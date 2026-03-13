@@ -5,5 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "openai[aiohttp]>=2.26.0",
     "qq-botpy>=1.2.1",
 ]
+
