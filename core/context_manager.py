@@ -236,7 +236,7 @@ class ChatContextManager:
         async with self.lock:
             self.add_assistant_message(chat_id, content, message_id)
 
-    def get_chat_history(
+    def get_history(
         self, chat_id: str, max_messages: Optional[int] = None
     ) -> List[Dict]:
         """
@@ -252,6 +252,21 @@ class ChatContextManager:
         if chat_id not in self.contexts:
             return []
         return self.contexts[chat_id].get_history_as_dicts(max_messages)
+
+    def get_chat_history(
+        self, chat_id: str, max_messages: Optional[int] = None
+    ) -> List[Dict]:
+        """
+        获取聊天历史记录（兼容性别名）
+
+        Args:
+            chat_id: 聊天ID
+            max_messages: 最大消息数
+
+        Returns:
+            历史消息字典列表
+        """
+        return self.get_history(chat_id, max_messages)
 
     async def get_chat_history_async(
         self, chat_id: str, max_messages: Optional[int] = None
@@ -279,7 +294,7 @@ class ChatContextManager:
             return ""
         return self.contexts[chat_id].get_conversation_context(max_messages)
 
-    def clear_chat_history(self, chat_id: str) -> None:
+    def clear_history(self, chat_id: str) -> None:
         """
         清空指定聊天的历史记录
 
@@ -288,6 +303,15 @@ class ChatContextManager:
         """
         if chat_id in self.contexts:
             self.contexts[chat_id].clear_history()
+
+    def clear_chat_history(self, chat_id: str) -> None:
+        """
+        清空指定聊天的历史记录（兼容性别名）
+
+        Args:
+            chat_id: 聊天ID
+        """
+        self.clear_history(chat_id)
 
     async def clear_chat_history_async(self, chat_id: str) -> None:
         """
@@ -343,6 +367,15 @@ class ChatContextManager:
             聊天ID列表
         """
         return list(self.contexts.keys())
+
+    def get_all_chats(self) -> Dict[str, ChatContext]:
+        """
+        获取所有聊天上下文
+
+        Returns:
+            聊天ID到上下文的映射
+        """
+        return self.contexts.copy()
 
     def get_context_count(self) -> int:
         """
