@@ -3,7 +3,10 @@ import asyncio
 import botpy
 from botpy import logging
 from botpy.message import C2CMessage, DirectMessage, GroupMessage, Message
+from openai.resources.conversations import AsyncItemsWithStreamingResponse
 
+from core.ai_service import AIService
+from core.command_manager import CommandManager
 from core.context_manager import ChatContextManager
 from core.message_queue import InputMessage, MessageQueue, ProcessedMessage
 
@@ -13,12 +16,21 @@ _log = logging.get_logger()
 class MyClient(botpy.Client):
 
     _msg_seq: int = 1
+    ai_service: AIService
+
+    system_prompt: str
+
+    admin_id: list[str]
 
     async def on_ready(self):
         _log.info(f"robot 「{self.robot.name}」 on_ready!")
 
         self.message_queue = MessageQueue()
         self.context_manager = ChatContextManager()
+
+        self.command_manager = CommandManager(self)
+
+        self.command_manager.register_default_commands()
 
         # 启动消息处理循环
         asyncio.create_task(self._process_messages_loop())
@@ -42,11 +54,6 @@ class MyClient(botpy.Client):
             chat_id=chat_id,
             content=message.content,
             is_group=False,
-        )
-
-        # 记录用户消息到上下文
-        await self.context_manager.add_user_message_async(
-            chat_id, message.content, message.id
         )
 
         await self.message_queue.put_input_message(input_message)
@@ -109,11 +116,6 @@ class MyClient(botpy.Client):
                 msg_seq=str(self._msg_seq),
             )
 
-        # 记录助手回复到上下文
-        await self.context_manager.add_assistant_message_async(
-            chat_id, content, message_id
-        )
-
         _log.info(f"已发送回复: {chat_id}, 消息ID: {message_id}")
 
     async def _process_messages_loop(self):
@@ -144,18 +146,49 @@ class MyClient(botpy.Client):
                 f"开始处理消息: {input_message.id}, 聊天ID: {input_message.chat_id}"
             )
 
-            # 初始化 AI 服务
-            if not hasattr(self, "ai_service"):
-                self.ai_service = AIServiceFactory.create_from_env()
+            # 使用命令管理器处理消息（检查是否为命令）
+            command_messages = self.command_manager.process_message(input_message)
 
-            # 生成 AI 响应
-            response = await self.ai_service.generate_with_context(
-                chat_id=input_message.chat_id,
-                user_message=input_message.content,
-                context_manager=self.context_manager,
-                system_prompt="你是一个友好的QQ机器人助手，请用中文回答用户的问题。保持回答简洁、有帮助，避免冗长。",
-                max_context_messages=8,
+            # 如果有命令消息返回，则发送这些消息并返回
+            if command_messages:
+                for msg in command_messages:
+                    await self._send_reply(
+                        chat_id=msg["chat_id"],
+                        content=msg["content"],
+                        message_id=msg["message_id"],
+                        is_group=msg["is_group"],
+                    )
+                return
+
+            # 记录用户消息到上下文
+            await self.context_manager.add_user_message_async(
+                input_message.chat_id, input_message.content, input_message.id
             )
+
+            # 检查 AI 服务是否已初始化
+            if not hasattr(self, "ai_service") or self.ai_service is None:
+                _log.error("AI 服务未初始化")
+                raise RuntimeError("AI 服务未初始化")
+
+            # 从上下文管理器获取历史消息
+            context_messages = await self.context_manager.get_chat_history_async(
+                input_message.chat_id, max_messages=8
+            )
+
+            # 构建消息列表
+            messages = [
+                {"role": "system", "content": self.system_prompt},
+                *context_messages,
+                {"role": "user", "content": input_message.content},
+            ]
+
+            # 调用 AI 服务生成响应
+            response = await self.ai_service.chat_completion(messages=messages)
+
+            _log.info(f"Res: {response}")
+
+            if response is None:
+                response = "AI 服务异常"
 
             # 发送回复
             await self._send_reply(
@@ -163,6 +196,11 @@ class MyClient(botpy.Client):
                 content=response,
                 message_id=input_message.id,
                 is_group=input_message.is_group,
+            )
+
+            # 记录助手回复到上下文
+            await self.context_manager.add_assistant_message_async(
+                input_message.chat_id, response, input_message.id
             )
 
             _log.info(f"消息处理完成: {input_message.id}")
