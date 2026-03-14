@@ -1,20 +1,11 @@
 """命令管理器模块"""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List
 
 from botpy import logging
 
 from core.commands import Command, CommandRegistry, PermissionLevel
-from core.handlers import (
-    handle_clear_command,
-    handle_help_command,
-    handle_history_command,
-    handle_list_chats_command,
-    handle_status_command,
-)
-
-if TYPE_CHECKING:
-    from core.client import MyClient
+from core.message_queue import InputMessage
 
 _log = logging.get_logger()
 
@@ -22,70 +13,25 @@ _log = logging.get_logger()
 class CommandManager:
     """命令管理器"""
 
-    def __init__(self, client: MyClient):
+    def __init__(self, client: "MyClient"):
         self.client = client
         self.registry = CommandRegistry()
 
+    def register_command(self, command: Command) -> None:
+        self.registry.register(command)
+
     def register_default_commands(self) -> None:
         """注册默认命令"""
-        # 历史命令
-        self.registry.register(
-            Command(
-                name="历史",
-                handler=lambda im, args: handle_history_command(self.client, im, args),
-                aliases=["history"],
-                permission=PermissionLevel.DEFAULT,
-                description="查看最近对话历史",
-            )
-        )
-
-        # 清空命令
-        self.registry.register(
-            Command(
-                name="清空",
-                handler=lambda im, args: handle_clear_command(self.client, im, args),
-                aliases=["clear"],
-                permission=PermissionLevel.DEFAULT,
-                description="清空当前对话历史",
-            )
-        )
-
         # 帮助命令
         self.registry.register(
             Command(
                 name="帮助",
-                handler=lambda im, args: handle_help_command(self.client, im, args),
+                handler=self.handle_help_command,
                 aliases=["help"],
                 permission=PermissionLevel.DEFAULT,
                 description="显示命令帮助",
             )
         )
-
-        # 状态命令（管理员专用）
-        self.registry.register(
-            Command(
-                name="状态",
-                handler=lambda im, args: handle_status_command(self.client, im, args),
-                aliases=["status"],
-                permission=PermissionLevel.ADMIN,
-                description="查看系统状态（管理员专用）",
-            )
-        )
-
-        # 列出所有聊天命令（管理员专用）
-        self.registry.register(
-            Command(
-                name="聊天列表",
-                handler=lambda im, args: handle_list_chats_command(
-                    self.client, im, args
-                ),
-                aliases=["list", "chats"],
-                permission=PermissionLevel.ADMIN,
-                description="查看所有聊天ID列表（管理员专用）",
-            )
-        )
-
-        _log.info(f"已注册 {self.registry.count()} 个命令")
 
     def find_command(self, command_name: str) -> Command | None:
         """查找命令"""
@@ -146,9 +92,53 @@ class CommandManager:
                 ]
 
             # 执行命令并返回消息列表
-            messages = command.handler(input_message, args)
+            messages = command.execute(input_message, args)
             return messages if messages else []
 
         except Exception as e:
             _log.error(f"处理命令消息时出错: {e}")
+            return []
+
+    def handle_help_command(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
+        """处理帮助命令，显示可用命令列表"""
+        try:
+            chat_id = input_message.chat_id
+            user_id = input_message.sender_id
+
+            # 获取所有命令
+            all_commands = self.get_all_commands()
+
+            # 过滤用户有权限的命令
+            available_commands = []
+            for cmd in all_commands:
+                if self.has_permission(cmd, user_id):
+                    available_commands.append(cmd)
+
+            if not available_commands:
+                reply_content = "没有可用的命令。"
+            else:
+                # 格式化帮助信息
+                help_text = ["可用命令："]
+                for cmd in available_commands:
+                    aliases_str = (
+                        f"（别名: {', '.join(cmd.aliases)}）" if cmd.aliases else ""
+                    )
+                    help_text.append(f"• {cmd.name}{aliases_str}: {cmd.description}")
+
+                reply_content = "\n".join(help_text)
+
+            # 返回消息列表
+            return [
+                {
+                    "chat_id": chat_id,
+                    "content": reply_content,
+                    "message_id": input_message.id,
+                    "is_group": input_message.is_group,
+                }
+            ]
+
+        except Exception as e:
+            _log.error(f"处理帮助命令时出错: {e}")
             return []
