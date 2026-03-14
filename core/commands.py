@@ -1,7 +1,7 @@
 """命令系统模块"""
 
 from enum import Enum
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from core.message_queue import InputMessage
 
@@ -30,9 +30,11 @@ class Command:
         self.permission = permission
         self.description = description
 
-    async def execute(self, input_message: InputMessage, args: str) -> None:
+    def execute(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
         """执行命令"""
-        await self.handler(input_message, args)
+        return self.handler(input_message, args)
 
     def has_permission(self, user_id: str, admin_ids: list[str]) -> bool:
         """检查用户是否有权限执行此命令"""

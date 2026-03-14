@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "openai[aiohttp]>=2.26.0",
+    "psutil>=7.2.2",
     "qq-botpy>=1.2.1",
 ]
 

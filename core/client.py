@@ -1,12 +1,16 @@
 import asyncio
+import time
+from typing import TYPE_CHECKING, Any, Dict, List
 
 import botpy
+import psutil
 from botpy import logging
 from botpy.message import C2CMessage, DirectMessage, GroupMessage, Message
 from openai.resources.conversations import AsyncItemsWithStreamingResponse
 
 from core.ai_service import AIService
 from core.command_manager import CommandManager
+from core.commands import Command, CommandRegistry, PermissionLevel
 from core.context_manager import ChatContextManager
 from core.message_queue import InputMessage, MessageQueue, ProcessedMessage
 
@@ -31,6 +35,21 @@ class MyClient(botpy.Client):
         self.command_manager = CommandManager(self)
 
         self.command_manager.register_default_commands()
+
+        self.context_manager.register_default_command(self.command_manager)
+
+        # 状态命令（管理员专用）
+        self.command_manager.register_command(
+            Command(
+                name="状态",
+                handler=self.handle_status_command,
+                aliases=["status"],
+                permission=PermissionLevel.ADMIN,
+                description="查看系统状态（管理员专用）",
+            )
+        )
+
+        _log.info(f"已注册 {self.command_manager.registry.count()} 个命令")
 
         # 启动消息处理循环
         asyncio.create_task(self._process_messages_loop())
@@ -216,3 +235,83 @@ class MyClient(botpy.Client):
                 message_id=input_message.id,
                 is_group=input_message.is_group,
             )
+
+    def handle_status_command(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
+        """处理状态命令，显示系统状态（管理员专用）"""
+        try:
+            chat_id = input_message.chat_id
+
+            # 内存使用情况
+            memory = psutil.virtual_memory()
+            memory_percent = memory.percent
+            memory_used = memory.used / (1024**3)  # GB
+            memory_total = memory.total / (1024**3)  # GB
+
+            # CPU使用率
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+
+            # 磁盘使用情况
+            disk = psutil.disk_usage("/")
+            disk_percent = disk.percent
+            disk_used = disk.used / (1024**3)  # GB
+            disk_total = disk.total / (1024**3)  # GB
+
+            # 进程信息
+            process = psutil.Process()
+            process_memory = process.memory_info().rss / (1024**2)  # MB
+            process_cpu = process.cpu_percent(interval=0.1)
+
+            # 消息队列状态
+            input_queue_size = self.message_queue.input_queue.qsize()
+            processed_queue_size = self.message_queue.processed_queue.qsize()
+
+            # 上下文管理器状态
+            active_chats = self.context_manager.get_context_count()
+
+            # 格式化状态信息
+            status_text = [
+                "=== 系统状态 ===",
+                f"系统时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                "",
+                "=== 系统资源 ===",
+                f"CPU使用率: {cpu_percent:.1f}%",
+                f"内存使用: {memory_percent:.1f}% ({memory_used:.1f}GB / {memory_total:.1f}GB)",
+                f"磁盘使用: {disk_percent:.1f}% ({disk_used:.1f}GB / {disk_total:.1f}GB)",
+                "",
+                "=== 进程状态 ===",
+                f"进程内存: {process_memory:.1f}MB",
+                f"进程CPU: {process_cpu:.1f}%",
+                "",
+                "=== 机器人状态 ===",
+                f"消息队列: 输入队列 {input_queue_size} 条，处理队列 {processed_queue_size} 条",
+                f"活跃聊天: {active_chats} 个",
+                f"管理员ID: {', '.join(self.admin_id) if self.admin_id else '未设置'}",
+            ]
+
+            reply_content = "\n".join(status_text)
+
+            # 返回消息列表
+            return [
+                {
+                    "chat_id": chat_id,
+                    "content": reply_content,
+                    "message_id": input_message.id,
+                    "is_group": input_message.is_group,
+                }
+            ]
+
+        except ImportError:
+            reply_content = "无法获取系统状态信息，请安装psutil库。"
+            return [
+                {
+                    "chat_id": chat_id,
+                    "content": reply_content,
+                    "message_id": input_message.id,
+                    "is_group": input_message.is_group,
+                }
+            ]
+        except Exception as e:
+            _log.error(f"处理状态命令时出错: {e}")
+            return []
