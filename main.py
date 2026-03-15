@@ -7,6 +7,7 @@ from botpy.ext.cog_yaml import read
 
 from core.ai_service import AIService
 from core.client import MyClient
+from core.template_manager import TemplateManager
 
 
 def main():
@@ -19,13 +20,9 @@ def main():
     )
     client = MyClient(intents=intents)
 
-    system_prompt = config["ai_system_prompt"]
-
-    if system_prompt is None:
-        print("Not find system prompt in config")
-        return
-
-    client.system_prompt = system_prompt
+    # 初始化模板管理器
+    template_manager = TemplateManager(config)
+    client.template_manager = template_manager
 
     client.admin_id = config.get("admin_id", [])
 
