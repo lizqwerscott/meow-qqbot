@@ -1,0 +1,123 @@
+import os
+from typing import Any, Dict, Optional
+
+import jinja2
+
+
+class TemplateManager:
+    """模板管理器类，负责加载和渲染提示模板"""
+
+    def __init__(self, config: Dict[str, Any]):
+        """
+        初始化模板管理器
+
+        Args:
+            config: 配置文件字典
+        """
+        # 初始化 Jinja2 模板环境
+        self.template_loader = jinja2.FileSystemLoader(searchpath=".")
+        self.template_env = jinja2.Environment(loader=self.template_loader)
+
+        # 读取提示模板配置
+        self.prompt_config = config.get("prompt_templates", {})
+
+        # 读取角色卡内容（如果存在）
+        self.character_card = self._load_character_card()
+
+        # 设置提示模板路径
+        self.private_chat_template = self.prompt_config.get(
+            "private_chat", "prompts/private_chat.j2"
+        )
+        self.group_chat_template = self.prompt_config.get(
+            "group_chat", "prompts/group_chat.j2"
+        )
+
+    def _load_character_card(self) -> str:
+        """加载角色卡内容"""
+        character_card_path = self.prompt_config.get("character_card")
+        if character_card_path and os.path.exists(character_card_path):
+            try:
+                with open(character_card_path, "r", encoding="utf-8") as f:
+                    return f.read().strip()
+            except Exception as e:
+                print(f"读取角色卡文件失败: {e}")
+        return ""
+
+    def render_prompt_template(
+        self, template_path: str, context: Dict[str, Any]
+    ) -> str:
+        """
+        渲染提示模板
+
+        Args:
+            template_path: 模板文件路径
+            context: 模板上下文变量
+
+        Returns:
+            渲染后的提示文本
+        """
+        try:
+            if not os.path.exists(template_path):
+                print(f"提示模板文件不存在: {template_path}")
+                return ""
+
+            template = self.template_env.get_template(template_path)
+            return template.render(**context)
+        except Exception as e:
+            print(f"渲染提示模板失败: {e}")
+            return ""
+
+    def get_private_chat_prompt(self, user_name: str) -> str:
+        """
+        获取私聊系统提示
+
+        Args:
+            user_name: 用户昵称
+
+        Returns:
+            私聊系统提示文本
+        """
+
+        # 使用模板渲染
+        context = {"user_name": user_name, "character_card": self.character_card}
+
+        prompt = self.render_prompt_template(self.private_chat_template, context)
+        if not prompt:
+            # 如果模板渲染失败，使用默认提示
+            prompt = f"你是一个贴心的 AI 助手，正在与用户「{user_name}」进行一对一的私密对话。"
+
+        return prompt
+
+    def get_group_chat_prompt(self, group_name: Optional[str] = None) -> str:
+        """
+        获取群聊系统提示
+
+        Args:
+            group_name: 群组名称（可选）
+
+        Returns:
+            群聊系统提示文本
+        """
+
+        # 使用模板渲染
+        context = {
+            "group_name": group_name or "当前群组",
+            "character_card": self.character_card,
+        }
+
+        prompt = self.render_prompt_template(self.group_chat_template, context)
+        if not prompt:
+            # 如果模板渲染失败，使用默认提示
+            prompt = "你是一个友好的QQ群机器人助手，正在与多个用户进行群聊对话。"
+            if group_name:
+                prompt += f" 当前群组名称是「{group_name}」。"
+
+        return prompt
+
+    def get_template_paths(self) -> Dict[str, str]:
+        """获取所有模板路径"""
+        return {
+            "private_chat": self.private_chat_template,
+            "group_chat": self.group_chat_template,
+            "character_card": self.prompt_config.get("character_card", ""),
+        }

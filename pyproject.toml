@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "jinja2>=3.1.6",
     "openai[aiohttp]>=2.26.0",
     "psutil>=7.2.2",
     "qq-botpy>=1.2.1",

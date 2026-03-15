@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 import time
 from typing import TYPE_CHECKING, Any, Dict, List
 
@@ -13,6 +15,7 @@ from core.command_manager import CommandManager
 from core.commands import Command, CommandRegistry, PermissionLevel
 from core.context_manager import ChatContextManager
 from core.message_queue import InputMessage, MessageQueue, ProcessedMessage
+from core.template_manager import TemplateManager
 
 _log = logging.get_logger()
 
@@ -22,9 +25,10 @@ class MyClient(botpy.Client):
     _msg_seq: int = 1
     ai_service: AIService
 
-    system_prompt: str
+    template_manager: TemplateManager
 
     admin_id: list[str]
+    nicknames: Dict[str, str]  # 用户ID -> 昵称映射
 
     async def on_ready(self):
         _log.info(f"robot 「{self.robot.name}」 on_ready!")
@@ -50,6 +54,9 @@ class MyClient(botpy.Client):
         )
 
         _log.info(f"已注册 {self.command_manager.registry.count()} 个命令")
+
+        self.nicknames = self._load_nicknames()
+        _log.info(f"已加载 {len(self.nicknames)} 个用户昵称")
 
         # 启动消息处理循环
         asyncio.create_task(self._process_messages_loop())
@@ -194,11 +201,26 @@ class MyClient(botpy.Client):
                 input_message.chat_id, max_messages=8
             )
 
-            # 构建消息列表
+            # 获取用户昵称
+            user_nickname = self._get_user_nickname(input_message.sender_id)
+
+            # 使用模板管理器获取系统提示
+            if input_message.is_group:
+                system_prompt = self.template_manager.get_group_chat_prompt()
+            else:
+                system_prompt = self.template_manager.get_private_chat_prompt(
+                    user_nickname
+                )
+
+            # 构建消息列表，将昵称作为元数据传递给AI
             messages = [
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": system_prompt},
                 *context_messages,
-                {"role": "user", "content": input_message.content},
+                {
+                    "role": "user",
+                    "content": input_message.content,
+                    "name": user_nickname,
+                },
             ]
 
             # 调用 AI 服务生成响应
@@ -315,3 +337,34 @@ class MyClient(botpy.Client):
         except Exception as e:
             _log.error(f"处理状态命令时出错: {e}")
             return []
+
+    def _load_nicknames(self) -> Dict[str, str]:
+        """
+        加载昵称映射文件
+
+        Returns:
+            用户ID -> 昵称的字典映射
+        """
+        nicknames_file = "nicknames.json"
+        if os.path.exists(nicknames_file):
+            try:
+                with open(nicknames_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                _log.error(f"加载昵称文件失败: {e}")
+                return {}
+        else:
+            _log.warning(f"昵称文件 {nicknames_file} 不存在")
+            return {}
+
+    def _get_user_nickname(self, user_id: str) -> str:
+        """
+        获取用户昵称，如果未找到则返回用户ID
+
+        Args:
+            user_id: 用户ID
+
+        Returns:
+            用户昵称或用户ID
+        """
+        return self.nicknames.get(user_id, user_id)
