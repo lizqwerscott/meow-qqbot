@@ -25,14 +25,20 @@ class ChatMessage:
 
     def to_dict(self) -> Dict:
         """转换为字典格式"""
+        content = self.content
+        # user 角色的消息将发言人信息嵌入到 content 中
+        if self.role == "user":
+            display_name = self.name or self.sender_id or "未知"
+            content = f"[{display_name}]: {self.content}"
+
         d: Dict = {
             "role": self.role,
-            "content": self.content,
+            "content": content,
             "timestamp": self.timestamp,
             "message_id": self.message_id,
             "sender_id": self.sender_id,
         }
-        # user 角色的消息带上 name（OpenAI 兼容格式）
+        # user 角色的消息保留 name 字段
         if self.role == "user" and self.name is not None:
             d["name"] = self.name
         return d
