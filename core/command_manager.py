@@ -1,13 +1,12 @@
 """命令管理器模块"""
 
+import logging
 from typing import TYPE_CHECKING, Any, Dict, List
-
-from botpy import logging
 
 from core.commands import Command, CommandRegistry, PermissionLevel
 from core.message_queue import InputMessage
 
-_log = logging.get_logger()
+_log = logging.getLogger(__name__)
 
 
 class CommandManager:

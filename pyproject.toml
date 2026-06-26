@@ -8,6 +8,10 @@ dependencies = [
     "jinja2>=3.1.6",
     "openai[aiohttp]>=2.26.0",
     "psutil>=7.2.2",
-    "qq-botpy>=1.2.1",
+    "pyyaml>=6.0",
+    "qqbot-agent-sdk",
 ]
+
+[tool.uv.sources]
+qqbot-agent-sdk = { git = "https://github.com/lizqwerscott/qqbot-agent-sdk", branch = "group-message-add" }
 

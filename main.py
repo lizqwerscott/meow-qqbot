@@ -1,34 +1,34 @@
 import asyncio
 import os
-from dataclasses import dataclass
 
-import botpy
-from botpy.ext.cog_yaml import read
+import yaml
+import logging
 
 from core.ai_service import AIService
-from core.client import MyClient
+from core.client import BotEngine
 from core.template_manager import TemplateManager
 
 
-def main():
+async def main() -> None:
     print("Hello from meow-qqbot!")
 
-    config = read(os.path.join(os.path.dirname(__file__), "config.yaml"))
+    # 在程序最开始的地方进行配置
+    logging.basicConfig(level=logging.INFO)  # 将级别设为 DEBUG 以显示所有信息
 
-    intents = botpy.Intents(
-        direct_message=True, public_guild_messages=True, public_messages=True
-    )
-    client = MyClient(intents=intents)
+    config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    engine = BotEngine(app_id=config["appid"], client_secret=config["secret"], bot_id=config["bot_id"])
 
     # 初始化模板管理器
     template_manager = TemplateManager(config)
-    client.template_manager = template_manager
+    engine.template_manager = template_manager
+    engine.admin_id = config.get("admin_id", [])
 
-    client.admin_id = config.get("admin_id", [])
-
+    # 初始化 AI 服务
     openai_config = config.get("openai", {})
-
-    ai_service = AIService(
+    engine.ai_service = AIService(
         api_key=openai_config.get("api_key"),
         base_url=openai_config.get("base_url"),
         model=openai_config.get("model", "gpt-3.5-turbo"),
@@ -38,10 +38,19 @@ def main():
         max_tokens=openai_config.get("max_tokens", 1000),
     )
 
-    client.ai_service = ai_service
+    # 获取 WebSocket 网关 URL
+    gateway_url = await engine.api.get_gateway_url()
+    loop = asyncio.get_running_loop()
 
-    client.run(appid=config["appid"], secret=config["secret"])
+    # 启动机器人
+    engine.start(gateway_url, loop)
+    print(f"机器人已启动，WebSocket 网关: {gateway_url}")
+
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await engine.stop()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

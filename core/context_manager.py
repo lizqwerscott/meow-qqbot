@@ -1,16 +1,15 @@
 import asyncio
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from botpy import logging
-
 from core.command_manager import CommandManager
 from core.commands import Command, PermissionLevel
 from core.message_queue import InputMessage
 
-_log = logging.get_logger()
+_log = logging.getLogger(__name__)
 
 
 @dataclass

@@ -1,13 +1,13 @@
 import asyncio
+import logging
 import os
 from typing import Any, Dict, Iterable, List, Optional
 
-from botpy import logging
 from httpx import Timeout
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
-_log = logging.get_logger()
+_log = logging.getLogger(__name__)
 
 
 class AIService:
