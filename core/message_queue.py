@@ -1,6 +1,6 @@
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 
@@ -13,6 +13,8 @@ class InputMessage:
     chat_id: str
     content: str
     is_group: bool
+    is_at_mention: bool = False
+    mentioned_ids: List[str] = field(default_factory=list)
     timestamp: float = None
 
     def __post_init__(self):
@@ -43,12 +45,12 @@ class MessageQueue:
     2. processed_queue: 保存处理完毕的消息
     """
 
-    def __init__(self, max_size: int = 1000):
+    def __init__(self, max_size: int = 40):
         """
         初始化消息队列
 
         Args:
-            max_size: 每个队列的最大容量，默认为1000
+            max_size: 每个队列的最大容量，默认为40
         """
         self.max_size = max_size
         self.input_queue = asyncio.Queue(maxsize=max_size)
