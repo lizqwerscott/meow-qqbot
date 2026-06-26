@@ -208,9 +208,16 @@ class BotEngine:
                     )
                 return
 
-            # 记录用户消息到上下文
+            # 获取用户昵称
+            user_nickname = self._get_user_nickname(input_message.sender_id)
+
+            # 记录用户消息到上下文（携带发送者ID和昵称）
             await self.context_manager.add_user_message_async(
-                input_message.chat_id, input_message.content, input_message.id
+                input_message.chat_id,
+                input_message.content,
+                input_message.id,
+                sender_id=input_message.sender_id,
+                name=user_nickname,
             )
 
             # 群聊非 @且非猫猫开头 → 保留上下文，但不进行 AI 回复
@@ -229,9 +236,6 @@ class BotEngine:
                 input_message.chat_id, max_messages=8
             )
 
-            # 获取用户昵称
-            user_nickname = self._get_user_nickname(input_message.sender_id)
-
             # 使用模板管理器获取系统提示
             if input_message.is_group:
                 system_prompt = self.template_manager.get_group_chat_prompt()
@@ -240,16 +244,16 @@ class BotEngine:
                     user_nickname
                 )
 
-            # 构建消息列表，将昵称作为元数据传递给AI
+            # 构建消息列表，history 已包含当前消息，无需重复添加
             messages = [
                 {"role": "system", "content": system_prompt},
                 *context_messages,
-                {
-                    "role": "user",
-                    "content": input_message.content,
-                    "name": user_nickname,
-                },
             ]
+
+            # 打印请求消息（格式化，便于调试）
+            _log.info(
+                f"请求 AI messages:\n{json.dumps(messages, ensure_ascii=False, indent=2)}"
+            )
 
             # 调用 AI 服务生成响应
             response = await self.ai_service.chat_completion(messages=messages)

@@ -20,15 +20,22 @@ class ChatMessage:
     content: str
     timestamp: float
     message_id: Optional[str] = None
+    sender_id: Optional[str] = None
+    name: Optional[str] = None
 
     def to_dict(self) -> Dict:
         """转换为字典格式"""
-        return {
+        d: Dict = {
             "role": self.role,
             "content": self.content,
             "timestamp": self.timestamp,
             "message_id": self.message_id,
+            "sender_id": self.sender_id,
         }
+        # user 角色的消息带上 name（OpenAI 兼容格式）
+        if self.role == "user" and self.name is not None:
+            d["name"] = self.name
+        return d
 
 
 class ChatContext:
@@ -52,7 +59,12 @@ class ChatContext:
         self.lock = asyncio.Lock()  # 异步锁，确保线程安全
 
     def add_message(
-        self, role: str, content: str, message_id: Optional[str] = None
+        self,
+        role: str,
+        content: str,
+        message_id: Optional[str] = None,
+        sender_id: Optional[str] = None,
+        name: Optional[str] = None,
     ) -> None:
         """
         添加消息到历史记录
@@ -61,16 +73,29 @@ class ChatContext:
             role: 角色，"user" 或 "assistant"
             content: 消息内容
             message_id: 消息ID（可选）
+            sender_id: 发送者ID（可选）
+            name: 发送者昵称/ID（可选，user 角色时用于 OpenAI name 字段）
         """
         message = ChatMessage(
-            role=role, content=content, timestamp=time.time(), message_id=message_id
+            role=role,
+            content=content,
+            timestamp=time.time(),
+            message_id=message_id,
+            sender_id=sender_id,
+            name=name,
         )
         self.history.append(message)
         self.last_activity = time.time()
 
-    def add_user_message(self, content: str, message_id: Optional[str] = None) -> None:
+    def add_user_message(
+        self,
+        content: str,
+        message_id: Optional[str] = None,
+        sender_id: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None:
         """添加用户消息"""
-        self.add_message("user", content, message_id)
+        self.add_message("user", content, message_id, sender_id=sender_id, name=name)
 
     def add_assistant_message(
         self, content: str, message_id: Optional[str] = None
@@ -148,13 +173,18 @@ class ChatContext:
         return time.time() - self.last_activity
 
     async def add_message_async(
-        self, role: str, content: str, message_id: Optional[str] = None
+        self,
+        role: str,
+        content: str,
+        message_id: Optional[str] = None,
+        sender_id: Optional[str] = None,
+        name: Optional[str] = None,
     ) -> None:
         """
         异步添加消息（线程安全）
         """
         async with self.lock:
-            self.add_message(role, content, message_id)
+            self.add_message(role, content, message_id, sender_id=sender_id, name=name)
 
 
 class ChatContextManager:
@@ -198,7 +228,12 @@ class ChatContextManager:
             return self.get_context(chat_id)
 
     def add_user_message(
-        self, chat_id: str, content: str, message_id: Optional[str] = None
+        self,
+        chat_id: str,
+        content: str,
+        message_id: Optional[str] = None,
+        sender_id: Optional[str] = None,
+        name: Optional[str] = None,
     ) -> None:
         """
         添加用户消息到指定聊天
@@ -207,9 +242,11 @@ class ChatContextManager:
             chat_id: 聊天ID
             content: 消息内容
             message_id: 消息ID（可选）
+            sender_id: 发送者ID（可选）
+            name: 发送者昵称/ID（可选）
         """
         context = self.get_context(chat_id)
-        context.add_user_message(content, message_id)
+        context.add_user_message(content, message_id, sender_id=sender_id, name=name)
 
     def add_assistant_message(
         self, chat_id: str, content: str, message_id: Optional[str] = None
@@ -226,13 +263,20 @@ class ChatContextManager:
         context.add_assistant_message(content, message_id)
 
     async def add_user_message_async(
-        self, chat_id: str, content: str, message_id: Optional[str] = None
+        self,
+        chat_id: str,
+        content: str,
+        message_id: Optional[str] = None,
+        sender_id: Optional[str] = None,
+        name: Optional[str] = None,
     ) -> None:
         """
         异步添加用户消息（线程安全）
         """
         async with self.lock:
-            self.add_user_message(chat_id, content, message_id)
+            self.add_user_message(
+                chat_id, content, message_id, sender_id=sender_id, name=name
+            )
 
     async def add_assistant_message_async(
         self, chat_id: str, content: str, message_id: Optional[str] = None
