@@ -129,6 +129,17 @@ class BotEngine:
 
         _log.info(f"[{event.chat_scope}][({event_type})] {event.user_id}: {event.content}")
 
+        # 跳过空内容或仅包含 QQ 表情的消息（如 <faceType=6,faceId="0",ext="...">）
+        stripped = event.content.strip()
+        if not stripped:
+            _log.debug("跳过空内容消息")
+            return
+        # 若去掉所有 <faceType=...,...> 标签后无实质内容，则跳过
+        cleaned = re.sub(r'<faceType=\d+,[^>]+>', '', stripped).strip()
+        if not cleaned:
+            _log.debug("跳过仅包含 QQ 表情的消息")
+            return
+
         # DM（频道直发消息）→ 简单回复，不进入 AI 流程
         if event.chat_scope == "dm":
             await self.api.send_text(
