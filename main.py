@@ -3,6 +3,7 @@ import os
 
 import yaml
 import logging
+from colorlog import ColoredFormatter
 
 from core.ai_service import AIService
 from core.client import BotEngine
@@ -13,7 +14,25 @@ async def main() -> None:
     print("Hello from meow-qqbot!")
 
     # 在程序最开始的地方进行配置
-    logging.basicConfig(level=logging.INFO)  # 将级别设为 DEBUG 以显示所有信息
+    # --- 彩色日志配置 ---
+    _colors = {
+        'DEBUG':    'cyan',
+        'INFO':     'green',
+        'WARNING':  'yellow',
+        'ERROR':    'red',
+        'CRITICAL': 'red,bg_white',
+    }
+
+    _formatter = ColoredFormatter(
+        "%(log_color)s%(asctime)s [%(levelname)-8s] %(blue)s%(name)s%(reset)s: %(message)s",
+        datefmt="%H:%M:%S",
+        reset=True,
+        log_colors=_colors,
+    )
+
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(_formatter)
+    logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
 
     config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     with open(config_path, "r", encoding="utf-8") as f:
