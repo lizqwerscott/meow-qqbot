@@ -50,6 +50,7 @@ class BotEngine:
         self.context_manager: Optional[ChatContextManager] = None
         self.command_manager: Optional[CommandManager] = None
         self._bot_name: str = "机器人"
+        self._auto_replied: dict[str, str] = {}  # {chat_id: content} — 已复读的内容追踪
 
     # ── 生命周期 ──
 
@@ -165,6 +166,29 @@ class BotEngine:
         await self.api.send_text(chat_type, chat_id, content, reply_to=message_id)
         _log.info(f"已发送回复: {chat_id}, 消息ID: {message_id}")
 
+    # ── 自动复读检查 ──
+
+    async def _check_auto_reply_duplicate(self, input_message: InputMessage) -> Optional[str]:
+        """检查群聊重复消息，返回需要复读的内容，或 None 表示不复读。"""
+        if not input_message.is_group:
+            return None
+
+        context = await self.context_manager.get_context_async(input_message.chat_id)
+        user_msgs = [m for m in context.history if m.role == "user"]
+        if len(user_msgs) < 2:
+            return None
+
+        last_content = user_msgs[-1].content
+        prev_content = user_msgs[-2].content
+        if last_content != prev_content:
+            return None
+
+        # 已复读过相同内容 → 不复读
+        if self._auto_replied.get(input_message.chat_id) == last_content:
+            return None
+
+        return last_content
+
     # ── 消息处理循环 ──
 
     async def _process_messages_loop(self) -> None:
@@ -220,6 +244,24 @@ class BotEngine:
                 sender_id=input_message.sender_id,
                 name=user_nickname,
             )
+
+            # ── 群聊重复消息自动复读 ──
+            reply_content = await self._check_auto_reply_duplicate(input_message)
+            if reply_content is not None:
+                _log.info(
+                    f"检测到重复消息 [{input_message.chat_id}]，自动复读: {reply_content[:30]}"
+                )
+                await self._send_reply(
+                    chat_id=input_message.chat_id,
+                    content=reply_content,
+                    message_id=input_message.id,
+                    is_group=True,
+                )
+                await self.context_manager.add_assistant_message_async(
+                    input_message.chat_id, reply_content, input_message.id,
+                )
+                self._auto_replied[input_message.chat_id] = reply_content
+                return
 
             # 群聊非 @且非猫猫开头 → 保留上下文，但不进行 AI 回复
             if input_message.is_group and not input_message.is_at_mention:
