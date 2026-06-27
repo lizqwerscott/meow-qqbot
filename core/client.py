@@ -132,10 +132,11 @@ class BotEngine:
             )
             return
 
-        # 解析消息中所有 @提及的 ID（含机器人自身），并从内容中移除所有 @标记
+        # 解析消息中所有 @提及的 ID（含机器人自身），并从内容中移除 @机器人的标记
         mentioned_ids = re.findall(r'<@([^>]+)>', event.content)
         _log.info(f"mentioned_ids: {mentioned_ids}")
-        event.content = re.sub(r'<@[^>]+>', '', event.content).strip()
+        # 只移除 @机器人自身的标记，保留 @其他人的
+        event.content = re.sub(rf'<@{re.escape(self._bot_id)}>', '', event.content).strip()
 
         # 通过 mentioned_ids 判断是否被 @
         is_at_mention = self._bot_id in mentioned_ids
