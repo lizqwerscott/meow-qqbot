@@ -31,7 +31,15 @@ _log = logging.getLogger(__name__)
 class BotEngine:
     """使用 qqbot_agent_sdk 的独立 QQ 机器人引擎。"""
 
-    def __init__(self, app_id: str, client_secret: str, bot_id: str):
+    def __init__(
+        self,
+        app_id: str,
+        client_secret: str,
+        bot_id: str,
+        template_manager: TemplateManager,
+        ai_service: AIService,
+        admin_id: list[str],
+    ):
         self._app_id = app_id
         self._client_secret = client_secret
         self._bot_id = bot_id
@@ -41,14 +49,14 @@ class BotEngine:
         self.ws: Optional[QQWebSocket] = None
         self._main_loop: Optional[asyncio.AbstractEventLoop] = None
 
-        # 业务组件（在 start 前由 main.py 注入，或在 on_ready 中初始化）
-        self.ai_service: Optional[AIService] = None
-        self.template_manager: Optional[TemplateManager] = None
-        self.admin_id: List[str] = []
+        # 业务组件（构造器注入）
+        self.ai_service: AIService = ai_service
+        self.template_manager: TemplateManager = template_manager
+        self.admin_id: list[str] = admin_id
         self.nicknames: Dict[str, str] = {}
-        self.message_queue: Optional[MessageQueue] = None
-        self.context_manager: Optional[ChatContextManager] = None
-        self.command_manager: Optional[CommandManager] = None
+        self.message_queue: MessageQueue = MessageQueue()
+        self.context_manager: ChatContextManager = ChatContextManager()
+        self.command_manager: CommandManager = CommandManager(self)
         self._bot_name: str = "机器人"
         self._auto_replied: dict[str, str] = {}  # {chat_id: content} — 已复读的内容追踪
 
@@ -78,9 +86,6 @@ class BotEngine:
         _log.info(f"机器人「{self._bot_name}」on_ready!")
 
         # 初始化组件
-        self.message_queue = MessageQueue()
-        self.context_manager = ChatContextManager()
-        self.command_manager = CommandManager(self)
         self.command_manager.register_default_commands()
         self.context_manager.register_default_command(self.command_manager)
         self.command_manager.register_command(
@@ -269,11 +274,6 @@ class BotEngine:
                     _log.debug(f"跳过 AI 回复（非@且非猫猫开头）: {input_message.content[:30]}")
                     return
 
-            # 检查 AI 服务是否已初始化
-            if self.ai_service is None:
-                _log.error("AI 服务未初始化")
-                raise RuntimeError("AI 服务未初始化")
-
             # 从上下文管理器获取历史消息
             context_messages = await self.context_manager.get_chat_history_async(
                 input_message.chat_id, max_messages=8
@@ -334,7 +334,7 @@ class BotEngine:
             )
 
     def handle_status_command(
-        self, input_message: InputMessage, args: str
+        self, input_message: InputMessage, _: str
     ) -> List[Dict[str, Any]]:
         """处理状态命令，显示系统状态（管理员专用）"""
         try:

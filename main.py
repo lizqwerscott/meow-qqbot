@@ -19,16 +19,12 @@ async def main() -> None:
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    engine = BotEngine(app_id=config["appid"], client_secret=config["secret"], bot_id=config["bot_id"])
-
     # 初始化模板管理器
     template_manager = TemplateManager(config)
-    engine.template_manager = template_manager
-    engine.admin_id = config.get("admin_id", [])
 
     # 初始化 AI 服务
     openai_config = config.get("openai", {})
-    engine.ai_service = AIService(
+    ai_service = AIService(
         api_key=openai_config.get("api_key"),
         base_url=openai_config.get("base_url"),
         model=openai_config.get("model", "gpt-3.5-turbo"),
@@ -36,6 +32,15 @@ async def main() -> None:
         max_retries=openai_config.get("max_retries", 3),
         temperature=openai_config.get("temperature", 0.7),
         max_tokens=openai_config.get("max_tokens", 1000),
+    )
+
+    engine = BotEngine(
+        app_id=config["appid"],
+        client_secret=config["secret"],
+        bot_id=config["bot_id"],
+        template_manager=template_manager,
+        ai_service=ai_service,
+        admin_id=config.get("admin_id", []),
     )
 
     # 获取 WebSocket 网关 URL
