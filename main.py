@@ -53,6 +53,9 @@ async def main() -> None:
         max_tokens=openai_config.get("max_tokens", 1000),
     )
 
+    # 读取多模态配置
+    multimodal_config = config.get("multimodal", {})
+
     engine = BotEngine(
         app_id=config["appid"],
         client_secret=config["secret"],
@@ -60,6 +63,8 @@ async def main() -> None:
         template_manager=template_manager,
         ai_service=ai_service,
         admin_id=config.get("admin_id", []),
+        openai_config=openai_config,
+        multimodal_config=multimodal_config,
     )
 
     # 获取 WebSocket 网关 URL

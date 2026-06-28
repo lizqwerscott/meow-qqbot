@@ -8,3 +8,11 @@ wheels/
 
 # Virtual environments
 .venv
+
+# 附件 & 表情缓存
+cache/*
+data/attachments/*
+data/emojis/*
+!data/attachments/.gitkeep
+!data/emojis/.gitkeep
+
