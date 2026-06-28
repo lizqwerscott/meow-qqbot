@@ -390,6 +390,126 @@ class EmojiManager:
         }
 
     # ════════════════════════════════════════════════════════════
+    # 工具调用支持
+    # ════════════════════════════════════════════════════════════
+
+    def find_emoji(self, query: str) -> Optional[dict]:
+        """
+        模糊匹配表情。供 AI 工具调用 search_emoji 使用。
+
+        匹配优先级：
+        1. 情绪标签完全匹配（query 等于某个标签）
+        2. 描述包含 query（子串匹配）
+        3. 情绪标签包含 query（子串匹配）
+        4. 以上都不匹配 → 返回 None
+
+        Args:
+            query: 搜索关键词，如「开心」「猫」「微笑」
+        Returns:
+            匹配到的第一条 emoji 记录 dict，或 None
+        """
+        records = self._storage.list_all()
+        if not records:
+            return None
+
+        q = query.lower().strip()
+
+        def _get_desc(r):
+            return (r.get("user_description") or r.get("auto_description", "") or "")
+
+        def _get_tags(r):
+            return r.get("user_tags") or r.get("auto_tags", []) or []
+
+        # 优先级 1：标签完全匹配
+        for r in records:
+            tags = [t.lower() for t in _get_tags(r)]
+            if q in tags:
+                return r
+
+        # 优先级 2：描述包含 query
+        for r in records:
+            desc = _get_desc(r).lower()
+            if q and q in desc:
+                return r
+
+        # 优先级 3：标签包含 query
+        for r in records:
+            tags = [t.lower() for t in _get_tags(r)]
+            if any(q in t for t in tags):
+                return r
+
+        return None
+
+    def find_emojis(self, query: str, max_results: int = 5) -> List[dict]:
+        """
+        模糊匹配多个表情（按匹配度排序）。
+
+        Args:
+            query: 搜索关键词
+            max_results: 最多返回数量
+        Returns:
+            匹配到的 emoji 记录列表（按使用次数降序）
+        """
+        records = self._storage.list_all()
+        if not records:
+            return []
+
+        q = query.lower().strip()
+
+        def _score(r):
+            """计算匹配分"""
+            desc = (r.get("user_description") or r.get("auto_description", "") or "").lower()
+            tags = [t.lower() for t in (r.get("user_tags") or r.get("auto_tags", []) or [])]
+            score = 0
+            if q in tags:
+                score += 10  # 标签精确匹配
+            if q in desc:
+                score += 5   # 描述包含
+            for t in tags:
+                if q in t:
+                    score += 3  # 标签子串
+            score += min(r.get("used_count", 0) / 10, 3)  # 使用频率加成
+            return score
+
+        scored = [(r, _score(r)) for r in records]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        # 只返回有得分的
+        results = [r for r, s in scored if s > 0][:max_results]
+        return results
+
+    def get_emoji_catalog_text(self, max_emojis: int = 30) -> str:
+        """
+        生成 AI 可读的表情目录文本。
+        格式：
+          - 描述 → [标签1, 标签2] (hash: a1b2c3...)
+
+        Args:
+            max_emojis: 最多列出多少个
+        Returns:
+            目录文本，如果没有表情则返回空字符串
+        """
+        records = self._storage.list_all()
+        if not records:
+            return ""
+
+        # 按使用次数降序排列
+        records.sort(key=lambda r: r.get("used_count", 0), reverse=True)
+        records = records[:max_emojis]
+
+        lines = ["## 可用表情"]
+        lines.append("你可以使用 search_emoji 工具搜索以下表情，然后用 send_emoji 发送。")
+        lines.append("")
+
+        for r in records:
+            short_hash = r["hash"][:12]
+            desc = r.get("user_description") or r.get("auto_description", "") or "(无描述)"
+            tags = r.get("user_tags") or r.get("auto_tags", []) or []
+            tag_str = f" [{', '.join(tags)}]" if tags else ""
+            lines.append(f"- {desc}{tag_str} (hash: {short_hash})")
+
+        return "\n".join(lines)
+
+    # ════════════════════════════════════════════════════════════
     # 内部辅助
     # ════════════════════════════════════════════════════════════
 

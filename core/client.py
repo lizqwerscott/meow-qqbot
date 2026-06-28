@@ -16,7 +16,9 @@ from qqbot_agent_sdk import (
     EventParser,
     InboundEvent,
 )
-from qqbot_agent_sdk.dto import WSReadyData
+from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
+from qqbot_agent_sdk.dto import MediaInfo, MessageToCreate, QQMessageType, WSReadyData
+from qqbot_agent_sdk.media_loader import MediaUploader
 
 from core.ai_service import AIService
 from core.command_manager import CommandManager
@@ -28,6 +30,52 @@ from core.multimodal_service import MultimodalService
 from core.template_manager import TemplateManager
 
 _log = logging.getLogger(__name__)
+
+
+# ════════════════════════════════════════════════════════════
+# 工具（Function Calling）定义
+# ════════════════════════════════════════════════════════════
+
+EMOJI_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_emoji",
+            "description": "根据描述或情绪标签搜索已有的表情图片。返回匹配的表情列表，包含表情的唯一标识(hash)、描述和情绪标签。你可以先搜索，看看有哪些可用的表情，再决定发送哪一个。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词，如「开心」「难过」「猫」「微笑」「可爱」等",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_emoji",
+            "description": "发送一个指定的表情图片到聊天中。需要提供通过 search_emoji 获取到的表情 hash。一条回复最多发送 1 个表情。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "emoji_hash": {
+                        "type": "string",
+                        "description": "表情的唯一标识 hash（完整 hash 或前 12 位短 hash），通过 search_emoji 获取",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "发送这个表情的原因或想表达的情绪，仅用于记录",
+                    },
+                },
+                "required": ["emoji_hash", "reason"],
+            },
+        },
+    },
+]
 
 
 class BotEngine:
@@ -65,6 +113,7 @@ class BotEngine:
         self._openai_config: dict = openai_config or {}
         self._multimodal_config: dict = multimodal_config or {}
         self._auto_replied: dict[str, str] = {}  # {chat_id: content} — 已复读的内容追踪
+        self.media_uploader = None
 
     # ── 生命周期 ──
 
@@ -127,6 +176,14 @@ class BotEngine:
             multimodal_service=self.multimodal_service,
             emoji_dir="data/emojis/",
         )
+
+        # 初始化 MediaUploader（用于上传本地文件并发送）
+        self.media_uploader = MediaUploader(
+            api_client=self.api,
+            http_client=self._http_client,
+            log_tag="MeowQQ",
+        )
+        _log.info("MediaUploader 已初始化")
 
         # 注册表情相关命令
         self._register_emoji_commands()
@@ -252,6 +309,263 @@ class BotEngine:
 
         return last_content
 
+    # ════════════════════════════════════════════════════════════
+    # 工具调用
+    # ════════════════════════════════════════════════════════════
+
+    async def _execute_tool_calls(
+        self,
+        messages: list,
+        tools: Optional[list],
+        chat_id: str,
+        is_group: bool,
+        reply_to: str,
+    ) -> tuple[list[str], bool]:
+        """
+        执行 AI 工具调用循环。
+
+        AI 返回 → 若有 tool_calls → 执行 → 结果追加到 messages → 继续下一轮
+        直到 AI 不再返回 tool_calls 或达到最大轮数。
+
+        Args:
+            messages: 消息历史（会被修改，追加 tool 角色的结果）
+            tools: 工具定义列表，None 表示不注入工具
+            chat_id: 聊天 ID
+            is_group: 是否为群聊
+            reply_to: 回复的消息 ID
+        Returns:
+            (text_replies, sent_emoji)
+            text_replies: AI 返回的所有文本内容列表
+            sent_emoji: 是否成功发送了表情
+        """
+        text_replies: list[str] = []
+        sent_emoji = False
+        MAX_ROUNDS = 5
+
+        for round_idx in range(MAX_ROUNDS):
+            # 调用 AI（带工具）
+            message = await self.ai_service.chat_completion_with_tools(
+                messages=messages,
+                tools=tools,
+            )
+
+            if message is None:
+                text_replies.append("AI 服务异常")
+                break
+
+            response_text = message.content or ""
+            tool_calls = message.tool_calls or []
+
+            _log.info(
+                f"[工具循环 第{round_idx + 1}轮] "
+                f"text={response_text[:50]!r}... "
+                f"tool_calls={[tc.function.name for tc in tool_calls]}"
+            )
+
+            if response_text:
+                text_replies.append(response_text)
+
+            if not tool_calls:
+                break  # AI 不再调用工具，结束循环
+
+            # ★ 将带 tool_calls 的 assistant 消息追加到 messages（API 要求 tool 消息前必须有对应的 tool_calls 消息）
+            assistant_msg = {"role": "assistant", "content": response_text or None}
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in tool_calls
+            ]
+            messages.append(assistant_msg)
+
+            # 处理每个 tool_call
+            for tc in tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments)
+                except json.JSONDecodeError:
+                    _log.warning(f"工具参数解析失败: {tc.function.arguments}")
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": json.dumps({"error": "参数解析失败"}),
+                    })
+                    continue
+
+                if tc.function.name == "search_emoji":
+                    result = self._execute_search_emoji(args)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    })
+
+                elif tc.function.name == "send_emoji":
+                    result_content, success = await self._execute_send_emoji(
+                        args, chat_id, is_group, reply_to,
+                    )
+                    if success:
+                        sent_emoji = True
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result_content,
+                    })
+
+                else:
+                    _log.warning(f"未知工具调用: {tc.function.name}")
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": json.dumps({"error": f"未知工具: {tc.function.name}"}),
+                    })
+
+        return text_replies, sent_emoji
+
+    def _execute_search_emoji(self, args: dict) -> str:
+        """执行 search_emoji 工具，返回 JSON 字符串。"""
+        query = args.get("query", "").strip()
+        if not query:
+            return json.dumps({"error": "搜索关键词为空"}, ensure_ascii=False)
+
+        results = self.emoji_manager.find_emojis(query, max_results=5)
+        if not results:
+            return json.dumps(
+                {"error": "未找到匹配的表情", "query": query},
+                ensure_ascii=False,
+            )
+
+        result_data = []
+        for r in results:
+            desc = r.get("user_description") or r.get("auto_description", "") or "(无描述)"
+            tags = r.get("user_tags") or r.get("auto_tags", []) or []
+            result_data.append({
+                "hash": r["hash"][:12],
+                "description": desc,
+                "tags": tags,
+            })
+
+        return json.dumps(result_data, ensure_ascii=False)
+
+    async def _execute_send_emoji(
+        self,
+        args: dict,
+        chat_id: str,
+        is_group: bool,
+        reply_to: str,
+    ) -> tuple[str, bool]:
+        """执行 send_emoji 工具。
+        Returns: (tool_result_json_str, success_bool)
+        """
+        emoji_hash = (args.get("emoji_hash") or "").strip()
+        if not emoji_hash:
+            result = json.dumps(
+                {"success": False, "reason": "未提供表情 hash"},
+                ensure_ascii=False,
+            )
+            return result, False
+
+        success, description, file_name, error = await self._send_emoji_by_hash(
+            chat_id=chat_id,
+            emoji_hash=emoji_hash,
+            is_group=is_group,
+            reply_to=reply_to,
+        )
+
+        if success:
+            _log.info(f"表情已发送: {description}")
+            result = json.dumps({
+                "success": True,
+                "description": description,
+                "message": f"表情「{description}」已发送到聊天中",
+            }, ensure_ascii=False)
+            return result, True
+        else:
+            _log.warning(f"表情发送失败 [{emoji_hash[:12]}..]: {error}")
+            result = json.dumps({
+                "success": False,
+                "reason": error or "发送失败",
+                "suggestion": "可以搜索其他表情试试，或直接用文字表达",
+            }, ensure_ascii=False)
+            return result, False
+
+    async def _send_emoji_by_hash(
+        self,
+        chat_id: str,
+        emoji_hash: str,
+        is_group: bool,
+        reply_to: str,
+    ) -> tuple[bool, str, str, str]:
+        """
+        上传并发送已缓存的 emoji 图片到聊天。
+
+        Args:
+            chat_id: 聊天 ID
+            emoji_hash: 表情 hash（支持前 12 位短前缀匹配）
+            is_group: 是否为群聊
+            reply_to: 回复的消息 ID
+        Returns:
+            (success, description, file_name, error_message)
+        """
+        # 查找完整记录
+        if len(emoji_hash) < 12:
+            # 短 hash → 精准查找
+            record = self.emoji_manager.get_info(emoji_hash)
+            if not record:
+                return False, "", "", f"未找到表情: {emoji_hash}"
+        else:
+            record = self._find_emoji(emoji_hash)
+            if not record:
+                return False, "", "", f"未找到表情: {emoji_hash[:12]}.."
+
+        full_hash = record["hash"]
+        file_name = record.get("file_name", "")
+        local_path = self.emoji_manager._emoji_dir / file_name
+
+        if not local_path.exists():
+            return False, "", file_name, f"本地文件缺失: {local_path}"
+
+        desc = record.get("user_description") or record.get("auto_description", "") or "表情"
+        chat_type = "group" if is_group else "c2c"
+
+        try:
+            # 上传本地文件到 QQ CDN
+            file_info = await self.media_uploader.upload(
+                chat_type=chat_type,
+                chat_id=chat_id,
+                source=str(local_path),
+                file_type=MEDIA_TYPE_IMAGE,  # = 1
+                file_name=file_name,
+            )
+
+            # 构建富媒体消息
+            msg = MessageToCreate(
+                msg_type=QQMessageType.RICH_MEDIA,  # = 7
+                msg_seq=self.api.next_msg_seq(),
+                msg_id=reply_to,
+                media=MediaInfo(file_info=file_info),
+            )
+
+            # 发送
+            if is_group:
+                await self.api.post_group_message(chat_id, msg)
+            else:
+                await self.api.post_c2c_message(chat_id, msg)
+
+            # 更新使用次数
+            record = self.emoji_manager.get_info(full_hash)
+            if record:
+                count = record.get("used_count", 0) + 1
+                self.emoji_manager._storage.update(full_hash, used_count=count)
+
+            _log.info(f"表情图片已发送 [{full_hash[:12]}..]: {desc}")
+            return True, desc, file_name, ""
+
+        except Exception as e:
+            _log.error(f"发送表情图片失败 [{full_hash[:12]}..]: {e}")
+            return False, desc, file_name, str(e)
+
     # ── 消息处理循环 ──
 
     async def _process_messages_loop(self) -> None:
@@ -354,31 +668,59 @@ class BotEngine:
                 *context_messages,
             ]
 
-            # 打印请求消息（格式化，便于调试）
+            # ── 工具调用循环（search_emoji / send_emoji）──
+            emoji_catalog_text = self.emoji_manager.get_emoji_catalog_text(max_emojis=30)
+            tools_to_use = EMOJI_TOOLS if emoji_catalog_text else None
+
+            # 如果有表情目录，重新生成 system prompt 注入到 messages
+            if emoji_catalog_text:
+                if input_message.is_group:
+                    system_prompt = self.template_manager.get_group_chat_prompt(
+                        emoji_catalog=emoji_catalog_text
+                    )
+                else:
+                    system_prompt = self.template_manager.get_private_chat_prompt(
+                        user_nickname, emoji_catalog=emoji_catalog_text
+                    )
+                messages[0] = {"role": "system", "content": system_prompt}
+
+            # 打印请求消息（便于调试）
             _log.info(
                 f"请求 AI messages:\n{json.dumps(messages, ensure_ascii=False, indent=2)}"
             )
+            if tools_to_use:
+                _log.info(f"本次请求注入 {len(EMOJI_TOOLS)} 个工具: {[t['function']['name'] for t in EMOJI_TOOLS]}")
 
-            # 调用 AI 服务生成响应
-            response = await self.ai_service.chat_completion(messages=messages)
-
-            _log.info(f"Res: {response}")
-
-            if response is None:
-                response = "AI 服务异常"
-
-            # 发送回复
-            await self._send_reply(
+            # 执行工具循环
+            text_replies, sent_emoji = await self._execute_tool_calls(
+                messages=messages,
+                tools=tools_to_use,
                 chat_id=input_message.chat_id,
-                content=response,
-                message_id=input_message.id,
                 is_group=input_message.is_group,
+                reply_to=input_message.id,
             )
+
+            # 发送所有文本回复
+            for text_content in text_replies:
+                if text_content.strip():
+                    await self._send_reply(
+                        chat_id=input_message.chat_id,
+                        content=text_content,
+                        message_id=input_message.id,
+                        is_group=input_message.is_group,
+                    )
 
             # 记录助手回复到上下文
-            await self.context_manager.add_assistant_message_async(
-                input_message.chat_id, response, input_message.id
-            )
+            full_text = "\n".join(t.strip() for t in text_replies if t and t.strip())
+            if sent_emoji:
+                if full_text:
+                    full_text += "\n[助手发送了一个表情]"
+                else:
+                    full_text = "[助手发送了一个表情]"
+            if full_text:
+                await self.context_manager.add_assistant_message_async(
+                    input_message.chat_id, full_text, input_message.id
+                )
 
             _log.info(f"消息处理完成: {input_message.id}")
 
