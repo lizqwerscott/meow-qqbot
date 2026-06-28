@@ -70,14 +70,16 @@ class TemplateManager:
     def get_private_chat_prompt(
         self,
         user_name: str,
-        emoji_catalog: Optional[str] = None,
+        has_emojis: bool = False,
+        has_users: bool = False,
     ) -> str:
         """
         获取私聊系统提示
 
         Args:
             user_name: 用户昵称
-            emoji_catalog: 表情目录文本（可选），注入后 AI 知道可用哪些表情
+            has_emojis: 是否有可用表情（可选），为 True 时注入表情工具说明
+            has_users: 是否有其他用户（可选），为 True 时注入 @ 用户工具说明
 
         Returns:
             私聊系统提示文本
@@ -87,7 +89,8 @@ class TemplateManager:
         context = {
             "user_name": user_name,
             "character_card": self.character_card,
-            "emoji_catalog": emoji_catalog or "",
+            "has_emojis": has_emojis,
+            "has_users": has_users,
         }
 
         prompt = self.render_prompt_template(self.private_chat_template, context)
@@ -100,14 +103,16 @@ class TemplateManager:
     def get_group_chat_prompt(
         self,
         group_name: Optional[str] = None,
-        emoji_catalog: Optional[str] = None,
+        has_emojis: bool = False,
+        has_users: bool = False,
     ) -> str:
         """
         获取群聊系统提示
 
         Args:
             group_name: 群组名称（可选）
-            emoji_catalog: 表情目录文本（可选），注入后 AI 知道可用哪些表情
+            has_emojis: 是否有可用表情（可选），为 True 时注入表情工具说明
+            has_users: 是否有其他用户（可选），为 True 时注入 @ 用户工具说明
 
         Returns:
             群聊系统提示文本
@@ -117,7 +122,8 @@ class TemplateManager:
         context = {
             "group_name": group_name or "当前群组",
             "character_card": self.character_card,
-            "emoji_catalog": emoji_catalog or "",
+            "has_emojis": has_emojis,
+            "has_users": has_users,
         }
 
         prompt = self.render_prompt_template(self.group_chat_template, context)

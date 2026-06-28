@@ -77,6 +77,26 @@ EMOJI_TOOLS = [
     },
 ]
 
+SEARCH_USER_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_user",
+            "description": "根据昵称或名字搜索群里的用户。返回用户的ID和昵称，获取到用户ID后你可以在回复中使用 <qqbot-at-user id=\"xxx\" /> 来@该用户。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词，如用户名、昵称或ID的一部分",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
+]
+
 
 class BotEngine:
     """使用 qqbot_agent_sdk 的独立 QQ 机器人引擎。"""
@@ -156,6 +176,10 @@ class BotEngine:
         self.nicknames = self._load_nicknames()
         _log.info(f"已加载 {len(self.nicknames)} 个用户昵称")
 
+        # 加载自动采集的昵称（data/nicknames.json）
+        self.auto_nicknames = self._load_auto_nicknames()
+        _log.info(f"已加载 {len(self.auto_nicknames)} 个自动采集昵称")
+
         # 初始化多模态（视觉）模型服务
         # 开关：multimodal.enabled == true 时激活 VLM 分析
         mm_cfg = self._multimodal_config
@@ -202,6 +226,8 @@ class BotEngine:
 
     async def stop(self) -> None:
         """安全关闭。"""
+        # 关闭前持久化昵称
+        self._save_auto_nicknames()
         if self.ws:
             await self.ws.async_stop()
         await self._http_client.aclose()
@@ -254,13 +280,43 @@ class BotEngine:
             return
 
         # 解析消息中所有 @提及的 ID（含机器人自身），并从内容中移除 @机器人的标记
-        mentioned_ids = re.findall(r'<@([^>]+)>', event.content)
+        mentioned_ids = []
+        mentions_data = raw.get("mentions", [])
+        for m in mentions_data:
+            uid = m.get("id")
+            if uid:
+                mentioned_ids.append(uid)
+                # 从 content 中移除 @提及标签
+                event.content = event.content.replace(f"<@{uid}>", "")
+        event.content = event.content.strip()
         _log.info(f"mentioned_ids: {mentioned_ids}")
-        # 只移除 @机器人自身的标记，保留 @其他人的
-        event.content = re.sub(rf'<@{re.escape(self._bot_id)}>', '', event.content).strip()
 
-        # 通过 mentioned_ids 判断是否被 @
-        is_at_mention = self._bot_id in mentioned_ids
+        # 通过 mentions 中的 is_you 字段判断是否被 @
+        is_at_mention = any(m.get("is_you") for m in mentions_data)
+
+        # ── 提取引用消息（msg_elements）──
+        replied_content = ""
+        replied_author = ""
+        if event.msg_elements:
+            elem = event.msg_elements[0]
+            replied_content = elem.content or ""
+            # 从 raw.msg_elements 提取作者名字
+            raw_elems = raw.get("msg_elements", [])
+            if raw_elems:
+                replied_author = raw_elems[0].get("author", {}).get("username", "")
+            if elem.attachments:
+                replied_content += " [含附件]"
+
+        # ── 自动采集昵称 ──
+        self._collect_nickname(
+            raw.get("author", {}).get("id", ""),
+            raw.get("author", {}).get("username", ""),
+        )
+        for m in mentions_data:
+            self._collect_nickname(m.get("id", ""), m.get("username", ""))
+        for raw_elem in raw.get("msg_elements", []):
+            elem_author = raw_elem.get("author", {})
+            self._collect_nickname(elem_author.get("id", ""), elem_author.get("username", ""))
 
         # 所有消息都排入 AI 处理队列
         # 群聊消息全部入队以保留上下文，但仅在 @机器人 或 "猫猫" 开头时回复
@@ -272,6 +328,8 @@ class BotEngine:
             is_group=(event.chat_scope == "group"),
             is_at_mention=is_at_mention,
             mentioned_ids=mentioned_ids,
+            replied_content=replied_content,
+            replied_author=replied_author,
         )
 
         await self.message_queue.put_input_message(input_message)
@@ -413,6 +471,14 @@ class BotEngine:
                         "content": result_content,
                     })
 
+                elif tc.function.name == "search_user":
+                    result = self._execute_search_user(args)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    })
+
                 else:
                     _log.warning(f"未知工具调用: {tc.function.name}")
                     messages.append({
@@ -447,6 +513,58 @@ class BotEngine:
             })
 
         return json.dumps(result_data, ensure_ascii=False)
+
+    def _execute_search_user(self, args: dict) -> str:
+        """执行 search_user 工具，返回 JSON 字符串。"""
+        query = args.get("query", "").strip().lower()
+        if not query:
+            return json.dumps({"error": "搜索关键词为空"}, ensure_ascii=False)
+
+        results = []
+        seen = set()
+
+        # 搜索手动+自动昵称
+        for source_dict, source_name in [(self.nicknames, "手动"), (self.auto_nicknames, "自动")]:
+            for uid, nickname in source_dict.items():
+                if uid in seen:
+                    continue
+                if query in nickname.lower() or query in uid.lower():
+                    seen.add(uid)
+                    results.append({
+                        "id": uid,
+                        "nickname": nickname,
+                        "source": source_name,
+                    })
+
+        if not results:
+            return json.dumps(
+                {"error": "未找到匹配的用户", "query": query},
+                ensure_ascii=False,
+            )
+
+        return json.dumps(results[:10], ensure_ascii=False)
+
+    def _get_user_catalog_text(self, max_users: int = 30) -> str:
+        """生成 AI 可读的用户目录文本。"""
+        merged = dict(self.nicknames)
+        # 自动昵称不覆盖手动昵称
+        for uid, name in self.auto_nicknames.items():
+            if uid not in merged:
+                merged[uid] = name
+
+        if not merged:
+            return ""
+
+        lines = []
+        for uid, nickname in list(merged.items())[:max_users]:
+            lines.append(f"- {nickname} (id: {uid})")
+
+        catalog = "当前群聊中已知的用户：\n" + "\n".join(lines)
+        catalog += (
+            "\n\n你可以使用 search_user 工具搜索用户获取其ID，"
+            "然后在回复中使用 <qqbot-at-user id=\"用户ID\" /> 来@该用户。"
+        )
+        return catalog
 
     async def _execute_send_emoji(
         self,
@@ -613,10 +731,22 @@ class BotEngine:
             # 获取用户昵称
             user_nickname = self._get_user_nickname(input_message.sender_id)
 
+            # ── 格式化引用消息 ──
+            content_with_context = input_message.content
+            if input_message.replied_content:
+                if input_message.replied_author:
+                    context_prefix = f"[正在回复 {input_message.replied_author}: {input_message.replied_content}]"
+                else:
+                    context_prefix = f"[正在回复: {input_message.replied_content}]"
+                if content_with_context:
+                    content_with_context = context_prefix + "\n" + content_with_context
+                else:
+                    content_with_context = context_prefix
+
             # 记录用户消息到上下文（携带发送者ID和昵称）
             await self.context_manager.add_user_message_async(
                 input_message.chat_id,
-                input_message.content,
+                content_with_context,
                 input_message.id,
                 sender_id=input_message.sender_id,
                 name=user_nickname,
@@ -668,19 +798,37 @@ class BotEngine:
                 *context_messages,
             ]
 
-            # ── 工具调用循环（search_emoji / send_emoji）──
-            emoji_catalog_text = self.emoji_manager.get_emoji_catalog_text(max_emojis=30)
-            tools_to_use = EMOJI_TOOLS if emoji_catalog_text else None
+            # ── 工具调用循环（search_emoji / send_emoji / search_user）──
+            has_emojis = self.emoji_manager._storage.count() > 0
+            if input_message.is_group:
+                has_users = any(
+                    k != self._bot_id for k in self.nicknames
+                ) or any(
+                    k != self._bot_id for k in self.auto_nicknames
+                )
+            else:
+                has_users = False
 
-            # 如果有表情目录，重新生成 system prompt 注入到 messages
-            if emoji_catalog_text:
+            # 动态构建工具列表
+            tools_to_use = []
+            if has_emojis:
+                tools_to_use.extend(EMOJI_TOOLS)
+            if has_users:
+                tools_to_use.extend(SEARCH_USER_TOOL)
+            tools_to_use = tools_to_use or None
+
+            # 如果有可用工具，重新生成 system prompt 注入 flag
+            if tools_to_use:
                 if input_message.is_group:
                     system_prompt = self.template_manager.get_group_chat_prompt(
-                        emoji_catalog=emoji_catalog_text
+                        has_emojis=has_emojis,
+                        has_users=has_users,
                     )
                 else:
                     system_prompt = self.template_manager.get_private_chat_prompt(
-                        user_nickname, emoji_catalog=emoji_catalog_text
+                        user_nickname,
+                        has_emojis=has_emojis,
+                        has_users=has_users,
                     )
                 messages[0] = {"role": "system", "content": system_prompt}
 
@@ -689,7 +837,7 @@ class BotEngine:
                 f"请求 AI messages:\n{json.dumps(messages, ensure_ascii=False, indent=2)}"
             )
             if tools_to_use:
-                _log.info(f"本次请求注入 {len(EMOJI_TOOLS)} 个工具: {[t['function']['name'] for t in EMOJI_TOOLS]}")
+                _log.info(f"本次请求注入 {len(tools_to_use)} 个工具: {[t['function']['name'] for t in tools_to_use]}")
 
             # 执行工具循环
             text_replies, sent_emoji = await self._execute_tool_calls(
@@ -1127,12 +1275,52 @@ class BotEngine:
 
     def _get_user_nickname(self, user_id: str) -> str:
         """
-        获取用户昵称，如果未找到则返回用户ID
-
-        Args:
-            user_id: 用户ID
-
-        Returns:
-            用户昵称或用户ID
+        获取用户昵称，合并手动（nicknames.json）+ 自动（data/nicknames.json）
+        手动优先，自动兜底，都找不到返回 user_id。
         """
-        return self.nicknames.get(user_id, user_id)
+        if user_id in self.nicknames:
+            return self.nicknames[user_id]
+        if user_id in self.auto_nicknames:
+            return self.auto_nicknames[user_id]
+        return user_id
+
+    def _load_auto_nicknames(self) -> Dict[str, str]:
+        """加载自动采集的昵称文件（data/nicknames.json）"""
+        path = "data/nicknames.json"
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                _log.error(f"加载自动昵称文件失败: {e}")
+        return {}
+
+    def _save_auto_nicknames(self) -> None:
+        """将自动采集的昵称持久化到 data/nicknames.json"""
+        path = "data/nicknames.json"
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.auto_nicknames, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            _log.error(f"保存自动昵称失败: {e}")
+
+    def _collect_nickname(self, user_id: str, username: str) -> None:
+        """
+        采集一个用户昵称，直接持久化到 data/nicknames.json。
+        跳过无效 ID、空名字、机器人自身。手动设置的昵称优先级更高，不覆盖。
+        """
+        if not user_id or not username:
+            return
+        if user_id == self._bot_id:
+            return
+        # 手动设置的昵称优先级高，不覆盖
+        if user_id in self.nicknames:
+            return
+        # 如果已有且相同，跳过
+        if self.auto_nicknames.get(user_id) == username:
+            return
+        # 更新内存 + 写文件
+        self.auto_nicknames[user_id] = username
+        self._save_auto_nicknames()
+        _log.debug(f"已采集并持久化昵称: {username} ({user_id[:12]}..)")
