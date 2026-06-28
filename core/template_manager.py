@@ -67,19 +67,28 @@ class TemplateManager:
             print(f"渲染提示模板失败: {e}")
             return ""
 
-    def get_private_chat_prompt(self, user_name: str) -> str:
+    def get_private_chat_prompt(
+        self,
+        user_name: str,
+        emoji_catalog: Optional[str] = None,
+    ) -> str:
         """
         获取私聊系统提示
 
         Args:
             user_name: 用户昵称
+            emoji_catalog: 表情目录文本（可选），注入后 AI 知道可用哪些表情
 
         Returns:
             私聊系统提示文本
         """
 
         # 使用模板渲染
-        context = {"user_name": user_name, "character_card": self.character_card}
+        context = {
+            "user_name": user_name,
+            "character_card": self.character_card,
+            "emoji_catalog": emoji_catalog or "",
+        }
 
         prompt = self.render_prompt_template(self.private_chat_template, context)
         if not prompt:
@@ -88,12 +97,17 @@ class TemplateManager:
 
         return prompt
 
-    def get_group_chat_prompt(self, group_name: Optional[str] = None) -> str:
+    def get_group_chat_prompt(
+        self,
+        group_name: Optional[str] = None,
+        emoji_catalog: Optional[str] = None,
+    ) -> str:
         """
         获取群聊系统提示
 
         Args:
             group_name: 群组名称（可选）
+            emoji_catalog: 表情目录文本（可选），注入后 AI 知道可用哪些表情
 
         Returns:
             群聊系统提示文本
@@ -103,6 +117,7 @@ class TemplateManager:
         context = {
             "group_name": group_name or "当前群组",
             "character_card": self.character_card,
+            "emoji_catalog": emoji_catalog or "",
         }
 
         prompt = self.render_prompt_template(self.group_chat_template, context)
