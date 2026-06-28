@@ -299,13 +299,30 @@ class BotEngine:
         replied_author = ""
         if event.msg_elements:
             elem = event.msg_elements[0]
-            replied_content = elem.content or ""
             # 从 raw.msg_elements 提取作者名字
             raw_elems = raw.get("msg_elements", [])
             if raw_elems:
                 replied_author = raw_elems[0].get("author", {}).get("username", "")
-            if elem.attachments:
-                replied_content += " [含附件]"
+            # 处理引用消息的内容
+            if elem.attachments and is_custom_emoji(elem.content or "", elem.attachments):
+                # 引用的消息是自定义表情 → 用 EmojiManager 解析
+                try:
+                    desc, tags = await self.emoji_manager.get_or_build(
+                        elem.attachments[0]
+                    )
+                    tag_str = " ".join(tags) if tags else ""
+                    replied_content = f"[表情: {desc}]"
+                    if tag_str:
+                        replied_content += f" [情绪: {tag_str}]"
+                except Exception as e:
+                    _log.error(f"解析引用消息中的自定义表情失败: {e}")
+                    replied_content = "[引用消息: 自定义表情]"
+            elif elem.attachments:
+                # 引用消息有普通附件（图片/文件等）
+                replied_content = (elem.content or "") + " [含附件]"
+            else:
+                # 纯文本引用
+                replied_content = elem.content or ""
 
         # ── 自动采集昵称 ──
         self._collect_nickname(
