@@ -286,8 +286,11 @@ class BotEngine:
             uid = m.get("id")
             if uid:
                 mentioned_ids.append(uid)
-                # 从 content 中移除 @提及标签
-                event.content = event.content.replace(f"<@{uid}>", "")
+                # 将 @提及标签替换为 @昵称
+                nickname = m.get("username") or uid
+                if m.get("is_you"):
+                    nickname = self._bot_name
+                event.content = event.content.replace(f"<@{uid}>", f"@{nickname}")
         event.content = event.content.strip()
         _log.info(f"mentioned_ids: {mentioned_ids}")
 
