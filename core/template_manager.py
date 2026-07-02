@@ -72,6 +72,7 @@ class TemplateManager:
         user_name: str,
         has_emojis: bool = False,
         has_users: bool = False,
+        emoji_tags: Optional[list] = None,
     ) -> str:
         """
         获取私聊系统提示
@@ -80,6 +81,7 @@ class TemplateManager:
             user_name: 用户昵称
             has_emojis: 是否有可用表情（可选），为 True 时注入表情工具说明
             has_users: 是否有其他用户（可选），为 True 时注入 @ 用户工具说明
+            emoji_tags: 可用表情标签列表（可选）
 
         Returns:
             私聊系统提示文本
@@ -91,6 +93,7 @@ class TemplateManager:
             "character_card": self.character_card,
             "has_emojis": has_emojis,
             "has_users": has_users,
+            "emoji_tags": emoji_tags or [],
         }
 
         prompt = self.render_prompt_template(self.private_chat_template, context)
@@ -105,6 +108,7 @@ class TemplateManager:
         group_name: Optional[str] = None,
         has_emojis: bool = False,
         has_users: bool = False,
+        emoji_tags: Optional[list] = None,
     ) -> str:
         """
         获取群聊系统提示
@@ -113,6 +117,7 @@ class TemplateManager:
             group_name: 群组名称（可选）
             has_emojis: 是否有可用表情（可选），为 True 时注入表情工具说明
             has_users: 是否有其他用户（可选），为 True 时注入 @ 用户工具说明
+            emoji_tags: 可用表情标签列表（可选）
 
         Returns:
             群聊系统提示文本
@@ -124,6 +129,7 @@ class TemplateManager:
             "character_card": self.character_card,
             "has_emojis": has_emojis,
             "has_users": has_users,
+            "emoji_tags": emoji_tags or [],
         }
 
         prompt = self.render_prompt_template(self.group_chat_template, context)
