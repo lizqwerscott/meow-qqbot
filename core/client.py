@@ -398,12 +398,14 @@ class BotEngine:
         chat_id: str,
         is_group: bool,
         reply_to: str,
-    ) -> tuple[list[str], bool]:
+    ) -> bool:
         """
         执行 AI 工具调用循环。
 
         AI 返回 → 若有 tool_calls → 执行 → 结果追加到 messages → 继续下一轮
         直到 AI 不再返回 tool_calls 或达到最大轮数。
+
+        每轮 AI 返回的文本会立即发送并记录到上下文。
 
         Args:
             messages: 消息历史（会被修改，追加 tool 角色的结果）
@@ -412,11 +414,8 @@ class BotEngine:
             is_group: 是否为群聊
             reply_to: 回复的消息 ID
         Returns:
-            (text_replies, sent_emoji)
-            text_replies: AI 返回的所有文本内容列表
             sent_emoji: 是否成功发送了表情
         """
-        text_replies: list[str] = []
         sent_emoji = False
         MAX_ROUNDS = 5
 
@@ -428,7 +427,7 @@ class BotEngine:
             )
 
             if message is None:
-                text_replies.append("AI 服务异常")
+                await self._send_reply(chat_id, "AI 服务异常", reply_to, is_group)
                 break
 
             response_text = message.content or ""
@@ -441,7 +440,15 @@ class BotEngine:
             )
 
             if response_text:
-                text_replies.append(response_text)
+                await self._send_reply(
+                    chat_id=chat_id,
+                    content=response_text,
+                    message_id=reply_to,
+                    is_group=is_group,
+                )
+                await self.context_manager.add_assistant_message_async(
+                    chat_id, response_text, reply_to
+                )
 
             if not tool_calls:
                 break  # AI 不再调用工具，结束循环
@@ -485,6 +492,9 @@ class BotEngine:
                     )
                     if success:
                         sent_emoji = True
+                        await self.context_manager.add_assistant_message_async(
+                            chat_id, "[助手发送了一个表情]", reply_to,
+                        )
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -507,7 +517,7 @@ class BotEngine:
                         "content": json.dumps({"error": f"未知工具: {tc.function.name}"}),
                     })
 
-        return text_replies, sent_emoji
+        return sent_emoji
 
     def _execute_search_emoji(self, args: dict) -> str:
         """执行 search_emoji 工具，返回 JSON 字符串。"""
@@ -859,36 +869,14 @@ class BotEngine:
             if tools_to_use:
                 _log.info(f"本次请求注入 {len(tools_to_use)} 个工具: {[t['function']['name'] for t in tools_to_use]}")
 
-            # 执行工具循环
-            text_replies, sent_emoji = await self._execute_tool_calls(
+            # 执行工具循环（内部已即时发送文本并记录上下文）
+            sent_emoji = await self._execute_tool_calls(
                 messages=messages,
                 tools=tools_to_use,
                 chat_id=input_message.chat_id,
                 is_group=input_message.is_group,
                 reply_to=input_message.id,
             )
-
-            # 发送所有文本回复
-            for text_content in text_replies:
-                if text_content.strip():
-                    await self._send_reply(
-                        chat_id=input_message.chat_id,
-                        content=text_content,
-                        message_id=input_message.id,
-                        is_group=input_message.is_group,
-                    )
-
-            # 记录助手回复到上下文
-            full_text = "\n".join(t.strip() for t in text_replies if t and t.strip())
-            if sent_emoji:
-                if full_text:
-                    full_text += "\n[助手发送了一个表情]"
-                else:
-                    full_text = "[助手发送了一个表情]"
-            if full_text:
-                await self.context_manager.add_assistant_message_async(
-                    input_message.chat_id, full_text, input_message.id
-                )
 
             _log.info(f"消息处理完成: {input_message.id}")
 
