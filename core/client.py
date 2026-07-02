@@ -871,16 +871,19 @@ class BotEngine:
 
             # 如果有可用工具，重新生成 system prompt 注入 flag
             if tools_to_use:
+                emoji_tags = self.emoji_manager.get_all_tags() if has_emojis else []
                 if input_message.is_group:
                     system_prompt = self.template_manager.get_group_chat_prompt(
                         has_emojis=has_emojis,
                         has_users=has_users,
+                        emoji_tags=emoji_tags,
                     )
                 else:
                     system_prompt = self.template_manager.get_private_chat_prompt(
                         user_nickname,
                         has_emojis=has_emojis,
                         has_users=has_users,
+                        emoji_tags=emoji_tags,
                     )
                 messages[0] = {"role": "system", "content": system_prompt}
 

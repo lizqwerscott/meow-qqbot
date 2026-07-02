@@ -420,9 +420,9 @@ class EmojiManager:
         def _get_tags(r):
             return r.get("user_tags") or r.get("auto_tags", []) or []
 
-        # 优先级 1：标签完全匹配
+        # 优先级 1：标签完全匹配（去尖括号）
         for r in records:
-            tags = [t.lower() for t in _get_tags(r)]
+            tags = [t.lower().strip('<>') for t in _get_tags(r)]
             if q in tags:
                 return r
 
@@ -432,9 +432,9 @@ class EmojiManager:
             if q and q in desc:
                 return r
 
-        # 优先级 3：标签包含 query
+        # 优先级 3：标签包含 query（去尖括号）
         for r in records:
-            tags = [t.lower() for t in _get_tags(r)]
+            tags = [t.lower().strip('<>') for t in _get_tags(r)]
             if any(q in t for t in tags):
                 return r
 
@@ -459,7 +459,7 @@ class EmojiManager:
         def _score(r):
             """计算匹配分"""
             desc = (r.get("user_description") or r.get("auto_description", "") or "").lower()
-            tags = [t.lower() for t in (r.get("user_tags") or r.get("auto_tags", []) or [])]
+            tags = [t.lower().strip('<>') for t in (r.get("user_tags") or r.get("auto_tags", []) or [])]
             score = 0
             if q in tags:
                 score += 10  # 标签精确匹配
@@ -468,7 +468,9 @@ class EmojiManager:
             for t in tags:
                 if q in t:
                     score += 3  # 标签子串
-            score += min(r.get("used_count", 0) / 10, 3)  # 使用频率加成
+            # 只有有语义匹配时，才用使用频率做平局决胜
+            if score > 0:
+                score += min(r.get("used_count", 0) / 10, 3)
             return score
 
         scored = [(r, _score(r)) for r in records]
@@ -476,6 +478,16 @@ class EmojiManager:
         # 只返回有得分的
         results = [r for r, s in scored if s > 0][:max_results]
         return results
+
+    def get_all_tags(self) -> List[str]:
+        """返回所有去重后的标签列表（去尖括号、去重、去空、排序）"""
+        tags_set = set()
+        for r in self._storage.list_all():
+            for t in (r.get("user_tags") or r.get("auto_tags", []) or []):
+                clean = t.strip('<>').strip()
+                if clean:
+                    tags_set.add(clean)
+        return sorted(tags_set)
 
     def get_emoji_catalog_text(self, max_emojis: int = 30) -> str:
         """
