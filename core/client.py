@@ -479,7 +479,14 @@ class BotEngine:
                     continue
 
                 if tc.function.name == "search_emoji":
+                    _log.info(
+                        f"[工具调用] search_emoji 输入: "
+                        f"query={args.get('query', '')!r}"
+                    )
                     result = self._execute_search_emoji(args)
+                    _log.info(
+                        f"[工具调用] search_emoji 输出: {result[:200]}"
+                    )
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -487,8 +494,17 @@ class BotEngine:
                     })
 
                 elif tc.function.name == "send_emoji":
+                    _log.info(
+                        f"[工具调用] send_emoji 输入: "
+                        f"description={args.get('description', '')!r}, "
+                        f"target={args.get('target', '')!r}"
+                    )
                     result_content, success = await self._execute_send_emoji(
                         args, chat_id, is_group, reply_to,
+                    )
+                    _log.info(
+                        f"[工具调用] send_emoji 输出: success={success}, "
+                        f"result={result_content[:200]}"
                     )
                     if success:
                         sent_emoji = True
@@ -502,7 +518,13 @@ class BotEngine:
                     })
 
                 elif tc.function.name == "search_user":
+                    _log.info(
+                        f"[工具调用] search_user 输入: query={args.get('query', '')!r}"
+                    )
                     result = self._execute_search_user(args)
+                    _log.info(
+                        f"[工具调用] search_user 输出: {result[:200]}"
+                    )
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
