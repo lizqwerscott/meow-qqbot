@@ -395,24 +395,23 @@ class EmojiManager:
 
     def find_emoji(self, query: str) -> Optional[dict]:
         """
-        模糊匹配表情。供 AI 工具调用 search_emoji 使用。
+        多关键词 OR 匹配，取最高分返回。
 
-        匹配优先级：
-        1. 情绪标签完全匹配（query 等于某个标签）
-        2. 描述包含 query（子串匹配）
-        3. 情绪标签包含 query（子串匹配）
-        4. 以上都不匹配 → 返回 None
+        query 按空格分隔为多个关键词，每个关键词独立匹配标签和描述，
+        按匹配数 + 匹配精度累计打分，返回最佳的一个。
 
         Args:
-            query: 搜索关键词，如「开心」「猫」「微笑」
+            query: 空格分隔的关键词，如「开心 撒娇 猫娘」
         Returns:
-            匹配到的第一条 emoji 记录 dict，或 None
+            匹配度最高的单条 emoji 记录，或 None
         """
         records = self._storage.list_all()
         if not records:
             return None
 
-        q = query.lower().strip()
+        keywords = [k.lower().strip() for k in query.split() if k.strip()]
+        if not keywords:
+            return None
 
         def _get_desc(r):
             return (r.get("user_description") or r.get("auto_description", "") or "")
@@ -420,62 +419,82 @@ class EmojiManager:
         def _get_tags(r):
             return r.get("user_tags") or r.get("auto_tags", []) or []
 
-        # 优先级 1：标签完全匹配（去尖括号）
-        for r in records:
-            tags = [t.lower().strip('<>') for t in _get_tags(r)]
-            if q in tags:
-                return r
+        best_record = None
+        best_score = 0
 
-        # 优先级 2：描述包含 query
         for r in records:
             desc = _get_desc(r).lower()
-            if q and q in desc:
-                return r
-
-        # 优先级 3：标签包含 query（去尖括号）
-        for r in records:
             tags = [t.lower().strip('<>') for t in _get_tags(r)]
-            if any(q in t for t in tags):
-                return r
+            score = 0
 
-        return None
+            for k in keywords:
+                # 标签完全匹配 +10
+                if k in tags:
+                    score += 10
+                # 标签子串匹配 +3
+                elif any(k in t for t in tags):
+                    score += 3
+                # 描述包含 +5
+                if k in desc:
+                    score += 5
+
+            if score > best_score:
+                best_score = score
+                best_record = r
+
+        return best_record
 
     def find_emojis(self, query: str, max_results: int = 5) -> List[dict]:
         """
-        模糊匹配多个表情（按匹配度排序）。
+        多关键词 OR 匹配，返回多条按匹配度排序。
+
+        query 按空格分隔为多个关键词，每个关键词独立匹配标签和描述，
+        命中关键词越多、匹配精度越高，得分越高。
 
         Args:
-            query: 搜索关键词
+            query: 空格分隔的关键词，如「开心 撒娇 猫娘」
             max_results: 最多返回数量
         Returns:
-            匹配到的 emoji 记录列表（按使用次数降序）
+            按匹配度降序的 emoji 记录列表
         """
         records = self._storage.list_all()
         if not records:
             return []
 
-        q = query.lower().strip()
+        keywords = [k.lower().strip() for k in query.split() if k.strip()]
+        if not keywords:
+            return []
 
         def _score(r):
-            """计算匹配分"""
             desc = (r.get("user_description") or r.get("auto_description", "") or "").lower()
             tags = [t.lower().strip('<>') for t in (r.get("user_tags") or r.get("auto_tags", []) or [])]
             score = 0
-            if q in tags:
-                score += 10  # 标签精确匹配
-            if q in desc:
-                score += 5   # 描述包含
-            for t in tags:
-                if q in t:
-                    score += 3  # 标签子串
-            # 只有有语义匹配时，才用使用频率做平局决胜
+            matched_keywords = 0
+
+            for k in keywords:
+                kw_score = 0
+                if k in tags:
+                    kw_score += 10
+                if k in desc:
+                    kw_score += 5
+                for t in tags:
+                    if k in t:
+                        kw_score += 3
+                        break
+                if kw_score > 0:
+                    matched_keywords += 1
+                score += kw_score
+
+            # 命中关键词数量 bonus（鼓励覆盖更多关键词）
+            score += matched_keywords * 2
+            # 使用频率平局决胜
             if score > 0:
                 score += min(r.get("used_count", 0) / 10, 3)
+
             return score
 
         scored = [(r, _score(r)) for r in records]
         scored.sort(key=lambda x: x[1], reverse=True)
-        # 只返回有得分的
         results = [r for r, s in scored if s > 0][:max_results]
         return results
 

@@ -42,13 +42,13 @@ EMOJI_TOOLS = [
         "type": "function",
         "function": {
             "name": "search_emoji",
-            "description": "根据描述或情绪标签搜索已有的表情图片。返回匹配的表情列表，包含表情的唯一标识(hash)、描述和情绪标签。你可以先搜索，看看有哪些可用的表情，再决定发送哪一个。",
+            "description": "搜索表情图片。输入一个或多个标签，用空格分开。系统会匹配其中任意标签，按匹配数量排序返回。输入多个标签可以得到更精准的搜索结果。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "搜索关键词，如「开心」「难过」「猫」「微笑」「可爱」等",
+                        "description": "用于搜索的标签，多个标签用空格分隔，例如：开心 撒娇 猫娘。标签越具体搜索越精准。",
                     }
                 },
                 "required": ["query"],
