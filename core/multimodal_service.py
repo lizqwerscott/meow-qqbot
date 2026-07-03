@@ -102,12 +102,13 @@ class MultimodalService:
 
         base64_data = self._encode_image(image_path)
         prompt = (
-            "请分析这张表情/贴图图片。\n"
-            "1. 用一句话描述图片中的主要内容。\n"
-            "2. 给出 1-3 个情绪/情感标签。\n\n"
-            "格式要求（严格按此格式返回）：\n"
-            "描述：<内容描述>\n"
-            "情绪：<标签1>、<标签2>、<标签3>"
+            '请分析这张表情/贴图图片，仅返回以下 JSON 格式'
+            '（不要包含其他文字或 markdown 包裹）：\n'
+            '{\n'
+            '  "description": "一句话描述图片中的主要内容",\n'
+            '  "emotions": ["标签1", "标签2", "标签3"]\n'
+            '}\n'
+            '其中 emotions 给出 1-3 个情绪/情感标签。'
         )
 
         result = await self._call_vlm(base64_data, prompt)
@@ -184,36 +185,49 @@ class MultimodalService:
     @staticmethod
     def _parse_emoji_result(result: str) -> Tuple[str, List[str]]:
         """
-        解析表情分析的结构化返回。
+        解析表情分析返回的 JSON 格式结果。
 
         期望格式：
-            描述：一个微笑的卡通猫头
-            情绪：开心、可爱、友好
+            {
+              "description": "一个微笑的卡通猫头",
+              "emotions": ["开心", "可爱", "友好"]
+            }
         """
-        description = ""
-        emotions: List[str] = []
+        import json
 
-        for line in result.strip().split("\n"):
-            line = line.strip()
-            if line.startswith("描述："):
-                description = line[3:].strip()
-            elif line.startswith("情绪："):
-                raw_tags = line[3:].strip()
-                # 支持中文顿号、逗号、空格分隔
+        text = result.strip()
+
+        # 移除模型有时会加的 markdown code block 包裹
+        if text.startswith("```json"):
+            text = text[7:]
+        if text.startswith("```"):
+            text = text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+
+        # 移除可能的前导/尾随非 JSON 字符
+        # 找到第一个 { 和最后一个 }
+        first_brace = text.find("{")
+        last_brace = text.rfind("}")
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            text = text[first_brace : last_brace + 1]
+
+        try:
+            data = json.loads(text)
+            desc = data.get("description", "").strip()
+            raw_emotions = data.get("emotions", [])
+            if isinstance(raw_emotions, list):
                 emotions = [
-                    t.strip()
-                    for t in raw_tags.replace("、", ",")
-                    .replace("，", ",")
-                    .replace(" ", ",")
-                    .split(",")
-                    if t.strip()
+                    e.strip() for e in raw_emotions
+                    if isinstance(e, str) and e.strip()
                 ]
-
-        # 如果解析失败，返回原始文本作为描述
-        if not description and result:
-            description = result.strip()
-
-        return description, emotions
+            else:
+                emotions = []
+            return desc, emotions
+        except (json.JSONDecodeError, TypeError):
+            _log.warning(f"解析表情 JSON 失败，原始返回: {result[:200]}")
+            # 兜底：返回原始文本作为描述
+            return result.strip(), []
 
     def _get_cache_key(self, image_path: str, mode: str) -> str:
         """
