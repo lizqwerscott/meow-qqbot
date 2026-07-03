@@ -24,12 +24,18 @@ class ChatMessage:
     name: Optional[str] = None
 
     def to_dict(self) -> Dict:
-        """转换为字典格式"""
+        """转换为字典格式（供 AI 消费）"""
+        # 格式化时间戳
+        time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.timestamp))
+
         content = self.content
-        # user 角色的消息将发言人信息嵌入到 content 中
+        # user 角色的消息将发言人信息和时间嵌入到 content 中
         if self.role == "user":
             display_name = self.name or self.sender_id or "未知"
-            content = f"[{display_name}]: {self.content}"
+            content = f"[{display_name} 在 {time_str}]: {self.content}"
+        else:
+            # assistant 消息也加上时间前缀
+            content = f"[助手在 {time_str}]: {self.content}"
 
         d: Dict = {
             "role": self.role,

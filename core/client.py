@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -886,6 +887,13 @@ class BotEngine:
                         emoji_tags=emoji_tags,
                     )
                 messages[0] = {"role": "system", "content": system_prompt}
+
+            # ── 向 system prompt 注入当前时间信息 ──
+            _tz = timezone(timedelta(hours=8))
+            now = datetime.now(_tz)
+            weekday_names = ["星期一","星期二","星期三","星期四","星期五","星期六","星期日"]
+            time_info = now.strftime(f"%Y-%m-%d %H:%M:%S ({weekday_names[now.weekday()]})")
+            messages[0]["content"] += f"\n\n当前时间: {time_info}"
 
             # 打印请求消息（便于调试）
             _log.info(
