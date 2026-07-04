@@ -34,8 +34,8 @@ class ChatMessage:
             display_name = self.name or self.sender_id or "未知"
             content = f"[{display_name} 在 {time_str}]: {self.content}"
         else:
-            # assistant 消息也加上时间前缀
-            content = f"[助手在 {time_str}]: {self.content}"
+            # assistant 消息不加时间前缀，避免 AI 模仿输出时间格式
+            content = self.content
 
         d: Dict = {
             "role": self.role,
