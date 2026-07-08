@@ -22,7 +22,7 @@ meow-qqbot/
 │   ├── client.py        # QQ 机器人客户端
 │   ├── ai_service.py    # AI 服务模块
 │   ├── context_manager.py  # 聊天上下文管理
-│   └── message_queue.py    # 消息队列管理
+│   └── message.py          # InputMessage 数据类
 └── README.md
 ```
 
@@ -93,7 +93,7 @@ python main.py
 - 支持上下文管理
 - 支持重试和错误处理
 
-### 2. 消息队列模块 (`core/message_queue.py`)
+### 2. 消息数据类 (`core/message.py`)
 
 - 异步消息队列管理
 - 支持输入消息和处理后消息

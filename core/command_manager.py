@@ -1,10 +1,10 @@
 """命令管理器模块"""
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import Any, Dict, List
 
 from core.commands import Command, CommandRegistry, PermissionLevel
-from core.message_queue import InputMessage
+from core.message import InputMessage
 
 _log = logging.getLogger(__name__)
 
@@ -12,8 +12,8 @@ _log = logging.getLogger(__name__)
 class CommandManager:
     """命令管理器"""
 
-    def __init__(self, client: "MyClient"):
-        self.client = client
+    def __init__(self, admin_id: list[str]):
+        self.admin_id = admin_id
         self.registry = CommandRegistry()
 
     def register_command(self, command: Command) -> None:
@@ -42,7 +42,7 @@ class CommandManager:
 
     def has_permission(self, command: Command, user_id: str) -> bool:
         """检查用户是否有权限执行命令"""
-        return command.has_permission(user_id, self.client.admin_id)
+        return command.has_permission(user_id, self.admin_id)
 
     def process_message(self, input_message) -> list[dict]:
         """
