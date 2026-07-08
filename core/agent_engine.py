@@ -680,8 +680,8 @@ class AgentEngine:
                 elif tc.function.name == "send_emoji":
                     _log.info(
                         f"[工具调用] send_emoji 输入: "
-                        f"description={args.get('description', '')!r}, "
-                        f"target={args.get('target', '')!r}"
+                        f"emoji_hash={args.get('emoji_hash', '')!r}, "
+                        f"reason={args.get('reason', '')!r}"
                     )
                     result_content, success = await self._execute_send_emoji(
                         args, chat_id, is_group, reply_to, reply_callback,
