@@ -14,6 +14,7 @@ from core.emoji import EmojiManager
 from core.multimodal_service import MultimodalService
 from core.router import Router
 from core.template_manager import TemplateManager
+from core.everos_memory import EverOSMemory
 
 
 async def main() -> None:
@@ -92,6 +93,36 @@ async def main() -> None:
     # 管理员 ID 列表
     admin_ids = config.get("admin_id", [])
 
+    # ── EverOS 长期记忆系统 ──
+    everos_config = config.get("everos", {})
+    everos_memory = None
+    if everos_config.get("enabled", True):
+        everos_memory = EverOSMemory(
+            base_url=everos_config.get("base_url", "http://127.0.0.1:8000"),
+            app_id=everos_config.get("app_id", "qq_bot"),
+            project_id=everos_config.get("project_id", "production"),
+        )
+        _log = logging.getLogger(__name__)
+        _log.info(
+            f"EverOS 记忆系统已启用: {everos_config.get('base_url', 'http://127.0.0.1:8000')}"
+        )
+    else:
+        _log = logging.getLogger(__name__)
+        _log.info("EverOS 记忆系统未启用")
+
+    # ── EverOS 启动健康检查 ──
+    if everos_memory:
+        health_result = await everos_memory.health()
+        if health_result.get("status") == "ok":
+            _log.info(
+                f"EverOS 健康检查通过 ({health_result.get('latency_ms')}ms)"
+            )
+        else:
+            _log.warning(
+                f"EverOS 健康检查失败: {health_result.get('error')}"
+                " — 记忆功能将降级运行"
+            )
+
     # ── 2. 创建 AgentEngine（全局单例） ──
     agent_engine = AgentEngine(
         ai_service=ai_service,
@@ -102,6 +133,9 @@ async def main() -> None:
         openai_config=openai_config,
         emoji_manager=emoji_manager,
         http_client=http_client,
+        everos_memory=everos_memory,
+        flush_threshold=everos_config.get("flush_threshold", 20),
+        search_top_k=everos_config.get("search_top_k", 3),
     )
 
     # ── 3. 创建 BotEngine ──

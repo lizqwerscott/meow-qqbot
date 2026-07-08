@@ -30,6 +30,23 @@ from core.router import Router
 _log = logging.getLogger(__name__)
 
 
+def _everos_status_line(health: dict) -> str:
+    """将 EverOS health dict 格式化为单行状态文本。"""
+    status = health.get("status", "unknown")
+    if status == "disabled":
+        return "未启用 🚫"
+    if status == "ok":
+        latency = health.get("latency_ms")
+        if latency is not None:
+            return f"已连接 ✅ ({latency}ms)"
+        return "已连接 ✅"
+    if status == "unknown":
+        return "待检查 ⏳"
+    # unreachable / error
+    error = health.get("error", "未知错误")
+    return f"不可达 ❌ ({error})"
+
+
 class BotEngine:
     """
     使用 qqbot_agent_sdk 的独立 QQ 机器人引擎。
@@ -372,6 +389,7 @@ class BotEngine:
             queue_sizes = stats.get("queue_sizes", {})
             total_queue = sum(queue_sizes.values())
             active_chats = stats.get("active_chats", 0)
+            everos_health = stats.get("everos_health", {})
 
             status_text = [
                 "=== 系统状态 ===",
@@ -390,6 +408,9 @@ class BotEngine:
                 f"消息队列: {total_queue} 条（{len(queue_sizes)} 个活跃会话）",
                 f"活跃聊天: {active_chats} 个",
                 f"管理员ID: {', '.join(self.admin_id) if self.admin_id else '未设置'}",
+                "",
+                "=== 记忆系统 ===",
+                f"EverOS: {_everos_status_line(everos_health)}",
             ]
 
             reply_content = "\n".join(status_text)
@@ -401,6 +422,7 @@ class BotEngine:
                     "is_group": input_message.is_group,
                 }
             ]
+
 
         except ImportError:
             return [
@@ -414,6 +436,7 @@ class BotEngine:
         except Exception as e:
             _log.error(f"处理状态命令时出错: {e}")
             return []
+
 
     # ════════════════════════════════════════════════════════════
     # 表情命令
