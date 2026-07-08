@@ -89,6 +89,61 @@ SEARCH_USER_TOOL = [
 
 
 # ════════════════════════════════════════════════════════════
+# EverOS 记忆工具
+# ════════════════════════════════════════════════════════════
+
+SEARCH_MEMORY_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_memory",
+            "description": (
+                "搜索记忆系统，可查询人物画像、过往经历、具体事实、"
+                "用户偏好等任何信息。如果不指定 person_name，则搜索"
+                "当前对话用户的记忆；如果指定 person_name，则搜索对应群友的记忆。"
+                "当需要了解某人的背景、确认某件事、查找说过的话时使用。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词或问题，例如 '他喜欢什么'、'上次提到的新显卡'、'生日是什么时候'",
+                    },
+                    "person_name": {
+                        "type": "string",
+                        "description": "要搜索的人名或昵称（可选）。不填则搜索当前对话用户。私聊中不可用。",
+                    },
+                    "method": {
+                        "type": "string",
+                        "enum": ["hybrid", "agentic"],
+                        "description": "检索方法。hybrid（默认）适合大多数情况；agentic 适合需要深度挖掘的复杂查询，会进行多轮检索。",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+]
+
+MARK_IMPORTANT_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "mark_important",
+            "description": (
+                "当用户明确要求'记住这个'、'记好了'，或者当前讨论的内容"
+                "非常重要时，调用此工具标记当前上下文，系统将立刻保存为长期记忆。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+]
+
+# ════════════════════════════════════════════════════════════
 # SessionTaskManager — 每会话队列 + 锁
 # ════════════════════════════════════════════════════════════
 
@@ -169,6 +224,10 @@ class AgentEngine:
         openai_config: dict,
         emoji_manager: Optional[EmojiManager] = None,
         http_client: Optional[Any] = None,
+        # EverOS 长期记忆
+        everos_memory: Optional[Any] = None,
+        flush_threshold: int = 20,
+        search_top_k: int = 3,
     ):
         self.ai_service = ai_service
         self.template_manager = template_manager
@@ -188,8 +247,11 @@ class AgentEngine:
         self.nicknames: Dict[str, str] = {}
         self.auto_nicknames: Dict[str, str] = {}
 
-        # 会话隔离
-        self.session_manager = SessionTaskManager()
+        # EverOS 长期记忆
+        self.everos = everos_memory
+        self._flush_threshold = flush_threshold
+        self._search_top_k = search_top_k
+        self._session_msg_count: Dict[str, int] = {}
 
         # 自动复读检测
         self._auto_replied: Dict[str, str] = {}
@@ -201,6 +263,9 @@ class AgentEngine:
 
         # 跟踪所有运行中的消费者 Task，用于 stop() 时等待
         self._consumer_tasks: Set[asyncio.Task] = set()
+
+        # 会话队列管理器
+        self.session_manager = SessionTaskManager()
 
         _log.info("AgentEngine 已初始化")
 
@@ -280,6 +345,34 @@ class AgentEngine:
             sender_id=input_message.sender_id,
             name=user_nickname,
         )
+
+        # ── 记录到 EverOS 长期记忆缓冲 ──
+        if self.everos:
+            asyncio.create_task(
+                self.everos.add_message(
+                    session_id=chat_id,
+                    sender_id=input_message.sender_id,
+                    sender_name=user_nickname,
+                    content=content_with_context,
+                )
+            )
+
+            # 计数 + 条件触发 flush
+            count = self._session_msg_count.get(chat_id, 0) + 1
+            self._session_msg_count[chat_id] = count
+
+            should_flush = count >= self._flush_threshold
+            if not should_flush:
+                # 关键词匹配触发即时 flush（计数器不归零，保留计数触发机会）
+                keywords = ["我喜欢", "我讨厌", "我叫", "我是", "我的"]
+                if any(k in input_message.content for k in keywords):
+                    should_flush = True
+
+            if should_flush:
+                # 仅计数触发时归零；关键词触发不归零，双重保险
+                if count >= self._flush_threshold:
+                    self._session_msg_count[chat_id] = 0
+                asyncio.create_task(self.everos.flush(session_id=chat_id))
 
         # ── 自动复读检测（仅文本，非表情） ──
         if not (input_message.content.startswith("[表情:") or input_message.content == "[自定义表情]"):
@@ -418,6 +511,10 @@ class AgentEngine:
             tools_to_use.extend(EMOJI_TOOLS)
         if has_users:
             tools_to_use.extend(SEARCH_USER_TOOL)
+        # ── 如有 EverOS，注入记忆工具 ──
+        if self.everos:
+            tools_to_use.extend(SEARCH_MEMORY_TOOL)
+            tools_to_use.extend(MARK_IMPORTANT_TOOL)
         tools_to_use = tools_to_use or None
 
         # 如果有工具，重新生成 system prompt 注入 flag
@@ -438,7 +535,24 @@ class AgentEngine:
                 )
             messages[0] = {"role": "system", "content": system_prompt}
 
-        # ── 向 system prompt 注入当前时间 ──
+        # ── 注入轻量 EverOS 记忆工具说明 ──
+        if self.everos:
+            desc = (
+                "\n\n【记忆系统】\n"
+                "你可以使用以下工具查询和保存长期记忆。\n"
+                "\n"
+                "**重要原则：不确定的先查记忆，不要猜测！**\n"
+                "- 当用户询问关于某人的背景、偏好、说过的话、过往经历时→ 先 search_memory，不要凭印象回答\n"
+                "- 当用户提到以前的事、上次的约定、之前讨论过的内容→ 先 search_memory 确认事实\n"
+                "- 当需要确认某个具体事实（如生日、爱好、说过的话）→ 先 search_memory 再回答\n"
+                "- 如果 search_memory 没有找到相关信息，如实告诉用户你不知道，不要编造\n"
+                "\n"
+                "可用工具：\n"
+                "- search_memory：搜索记忆（指定 person_name 可查群友，不指定则查当前用户），可查画像、经历、事实等\n"
+                "- mark_important：将当前对话内容标记为重要，立即存入长期记忆\n"
+            )
+            messages[0]["content"] += desc
+
         _tz = timezone(timedelta(hours=8))
         now = datetime.now(_tz)
         weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -460,6 +574,7 @@ class AgentEngine:
             is_group=is_group,
             reply_to=input_message.id,
             reply_callback=reply_callback,
+            sender_id=input_message.sender_id,
         )
 
         _log.info(f"消息处理完成: {input_message.id}")
@@ -476,6 +591,7 @@ class AgentEngine:
         is_group: bool,
         reply_to: str,
         reply_callback: Callable,
+        sender_id: str = "",
     ) -> bool:
         """
         执行 AI 工具调用循环。
@@ -597,6 +713,37 @@ class AgentEngine:
                         "content": result,
                     })
 
+                elif tc.function.name == "search_memory":
+                    _log.info(
+                        f"[工具调用] search_memory 输入: "
+                        f"query={args.get('query', '')!r} "
+                        f"person_name={args.get('person_name', '')!r} "
+                        f"method={args.get('method', 'hybrid')!r}"
+                    )
+                    result = await self._execute_search_memory(
+                        args, chat_id, is_group, sender_id
+                    )
+                    _log.info(
+                        f"[工具调用] search_memory 输出: {result[:200]}"
+                    )
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    })
+
+                elif tc.function.name == "mark_important":
+                    _log.info("[工具调用] mark_important")
+                    result = await self._execute_mark_important(chat_id)
+                    _log.info(
+                        f"[工具调用] mark_important 输出: {result[:200]}"
+                    )
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    })
+
                 else:
                     _log.warning(f"未知工具调用: {tc.function.name}")
                     messages.append({
@@ -665,6 +812,102 @@ class AgentEngine:
             )
 
         return json.dumps(results[:10], ensure_ascii=False)
+
+    # ── EverOS 工具执行器 ──
+
+    async def _execute_search_memory(
+        self, args: dict, chat_id: str, is_group: bool, sender_id: str
+    ) -> str:
+        """执行 search_memory 工具，统一记忆搜索。"""
+        query = (args.get("query") or "").strip()
+        if not query:
+            return json.dumps(
+                {"error": "请输入搜索内容"}, ensure_ascii=False
+            )
+
+        person_name = (args.get("person_name") or "").strip()
+        method = args.get("method", "hybrid")
+        target_id = sender_id
+        display_name = "当前用户"
+
+        # 如果指定了人名，解析为 user_id
+        if person_name:
+            if not is_group:
+                return json.dumps(
+                    {"error": "私聊中无法搜索其他人"}, ensure_ascii=False
+                )
+            # 合并昵称字典
+            merged = dict(self.nicknames)
+            for uid, name in self.auto_nicknames.items():
+                if uid not in merged:
+                    merged[uid] = name
+
+            matched_id = None
+            for uid, nickname in merged.items():
+                if person_name.lower() in nickname.lower() or person_name.lower() in uid.lower():
+                    matched_id = uid
+                    display_name = nickname
+                    break
+
+            if not matched_id:
+                return json.dumps(
+                    {"error": f"在昵称列表中找不到叫「{person_name}」的人"},
+                    ensure_ascii=False,
+                )
+            target_id = matched_id
+
+        if not self.everos:
+            return json.dumps(
+                {"error": "记忆系统未就绪"}, ensure_ascii=False
+            )
+
+        result = await self.everos.search(
+            user_id=target_id,
+            query=query,
+            top_k=10,
+            include_profile=True,
+            method=method,
+        )
+        profiles = result.get("profiles", [])
+        episodes = result.get("episodes", [])
+
+        if not episodes and not profiles:
+            return json.dumps(
+                {"info": f"关于「{display_name}」暂无相关记忆记录"},
+                ensure_ascii=False,
+            )
+
+        lines = [f"关于「{display_name}」的记忆检索结果："]
+        if profiles:
+            lines.append("【人物画像】")
+            for p in profiles[:3]:
+                pd = p.get("profile_data", {})
+                if isinstance(pd, dict):
+                    for k, v in pd.items():
+                        lines.append(f"- {k}: {v}")
+        if episodes:
+            lines.append("【相关记忆】")
+            for e in episodes[:5]:
+                content = e.get("summary", "") or e.get("subject", "") or e.get("episode", "")
+                mem_type = e.get("memory_type", "episode")
+                if content:
+                    lines.append(f"- [{mem_type}] {content[:200]}")
+        return "\n".join(lines)
+
+    async def _execute_mark_important(self, chat_id: str) -> str:
+        """执行 mark_important 工具，异步触发 flush。"""
+        if not self.everos:
+            return json.dumps(
+                {"error": "记忆系统未就绪"}, ensure_ascii=False
+            )
+        asyncio.create_task(self.everos.flush(session_id=chat_id))
+        return json.dumps(
+            {
+                "success": True,
+                "message": "已标记当前对话为重要，正在整理记忆中。",
+            },
+            ensure_ascii=False,
+        )
 
     def _get_user_catalog_text(self, max_users: int = 30) -> str:
         """生成 AI 可读的用户目录文本。"""
@@ -827,11 +1070,24 @@ class AgentEngine:
 
     def get_stats(self) -> dict:
         """返回引擎统计信息（用于状态命令）。"""
-        return {
+        stats: dict = {
             "queue_sizes": self.session_manager.get_queue_sizes(),
             "active_chats": self.context_manager.get_context_count(),
             "total_messages": self.context_manager.get_total_messages_count(),
         }
+
+        # EverOS 记忆系统健康状态（缓存，非阻塞）
+        if self.everos:
+            health = self.everos.last_health_status
+            if health:
+                stats["everos_health"] = health
+            else:
+                # 标记为“待刷新”，实际检查在 status command 里做
+                stats["everos_health"] = {"status": "unknown", "error": "待检查"}
+        else:
+            stats["everos_health"] = {"status": "disabled"}
+
+        return stats
 
     # ── 生命周期 ──
 
@@ -844,4 +1100,9 @@ class AgentEngine:
             await asyncio.wait(self._consumer_tasks, timeout=5.0)
             self._consumer_tasks.clear()
         await self.session_manager.cleanup_all()
+
+        # 关闭 EverOS 客户端
+        if self.everos:
+            await self.everos.close()
+
         _log.info("AgentEngine 已停止")
