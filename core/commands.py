@@ -3,7 +3,7 @@
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
-from core.message_queue import InputMessage
+from core.message import InputMessage
 
 
 class PermissionLevel(Enum):

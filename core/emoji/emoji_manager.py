@@ -350,6 +350,18 @@ class EmojiManager:
         _log.info(f"已重置 emoji [{emoji_hash[:12]}..] 为自动识别结果")
         return True
 
+    def count_emojis(self) -> int:
+        """返回已知表情总数。"""
+        return self._storage.count()
+
+    def update_emoji(self, emoji_hash: str, **kwargs) -> bool:
+        """更新一条表情记录的字段，返回是否成功。"""
+        record = self.get_info(emoji_hash)
+        if not record:
+            return False
+        self._storage.update(emoji_hash, **kwargs)
+        return True
+
     def get_info(self, emoji_hash: str) -> Optional[dict]:
         """
         获取 emoji 的完整信息。
@@ -392,6 +404,17 @@ class EmojiManager:
     # ════════════════════════════════════════════════════════════
     # 工具调用支持
     # ════════════════════════════════════════════════════════════
+
+    def find_by_hash(self, partial_hash: str) -> Optional[dict]:
+        """根据 hash（支持短前缀）查找 emoji 记录。"""
+        records = self._storage.list_all()
+        for e in records:
+            if e["hash"] == partial_hash:
+                return e
+        matches = [e for e in records if e["hash"].startswith(partial_hash)]
+        if len(matches) == 1:
+            return matches[0]
+        return None
 
     def find_emoji(self, query: str) -> Optional[dict]:
         """

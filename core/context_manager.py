@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from core.command_manager import CommandManager
 from core.commands import Command, PermissionLevel
-from core.message_queue import InputMessage
+from core.message import InputMessage
 
 _log = logging.getLogger(__name__)
 
