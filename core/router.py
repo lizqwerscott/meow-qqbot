@@ -27,10 +27,9 @@ class Router:
 
     def __init__(
         self,
-        command_manager: "CommandManager",
         agent_engine: "AgentEngine",
     ):
-        self.command_manager = command_manager
+        self.command_manager: Optional["CommandManager"] = None
         self.agent_engine = agent_engine
 
     async def route(
@@ -48,7 +47,7 @@ class Router:
             get_user_nickname: 获取用户昵称的回调 (user_id) -> str
         """
         # ── 1. 命令检测 ──
-        command_messages = self.command_manager.process_message(input_message)
+        command_messages = await self.command_manager.process_message(input_message)
         if command_messages:
             for msg in command_messages:
                 await reply_callback(

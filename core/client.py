@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import re
-import time
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -21,30 +20,12 @@ from qqbot_agent_sdk.media_loader import MediaUploader
 
 from core.agent_engine import AgentEngine
 from core.command_manager import CommandManager
-from core.commands import Command, PermissionLevel
 from core.emoji import EmojiManager, is_custom_emoji
 from core.message import InputMessage
 from core.multimodal_service import MultimodalService
 from core.router import Router
 
 _log = logging.getLogger(__name__)
-
-
-def _everos_status_line(health: dict) -> str:
-    """将 EverOS health dict 格式化为单行状态文本。"""
-    status = health.get("status", "unknown")
-    if status == "disabled":
-        return "未启用 🚫"
-    if status == "ok":
-        latency = health.get("latency_ms")
-        if latency is not None:
-            return f"已连接 ✅ ({latency}ms)"
-        return "已连接 ✅"
-    if status == "unknown":
-        return "待检查 ⏳"
-    # unreachable / error
-    error = health.get("error", "未知错误")
-    return f"不可达 ❌ ({error})"
 
 
 class BotEngine:
@@ -55,11 +36,11 @@ class BotEngine:
     - WebSocket 连接管理
     - 消息接收与解析（→ InputMessage）
     - 发送回复（API 调用）
-    - 命令管理（表情、状态、帮助等）
     - 昵称管理
 
     AI 编排、会话管理、工具执行由 AgentEngine 负责。
-    消息路由由 Router 负责。
+    消息路由/命令分发由 Router 负责。
+    命令处理器在 core/command_handlers/ 中各独立文件实现。
     """
 
     def __init__(
@@ -94,7 +75,6 @@ class BotEngine:
         self.router.command_manager = self.command_manager
         self.media_uploader = None
         self._bot_name: str = "机器人"
-        self._commands_registered = False
         self._deps_injected = False
 
         # 昵称
@@ -126,35 +106,10 @@ class BotEngine:
     def _on_ready(self, ready: WSReadyData) -> None:
         """
         同步回调——WS 就绪时初始化。
-
-        ★ 不再启动 _process_messages_loop — AgentEngine 按需启动会话消费者。
         """
         if ready.user:
             self._bot_name = ready.user.username or "机器人"
         _log.info(f"机器人「{self._bot_name}」on_ready!")
-
-        # 注册命令（仅在首次 on_ready 时注册，WS 重连跳过）
-        if not self._commands_registered:
-            self.command_manager.register_default_commands()
-            self.command_manager.register_command(
-                Command(
-                    name="状态",
-                    handler=self.handle_status_command,
-                    aliases=["status"],
-                    permission=PermissionLevel.ADMIN,
-                    description="查看系统状态（管理员专用）",
-                )
-            )
-            self._register_emoji_commands()
-            self._commands_registered = True
-            _log.info(f"已注册 {self.command_manager.registry.count()} 个命令")
-        else:
-            _log.debug("命令已在首次 on_ready 注册，跳过")
-
-        # ★ 注册 ChatContextManager 提供的命令（历史/清空/聊天列表）
-        self.agent_engine.context_manager.register_default_command(
-            self.command_manager
-        )
 
         # 加载昵称
         self.nicknames = self._load_nicknames()
@@ -358,363 +313,6 @@ class BotEngine:
         """发送回复——使用 SDK send_text 自动路由 + 重试。"""
         chat_type = "group" if is_group else "c2c"
         await self.api.send_text(chat_type, chat_id, content, reply_to=message_id)
-        _log.info(f"已发送回复: {chat_id}, 消息ID: {message_id}")
-
-    # ── 状态命令 ──
-
-    def handle_status_command(
-        self, input_message: InputMessage, _: str
-    ) -> List[Dict[str, Any]]:
-        """处理状态命令，显示系统状态（管理员专用）"""
-        try:
-            chat_id = input_message.chat_id
-
-            # 系统资源
-            import psutil
-            memory = psutil.virtual_memory()
-            memory_percent = memory.percent
-            memory_used = memory.used / (1024**3)
-            memory_total = memory.total / (1024**3)
-            cpu_percent = psutil.cpu_percent(interval=0.1)
-            disk = psutil.disk_usage("/")
-            disk_percent = disk.percent
-            disk_used = disk.used / (1024**3)
-            disk_total = disk.total / (1024**3)
-            process = psutil.Process()
-            process_memory = process.memory_info().rss / (1024**2)
-            process_cpu = process.cpu_percent(interval=0.1)
-
-            # 从 AgentEngine 获取统计信息
-            stats = self.agent_engine.get_stats()
-            queue_sizes = stats.get("queue_sizes", {})
-            total_queue = sum(queue_sizes.values())
-            active_chats = stats.get("active_chats", 0)
-            everos_health = stats.get("everos_health", {})
-
-            status_text = [
-                "=== 系统状态 ===",
-                f"系统时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
-                "",
-                "=== 系统资源 ===",
-                f"CPU使用率: {cpu_percent:.1f}%",
-                f"内存使用: {memory_percent:.1f}% ({memory_used:.1f}GB / {memory_total:.1f}GB)",
-                f"磁盘使用: {disk_percent:.1f}% ({disk_used:.1f}GB / {disk_total:.1f}GB)",
-                "",
-                "=== 进程状态 ===",
-                f"进程内存: {process_memory:.1f}MB",
-                f"进程CPU: {process_cpu:.1f}%",
-                "",
-                "=== 机器人状态 ===",
-                f"消息队列: {total_queue} 条（{len(queue_sizes)} 个活跃会话）",
-                f"活跃聊天: {active_chats} 个",
-                f"管理员ID: {', '.join(self.admin_id) if self.admin_id else '未设置'}",
-                "",
-                "=== 记忆系统 ===",
-                f"EverOS: {_everos_status_line(everos_health)}",
-            ]
-
-            reply_content = "\n".join(status_text)
-            return [
-                {
-                    "chat_id": chat_id,
-                    "content": reply_content,
-                    "message_id": input_message.id,
-                    "is_group": input_message.is_group,
-                }
-            ]
-
-
-        except ImportError:
-            return [
-                {
-                    "chat_id": chat_id,
-                    "content": "无法获取系统状态信息，请安装psutil库。",
-                    "message_id": input_message.id,
-                    "is_group": input_message.is_group,
-                }
-            ]
-        except Exception as e:
-            _log.error(f"处理状态命令时出错: {e}")
-            return []
-
-
-    # ════════════════════════════════════════════════════════════
-    # 表情命令
-    # ════════════════════════════════════════════════════════════
-
-    def _register_emoji_commands(self) -> None:
-        """注册表情相关命令"""
-        self.command_manager.register_command(
-            Command(
-                name="表情列表",
-                handler=self._handle_emoji_list,
-                aliases=["emojis"],
-                permission=PermissionLevel.DEFAULT,
-                description="查看所有已知自定义表情",
-            )
-        )
-        self.command_manager.register_command(
-            Command(
-                name="表情查看",
-                handler=self._handle_emoji_info,
-                aliases=["emoji"],
-                permission=PermissionLevel.DEFAULT,
-                description="查看指定表情的详细信息。用法：猫猫表情查看 <hash>",
-            )
-        )
-        self.command_manager.register_command(
-            Command(
-                name="表情编辑",
-                handler=self._handle_emoji_edit,
-                aliases=[],
-                permission=PermissionLevel.ADMIN,
-                description="自定义表情描述和标签。用法：猫猫表情编辑 <hash> 描述=xxx 标签=xxx",
-            )
-        )
-        self.command_manager.register_command(
-            Command(
-                name="表情重置",
-                handler=self._handle_emoji_reset,
-                aliases=[],
-                permission=PermissionLevel.ADMIN,
-                description="恢复表情为 AI 自动识别结果。用法：猫猫表情重置 <hash>",
-            )
-        )
-
-    def _handle_emoji_list(
-        self, input_message: InputMessage, args: str
-    ) -> List[Dict[str, Any]]:
-        """猫猫表情列表 — 分页显示所有已知表情"""
-        if self.emoji_manager is None:
-            return [{"chat_id": input_message.chat_id, "content": "表情管理器未就绪。",
-                     "message_id": input_message.id, "is_group": input_message.is_group}]
-        try:
-            page = 1
-            if args.strip():
-                try:
-                    page = max(1, int(args.strip()))
-                except ValueError:
-                    pass
-
-            result = self.emoji_manager.list_emojis(page=page, page_size=10)
-            if result["total"] == 0:
-                return [
-                    {
-                        "chat_id": input_message.chat_id,
-                        "content": "还没有记录任何自定义表情。",
-                        "message_id": input_message.id,
-                        "is_group": input_message.is_group,
-                    }
-                ]
-
-            lines = [
-                f"已知自定义表情（共 {result['total']} 个，第 {result['page']} 页）："
-            ]
-            for emoji in result["emojis"]:
-                short_hash = emoji["hash"][:12]
-                desc = emoji.get("user_description") or emoji.get("auto_description", "")
-                tags = emoji.get("user_tags") or emoji.get("auto_tags", [])
-                tag_str = f" [{', '.join(tags[:3])}]" if tags else ""
-                marker = " ★" if (emoji.get("user_description") is not None or emoji.get("user_tags")) else ""
-                count = emoji.get("used_count", 0)
-                lines.append(f"  {short_hash}: {desc}{tag_str}{marker} (x{count})")
-
-            if result["total"] > page * result["page_size"]:
-                lines.append(f"输入「猫猫表情列表 {page + 1}」查看下一页")
-
-            return [
-                {
-                    "chat_id": input_message.chat_id,
-                    "content": "\n".join(lines),
-                    "message_id": input_message.id,
-                    "is_group": input_message.is_group,
-                }
-            ]
-        except Exception as e:
-            _log.error(f"表情列表命令失败: {e}")
-            return []
-
-    def _handle_emoji_info(
-        self, input_message: InputMessage, args: str
-    ) -> List[Dict[str, Any]]:
-        """猫猫表情查看 <hash> — 查看指定表情的详细信息"""
-        if self.emoji_manager is None:
-            return [{"chat_id": input_message.chat_id, "content": "表情管理器未就绪。",
-                     "message_id": input_message.id, "is_group": input_message.is_group}]
-        emoji_hash = args.strip()
-        if not emoji_hash:
-            return [
-                {
-                    "chat_id": input_message.chat_id,
-                    "content": "请提供表情 hash。用法：猫猫表情查看 <hash>",
-                    "message_id": input_message.id,
-                    "is_group": input_message.is_group,
-                }
-            ]
-
-        record = self.emoji_manager.find_by_hash(emoji_hash)
-        if record is None:
-            return [
-                {
-                    "chat_id": input_message.chat_id,
-                    "content": f"未找到表情「{emoji_hash}」。",
-                    "message_id": input_message.id,
-                    "is_group": input_message.is_group,
-                }
-            ]
-
-        lines = [
-            f"=== 表情详情 ===",
-            f"Hash: {record['hash']}",
-            f"文件名: {record.get('file_name', 'N/A')}",
-            f"使用次数: {record.get('used_count', 0)}",
-            f"",
-            f"AI 描述: {record.get('auto_description', '(无)')}",
-            f"AI 标签: {', '.join(record.get('auto_tags', [])) or '(无)'}",
-        ]
-        has_custom = record.get("user_description") is not None or record.get("user_tags")
-        if has_custom:
-            lines.append(f"")
-            lines.append(f"★ 用户自定义描述: {record.get('user_description', '(无)')}")
-            lines.append(f"★ 用户自定义标签: {', '.join(record.get('user_tags', [])) or '(无)'}")
-        lines.append(f"")
-        lines.append(f"创建时间: {record.get('created_at', 'N/A')}")
-        lines.append(f"最后更新: {record.get('updated_at', 'N/A')}")
-        lines.append(f"URL: {record.get('url', 'N/A')[:60]}...")
-
-        return [
-            {
-                "chat_id": input_message.chat_id,
-                "content": "\n".join(lines),
-                "message_id": input_message.id,
-                "is_group": input_message.is_group,
-            }
-        ]
-
-    def _handle_emoji_edit(
-        self, input_message: InputMessage, args: str
-    ) -> List[Dict[str, Any]]:
-        """猫猫表情编辑 <hash> 描述=xxx 标签=A、B — 自定义表情描述和标签"""
-        if self.emoji_manager is None:
-            return [{"chat_id": input_message.chat_id, "content": "表情管理器未就绪。",
-                     "message_id": input_message.id, "is_group": input_message.is_group}]
-        parts = args.strip().split()
-        if len(parts) < 2:
-            return [
-                {
-                    "chat_id": input_message.chat_id,
-                    "content": "格式：猫猫表情编辑 <hash> 描述=xxx 标签=A、B",
-                    "message_id": input_message.id,
-                    "is_group": input_message.is_group,
-                }
-            ]
-
-        emoji_hash = parts[0]
-        desc = None
-        tags = None
-
-        for p in parts[1:]:
-            if p.startswith("描述="):
-                desc = p[3:]
-            elif p.startswith("标签="):
-                raw = p[3:]
-                tags = [t.strip() for t in raw.replace("、", ",").split(",") if t.strip()]
-
-        if desc is None and tags is None:
-            return [
-                {
-                    "chat_id": input_message.chat_id,
-                    "content": "至少要提供描述或标签中的一个。\n格式：猫猫表情编辑 <hash> 描述=xxx 标签=A、B",
-                    "message_id": input_message.id,
-                    "is_group": input_message.is_group,
-                }
-            ]
-
-        record = self.emoji_manager.find_by_hash(emoji_hash)
-        if record is None:
-            return [
-                {
-                    "chat_id": input_message.chat_id,
-                    "content": f"未找到表情「{emoji_hash}」。「猫猫表情列表」查看所有。",
-                    "message_id": input_message.id,
-                    "is_group": input_message.is_group,
-                }
-            ]
-
-        ok = self.emoji_manager.set_custom(record["hash"], description=desc, tags=tags)
-        if ok:
-            changes = []
-            if desc is not None:
-                changes.append(f"描述 → {desc}")
-            if tags is not None:
-                changes.append(f"标签 → {', '.join(tags)}")
-            return [
-                {
-                    "chat_id": input_message.chat_id,
-                    "content": f"表情 {record['hash'][:12]}.. 已更新：{'；'.join(changes)}",
-                    "message_id": input_message.id,
-                    "is_group": input_message.is_group,
-                }
-            ]
-        else:
-            return [
-                {
-                    "chat_id": input_message.chat_id,
-                    "content": f"更新失败，请重试。",
-                    "message_id": input_message.id,
-                    "is_group": input_message.is_group,
-                }
-            ]
-
-    def _handle_emoji_reset(
-        self, input_message: InputMessage, args: str
-    ) -> List[Dict[str, Any]]:
-        """猫猫表情重置 <hash> — 恢复为 AI 自动识别结果"""
-        if self.emoji_manager is None:
-            return [{"chat_id": input_message.chat_id, "content": "表情管理器未就绪。",
-                     "message_id": input_message.id, "is_group": input_message.is_group}]
-        emoji_hash = args.strip()
-        if not emoji_hash:
-            return [
-                {
-                    "chat_id": input_message.chat_id,
-                    "content": "请提供表情 hash。用法：猫猫表情重置 <hash>",
-                    "message_id": input_message.id,
-                    "is_group": input_message.is_group,
-                }
-            ]
-
-        record = self.emoji_manager.find_by_hash(emoji_hash)
-        if record is None:
-            return [
-                {
-                    "chat_id": input_message.chat_id,
-                    "content": f"未找到表情「{emoji_hash}」。",
-                    "message_id": input_message.id,
-                    "is_group": input_message.is_group,
-                }
-            ]
-
-        ok = self.emoji_manager.reset_to_auto(record["hash"])
-        if ok:
-            return [
-                {
-                    "chat_id": input_message.chat_id,
-                    "content": f"表情 {record['hash'][:12]}.. 已恢复为 AI 自动识别结果。",
-                    "message_id": input_message.id,
-                    "is_group": input_message.is_group,
-                }
-            ]
-        else:
-            return [
-                {
-                    "chat_id": input_message.chat_id,
-                    "content": f"重置失败，请重试。",
-                    "message_id": input_message.id,
-                    "is_group": input_message.is_group,
-                }
-            ]
-
     # ════════════════════════════════════════════════════════════
     # 昵称管理
     # ════════════════════════════════════════════════════════════

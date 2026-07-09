@@ -15,6 +15,7 @@ from core.multimodal_service import MultimodalService
 from core.router import Router
 from core.template_manager import TemplateManager
 from core.everos_memory import EverOSMemory
+from core.command_handlers import register_all_commands
 
 
 async def main() -> None:
@@ -138,10 +139,7 @@ async def main() -> None:
     )
 
     # ── 3. 创建 BotEngine ──
-    router = Router(
-        command_manager=None,  # BotEngine 创建后设置
-        agent_engine=agent_engine,
-    )
+    router = Router(agent_engine=agent_engine)
 
     bot_id = config.get("bot_id", "")
     engine = BotEngine(
@@ -155,8 +153,13 @@ async def main() -> None:
         multimodal_service=multimodal_service,
     )
 
-    # 完善 Router — 注入 BotEngine 的 command_manager
-    router.command_manager = engine.command_manager
+    # 注册命令处理器（从 core/command_handlers/ 自动发现）
+    register_all_commands(
+        engine.command_manager,
+        context_manager=context_manager,
+        emoji_manager=emoji_manager,
+        agent_engine=agent_engine,
+    )
 
     # ── 4. 启动 WebSocket ──
     gateway_url = await engine.api.get_gateway_url()
