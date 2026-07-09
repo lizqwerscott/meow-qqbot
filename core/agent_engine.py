@@ -226,7 +226,6 @@ class AgentEngine:
         http_client: Optional[Any] = None,
         # EverOS 长期记忆
         everos_memory: Optional[Any] = None,
-        flush_threshold: int = 20,
         search_top_k: int = 3,
     ):
         self.ai_service = ai_service
@@ -249,9 +248,7 @@ class AgentEngine:
 
         # EverOS 长期记忆
         self.everos = everos_memory
-        self._flush_threshold = flush_threshold
         self._search_top_k = search_top_k
-        self._session_msg_count: Dict[str, int] = {}
 
         # 自动复读检测
         self._auto_replied: Dict[str, str] = {}
@@ -346,33 +343,18 @@ class AgentEngine:
             name=user_nickname,
         )
 
-        # ── 记录到 EverOS 长期记忆缓冲 ──
+        # ── 记录到 EverOS 长期记忆缓冲（per-session 队列保证顺序，不阻塞） ──
         if self.everos:
-            asyncio.create_task(
-                self.everos.add_message(
-                    session_id=chat_id,
-                    sender_id=input_message.sender_id,
-                    sender_name=user_nickname,
-                    content=content_with_context,
-                )
+            await self.everos.add_message(
+                session_id=chat_id,
+                sender_id=input_message.sender_id,
+                sender_name=user_nickname,
+                content=content_with_context,
             )
-
-            # 计数 + 条件触发 flush
-            count = self._session_msg_count.get(chat_id, 0) + 1
-            self._session_msg_count[chat_id] = count
-
-            should_flush = count >= self._flush_threshold
-            if not should_flush:
-                # 关键词匹配触发即时 flush（计数器不归零，保留计数触发机会）
-                keywords = ["我喜欢", "我讨厌", "我叫", "我是", "我的"]
-                if any(k in input_message.content for k in keywords):
-                    should_flush = True
-
-            if should_flush:
-                # 仅计数触发时归零；关键词触发不归零，双重保险
-                if count >= self._flush_threshold:
-                    self._session_msg_count[chat_id] = 0
-                asyncio.create_task(self.everos.flush(session_id=chat_id))
+            # 关键词匹配触发即时 flush
+            keywords = ["我喜欢", "我讨厌", "我叫", "我是", "我的", "记住", "我不喜欢", "我有", "别忘了"]
+            if any(k in input_message.content for k in keywords):
+                await self.everos.flush(session_id=chat_id)
 
         # ── 自动复读检测（仅文本，非表情） ──
         if not (input_message.content.startswith("[表情:") or input_message.content == "[自定义表情]"):
@@ -900,7 +882,7 @@ class AgentEngine:
             return json.dumps(
                 {"error": "记忆系统未就绪"}, ensure_ascii=False
             )
-        asyncio.create_task(self.everos.flush(session_id=chat_id))
+        await self.everos.flush(session_id=chat_id)
         return json.dumps(
             {
                 "success": True,
