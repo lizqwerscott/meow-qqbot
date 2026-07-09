@@ -14,8 +14,6 @@ class EmojiEditCommand:
         self.emoji_manager = emoji_manager
 
     async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
-        if self.emoji_manager is None:
-            return make_reply(input_message, "表情管理器未就绪。")
         parts = args.strip().split()
         if len(parts) < 2:
             return make_reply(input_message, "格式：猫猫表情编辑 <hash> 描述=xxx 标签=A、B")

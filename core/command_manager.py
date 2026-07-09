@@ -29,7 +29,10 @@ class CommandManager:
 
     def has_permission(self, command: Command, user_id: str) -> bool:
         """检查用户是否有权限执行命令"""
-        return command.has_permission(user_id, self.admin_id)
+        if command.permission == PermissionLevel.DEFAULT:
+            return True
+        if command.permission == PermissionLevel.ADMIN:
+            return user_id in self.admin_id
 
     async def process_message(self, input_message) -> list[dict]:
         """
