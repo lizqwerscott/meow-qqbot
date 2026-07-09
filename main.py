@@ -101,6 +101,7 @@ async def main() -> None:
             base_url=everos_config.get("base_url", "http://127.0.0.1:8000"),
             app_id=everos_config.get("app_id", "qq_bot"),
             project_id=everos_config.get("project_id", "production"),
+            flush_threshold=everos_config.get("flush_threshold", 20),
         )
         _log = logging.getLogger(__name__)
         _log.info(
@@ -134,7 +135,6 @@ async def main() -> None:
         emoji_manager=emoji_manager,
         http_client=http_client,
         everos_memory=everos_memory,
-        flush_threshold=everos_config.get("flush_threshold", 20),
         search_top_k=everos_config.get("search_top_k", 3),
     )
 
