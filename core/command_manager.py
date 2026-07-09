@@ -1,7 +1,6 @@
 """命令管理器模块"""
 
 import logging
-from typing import Any, Dict, List
 
 from core.commands import Command, CommandRegistry, PermissionLevel
 from core.message import InputMessage
@@ -34,7 +33,7 @@ class CommandManager:
         if command.permission == PermissionLevel.ADMIN:
             return user_id in self.admin_id
 
-    async def process_message(self, input_message) -> list[dict]:
+    async def process_message(self, input_message: InputMessage) -> list[dict]:
         """
         处理消息，查找是否有符合的命令，如果有就执行并返回消息列表
 

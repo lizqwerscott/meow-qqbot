@@ -2,7 +2,7 @@
 
 import asyncio
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from core.message import InputMessage
 
@@ -39,8 +39,6 @@ class Command:
         if asyncio.iscoroutine(result):
             result = await result
         return result
-
-
 
 
 class CommandRegistry:

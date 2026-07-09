@@ -46,6 +46,10 @@ class Router:
             reply_callback: 发送回复的回调 (chat_id, content, message_id, is_group) -> None
             get_user_nickname: 获取用户昵称的回调 (user_id) -> str
         """
+        if self.command_manager is None:
+            _log.error("command_manager 未初始化，无法处理命令")
+            return
+
         # ── 1. 命令检测 ──
         command_messages = await self.command_manager.process_message(input_message)
         if command_messages:
