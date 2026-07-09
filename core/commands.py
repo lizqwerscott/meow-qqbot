@@ -1,5 +1,6 @@
 """命令系统模块"""
 
+import asyncio
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
@@ -30,11 +31,14 @@ class Command:
         self.permission = permission
         self.description = description
 
-    def execute(
+    async def execute(
         self, input_message: InputMessage, args: str
     ) -> List[Dict[str, Any]]:
-        """执行命令"""
-        return self.handler(input_message, args)
+        """执行命令（支持 async handler）"""
+        result = self.handler(input_message, args)
+        if asyncio.iscoroutine(result):
+            result = await result
+        return result
 
     def has_permission(self, user_id: str, admin_ids: list[str]) -> bool:
         """检查用户是否有权限执行此命令"""
