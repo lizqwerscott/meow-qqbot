@@ -586,6 +586,14 @@ class AgentEngine:
         time_info = now.strftime(f"%Y-%m-%d %H:%M:%S ({weekday_names[now.weekday()]})")
         messages[0]["content"] += f"\n\n当前时间: {time_info}"
 
+        # ── 自动记忆注入：透明地将当前用户的相关记忆注入到上下文 ──
+        await self._auto_inject_memory_context(
+            messages=messages,
+            chat_id=chat_id,
+            sender_id=input_message.sender_id,
+            input_message=input_message,
+        )
+
         # 打印请求消息（调试）
         _log.info(
             f"请求 AI messages:\n{json.dumps(messages, ensure_ascii=False, indent=2)}"
@@ -605,6 +613,69 @@ class AgentEngine:
         )
 
         _log.info(f"消息处理完成: {input_message.id}")
+
+    # ── 自动记忆注入 ──
+
+    async def _auto_inject_memory_context(
+        self,
+        messages: list,
+        chat_id: str,
+        sender_id: str,
+        input_message: InputMessage,
+    ) -> None:
+        """自动检索当前用户的记忆，注入到 system prompt 作为背景知识。
+
+        对 AI 和用户完全透明，只为 AI 提供上下文感知能力。
+        如果检索结果为空或系统异常，跳过注入，不影响主流程。
+        """
+        if not self.everos:
+            return
+
+        query = input_message.content.strip()
+        if not query:
+            return
+
+        try:
+            result = await self.everos.search(
+                user_id=sender_id,
+                query=query,
+                top_k=5,
+                include_profile=True,
+            )
+
+            episodes = result.get("episodes", [])
+            profiles = result.get("profiles", [])
+
+            if not episodes and not profiles:
+                return
+
+            # 格式化记忆上下文
+            parts = ["\n\n--- 相关记忆 ---"]
+
+            if profiles:
+                for p in profiles[:3]:
+                    pd = p.get("profile_data", {})
+                    if isinstance(pd, dict):
+                        for k, v in pd.items():
+                            parts.append(f"- [{k}]: {v}")
+
+            if episodes:
+                for e in episodes[:5]:
+                    summary = e.get("summary", "") or e.get("episode", "")
+                    if summary:
+                        parts.append(f"- {summary[:300]}")
+
+            parts.append("--- 相关记忆结束 ---")
+
+            memory_text = "\n".join(parts)
+            messages[0]["content"] += memory_text
+
+            _log.info(
+                f"自动记忆注入: chat={chat_id[:16]}.. sender={sender_id[:16]}.. "
+                f"注入{len(episodes)}条经历, {len(profiles)}条画像"
+            )
+        except Exception as e:
+            _log.warning(f"自动记忆注入失败: {e!r}")
 
     # ════════════════════════════════════════════════════════════
     # 工具调用
