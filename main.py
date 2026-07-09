@@ -133,7 +133,6 @@ async def main() -> None:
         admin_id=admin_ids,
         openai_config=openai_config,
         emoji_manager=emoji_manager,
-        http_client=http_client,
         everos_memory=everos_memory,
         search_top_k=everos_config.get("search_top_k", 3),
     )

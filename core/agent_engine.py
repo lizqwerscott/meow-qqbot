@@ -100,7 +100,6 @@ class AgentEngine:
         admin_id: List[str],
         openai_config: dict,
         emoji_manager: Optional[EmojiManager] = None,
-        http_client: Optional[Any] = None,
         everos_memory: Optional[Any] = None,
         search_top_k: int = 3,
     ):
@@ -111,7 +110,6 @@ class AgentEngine:
         self._admin_id = admin_id
         self._openai_config = openai_config
 
-        self.http_client = http_client
         self.emoji_manager = emoji_manager
         self.media_uploader = None
         self.multimodal_service = None
