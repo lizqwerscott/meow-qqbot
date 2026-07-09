@@ -14,6 +14,7 @@ from core.ai_service import AIService
 from core.context_manager import ChatContextManager
 from core.emoji import EmojiManager
 from core.message import InputMessage
+from core.nickname_manager import NicknameManager
 from core.template_manager import TemplateManager
 from core.tools import ToolExecutor, ToolContext
 from core.tools.definitions import (
@@ -99,6 +100,7 @@ class AgentEngine:
         bot_id: str,
         admin_id: List[str],
         openai_config: dict,
+        nickname_manager: Optional[NicknameManager] = None,
         emoji_manager: Optional[EmojiManager] = None,
         everos_memory: Optional[Any] = None,
         search_top_k: int = 3,
@@ -110,13 +112,11 @@ class AgentEngine:
         self._admin_id = admin_id
         self._openai_config = openai_config
 
+        self._nm = nickname_manager
         self.emoji_manager = emoji_manager
         self.media_uploader = None
         self.multimodal_service = None
         self._api_client = None
-
-        self.nicknames: Dict[str, str] = {}
-        self.auto_nicknames: Dict[str, str] = {}
 
         self.everos = everos_memory
         self._search_top_k = search_top_k
@@ -125,6 +125,7 @@ class AgentEngine:
             emoji_manager=emoji_manager,
             everos=everos_memory,
             bot_id=bot_id,
+            nickname_manager=nickname_manager,
         )
 
         self._auto_replied: Dict[str, str] = {}
@@ -156,10 +157,9 @@ class AgentEngine:
     def set_emoji_manager(self, emoji_manager: EmojiManager):
         self.emoji_manager = emoji_manager
 
-    def set_nicknames(self, nicknames: Dict[str, str], auto_nicknames: Dict[str, str]):
-        self.nicknames = nicknames
-        self.auto_nicknames = auto_nicknames
-        self.tool_executor.update_nicknames(nicknames, auto_nicknames)
+    def set_nickname_manager(self, nm: NicknameManager):
+        self._nm = nm
+        self.tool_executor.set_nickname_manager(nm)
 
     # ── 消息分发 ──
 
@@ -315,11 +315,11 @@ class AgentEngine:
         ]
 
         has_emojis = self.emoji_manager is not None and self.emoji_manager.count_emojis() > 0
-        if is_group:
+        if is_group and self._nm:
             has_users = any(
-                k != self._bot_id for k in self.nicknames
+                k != self._bot_id for k in self._nm.nicknames
             ) or any(
-                k != self._bot_id for k in self.auto_nicknames
+                k != self._bot_id for k in self._nm.auto_nicknames
             )
         else:
             has_users = False
@@ -564,10 +564,9 @@ class AgentEngine:
     # ── 辅助：用户目录文本（仅供 prompt 拼接）──
 
     def _get_user_catalog_text(self, max_users: int = 30) -> str:
-        merged = dict(self.nicknames)
-        for uid, name in self.auto_nicknames.items():
-            if uid not in merged:
-                merged[uid] = name
+        if not self._nm:
+            return ""
+        merged = self._nm.all_merged()
 
         if not merged:
             return ""

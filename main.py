@@ -12,6 +12,7 @@ from core.client import BotEngine
 from core.context_manager import ChatContextManager
 from core.emoji import EmojiManager
 from core.multimodal_service import MultimodalService
+from core.nickname_manager import NicknameManager
 from core.router import Router
 from core.template_manager import TemplateManager
 from core.everos_memory import EverOSMemory
@@ -125,14 +126,20 @@ async def main() -> None:
                 " — 记忆功能将降级运行"
             )
 
+    bot_id = config.get("bot_id", "")
+
+    # ── NicknameManager（统一昵称管理，全局单例） ──
+    nickname_manager = NicknameManager(bot_id=bot_id)
+
     # ── 2. 创建 AgentEngine（全局单例） ──
     agent_engine = AgentEngine(
         ai_service=ai_service,
         template_manager=template_manager,
         context_manager=context_manager,
-        bot_id=config["bot_id"],
+        bot_id=bot_id,
         admin_id=admin_ids,
         openai_config=openai_config,
+        nickname_manager=nickname_manager,
         emoji_manager=emoji_manager,
         everos_memory=everos_memory,
         search_top_k=everos_config.get("search_top_k", 3),
@@ -141,7 +148,6 @@ async def main() -> None:
     # ── 3. 创建 BotEngine ──
     router = Router(agent_engine=agent_engine)
 
-    bot_id = config.get("bot_id", "")
     engine = BotEngine(
         app_id=config["appid"],
         client_secret=config["secret"],
@@ -149,6 +155,7 @@ async def main() -> None:
         agent_engine=agent_engine,
         router=router,
         admin_id=admin_ids,
+        nickname_manager=nickname_manager,
         emoji_manager=emoji_manager,
         multimodal_service=multimodal_service,
     )

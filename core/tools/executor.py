@@ -13,6 +13,8 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
 from qqbot_agent_sdk.dto import MediaInfo, MessageToCreate, QQMessageType
 
+from core.nickname_manager import NicknameManager
+
 _log = logging.getLogger(__name__)
 
 
@@ -50,7 +52,7 @@ class ToolExecutor:
     """工具执行器。
 
     聚合所有工具的执行方法，通过构造函数接收所需的外部依赖。
-    nicknames / auto_nicknames 是可变 dict 引用，与 AgentEngine 共享。
+    昵称数据通过 NicknameManager 实例统一访问，与 AgentEngine 共享同一实例。
 
     所有 handler 统一签名 ``(args: dict, ctx: ToolContext) -> ToolResult``。
     同步或异步由注册时的 ``is_async`` 标记决定。
@@ -63,16 +65,14 @@ class ToolExecutor:
         media_uploader=None,
         api_client=None,
         everos=None,
-        nicknames: Optional[Dict[str, str]] = None,
-        auto_nicknames: Optional[Dict[str, str]] = None,
+        nickname_manager: Optional[NicknameManager] = None,
         bot_id: str = "",
     ):
         self._emoji_manager = emoji_manager
         self._media_uploader = media_uploader
         self._api_client = api_client
         self._everos = everos
-        self._nicknames = nicknames or {}
-        self._auto_nicknames = auto_nicknames or {}
+        self._nm = nickname_manager
         self._bot_id = bot_id
 
         self._registry: Dict[str, tuple[Callable, bool]] = {}
@@ -99,9 +99,8 @@ class ToolExecutor:
     def set_api_client(self, client):
         self._api_client = client
 
-    def update_nicknames(self, nicknames, auto_nicknames):
-        self._nicknames = nicknames
-        self._auto_nicknames = auto_nicknames
+    def set_nickname_manager(self, nm: NicknameManager):
+        self._nm = nm
 
     # ── 统一入口 ──
 
@@ -274,7 +273,10 @@ class ToolExecutor:
         results = []
         seen = set()
 
-        for source_dict, source_name in [(self._nicknames, "手动"), (self._auto_nicknames, "自动")]:
+        for source_dict, source_name in (
+            [(self._nm.nicknames, "手动"), (self._nm.auto_nicknames, "自动")]
+            if self._nm else []
+        ):
             for uid, nickname in source_dict.items():
                 if uid in seen:
                     continue
@@ -314,10 +316,11 @@ class ToolExecutor:
                 return ToolResult(content=json.dumps(
                     {"error": "私聊中无法搜索其他人"}, ensure_ascii=False
                 ))
-            merged = dict(self._nicknames)
-            for uid, name in self._auto_nicknames.items():
-                if uid not in merged:
-                    merged[uid] = name
+            if not self._nm:
+                return ToolResult(content=json.dumps(
+                    {"error": "昵称管理器未就绪"}, ensure_ascii=False
+                ))
+            merged = self._nm.all_merged()
 
             matched_id = None
             for uid, nickname in merged.items():
@@ -492,27 +495,26 @@ class ToolExecutor:
     def _resolve_person(
         self, raw: str, ctx: ToolContext
     ) -> Tuple[Optional[str], str]:
-        """解析人名字符串 → (user_id, display_name)。"""
         raw_lower = raw.strip().lower()
         if not raw_lower:
             return None, ""
 
-        sender_nick = self._nicknames.get(ctx.sender_id) or self._auto_nicknames.get(ctx.sender_id, "")
+        if not self._nm:
+            return None, ""
+
+        sender_nick = self._nm.get(ctx.sender_id)
 
         if raw_lower in ("我", "自己", "myself"):
-            return ctx.sender_id, sender_nick or "当前用户"
+            return ctx.sender_id, sender_nick if sender_nick != ctx.sender_id else "当前用户"
         if sender_nick and raw_lower == sender_nick.lower():
             return ctx.sender_id, sender_nick
         if raw_lower == ctx.sender_id.lower():
-            return ctx.sender_id, sender_nick or "当前用户"
+            return ctx.sender_id, sender_nick if sender_nick != ctx.sender_id else "当前用户"
 
         if not ctx.is_group:
             return None, ""
 
-        merged = dict(self._nicknames)
-        for uid, name in self._auto_nicknames.items():
-            if uid not in merged:
-                merged[uid] = name
+        merged = self._nm.all_merged()
 
         for uid, nickname in merged.items():
             if raw_lower in nickname.lower() or raw_lower in uid.lower():
