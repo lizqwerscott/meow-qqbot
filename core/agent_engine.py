@@ -72,7 +72,7 @@ SEARCH_USER_TOOL = [
         "type": "function",
         "function": {
             "name": "search_user",
-            "description": "根据昵称或名字搜索群里的用户。返回用户的ID和昵称，获取到用户ID后你可以在回复中使用 <qqbot-at-user id=\"xxx\" /> 来@该用户。",
+            "description": "根据昵称或昵称的一部分模糊搜索群里的用户。输入昵称的一部分（如'小'）即可找到所有匹配的人。返回用户的ID和昵称，获取到用户ID后你可以在回复中使用 <qqbot-at-user id=\"xxx\" /> 来@该用户。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -101,6 +101,7 @@ SEARCH_MEMORY_TOOL = [
                 "搜索记忆系统，可查询人物画像、过往经历、具体事实、"
                 "用户偏好等任何信息。如果不指定 person_name，则搜索"
                 "当前对话用户的记忆；如果指定 person_name，则搜索对应群友的记忆。"
+                "person_name 支持模糊搜索，输入昵称的一部分也能匹配到。"
                 "当需要了解某人的背景、确认某件事、查找说过的话时使用。"
             ),
             "parameters": {
@@ -112,7 +113,7 @@ SEARCH_MEMORY_TOOL = [
                     },
                     "person_name": {
                         "type": "string",
-                        "description": "要搜索的人名或昵称（可选）。不填则搜索当前对话用户。私聊中不可用。",
+                        "description": "要搜索的人名或昵称（可选）。支持模糊搜索，输入昵称的一部分（如'小'）也能匹配。不填则搜索当前对话用户。私聊中不可用。",
                     },
                     "method": {
                         "type": "string",
@@ -121,6 +122,48 @@ SEARCH_MEMORY_TOOL = [
                     },
                 },
                 "required": ["query"],
+            },
+        },
+    },
+]
+
+# ════════════════════════════════════════════════════════════
+# 关系搜索工具
+# ════════════════════════════════════════════════════════════
+
+SEARCH_RELATION_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_relation",
+            "description": (
+                "搜索两个人之间的关系记忆。当你需要了解两个用户之间的关联、"
+                "共同经历、相互评价、关系背景时使用。"
+                "系统会同时搜索两个人的相关记忆以及当前用户的记载。"
+                "人名支持模糊搜索，输入昵称的一部分即可匹配。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "person_a": {
+                        "type": "string",
+                        "description": "第一个人的人名或昵称，支持模糊搜索（部分匹配即可）。如果搜'我'或'自己'则代表当前说话者。",
+                    },
+                    "person_b": {
+                        "type": "string",
+                        "description": "第二个人的人名或昵称，支持模糊搜索（部分匹配即可）。如果搜'我'或'自己'则代表当前说话者。",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词或问题（可选）。例如'他们什么关系'、'一起做过什么'",
+                    },
+                    "method": {
+                        "type": "string",
+                        "enum": ["hybrid", "agentic"],
+                        "description": "检索方法。hybrid（默认）适合大多数情况；agentic 适合需要深度挖掘的复杂查询。",
+                    },
+                },
+                "required": ["person_a", "person_b"],
             },
         },
     },
@@ -496,6 +539,7 @@ class AgentEngine:
         # ── 如有 EverOS，注入记忆工具 ──
         if self.everos:
             tools_to_use.extend(SEARCH_MEMORY_TOOL)
+            tools_to_use.extend(SEARCH_RELATION_TOOL)
             tools_to_use.extend(MARK_IMPORTANT_TOOL)
         tools_to_use = tools_to_use or None
 
@@ -531,6 +575,7 @@ class AgentEngine:
                 "\n"
                 "可用工具：\n"
                 "- search_memory：搜索记忆（指定 person_name 可查群友，不指定则查当前用户），可查画像、经历、事实等\n"
+                "- search_relation：搜索两个人之间的关系记忆，系统会同时搜索双方记忆和当前用户的记载\n"
                 "- mark_important：将当前对话内容标记为重要，立即存入长期记忆\n"
             )
             messages[0]["content"] += desc
@@ -726,6 +771,26 @@ class AgentEngine:
                         "content": result,
                     })
 
+                elif tc.function.name == "search_relation":
+                    _log.info(
+                        f"[工具调用] search_relation 输入: "
+                        f"person_a={args.get('person_a', '')!r} "
+                        f"person_b={args.get('person_b', '')!r} "
+                        f"query={args.get('query', '')!r} "
+                        f"method={args.get('method', 'hybrid')!r}"
+                    )
+                    result = await self._execute_search_relation(
+                        args, chat_id, is_group, sender_id
+                    )
+                    _log.info(
+                        f"[工具调用] search_relation 输出: {result[:200]}"
+                    )
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    })
+
                 else:
                     _log.warning(f"未知工具调用: {tc.function.name}")
                     messages.append({
@@ -874,6 +939,198 @@ class AgentEngine:
                 mem_type = e.get("memory_type", "episode")
                 if content:
                     lines.append(f"- [{mem_type}] {content[:200]}")
+        return "\n".join(lines)
+
+    # ── 辅助：将人名解析为 user_id ──
+
+    def _resolve_person(
+        self, raw: str, sender_id: str, is_group: bool
+    ) -> tuple[Optional[str], str]:
+        """解析人名字符串 → (user_id, display_name)。
+
+        - "我" / "自己" / 说话者自己的昵称 → 返回 sender_id
+        - 群聊中模糊匹配昵称 → 返回匹配到的 user_id
+        - 私聊中非"我" → 返回 None
+        - 找不到 → 返回 None
+        """
+        raw_lower = raw.strip().lower()
+        if not raw_lower:
+            return None, ""
+
+        # 说话者自己的昵称
+        sender_nick = self.nicknames.get(sender_id) or self.auto_nicknames.get(sender_id, "")
+
+        # 判断是否指代自己
+        if raw_lower in ("我", "自己", "myself"):
+            return sender_id, sender_nick or "当前用户"
+        if sender_nick and raw_lower == sender_nick.lower():
+            return sender_id, sender_nick
+        if raw_lower == sender_id.lower():
+            return sender_id, sender_nick or "当前用户"
+
+        if not is_group:
+            return None, ""
+
+        # 昵称模糊匹配
+        merged = dict(self.nicknames)
+        for uid, name in self.auto_nicknames.items():
+            if uid not in merged:
+                merged[uid] = name
+
+        for uid, nickname in merged.items():
+            if raw_lower in nickname.lower() or raw_lower in uid.lower():
+                return uid, nickname
+
+        return None, ""
+
+    # ── 关系搜索工具执行器 ──
+
+    async def _execute_search_relation(
+        self, args: dict, chat_id: str, is_group: bool, sender_id: str
+    ) -> str:
+        """执行 search_relation 工具 — 多维关系搜索。
+
+        搜索维度（自动去重）:
+        1. person_a 的记忆中关于 person_b 的内容
+        2. person_b 的记忆中关于 person_a 的内容（若与 person_a 不同）
+        3. 当前说话者的记忆中关于两人的内容（若说话者不是 a 也不是 b）
+
+        结果会清晰标注来源。
+        """
+        person_a_raw = (args.get("person_a") or "").strip()
+        person_b_raw = (args.get("person_b") or "").strip()
+        query = (args.get("query") or "").strip()
+        method = args.get("method", "hybrid")
+
+        if not person_a_raw or not person_b_raw:
+            return json.dumps(
+                {"error": "请指定两个人名或昵称"}, ensure_ascii=False
+            )
+
+        if not self.everos:
+            return json.dumps(
+                {"error": "记忆系统未就绪"}, ensure_ascii=False
+            )
+
+        # ── 解析两个人 ──
+        a_id, a_name = self._resolve_person(person_a_raw, sender_id, is_group)
+        b_id, b_name = self._resolve_person(person_b_raw, sender_id, is_group)
+
+        if a_id is None:
+            return json.dumps(
+                {"error": f"找不到「{person_a_raw}」对应的用户"}, ensure_ascii=False
+            )
+        if b_id is None:
+            return json.dumps(
+                {"error": f"找不到「{person_b_raw}」对应的用户"}, ensure_ascii=False
+            )
+
+        # ── 构造各维度搜索 query ──
+        def make_query(base: str, target_name: str) -> str:
+            return f"{base} {target_name}" if base else target_name
+
+        query_a = make_query(query, b_name)
+        query_b = make_query(query, a_name)
+        query_speaker = make_query(query, f"{a_name} {b_name}")
+
+        # ── 确定搜索维度（自动去重） ──
+        tasks = []
+        task_labels = {}  # 用 id 标记每个任务的角色
+
+        # 维度 1: person_a 的记忆
+        tasks.append(self.everos.search(
+            user_id=a_id, query=query_a, top_k=5, include_profile=True, method=method
+        ))
+        task_labels[len(tasks) - 1] = ("a", a_id, a_name)
+
+        # 维度 2: person_b 的记忆（如果和 person_a 不同）
+        if b_id != a_id:
+            tasks.append(self.everos.search(
+                user_id=b_id, query=query_b, top_k=5, include_profile=True, method=method
+            ))
+            task_labels[len(tasks) - 1] = ("b", b_id, b_name)
+
+        # 维度 3: 当前说话者的记忆（如果说话者不是 a 也不是 b）
+        if sender_id not in (a_id, b_id):
+            tasks.append(self.everos.search(
+                user_id=sender_id, query=query_speaker, top_k=5, include_profile=False, method=method
+            ))
+            task_labels[len(tasks) - 1] = ("speaker", sender_id, "当前用户")
+
+        # ── 并行执行 ──
+        raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # ── 组装结果 ──
+        lines = [f"关于「{a_name}」和「{b_name}」的关系检索结果："]
+
+        seen_episodes: Set[str] = set()  # 去重
+
+        for idx, r in enumerate(raw_results):
+            role, uid, label = task_labels[idx]
+
+            if isinstance(r, Exception):
+                _log.warning(f"search_relation {role}({uid}) 失败: {r}")
+                continue
+
+            profiles = r.get("profiles", [])
+            episodes = r.get("episodes", [])
+
+            if role == "a":
+                # person_a 的画像
+                if profiles:
+                    lines.append(f"【{label} 的人物画像】")
+                    for p in profiles[:3]:
+                        pd = p.get("profile_data", {})
+                        if isinstance(pd, dict):
+                            for k, v in pd.items():
+                                lines.append(f"- {k}: {v}")
+                # person_a 记忆中关于 person_b 的内容
+                if episodes:
+                    lines.append(f"【{label} 记忆中关于 {b_name} 的内容】")
+                    for e in episodes[:5]:
+                        content = e.get("summary", "") or e.get("subject", "") or e.get("episode", "")
+                        if content:
+                            dedup_key = content[:100]
+                            if dedup_key not in seen_episodes:
+                                seen_episodes.add(dedup_key)
+                                lines.append(f"- {content[:200]}")
+
+            elif role == "b":
+                # person_b 的画像
+                if profiles:
+                    lines.append(f"【{label} 的人物画像】")
+                    for p in profiles[:3]:
+                        pd = p.get("profile_data", {})
+                        if isinstance(pd, dict):
+                            for k, v in pd.items():
+                                lines.append(f"- {k}: {v}")
+                # person_b 记忆中关于 person_a 的内容
+                if episodes:
+                    lines.append(f"【{label} 记忆中关于 {a_name} 的内容】")
+                    for e in episodes[:5]:
+                        content = e.get("summary", "") or e.get("subject", "") or e.get("episode", "")
+                        if content:
+                            dedup_key = content[:100]
+                            if dedup_key not in seen_episodes:
+                                seen_episodes.add(dedup_key)
+                                lines.append(f"- {content[:200]}")
+
+            elif role == "speaker":
+                # 当前说话者记忆中关于两人的内容
+                if episodes:
+                    lines.append(f"【你对两人的相关记载】")
+                    for e in episodes[:5]:
+                        content = e.get("summary", "") or e.get("subject", "") or e.get("episode", "")
+                        if content:
+                            dedup_key = content[:100]
+                            if dedup_key not in seen_episodes:
+                                seen_episodes.add(dedup_key)
+                                lines.append(f"- {content[:200]}")
+
+        # ── 全空时的兜底 ──
+        if len(lines) == 1:
+            lines.append("（未找到两人相关的记忆记录）")
+
         return "\n".join(lines)
 
     async def _execute_mark_important(self, chat_id: str) -> str:
