@@ -14,8 +14,6 @@ class EmojiInfoCommand:
         self.emoji_manager = emoji_manager
 
     async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
-        if self.emoji_manager is None:
-            return make_reply(input_message, "表情管理器未就绪。")
         emoji_hash = args.strip()
         if not emoji_hash:
             return make_reply(input_message, "请提供表情 hash。用法：猫猫表情查看 <hash>")

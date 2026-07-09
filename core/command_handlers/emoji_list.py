@@ -14,8 +14,6 @@ class EmojiListCommand:
         self.emoji_manager = emoji_manager
 
     async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
-        if self.emoji_manager is None:
-            return make_reply(input_message, "表情管理器未就绪。")
         try:
             page = 1
             if args.strip():

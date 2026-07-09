@@ -40,13 +40,7 @@ class Command:
             result = await result
         return result
 
-    def has_permission(self, user_id: str, admin_ids: list[str]) -> bool:
-        """检查用户是否有权限执行此命令"""
-        if self.permission == PermissionLevel.DEFAULT:
-            return True
-        elif self.permission == PermissionLevel.ADMIN:
-            return user_id in admin_ids
-        return False
+
 
 
 class CommandRegistry:
