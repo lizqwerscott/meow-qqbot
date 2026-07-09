@@ -1,7 +1,5 @@
 import asyncio
-import json
 import logging
-import os
 import re
 from typing import Any, Dict, List, Optional
 
@@ -23,6 +21,7 @@ from core.command_manager import CommandManager
 from core.emoji import EmojiManager, is_custom_emoji
 from core.message import InputMessage
 from core.multimodal_service import MultimodalService
+from core.nickname_manager import NicknameManager
 from core.router import Router
 
 _log = logging.getLogger(__name__)
@@ -36,10 +35,10 @@ class BotEngine:
     - WebSocket 连接管理
     - 消息接收与解析（→ InputMessage）
     - 发送回复（API 调用）
-    - 昵称管理
 
     AI 编排、会话管理、工具执行由 AgentEngine 负责。
     消息路由/命令分发由 Router 负责。
+    昵称管理由 NicknameManager 负责。
     命令处理器在 core/command_handlers/ 中各独立文件实现。
     """
 
@@ -51,6 +50,7 @@ class BotEngine:
         agent_engine: AgentEngine,
         router: Router,
         admin_id: List[str],
+        nickname_manager: NicknameManager,
         emoji_manager: Optional[EmojiManager] = None,
         multimodal_service: Optional[MultimodalService] = None,
     ):
@@ -69,6 +69,7 @@ class BotEngine:
         self.admin_id: List[str] = admin_id
 
         # BotEngine 自有组件
+        self.nickname_manager = nickname_manager
         self.emoji_manager = emoji_manager
         self.multimodal_service = multimodal_service
         self.command_manager: CommandManager = CommandManager(admin_id=admin_id)
@@ -76,11 +77,6 @@ class BotEngine:
         self.media_uploader = None
         self._bot_name: str = "机器人"
         self._deps_injected = False
-
-        # 昵称
-        self.nicknames: Dict[str, str] = {}
-        self.auto_nicknames: Dict[str, str] = {}
-        self._nickname_save_task: Optional[asyncio.Task] = None
 
         _log.info("BotEngine 已初始化")
 
@@ -111,10 +107,7 @@ class BotEngine:
             self._bot_name = ready.user.username or "机器人"
         _log.info(f"机器人「{self._bot_name}」on_ready!")
 
-        # 加载昵称
-        self.nicknames = self._load_nicknames()
-        self.auto_nicknames = self._load_auto_nicknames()
-        _log.info(f"已加载 {len(self.nicknames)} 个手动昵称 + {len(self.auto_nicknames)} 个自动昵称")
+        self.nickname_manager.load_all()
 
         # 初始化多模态（如尚未由外部注入）
         if self.multimodal_service is None:
@@ -155,19 +148,15 @@ class BotEngine:
                 )
 
     async def _inject_agent_engine_deps(self):
-        """将 BotEngine 拥有的依赖注入到 AgentEngine。"""
         self.agent_engine.set_media_uploader(self.media_uploader)
         self.agent_engine.set_api_client(self.api)
         if self.multimodal_service:
             self.agent_engine.set_multimodal_service(self.multimodal_service)
         if self.emoji_manager:
             self.agent_engine.set_emoji_manager(self.emoji_manager)
-        self.agent_engine.set_nicknames(self.nicknames, self.auto_nicknames)
 
     async def _reconnect_update_agent_engine(self):
-        """WS 重连时仅更新可能变化的组件。"""
         self.agent_engine.set_media_uploader(self.media_uploader)
-        self.agent_engine.set_nicknames(self.nicknames, self.auto_nicknames)
 
     def start(self, gateway_url: str, main_loop: asyncio.AbstractEventLoop) -> None:
         """启动 WebSocket 连接。"""
@@ -176,14 +165,8 @@ class BotEngine:
         self.ws.start(gateway_url, main_loop)
 
     async def stop(self) -> None:
-        """安全关闭。"""
-        # 等待防抖持久化完成，然后兜底写入一次
-        if self._nickname_save_task and not self._nickname_save_task.done():
-            try:
-                await asyncio.wait_for(self._nickname_save_task, timeout=3.0)
-            except asyncio.TimeoutError:
-                pass
-        self._save_auto_nicknames()
+        await self.nickname_manager.flush_save()
+        self.nickname_manager.save_auto()
         await self.agent_engine.stop()
         if self.ws:
             await self.ws.async_stop()
@@ -276,15 +259,15 @@ class BotEngine:
                 replied_content = elem.content or ""
 
         # 采集昵称
-        self._collect_nickname(
+        self.nickname_manager.collect(
             raw.get("author", {}).get("id", ""),
             raw.get("author", {}).get("username", ""),
         )
         for m in mentions_data:
-            self._collect_nickname(m.get("id", ""), m.get("username", ""))
+            self.nickname_manager.collect(m.get("id", ""), m.get("username", ""))
         for raw_elem in raw.get("msg_elements", []):
             elem_author = raw_elem.get("author", {})
-            self._collect_nickname(elem_author.get("id", ""), elem_author.get("username", ""))
+            self.nickname_manager.collect(elem_author.get("id", ""), elem_author.get("username", ""))
 
         # 构造 InputMessage 并交给 Router
         input_message = InputMessage(
@@ -302,7 +285,7 @@ class BotEngine:
         await self.router.route(
             input_message=input_message,
             reply_callback=self._send_reply,
-            get_user_nickname=self._get_user_nickname,
+            get_user_nickname=self.nickname_manager.get,
         )
 
     # ── 发送回复 ──
@@ -313,72 +296,4 @@ class BotEngine:
         """发送回复——使用 SDK send_text 自动路由 + 重试。"""
         chat_type = "group" if is_group else "c2c"
         await self.api.send_text(chat_type, chat_id, content, reply_to=message_id)
-    # ════════════════════════════════════════════════════════════
-    # 昵称管理
-    # ════════════════════════════════════════════════════════════
 
-    def _load_nicknames(self) -> Dict[str, str]:
-        """加载昵称映射文件（nicknames.json）"""
-        nicknames_file = "nicknames.json"
-        if os.path.exists(nicknames_file):
-            try:
-                with open(nicknames_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception as e:
-                _log.error(f"加载昵称文件失败: {e}")
-                return {}
-        else:
-            _log.warning(f"昵称文件 {nicknames_file} 不存在")
-            return {}
-
-    def _get_user_nickname(self, user_id: str) -> str:
-        """获取用户昵称，手动优先，自动兜底。"""
-        if user_id in self.nicknames:
-            return self.nicknames[user_id]
-        if user_id in self.auto_nicknames:
-            return self.auto_nicknames[user_id]
-        return user_id
-
-    def _load_auto_nicknames(self) -> Dict[str, str]:
-        """加载自动采集的昵称文件（data/nicknames.json）"""
-        path = "data/nicknames.json"
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception as e:
-                _log.error(f"加载自动昵称文件失败: {e}")
-        return {}
-
-    def _save_auto_nicknames(self) -> None:
-        """将自动采集的昵称持久化到 data/nicknames.json"""
-        path = "data/nicknames.json"
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(self.auto_nicknames, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            _log.error(f"保存自动昵称失败: {e}")
-
-    def _collect_nickname(self, user_id: str, username: str) -> None:
-        """采集一个用户昵称（防抖持久化，10 秒内多次写入合并为一次）。"""
-        if not user_id or not username:
-            return
-        if user_id == self._bot_id:
-            return
-        if user_id in self.nicknames:
-            return
-        if self.auto_nicknames.get(user_id) == username:
-            return
-        self.auto_nicknames[user_id] = username
-        _log.debug(f"已采集昵称: {username} ({user_id[:12]}..)")
-        # 防抖持久化
-        if self._nickname_save_task is None or self._nickname_save_task.done():
-            self._nickname_save_task = asyncio.create_task(
-                self._debounced_save_nicknames()
-            )
-
-    async def _debounced_save_nicknames(self):
-        """10 秒防抖后批量持久化昵称。"""
-        await asyncio.sleep(10)
-        self._save_auto_nicknames()
