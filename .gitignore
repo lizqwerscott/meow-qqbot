@@ -16,3 +16,7 @@ data/emojis/*
 !data/attachments/.gitkeep
 !data/emojis/.gitkeep
 
+# 插件（独立 git 仓库，不作为项目一部分）
+plugins/*
+!plugins/__init__.py
+
