@@ -46,6 +46,9 @@ class StatusCommand:
             active_chats = stats.get("active_chats", 0)
             everos_health = stats.get("everos_health", {})
 
+            sm = self.agent_engine._skill_managers
+            skill_count = len(sm.list_skill_names()) if sm and sm.has_skills else 0
+
             status_text = [
                 "=== 系统状态 ===",
                 f"系统时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
@@ -62,6 +65,7 @@ class StatusCommand:
                 "=== 机器人状态 ===",
                 f"消息队列: {total_queue} 条（{len(queue_sizes)} 个活跃会话）",
                 f"活跃聊天: {active_chats} 个",
+                f"已加载技能: {skill_count} 个",
                 "",
                 "=== 记忆系统 ===",
                 f"EverOS: {_everos_status_line(everos_health)}",
