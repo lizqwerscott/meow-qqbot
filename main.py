@@ -18,6 +18,7 @@ from core.template_manager import TemplateManager
 from core.everos_memory import EverOSMemory
 from core.command_handlers import register_all_commands
 from core.skill_managers import SkillManagers
+from core.plugin_manager import PluginManager
 
 
 async def main() -> None:
@@ -178,7 +179,19 @@ async def main() -> None:
         bot_engine=engine,
     )
 
-    # ── 4. 启动 WebSocket ──
+    # ── 4. 加载插件 ──
+    plugin_manager = PluginManager(plugin_dir="plugins")
+    plugin_manager.load_all(
+        command_manager=engine.command_manager,
+        context_manager=context_manager,
+        emoji_manager=emoji_manager,
+        agent_engine=agent_engine,
+        skill_managers=skill_managers,
+        api_client=engine.api,
+        bot_engine=engine,
+    )
+
+    # ── 5. 启动 WebSocket ──
     gateway_url = await engine.api.get_gateway_url()
     loop = asyncio.get_running_loop()
 

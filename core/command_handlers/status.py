@@ -1,12 +1,15 @@
 import logging
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import psutil
 
 from core.agent_engine import AgentEngine
 from core.command_handlers.base import command, make_reply
 from core.message import InputMessage
+
+if TYPE_CHECKING:
+    from core.plugin_manager import PluginManager
 
 _log = logging.getLogger(__name__)
 
@@ -28,8 +31,9 @@ def _everos_status_line(health: dict) -> str:
 
 @command(name="状态", aliases=["status"], permission="admin", description="查看系统状态（管理员专用）")
 class StatusCommand:
-    def __init__(self, agent_engine: AgentEngine):
+    def __init__(self, agent_engine: AgentEngine, plugin_manager: Optional["PluginManager"] = None):
         self.agent_engine = agent_engine
+        self.plugin_manager = plugin_manager
 
     async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
         try:
@@ -66,6 +70,7 @@ class StatusCommand:
                 f"消息队列: {total_queue} 条（{len(queue_sizes)} 个活跃会话）",
                 f"活跃聊天: {active_chats} 个",
                 f"已加载技能: {skill_count} 个",
+                f"已加载插件: {self.plugin_manager.count if self.plugin_manager else 0} 个",
                 "",
                 "=== 记忆系统 ===",
                 f"EverOS: {_everos_status_line(everos_health)}",
