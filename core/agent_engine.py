@@ -386,6 +386,17 @@ class AgentEngine:
         if self._skill_managers and self._skill_managers.has_skills:
             messages[0]["content"] += self._skill_managers.get_available_skills_block()
 
+        if tools_to_use:
+            messages[0]["content"] += (
+                "\n\n【工具配合原则】\n"
+                "许多任务需要多个工具和技能配合完成：\n"
+                "- 先 view_skill 加载一个技能的方法论，执行完步骤后，\n"
+                "  再 view_skill 加载下一个技能继续后续步骤（技能串联）\n"
+                "- 先 search_memory 查背景信息，再制定方案，最后 execute_command 执行\n"
+                "- 先用工具 A 获取结果，再用工具 B 对结果进一步处理\n"
+                "如果当前工具返回的结果不够完整，考虑用另一个工具进一步获取。"
+            )
+
         await self._auto_inject_memory_context(
             messages=messages,
             chat_id=chat_id,
