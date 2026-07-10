@@ -24,6 +24,7 @@ class AIService:
         max_retries: int = 3,
         temperature: float = 0.7,
         max_tokens: int = 1000,
+        reasoning_effort: Optional[str] = None,
     ):
         """
         初始化 AI 服务
@@ -36,6 +37,7 @@ class AIService:
             max_retries: 最大重试次数
             temperature: 温度参数
             max_tokens: 最大生成 token 数
+            reasoning_effort: 思考力度，可选 "low" / "medium" / "high"
         """
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
@@ -46,6 +48,7 @@ class AIService:
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
 
         self.client = AsyncOpenAI(
             api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries
@@ -101,6 +104,9 @@ class AIService:
             _log.error(f"AI 请求失败: {e}")
             return None
 
+    def _is_reasoning_model(self, model: str) -> bool:
+        return any(k in model for k in ("o1", "o3", "deepseek-reasoner", "reasoning"))
+
     async def chat_completion_with_tools(
         self,
         messages: Iterable[ChatCompletionMessageParam],
@@ -125,18 +131,27 @@ class AIService:
             或 None（请求失败时）
         """
         model_to_use = model or self.model
-        temperature_to_use = (
-            temperature if temperature is not None else self.temperature
-        )
         max_tokens_to_use = max_tokens if max_tokens is not None else self.max_tokens
+        is_reasoning = self._is_reasoning_model(model_to_use)
 
         try:
-            kwargs = dict(
+            kwargs: Dict[str, Any] = dict(
                 messages=messages,
                 model=model_to_use,
-                temperature=temperature_to_use,
                 max_tokens=max_tokens_to_use,
             )
+
+            if is_reasoning:
+                pass
+            else:
+                temperature_to_use = (
+                    temperature if temperature is not None else self.temperature
+                )
+                kwargs["temperature"] = temperature_to_use
+
+            if self.reasoning_effort:
+                kwargs["reasoning_effort"] = self.reasoning_effort
+
             if tools:
                 kwargs["tools"] = tools
 
