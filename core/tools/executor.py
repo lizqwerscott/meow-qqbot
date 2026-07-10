@@ -94,6 +94,7 @@ class ToolExecutor:
         self._register("search_memory", self._exec_search_memory, is_async=True)
         self._register("mark_important", self._exec_mark_important, is_async=True)
         self._register("search_relation", self._exec_search_relation, is_async=True)
+        self._register("rescan_skills", self._exec_rescan_skills)
         self._register("view_skill", self._exec_view_skill)
         self._register("execute_skill", self._exec_execute_skill, is_async=True)
         self._register("execute_command", self._exec_execute_command, is_async=True)
@@ -500,6 +501,15 @@ class ToolExecutor:
     # ════════════════════════════════════════════════════════
     # Skill 工具
     # ════════════════════════════════════════════════════════
+
+    def _exec_rescan_skills(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """执行 rescan_skills — 重新扫描技能。"""
+        if not self._skill_managers:
+            return ToolResult(content=json.dumps(
+                {"error": "技能系统未就绪"}, ensure_ascii=False,
+            ))
+        result = self._skill_managers.rescan()
+        return ToolResult(content=json.dumps(result, ensure_ascii=False))
 
     def _exec_view_skill(self, args: dict, ctx: ToolContext) -> ToolResult:
         """执行 view_skill — 查看技能详细说明。"""

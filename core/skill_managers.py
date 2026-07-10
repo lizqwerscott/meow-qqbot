@@ -182,3 +182,16 @@ class SkillManagers:
 
     def list_skill_names(self) -> list:
         return self._manager.list_skills(include_qualified=True)
+
+    def rescan(self) -> Dict[str, Any]:
+        before = len(self._manager.list_skills())
+        self._manager.discover()
+        after = len(self._manager.list_skills())
+        self._skills_loaded = after > 0
+        _log.info(f"技能重新扫描: {before} → {after} 个技能")
+        return {
+            "success": True,
+            "before": before,
+            "after": after,
+            "available_skills": self.get_available_skills_block(),
+        }
