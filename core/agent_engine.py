@@ -544,6 +544,9 @@ class AgentEngine:
                 break
 
             assistant_msg = {"role": "assistant", "content": response_text or None}
+            reasoning_content = getattr(message, "reasoning_content", None)
+            if reasoning_content:
+                assistant_msg["reasoning_content"] = reasoning_content
             assistant_msg["tool_calls"] = [
                 {
                     "id": tc.id,

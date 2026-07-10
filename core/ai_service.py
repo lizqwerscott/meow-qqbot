@@ -84,18 +84,30 @@ class AIService:
             AI 生成的文本内容，或 None
         """
         model_to_use = model or self.model
-        temperature_to_use = (
-            temperature if temperature is not None else self.temperature
-        )
         max_tokens_to_use = max_tokens if max_tokens is not None else self.max_tokens
+        is_reasoning = self._is_reasoning_model(model_to_use)
 
         try:
-            response = await self.client.chat.completions.create(
+            kwargs: Dict[str, Any] = dict(
                 messages=messages,
                 model=model_to_use,
-                temperature=temperature_to_use,
                 max_tokens=max_tokens_to_use,
             )
+
+            if not (is_reasoning or self.reasoning_effort):
+                temperature_to_use = (
+                    temperature if temperature is not None else self.temperature
+                )
+                kwargs["temperature"] = temperature_to_use
+
+            if self.reasoning_effort:
+                kwargs["reasoning_effort"] = self.reasoning_effort
+
+            extra_body = self._build_extra_body()
+            if extra_body:
+                kwargs["extra_body"] = extra_body
+
+            response = await self.client.chat.completions.create(**kwargs)
             if hasattr(response, "choices") and response.choices:
                 return response.choices[0].message.content
             else:
@@ -105,7 +117,12 @@ class AIService:
             return None
 
     def _is_reasoning_model(self, model: str) -> bool:
-        return any(k in model for k in ("o1", "o3", "deepseek-reasoner", "reasoning"))
+        return any(k in model for k in ("o1", "o3", "deepseek", "reasoning"))
+
+    def _build_extra_body(self) -> Optional[Dict[str, Any]]:
+        if self.reasoning_effort:
+            return {"thinking": {"type": "enabled"}}
+        return None
 
     async def chat_completion_with_tools(
         self,
@@ -141,7 +158,7 @@ class AIService:
                 max_tokens=max_tokens_to_use,
             )
 
-            if is_reasoning:
+            if is_reasoning or self.reasoning_effort:
                 pass
             else:
                 temperature_to_use = (
@@ -151,6 +168,10 @@ class AIService:
 
             if self.reasoning_effort:
                 kwargs["reasoning_effort"] = self.reasoning_effort
+
+            extra_body = self._build_extra_body()
+            if extra_body:
+                kwargs["extra_body"] = extra_body
 
             if tools:
                 kwargs["tools"] = tools
