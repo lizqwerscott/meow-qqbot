@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import itertools
 import json
 import logging
 from datetime import datetime, timezone, timedelta
@@ -106,8 +107,10 @@ class AgentEngine:
         everos_memory: Optional[Any] = None,
         search_top_k: int = 3,
         skill_managers: Optional[Any] = None,
+        max_tool_rounds: int = -1,
     ):
         self.ai_service = ai_service
+        self._max_tool_rounds = max_tool_rounds
         self.template_manager = template_manager
         self.context_manager = context_manager
         self._bot_id = bot_id
@@ -502,9 +505,13 @@ class AgentEngine:
         每轮 AI 返回的文本会立即发送并记录到上下文。
         """
         sent_emoji = False
-        MAX_ROUNDS = 5
 
-        for round_idx in range(MAX_ROUNDS):
+        if self._max_tool_rounds == -1:
+            _rounds: Any = itertools.count()
+        else:
+            _rounds = range(self._max_tool_rounds)
+
+        for round_idx in _rounds:
             message = await self.ai_service.chat_completion_with_tools(
                 messages=messages,
                 tools=tools,

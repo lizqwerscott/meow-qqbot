@@ -149,6 +149,7 @@ async def main() -> None:
         everos_memory=everos_memory,
         search_top_k=everos_config.get("search_top_k", 3),
         skill_managers=skill_managers,
+        max_tool_rounds=config.get("max_tool_rounds", -1),
     )
 
     # ── 3. 创建 BotEngine ──
