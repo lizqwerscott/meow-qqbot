@@ -65,7 +65,23 @@ class SkillManagers:
         skills = self._manager.list_skills()
         if not skills:
             return ""
-        lines = ["\n\n<available_skills>"]
+        lines = [
+            "\n\n--- 技能系统 ---",
+            "以下 <available_skills> 中列出的是我掌握的专业领域知识包（Skills）。",
+            "每个技能包含该领域的完整思考框架、方法论和操作指南。",
+            "",
+            "当用户的问题涉及某个领域时，我应当：",
+            "1. 使用 view_skill 查看该技能的完整指导说明",
+            "2. 将技能中的方法论融入当前思考，按它的框架来处理问题",
+            "3. 如果技能附带可执行脚本，使用 execute_skill 运行",
+            "",
+            "注意：技能 ≠ 工具。",
+            "技能是「怎么思考」—— 一种专业方法的注入，",
+            "工具是「怎么执行」—— 一个具体的操作。",
+            "使用技能意味着我吸收了该领域的专业知识来指导行为。",
+            "",
+            "<available_skills>",
+        ]
         for s in skills:
             name = s.name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             desc = (s.description or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -74,11 +90,6 @@ class SkillManagers:
             lines.append(f"    <description>{desc}</description>")
             lines.append("  </skill>")
         lines.append("</available_skills>")
-        lines.append(
-            "\n你可以使用 view_skill 工具查看某个技能的详细内容，"
-            "使用 execute_skill 运行技能自带的脚本，"
-            "使用 execute_command 执行任意 bash 命令。"
-        )
         return "\n".join(lines)
 
     def get_skill_detail(self, skill_name: str) -> str:

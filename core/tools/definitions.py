@@ -162,7 +162,7 @@ RESCAN_SKILLS_TOOL = [
         "type": "function",
         "function": {
             "name": "rescan_skills",
-            "description": "重新扫描 skills 目录，发现新增或移除的技能。安装新 skill 后调用此工具刷新列表。",
+            "description": "重新扫描 skills 目录，刷新可用技能列表。",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -177,7 +177,7 @@ VIEW_SKILL_TOOL = [
         "type": "function",
         "function": {
             "name": "view_skill",
-            "description": "查看某个技能的详细说明和完整使用指南。技能是在 <available_skills> 中列出的。",
+            "description": "查看并加载某个技能的完整指导说明。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -197,7 +197,7 @@ EXECUTE_SKILL_TOOL = [
         "type": "function",
         "function": {
             "name": "execute_skill",
-            "description": "执行某个技能自带的脚本。需要先通过 view_skill 了解该技能有哪些脚本可用。脚本参数以 JSON 形式传入。",
+            "description": "执行技能附带的脚本（如自动化分析、代码生成等）。参数以 JSON 形式传入。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -230,7 +230,7 @@ EXECUTE_COMMAND_TOOL = [
         "type": "function",
         "function": {
             "name": "execute_command",
-            "description": "执行任意 bash 命令（受权限和白名单限制）。可用于运行 git 操作、python 脚本、文件查看等。",
+            "description": "执行任意 bash 命令（受权限和黑名单限制）。可用于运行 git 操作、python 脚本、文件查看等。",
             "parameters": {
                 "type": "object",
                 "properties": {
