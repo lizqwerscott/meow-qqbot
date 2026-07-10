@@ -23,6 +23,7 @@ from core.tools.definitions import (
     SEARCH_MEMORY_TOOL,
     SEARCH_RELATION_TOOL,
     MARK_IMPORTANT_TOOL,
+    SKILL_TOOLS,
 )
 
 _log = logging.getLogger(__name__)
@@ -104,6 +105,7 @@ class AgentEngine:
         emoji_manager: Optional[EmojiManager] = None,
         everos_memory: Optional[Any] = None,
         search_top_k: int = 3,
+        skill_managers: Optional[Any] = None,
     ):
         self.ai_service = ai_service
         self.template_manager = template_manager
@@ -120,12 +122,15 @@ class AgentEngine:
 
         self.everos = everos_memory
         self._search_top_k = search_top_k
+        self._skill_managers = skill_managers
 
         self.tool_executor = ToolExecutor(
             emoji_manager=emoji_manager,
             everos=everos_memory,
             bot_id=bot_id,
             nickname_manager=nickname_manager,
+            skill_managers=skill_managers,
+            admin_ids=admin_id,
         )
 
         self._auto_replied: Dict[str, str] = {}
@@ -333,6 +338,8 @@ class AgentEngine:
             tools_to_use.extend(SEARCH_MEMORY_TOOL)
             tools_to_use.extend(SEARCH_RELATION_TOOL)
             tools_to_use.extend(MARK_IMPORTANT_TOOL)
+        if self._skill_managers and self._skill_managers.has_skills:
+            tools_to_use.extend(SKILL_TOOLS)
         tools_to_use = tools_to_use or None
 
         if tools_to_use:
@@ -375,6 +382,9 @@ class AgentEngine:
         weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
         time_info = now.strftime(f"%Y-%m-%d %H:%M:%S ({weekday_names[now.weekday()]})")
         messages[0]["content"] += f"\n\n当前时间: {time_info}"
+
+        if self._skill_managers and self._skill_managers.has_skills:
+            messages[0]["content"] += self._skill_managers.get_available_skills_block()
 
         await self._auto_inject_memory_context(
             messages=messages,

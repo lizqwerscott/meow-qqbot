@@ -157,6 +157,99 @@ MARK_IMPORTANT_TOOL = [
 ]
 
 
+VIEW_SKILL_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "view_skill",
+            "description": "查看某个技能的详细说明和完整使用指南。技能是在 <available_skills> 中列出的。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "要查看的技能名称，从 <available_skills> 中获取",
+                    },
+                },
+                "required": ["skill_name"],
+            },
+        },
+    },
+]
+
+EXECUTE_SKILL_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_skill",
+            "description": "执行某个技能自带的脚本。需要先通过 view_skill 了解该技能有哪些脚本可用。脚本参数以 JSON 形式传入。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "技能名称",
+                    },
+                    "script_name": {
+                        "type": "string",
+                        "description": "脚本名称（无需后缀，如 'release'、'extract'）",
+                    },
+                    "arguments": {
+                        "type": "object",
+                        "description": "传递给脚本的参数（JSON 对象）",
+                        "additionalProperties": True,
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "执行超时时间（秒），默认 30，最大 120",
+                    },
+                },
+                "required": ["skill_name", "script_name"],
+            },
+        },
+    },
+]
+
+EXECUTE_COMMAND_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_command",
+            "description": "执行任意 bash 命令（受权限和白名单限制）。可用于运行 git 操作、python 脚本、文件查看等。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "要执行的 bash 命令",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "执行超时时间（秒），默认 30，最大 120",
+                    },
+                    "workdir": {
+                        "type": "string",
+                        "description": "工作目录（可选，默认项目根目录）",
+                    },
+                },
+                "required": ["command"],
+            },
+        },
+    },
+]
+
+
+SKILL_TOOLS = [
+    *VIEW_SKILL_TOOL,
+    *EXECUTE_SKILL_TOOL,
+    *EXECUTE_COMMAND_TOOL,
+]
+
+
 def tool_names() -> set[str]:
     """返回所有已注册工具的名称集合。"""
-    return {"search_emoji", "send_emoji", "search_user", "search_memory", "mark_important", "search_relation"}
+    return {
+        "search_emoji", "send_emoji", "search_user",
+        "search_memory", "mark_important", "search_relation",
+        "view_skill", "execute_skill", "execute_command",
+    }

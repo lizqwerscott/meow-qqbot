@@ -17,6 +17,7 @@ from core.router import Router
 from core.template_manager import TemplateManager
 from core.everos_memory import EverOSMemory
 from core.command_handlers import register_all_commands
+from core.skill_managers import SkillManagers
 
 
 async def main() -> None:
@@ -131,6 +132,12 @@ async def main() -> None:
     # ── NicknameManager（统一昵称管理，全局单例） ──
     nickname_manager = NicknameManager(bot_id=bot_id)
 
+    # ── SkillManagers（技能系统，全局单例） ──
+    user_home = os.path.expanduser("~")
+    skill_managers = SkillManagers(
+        project_skill_dir=os.path.join(user_home, ".agents", "skills"),
+    )
+
     # ── 2. 创建 AgentEngine（全局单例） ──
     agent_engine = AgentEngine(
         ai_service=ai_service,
@@ -143,6 +150,7 @@ async def main() -> None:
         emoji_manager=emoji_manager,
         everos_memory=everos_memory,
         search_top_k=everos_config.get("search_top_k", 3),
+        skill_managers=skill_managers,
     )
 
     # ── 3. 创建 BotEngine ──
