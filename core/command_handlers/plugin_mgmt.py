@@ -103,11 +103,10 @@ class PluginManageCommand:
             return make_reply(msg, f"插件已安装到 {plugin_dir}，但加载失败，请检查日志")
 
         cmds = self.pm._plugin_commands.get(name, [])
-        cmd_list = "、".join(f"/{c}" for c in cmds) if cmds else "无命令"
+        cmd_lines = "\n".join(f"- `/{c}`" for c in cmds) if cmds else "无命令"
         return make_reply(
             msg,
-            f"插件 {name} v{meta.version} 已安装并加载\n"
-            f"可用命令: {cmd_list}",
+            f"**插件 `{name}` v{meta.version} 已安装并加载**\n\n{cmd_lines}",
         )
 
     async def _reload(self, msg: InputMessage, name: str) -> List[dict]:
@@ -133,10 +132,10 @@ class PluginManageCommand:
 
         meta = self.pm.reload_plugin(name)
         if meta is None:
-            return make_reply(msg, f"重载插件 {name} 失败，请检查日志")
+            return make_reply(msg, f"**重载插件 `{name}` 失败**，请检查日志")
         cmds = self.pm._plugin_commands.get(name, [])
-        cmd_list = "、".join(f"/{c}" for c in cmds) if cmds else "无命令"
-        return make_reply(msg, f"插件 {name} v{meta.version} 已重载\n可用命令: {cmd_list}")
+        cmd_lines = "\n".join(f"- `/{c}`" for c in cmds) if cmds else "无命令"
+        return make_reply(msg, f"**插件 `{name}` v{meta.version} 已重载**\n\n{cmd_lines}")
 
     async def _unload(self, msg: InputMessage, name: str) -> List[dict]:
         name = name.strip()
@@ -150,9 +149,9 @@ class PluginManageCommand:
     def _list(self, msg: InputMessage) -> List[dict]:
         if self.pm.count == 0:
             return make_reply(msg, "未加载任何插件")
-        lines = [f"已加载插件: {self.pm.count} 个"]
+        lines = [f"**已加载插件** ({self.pm.count})"]
         for name, meta in self.pm.loaded_plugins.items():
             cmds = self.pm._plugin_commands.get(name, [])
-            cmd_str = ", ".join(c for c in cmds) if cmds else "-"
-            lines.append(f"  {name} v{meta.version} [{cmd_str}]")
+            cmd_str = "`, `".join(c for c in cmds) if cmds else "—"
+            lines.append(f"- **{name}** `v{meta.version}` — `{cmd_str}`")
         return make_reply(msg, "\n".join(lines))
