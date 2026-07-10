@@ -74,6 +74,17 @@ class CommandRegistry:
         """获取命令数量（去重）"""
         return len(set(cmd.name for cmd in self._commands.values()))
 
+    def unregister(self, command_name: str) -> Optional[Command]:
+        """注销命令及其所有别名"""
+        key = command_name.lower()
+        cmd = self._commands.get(key)
+        if cmd is None:
+            return None
+        keys_to_del = [cmd.name.lower()] + [a.lower() for a in cmd.aliases]
+        for k in keys_to_del:
+            self._commands.pop(k, None)
+        return cmd
+
     def clear(self) -> None:
         """清空所有命令"""
         self._commands.clear()
