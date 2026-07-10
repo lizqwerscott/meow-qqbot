@@ -132,11 +132,8 @@ async def main() -> None:
     # ── NicknameManager（统一昵称管理，全局单例） ──
     nickname_manager = NicknameManager(bot_id=bot_id)
 
-    # ── SkillManagers（技能系统，全局单例） ──
-    user_home = os.path.expanduser("~")
-    skill_managers = SkillManagers(
-        project_skill_dir=os.path.join(user_home, ".agents", "skills"),
-    )
+    # ── SkillManagers（技能系统，全局单例，仅从项目本地加载） ──
+    skill_managers = SkillManagers(project_skill_dir="./.agents/skills/")
 
     # ── 2. 创建 AgentEngine（全局单例） ──
     agent_engine = AgentEngine(
@@ -174,6 +171,7 @@ async def main() -> None:
         context_manager=context_manager,
         emoji_manager=emoji_manager,
         agent_engine=agent_engine,
+        skill_managers=skill_managers,
     )
 
     # ── 4. 启动 WebSocket ──
