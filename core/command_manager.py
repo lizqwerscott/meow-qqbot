@@ -1,6 +1,7 @@
 """命令管理器模块"""
 
 import logging
+from typing import Optional
 
 from core.commands import Command, CommandRegistry, PermissionLevel
 from core.message import InputMessage
@@ -17,6 +18,9 @@ class CommandManager:
 
     def register_command(self, command: Command) -> None:
         self.registry.register(command)
+
+    def unregister_command(self, command_name: str) -> Optional[Command]:
+        return self.registry.unregister(command_name)
 
     def find_command(self, command_name: str) -> Command | None:
         """查找命令"""
