@@ -174,6 +174,8 @@ async def main() -> None:
         emoji_manager=emoji_manager,
         agent_engine=agent_engine,
         skill_managers=skill_managers,
+        api_client=engine.api,
+        bot_engine=engine,
     )
 
     # ── 4. 启动 WebSocket ──
