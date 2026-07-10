@@ -7,6 +7,10 @@ from core.tools.definitions import (
     SEARCH_MEMORY_TOOL,
     SEARCH_RELATION_TOOL,
     MARK_IMPORTANT_TOOL,
+    VIEW_SKILL_TOOL,
+    EXECUTE_SKILL_TOOL,
+    EXECUTE_COMMAND_TOOL,
+    SKILL_TOOLS,
     tool_names,
 )
 
@@ -19,5 +23,9 @@ __all__ = [
     "SEARCH_MEMORY_TOOL",
     "SEARCH_RELATION_TOOL",
     "MARK_IMPORTANT_TOOL",
+    "VIEW_SKILL_TOOL",
+    "EXECUTE_SKILL_TOOL",
+    "EXECUTE_COMMAND_TOOL",
+    "SKILL_TOOLS",
     "tool_names",
 ]

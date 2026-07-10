@@ -67,6 +67,8 @@ class ToolExecutor:
         everos=None,
         nickname_manager: Optional[NicknameManager] = None,
         bot_id: str = "",
+        skill_managers=None,
+        admin_ids: Optional[list] = None,
     ):
         self._emoji_manager = emoji_manager
         self._media_uploader = media_uploader
@@ -74,6 +76,8 @@ class ToolExecutor:
         self._everos = everos
         self._nm = nickname_manager
         self._bot_id = bot_id
+        self._skill_managers = skill_managers
+        self._admin_ids = admin_ids or []
 
         self._registry: Dict[str, tuple[Callable, bool]] = {}
         self._register_all()
@@ -90,6 +94,9 @@ class ToolExecutor:
         self._register("search_memory", self._exec_search_memory, is_async=True)
         self._register("mark_important", self._exec_mark_important, is_async=True)
         self._register("search_relation", self._exec_search_relation, is_async=True)
+        self._register("view_skill", self._exec_view_skill)
+        self._register("execute_skill", self._exec_execute_skill, is_async=True)
+        self._register("execute_command", self._exec_execute_command, is_async=True)
 
     # ── 懒注入（AgentEngine 在运行时更新引用）──
 
@@ -489,6 +496,76 @@ class ToolExecutor:
             lines.append("（未找到两人相关的记忆记录）")
 
         return ToolResult(content="\n".join(lines))
+
+    # ════════════════════════════════════════════════════════
+    # Skill 工具
+    # ════════════════════════════════════════════════════════
+
+    def _exec_view_skill(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """执行 view_skill — 查看技能详细说明。"""
+        if not self._skill_managers:
+            return ToolResult(content=json.dumps(
+                {"error": "技能系统未就绪"}, ensure_ascii=False,
+            ))
+        skill_name = (args.get("skill_name") or "").strip()
+        if not skill_name:
+            return ToolResult(content=json.dumps(
+                {"error": "请提供技能名称"}, ensure_ascii=False,
+            ))
+        content = self._skill_managers.get_skill_detail(skill_name)
+        return ToolResult(content=content)
+
+    async def _exec_execute_skill(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """执行 execute_skill — 运行技能自带的脚本。"""
+        if not self._skill_managers:
+            return ToolResult(content=json.dumps(
+                {"error": "技能系统未就绪"}, ensure_ascii=False,
+            ))
+        skill_name = (args.get("skill_name") or "").strip()
+        script_name = (args.get("script_name") or "").strip()
+        if not skill_name or not script_name:
+            return ToolResult(content=json.dumps(
+                {"error": "请提供技能名称和脚本名称"}, ensure_ascii=False,
+            ))
+        arguments = args.get("arguments") or {}
+        timeout = args.get("timeout", 30)
+
+        result = self._skill_managers.execute_skill_script(
+            skill_name=skill_name,
+            script_name=script_name,
+            arguments=arguments,
+            timeout=timeout,
+        )
+        return ToolResult(content=json.dumps(result, ensure_ascii=False))
+
+    async def _exec_execute_command(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """执行 execute_command — 运行 bash 命令（仅管理员）。"""
+        if ctx.sender_id not in self._admin_ids:
+            _log.warning(f"execute_command 权限被拒: sender={ctx.sender_id}")
+            return ToolResult(content=json.dumps(
+                {"error": "此工具仅限管理员使用"}, ensure_ascii=False,
+            ))
+
+        if not self._skill_managers:
+            return ToolResult(content=json.dumps(
+                {"error": "技能系统未就绪"}, ensure_ascii=False,
+            ))
+
+        command = (args.get("command") or "").strip()
+        if not command:
+            return ToolResult(content=json.dumps(
+                {"error": "请提供要执行的命令"}, ensure_ascii=False,
+            ))
+
+        timeout = args.get("timeout", 30)
+        workdir = args.get("workdir")
+
+        result = self._skill_managers.execute_command(
+            command=command,
+            timeout=timeout,
+            workdir=workdir,
+        )
+        return ToolResult(content=json.dumps(result, ensure_ascii=False))
 
     # ── 辅助 ──
 
