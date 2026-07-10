@@ -10,5 +10,6 @@ import core.command_handlers.history
 import core.command_handlers.clear
 import core.command_handlers.list_chats
 import core.command_handlers.skills
+import core.command_handlers.approval_test
 
 __all__ = ["command", "register_all_commands", "_HANDLER_REGISTRY"]

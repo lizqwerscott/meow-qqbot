@@ -11,6 +11,8 @@ from qqbot_agent_sdk import (
     WSCallbacks,
     EventParser,
     InboundEvent,
+    parse_interaction_event,
+    parse_approval_button_data,
 )
 from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
 from qqbot_agent_sdk.dto import MediaInfo, MessageToCreate, QQMessageType, WSReadyData
@@ -77,6 +79,7 @@ class BotEngine:
         self.media_uploader = None
         self._bot_name: str = "机器人"
         self._deps_injected = False
+        self.pending_approvals: Dict[str, tuple] = {}
 
         _log.info("BotEngine 已初始化")
 
@@ -86,6 +89,7 @@ class BotEngine:
         """构造 WSCallbacks，全部回调绑定到 BotEngine 方法。"""
         return WSCallbacks(
             on_message_event=self._on_message_event,
+            on_interaction_event=self._on_interaction_event,
             get_token=self.api.ensure_token_sync,
             get_gateway_url=self.api.get_gateway_url_sync,
             on_connected=lambda: _log.info("WebSocket 已连接"),
@@ -287,6 +291,46 @@ class BotEngine:
             reply_callback=self._send_reply,
             get_user_nickname=self.nickname_manager.get,
         )
+
+    # ── 交互事件（按钮点击） ──
+
+    async def _on_interaction_event(self, event_type: str, raw: dict) -> None:
+        """处理按钮交互事件（审批按钮和自定义键盘）。"""
+        interaction = parse_interaction_event(raw)
+        _log.info(f"收到按钮交互: {interaction.data.resolved.button_data}")
+
+        # ACK 交互
+        await self.api.acknowledge_interaction(interaction.id)
+
+        chat_type = "c2c" if interaction.is_c2c else "group"
+        chat_id = interaction.chat_id
+
+        # 审批按钮
+        parsed = parse_approval_button_data(interaction.data.resolved.button_data)
+        if parsed:
+            session_key, decision = parsed
+            if session_key in self.pending_approvals:
+                self.pending_approvals.pop(session_key)
+                responses = {
+                    "allow-once": "✅ 已允许一次",
+                    "allow-always": "⭐ 已始终允许",
+                    "deny": "❌ 已拒绝",
+                }
+                await self.api.send_text(
+                    chat_type, chat_id,
+                    responses.get(decision, f"❓ 审批结果: {decision}"),
+                )
+                _log.info(f"审批响应: {decision}")
+            return
+
+        # 自定义键盘
+        if interaction.data.resolved.button_data.startswith("test_keyboard:"):
+            choice = interaction.data.resolved.button_data.split(":")[-1]
+            await self.api.send_text(
+                chat_type, chat_id,
+                f"✓ 你选择了: {choice.upper()}",
+            )
+            _log.info(f"自定义键盘选择: {choice}")
 
     # ── 发送回复 ──
 
