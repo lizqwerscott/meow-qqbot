@@ -15,20 +15,25 @@ from skillkit import SkillManager
 _log = logging.getLogger(__name__)
 
 
-ALLOWED_COMMANDS = frozenset({
-    "git", "python3", "python", "pip", "node", "npm", "npx", "uv", "make",
-    "ls", "cat", "echo", "pwd", "head", "tail", "wc", "sort", "uniq",
-    "grep", "rg", "find", "date", "which", "du", "df",
-    "curl", "wget", "ping", "dig",
-    "mkdir", "cp", "mv",
-})
-
-# 这些命令无论出现在哪个位置（含管道后）都拒绝
 DENIED_COMMAND_PATTERNS = re.compile(
-    r"\b(rm|chmod|chown|sudo|su|dd|mkfs|shutdown|reboot|"
-    r"passwd|useradd|usermod|groupadd|"
-    r"setuid|setgid|chattr|lsattr|tcpdump|nmap)\b"
+    r"\b("
+    r"rm|chmod|chown|sudo|su|doas|"
+    r"dd|mkfs|mkfs\..*|fdisk|parted|mkswap|"
+    r"shutdown|reboot|poweroff|halt|init|systemctl|"
+    r"useradd|usermod|groupadd|userdel|groupdel|"
+    r"setuid|setgid|chattr|lsattr|"
+    r"tcpdump|nmap|tshark|"
+    r"pkill|killall|"
+    r"service|grub|grub-install|grub-mkconfig|"
+    r"modprobe|insmod|rmmod|"
+    r"iptables|ufw|"
+    r"wget\s+.*-O\s+/|curl\s+.*-o\s+/|"
+    r"python.*\s+-m\s+http\.server\s+\d+"
+    r")\b"
 )
+
+# 这些只在作为独立命令（行首或管道后首词）时拒绝
+_SOFT_DENIED = re.compile(r"(?:^|\|\s*)(kill|passwd)(?:\s|$)")
 
 
 class SkillManagers:
@@ -121,17 +126,18 @@ class SkillManagers:
         if not command:
             return {"success": False, "error": "命令为空"}
 
-        first_word = command.split()[0] if command.split() else ""
-        if first_word not in ALLOWED_COMMANDS:
-            _log.warning(f"execute_command 被拒绝: '{first_word}' 不在白名单")
-            return {
-                "success": False,
-                "error": f"命令 '{first_word}' 不在允许执行的白名单中",
-            }
-
         denied_match = DENIED_COMMAND_PATTERNS.search(command.lower())
         if denied_match:
             denied_word = denied_match.group(0)
+            _log.warning(f"execute_command 被拒绝: 含危险命令 '{denied_word}'")
+            return {
+                "success": False,
+                "error": f"命令包含不允许的危险命令: '{denied_word}'",
+            }
+
+        soft_denied = _SOFT_DENIED.search(command.lower())
+        if soft_denied:
+            denied_word = soft_denied.group(1)
             _log.warning(f"execute_command 被拒绝: 含危险命令 '{denied_word}'")
             return {
                 "success": False,
