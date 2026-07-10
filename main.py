@@ -64,6 +64,7 @@ async def main() -> None:
         max_retries=openai_config.get("max_retries", 3),
         temperature=openai_config.get("temperature", 0.7),
         max_tokens=openai_config.get("max_tokens", 1000),
+        reasoning_effort=openai_config.get("reasoning_effort"),
     )
 
     # 多模态配置

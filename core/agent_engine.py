@@ -517,6 +517,12 @@ class AgentEngine:
             response_text = message.content or ""
             tool_calls = message.tool_calls or []
 
+            reasoning = getattr(message, "reasoning_content", None) or None
+            if reasoning:
+                _log.info(
+                    f"[工具循环 第{round_idx + 1}轮 思考过程]\n{reasoning}"
+                )
+
             _log.info(
                 f"[工具循环 第{round_idx + 1}轮] "
                 f"text={response_text[:50]!r}... "
