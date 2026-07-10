@@ -421,6 +421,7 @@ class AgentEngine:
             reply_to=input_message.id,
             reply_callback=reply_callback,
             sender_id=input_message.sender_id,
+            get_user_nickname=get_user_nickname,
         )
 
         _log.info(f"消息处理完成: {input_message.id}")
@@ -495,6 +496,7 @@ class AgentEngine:
         reply_to: str,
         reply_callback: Callable,
         sender_id: str = "",
+        get_user_nickname: Optional[Callable[[str], str]] = None,
     ) -> bool:
         """
         执行 AI 工具调用循环。
@@ -596,7 +598,73 @@ class AgentEngine:
                     "content": result.content,
                 })
 
+            if get_user_nickname:
+                steer_msgs = await self._drain_steering_messages(
+                    chat_id=chat_id,
+                    current_sender_id=sender_id,
+                    messages=messages,
+                    get_user_nickname=get_user_nickname,
+                )
+                messages.extend(steer_msgs)
+
         return sent_emoji
+
+    # ── Queue Steering ──
+
+    async def _drain_steering_messages(
+        self,
+        chat_id: str,
+        current_sender_id: str,
+        messages: list,
+        get_user_nickname: Callable[[str], str],
+    ) -> List[dict]:
+        """从会话队列中 drain 新消息，注入到当前工具循环。
+
+        同一用户 → 不注入记忆（减少冗余调用）
+        不同用户 → 走一次 _auto_inject_memory_context
+        """
+        queue = await self.session_manager.get_queue(chat_id)
+        drained: List[InputMessage] = []
+        while not queue.empty():
+            try:
+                drained.append(queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+
+        steered: List[dict] = []
+        for msg in drained:
+            nick = get_user_nickname(msg.sender_id) or msg.sender_id
+            content = f"[来自 {nick} 的新消息]: {msg.content}"
+            user_msg: dict = {"role": "user", "content": content}
+            steered.append(user_msg)
+
+            await self.context_manager.add_user_message_async(
+                chat_id, content, msg.id,
+                sender_id=msg.sender_id, name=nick,
+            )
+
+            if self.everos:
+                await self.everos.add_message(
+                    session_id=chat_id,
+                    sender_id=msg.sender_id,
+                    sender_name=nick,
+                    content=content,
+                )
+                keywords = ["我喜欢", "我讨厌", "我叫", "我是", "我的", "记住", "我不喜欢", "我有", "别忘了"]
+                if any(k in msg.content for k in keywords):
+                    await self.everos.flush(session_id=chat_id)
+
+            if msg.sender_id != current_sender_id and self.everos:
+                await self._auto_inject_memory_context(
+                    messages=messages,
+                    chat_id=chat_id,
+                    sender_id=msg.sender_id,
+                    input_message=msg,
+                )
+
+            queue.task_done()
+
+        return steered
 
     # ── 辅助：用户目录文本（仅供 prompt 拼接）──
 
