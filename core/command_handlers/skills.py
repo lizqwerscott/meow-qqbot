@@ -32,3 +32,16 @@ class SkillsListCommand:
                 lines.append(f"  • {name}")
 
         return make_reply(input_message, "\n".join(lines))
+
+
+@command(name="技能重新扫描", aliases=["rescan_skills", "技能刷新"], permission="admin", description="重新扫描技能目录，发现新增或移除的技能（管理员专用）")
+class SkillsRescanCommand:
+    def __init__(self, skill_managers: SkillManagers):
+        self.skill_managers = skill_managers
+
+    async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
+        result = self.skill_managers.rescan()
+        return make_reply(
+            input_message,
+            f"技能重新扫描完成: {result['before']} → {result['after']} 个技能",
+        )

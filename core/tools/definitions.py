@@ -157,6 +157,21 @@ MARK_IMPORTANT_TOOL = [
 ]
 
 
+RESCAN_SKILLS_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "rescan_skills",
+            "description": "重新扫描 skills 目录，发现新增或移除的技能。安装新 skill 后调用此工具刷新列表。",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+]
+
+
 VIEW_SKILL_TOOL = [
     {
         "type": "function",
@@ -240,6 +255,7 @@ EXECUTE_COMMAND_TOOL = [
 
 
 SKILL_TOOLS = [
+    *RESCAN_SKILLS_TOOL,
     *VIEW_SKILL_TOOL,
     *EXECUTE_SKILL_TOOL,
     *EXECUTE_COMMAND_TOOL,
@@ -251,5 +267,5 @@ def tool_names() -> set[str]:
     return {
         "search_emoji", "send_emoji", "search_user",
         "search_memory", "mark_important", "search_relation",
-        "view_skill", "execute_skill", "execute_command",
+        "rescan_skills", "view_skill", "execute_skill", "execute_command",
     }
