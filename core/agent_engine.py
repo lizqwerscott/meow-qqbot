@@ -306,8 +306,11 @@ class AgentEngine:
         is_group = input_message.is_group
         user_nickname = get_user_nickname(input_message.sender_id)
 
-        context_messages = await self.context_manager.get_chat_history_async(
-            chat_id, max_messages=8
+        compacted = await self.context_manager.get_context_async(chat_id)
+        await compacted.compact_history_if_needed(self.ai_service)
+
+        context_messages = await self.context_manager.get_pruned_history_async(
+            chat_id,
         )
 
         if is_group:
@@ -538,6 +541,20 @@ class AgentEngine:
                 f"tool_calls={[tc.function.name for tc in tool_calls]}"
             )
 
+            tool_calls_data = None
+            if tool_calls:
+                tool_calls_data = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in tool_calls
+                ]
+
             if response_text:
                 await reply_callback(
                     chat_id=chat_id,
@@ -545,8 +562,13 @@ class AgentEngine:
                     message_id=reply_to,
                     is_group=is_group,
                 )
+
+            if response_text or tool_calls:
                 await self.context_manager.add_assistant_message_async(
-                    chat_id, response_text, reply_to
+                    chat_id,
+                    response_text or "",
+                    reply_to,
+                    tool_calls=tool_calls_data,
                 )
 
             if not tool_calls:
@@ -556,14 +578,7 @@ class AgentEngine:
             reasoning_content = getattr(message, "reasoning_content", None)
             if reasoning_content:
                 assistant_msg["reasoning_content"] = reasoning_content
-            assistant_msg["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                }
-                for tc in tool_calls
-            ]
+            assistant_msg["tool_calls"] = tool_calls_data
             messages.append(assistant_msg)
 
             ctx = ToolContext(
@@ -597,6 +612,9 @@ class AgentEngine:
                     "tool_call_id": tc.id,
                     "content": result.content,
                 })
+                await self.context_manager.add_tool_result_async(
+                    chat_id, tc.function.name, result.content, tc.id,
+                )
 
             if get_user_nickname:
                 steer_msgs = await self._drain_steering_messages(
