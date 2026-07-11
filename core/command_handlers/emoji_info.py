@@ -8,7 +8,7 @@ from core.message import InputMessage
 _log = logging.getLogger(__name__)
 
 
-@command(name="表情查看", aliases=["emoji"], description="查看指定表情的详细信息。用法：猫猫表情查看 <hash>")
+@command(name="表情查看", aliases=["emoji"], description="查看指定表情的详细信息。用法：猫猫 /表情查看 <hash>")
 class EmojiInfoCommand:
     def __init__(self, emoji_manager: EmojiManager):
         self.emoji_manager = emoji_manager
@@ -16,7 +16,7 @@ class EmojiInfoCommand:
     async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
         emoji_hash = args.strip()
         if not emoji_hash:
-            return make_reply(input_message, "请提供表情 hash。用法：猫猫表情查看 <hash>")
+            return make_reply(input_message, "请提供表情 hash。用法：猫猫 /表情查看 <hash>")
 
         record = self.emoji_manager.find_by_hash(emoji_hash)
         if record is None:

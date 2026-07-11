@@ -189,6 +189,7 @@ async def main() -> None:
         skill_managers=skill_managers,
         api_client=engine.api,
         bot_engine=engine,
+        ai_service=ai_service,
     )
 
     # ── 4. 加载插件 ──

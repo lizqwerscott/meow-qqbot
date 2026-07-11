@@ -63,6 +63,8 @@ class Router:
             _log.debug(f"命令已处理: {input_message.content[:30]}")
             return
 
+        _log.debug(f"非命令消息，转 AI: {input_message.content[:50]}")
+
         # ── 2. 非命令 → AI 对话处理 ──
         await self.agent_engine.dispatch(
             input_message=input_message,

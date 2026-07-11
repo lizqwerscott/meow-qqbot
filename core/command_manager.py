@@ -51,20 +51,25 @@ class CommandManager:
         try:
             content = input_message.content.strip()
 
-            # 检查是否是命令（以猫猫开头或以/开头）
-            if content.startswith("猫猫"):
-                # 猫猫 命令名 参数 - 使用len("猫猫")而不是固定2
-                parts = content[len("猫猫") :].strip().split(maxsplit=1)
-                if not parts or not parts[0]:
-                    return []
-                command_name = parts[0]
-                args = parts[1] if len(parts) > 1 else ""
-            elif content.startswith("/"):
-                # /命令名 参数
-                parts = content[1:].split(maxsplit=1)
-                command_name = parts[0]
-                args = parts[1] if len(parts) > 1 else ""
+            command_name = ""
+            args = ""
+
+            if input_message.is_group:
+                # 群聊：只认 猫猫 /<命令>
+                if content.startswith("猫猫 /"):
+                    raw = content[len("猫猫 /"):].strip()
+                    if raw:
+                        parts = raw.split(maxsplit=1)
+                        command_name = parts[0]
+                        args = parts[1] if len(parts) > 1 else ""
             else:
+                # 私聊：只认 /<命令>
+                if content.startswith("/"):
+                    parts = content[1:].split(maxsplit=1)
+                    command_name = parts[0]
+                    args = parts[1] if len(parts) > 1 else ""
+
+            if not command_name:
                 return []
 
             # 查找命令

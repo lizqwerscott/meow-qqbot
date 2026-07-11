@@ -212,15 +212,6 @@ class BotEngine:
             if not cleaned:
                 return
 
-        # DM（频道直发消息）→ 简单回复
-        if event.chat_scope == "dm":
-            await self.api.send_text(
-                "guild", event.chat_id,
-                f"机器人{self._bot_name}收到你的消息了: {event.content}",
-                reply_to=event.message_id,
-            )
-            return
-
         # 解析 @提及
         mentioned_ids = []
         mentions_data = raw.get("mentions", [])
@@ -235,6 +226,13 @@ class BotEngine:
         event.content = event.content.strip()
 
         is_at_mention = any(m.get("is_you") for m in mentions_data)
+
+        # 如果机器人被 @，剥离 @bot_name 前缀并替换为 猫猫 前缀
+        if is_at_mention:
+            at_prefix = f"@{self._bot_name}"
+            if event.content.startswith(at_prefix):
+                rest = event.content[len(at_prefix):].strip()
+                event.content = f"猫猫 {rest}" if rest else "猫猫"
 
         # 提取引用消息
         replied_content = ""
