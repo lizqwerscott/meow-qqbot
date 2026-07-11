@@ -569,6 +569,7 @@ class AgentEngine:
                     response_text or "",
                     reply_to,
                     tool_calls=tool_calls_data,
+                    reasoning_content=reasoning,
                 )
 
             if not tool_calls:

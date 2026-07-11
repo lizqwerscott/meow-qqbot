@@ -3,7 +3,7 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 _log = logging.getLogger(__name__)
 
@@ -21,6 +21,7 @@ class ChatMessage:
     tool_call_id: Optional[str] = None
     tool_name: Optional[str] = None
     tool_calls: Optional[List[Dict]] = None
+    reasoning_content: Optional[str] = None
 
     def to_dict(self) -> Dict:
         if self.role == "tool":
@@ -48,10 +49,13 @@ class ChatMessage:
         }
         if self.role == "user" and self.name is not None:
             d["name"] = self.name
-        if self.role == "assistant" and self.tool_calls:
-            d["tool_calls"] = self.tool_calls
-            if not self.content:
-                d["content"] = None
+        if self.role == "assistant":
+            if self.tool_calls:
+                d["tool_calls"] = self.tool_calls
+                if not self.content:
+                    d["content"] = None
+            if self.reasoning_content:
+                d["reasoning_content"] = self.reasoning_content
         return d
 
 
@@ -86,6 +90,7 @@ class ChatContext:
         tool_call_id: Optional[str] = None,
         tool_name: Optional[str] = None,
         tool_calls: Optional[List[Dict]] = None,
+        reasoning_content: Optional[str] = None,
     ) -> None:
         message = ChatMessage(
             role=role,
@@ -97,6 +102,7 @@ class ChatContext:
             tool_call_id=tool_call_id,
             tool_name=tool_name,
             tool_calls=tool_calls,
+            reasoning_content=reasoning_content,
         )
         self.history.append(message)
         self.last_activity = time.time()
@@ -115,8 +121,12 @@ class ChatContext:
         content: str,
         message_id: Optional[str] = None,
         tool_calls: Optional[List[Dict]] = None,
+        reasoning_content: Optional[str] = None,
     ) -> None:
-        self.add_message("assistant", content, message_id, tool_calls=tool_calls)
+        self.add_message(
+            "assistant", content, message_id,
+            tool_calls=tool_calls, reasoning_content=reasoning_content,
+        )
 
     def add_tool_result(
         self,
@@ -171,6 +181,7 @@ class ChatContext:
         tool_call_id: Optional[str] = None,
         tool_name: Optional[str] = None,
         tool_calls: Optional[List[Dict]] = None,
+        reasoning_content: Optional[str] = None,
     ) -> None:
         async with self.lock:
             self.add_message(
@@ -178,6 +189,7 @@ class ChatContext:
                 sender_id=sender_id, name=name,
                 tool_call_id=tool_call_id, tool_name=tool_name,
                 tool_calls=tool_calls,
+                reasoning_content=reasoning_content,
             )
 
     async def add_assistant_message_async(
@@ -185,9 +197,14 @@ class ChatContext:
         content: str,
         message_id: Optional[str] = None,
         tool_calls: Optional[List[Dict]] = None,
+        reasoning_content: Optional[str] = None,
     ) -> None:
         async with self.lock:
-            self.add_assistant_message(content, message_id, tool_calls=tool_calls)
+            self.add_assistant_message(
+                content, message_id,
+                tool_calls=tool_calls,
+                reasoning_content=reasoning_content,
+            )
 
     async def add_tool_result_async(
         self,
@@ -258,7 +275,22 @@ class ChatContext:
                     )
                 result.append(d)
 
-        return result[-max_messages:]
+        result = result[-max_messages:]
+
+        valid_ids: Set[str] = set()
+        cleaned: List[Dict] = []
+        for d in result:
+            if d.get("role") == "assistant" and d.get("tool_calls"):
+                for tc in d["tool_calls"]:
+                    valid_ids.add(tc["id"])
+                cleaned.append(d)
+            elif d.get("role") == "tool":
+                if d.get("tool_call_id") in valid_ids:
+                    cleaned.append(d)
+            else:
+                cleaned.append(d)
+
+        return cleaned
 
     # ── 压缩 (Compaction) — 调用 AI 总结旧对话 ──
 
@@ -416,9 +448,14 @@ class ChatContextManager:
         content: str,
         message_id: Optional[str] = None,
         tool_calls: Optional[List[Dict]] = None,
+        reasoning_content: Optional[str] = None,
     ) -> None:
         context = self.get_context(chat_id)
-        context.add_assistant_message(content, message_id, tool_calls=tool_calls)
+        context.add_assistant_message(
+            content, message_id,
+            tool_calls=tool_calls,
+            reasoning_content=reasoning_content,
+        )
 
     def add_tool_result(
         self,
@@ -449,9 +486,14 @@ class ChatContextManager:
         content: str,
         message_id: Optional[str] = None,
         tool_calls: Optional[List[Dict]] = None,
+        reasoning_content: Optional[str] = None,
     ) -> None:
         async with self.lock:
-            self.add_assistant_message(chat_id, content, message_id, tool_calls=tool_calls)
+            self.add_assistant_message(
+                chat_id, content, message_id,
+                tool_calls=tool_calls,
+                reasoning_content=reasoning_content,
+            )
 
     async def add_tool_result_async(
         self,
