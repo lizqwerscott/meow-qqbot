@@ -7,8 +7,6 @@ import core.command_handlers.emoji_info
 import core.command_handlers.emoji_edit
 import core.command_handlers.emoji_reset
 import core.command_handlers.history
-import core.command_handlers.clear
-import core.command_handlers.list_chats
 import core.command_handlers.skills
 import core.command_handlers.approval_test
 import core.command_handlers.plugin_mgmt
