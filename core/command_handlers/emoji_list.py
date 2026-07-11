@@ -37,7 +37,7 @@ class EmojiListCommand:
                 lines.append(f"  {short_hash}: {desc}{tag_str}{marker} (x{count})")
 
             if result["total"] > page * result["page_size"]:
-                lines.append(f"输入「猫猫表情列表 {page + 1}」查看下一页")
+                lines.append(f"输入「猫猫 /表情列表 {page + 1}」查看下一页")
 
             return make_reply(input_message, "\n".join(lines))
         except Exception as e:

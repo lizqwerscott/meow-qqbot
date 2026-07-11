@@ -323,12 +323,12 @@ class ChatContext:
         return "\n".join(lines)
 
     async def compact_history_if_needed(
-        self, ai_service: Any
+        self, ai_service: Any, force: bool = False
     ) -> bool:
         """如果历史超过阈值，用 AI 将旧消息压缩为摘要。
         返回 True 表示执行了压缩。
         """
-        if len(self.history) < self.compact_threshold:
+        if not force and len(self.history) < self.compact_threshold:
             return False
 
         all_msgs = list(self.history)
