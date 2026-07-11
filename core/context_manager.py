@@ -290,6 +290,19 @@ class ChatContext:
             else:
                 cleaned.append(d)
 
+        responded_ids: Set[str] = set()
+        for d in cleaned:
+            if d.get("role") == "tool" and d.get("tool_call_id"):
+                responded_ids.add(d["tool_call_id"])
+
+        for d in cleaned:
+            if d.get("role") == "assistant" and d.get("tool_calls"):
+                call_ids = {tc["id"] for tc in d["tool_calls"]}
+                if not call_ids.issubset(responded_ids):
+                    del d["tool_calls"]
+                    if not d.get("content"):
+                        d["content"] = None
+
         return cleaned
 
     # ── 压缩 (Compaction) — 调用 AI 总结旧对话 ──
