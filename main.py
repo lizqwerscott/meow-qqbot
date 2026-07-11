@@ -92,8 +92,20 @@ async def main() -> None:
         emoji_dir="data/emojis/",
     )
 
+    # 上下文管理配置
+    ctx_mgmt = config.get("context_management", {})
+
     # 全局 ChatContextManager（短期记忆，不依赖 WS 生命周期）
-    context_manager = ChatContextManager()
+    context_manager = ChatContextManager(
+        max_history_per_chat=ctx_mgmt.get("max_history", 30),
+        compact_threshold=ctx_mgmt.get("compact_threshold", 25),
+        keep_recent=ctx_mgmt.get("keep_recent", 8),
+        max_conversation_messages=ctx_mgmt.get("max_conversation_messages", 12),
+        max_tool_results=ctx_mgmt.get("max_tool_results", 5),
+        keep_last_assistants=ctx_mgmt.get("keep_last_assistants", 3),
+        soft_trim=ctx_mgmt.get("soft_trim", 3000),
+        hard_clear=ctx_mgmt.get("hard_clear", 10000),
+    )
 
     # 管理员 ID 列表
     admin_ids = config.get("admin_id", [])

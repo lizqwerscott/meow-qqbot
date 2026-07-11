@@ -3,7 +3,7 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 _log = logging.getLogger(__name__)
 
@@ -12,26 +12,32 @@ _log = logging.getLogger(__name__)
 class ChatMessage:
     """聊天消息记录"""
 
-    role: str  # "user" 或 "assistant"
+    role: str  # "user" | "assistant" | "tool"
     content: str
     timestamp: float
     message_id: Optional[str] = None
     sender_id: Optional[str] = None
     name: Optional[str] = None
+    tool_call_id: Optional[str] = None
+    tool_name: Optional[str] = None
+    tool_calls: Optional[List[Dict]] = None
 
     def to_dict(self) -> Dict:
-        """转换为字典格式（供 AI 消费）"""
-        # 格式化时间戳
-        time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.timestamp))
+        if self.role == "tool":
+            return {
+                "role": "tool",
+                "tool_call_id": self.tool_call_id,
+                "content": self.content,
+            }
+
+        time_str = time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.localtime(self.timestamp)
+        )
 
         content = self.content
-        # user 角色的消息将发言人信息和时间嵌入到 content 中
         if self.role == "user":
             display_name = self.name or self.sender_id or "未知"
             content = f"[{display_name} 在 {time_str}]: {self.content}"
-        else:
-            # assistant 消息不加时间前缀，避免 AI 模仿输出时间格式
-            content = self.content
 
         d: Dict = {
             "role": self.role,
@@ -40,9 +46,12 @@ class ChatMessage:
             "message_id": self.message_id,
             "sender_id": self.sender_id,
         }
-        # user 角色的消息保留 name 字段
         if self.role == "user" and self.name is not None:
             d["name"] = self.name
+        if self.role == "assistant" and self.tool_calls:
+            d["tool_calls"] = self.tool_calls
+            if not self.content:
+                d["content"] = None
         return d
 
 
@@ -52,19 +61,20 @@ class ChatContext:
     每个 chat_id 对应一个实例
     """
 
-    def __init__(self, chat_id: str, max_history: int = 8):
-        """
-        初始化聊天上下文
-
-        Args:
-            chat_id: 聊天ID（用户ID或群聊ID）
-            max_history: 最大历史记录条数，默认为8条
-        """
+    def __init__(
+        self,
+        chat_id: str,
+        max_history: int = 30,
+        compact_threshold: int = 25,
+        keep_recent: int = 8,
+    ):
         self.chat_id = chat_id
         self.max_history = max_history
-        self.history = deque(maxlen=max_history)  # 使用deque自动限制大小
+        self.compact_threshold = compact_threshold
+        self.keep_recent = keep_recent
+        self.history = deque(maxlen=max_history)
         self.last_activity = time.time()
-        self.lock = asyncio.Lock()  # 异步锁，确保线程安全
+        self.lock = asyncio.Lock()
 
     def add_message(
         self,
@@ -73,17 +83,10 @@ class ChatContext:
         message_id: Optional[str] = None,
         sender_id: Optional[str] = None,
         name: Optional[str] = None,
+        tool_call_id: Optional[str] = None,
+        tool_name: Optional[str] = None,
+        tool_calls: Optional[List[Dict]] = None,
     ) -> None:
-        """
-        添加消息到历史记录
-
-        Args:
-            role: 角色，"user" 或 "assistant"
-            content: 消息内容
-            message_id: 消息ID（可选）
-            sender_id: 发送者ID（可选）
-            name: 发送者昵称/ID（可选，user 角色时用于 OpenAI name 字段）
-        """
         message = ChatMessage(
             role=role,
             content=content,
@@ -91,6 +94,9 @@ class ChatContext:
             message_id=message_id,
             sender_id=sender_id,
             name=name,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            tool_calls=tool_calls,
         )
         self.history.append(message)
         self.last_activity = time.time()
@@ -102,82 +108,57 @@ class ChatContext:
         sender_id: Optional[str] = None,
         name: Optional[str] = None,
     ) -> None:
-        """添加用户消息"""
         self.add_message("user", content, message_id, sender_id=sender_id, name=name)
 
     def add_assistant_message(
-        self, content: str, message_id: Optional[str] = None
+        self,
+        content: str,
+        message_id: Optional[str] = None,
+        tool_calls: Optional[List[Dict]] = None,
     ) -> None:
-        """添加助手消息"""
-        self.add_message("assistant", content, message_id)
+        self.add_message("assistant", content, message_id, tool_calls=tool_calls)
+
+    def add_tool_result(
+        self,
+        tool_name: str,
+        content: str,
+        tool_call_id: str,
+    ) -> None:
+        self.add_message("tool", content, tool_call_id=tool_call_id, tool_name=tool_name)
 
     def get_history(self, max_messages: Optional[int] = None) -> List[ChatMessage]:
-        """
-        获取历史记录
-
-        Args:
-            max_messages: 最大返回消息数，None表示返回全部
-
-        Returns:
-            历史消息列表
-        """
         if max_messages is None:
             return list(self.history)
         return list(self.history)[-max_messages:]
 
     def get_history_as_dicts(self, max_messages: Optional[int] = None) -> List[Dict]:
-        """
-        获取历史记录（字典格式）
-
-        Args:
-            max_messages: 最大返回消息数
-
-        Returns:
-            历史消息字典列表
-        """
         messages = self.get_history(max_messages)
         return [msg.to_dict() for msg in messages]
 
     def get_conversation_context(self, max_messages: Optional[int] = None) -> str:
-        """
-        获取对话上下文文本
-
-        Args:
-            max_messages: 最大消息数
-
-        Returns:
-            格式化的对话上下文
-        """
         messages = self.get_history(max_messages)
         context_lines = []
-
         for msg in messages:
             role_label = "用户" if msg.role == "user" else "助手"
             time_str = time.strftime("%H:%M:%S", time.localtime(msg.timestamp))
             context_lines.append(f"[{time_str}] {role_label}: {msg.content}")
-
         return "\n".join(context_lines)
 
     def clear_history(self) -> None:
-        """清空历史记录"""
         self.history.clear()
 
     def get_history_count(self) -> int:
-        """获取历史记录数量"""
         return len(self.history)
 
     def is_empty(self) -> bool:
-        """是否为空"""
         return len(self.history) == 0
 
     def get_last_message(self) -> Optional[ChatMessage]:
-        """获取最后一条消息"""
         if self.history:
             return self.history[-1]
         return None
 
     def get_inactivity_time(self) -> float:
-        """获取不活跃时间（秒）"""
         return time.time() - self.last_activity
 
     async def add_message_async(
@@ -187,12 +168,191 @@ class ChatContext:
         message_id: Optional[str] = None,
         sender_id: Optional[str] = None,
         name: Optional[str] = None,
+        tool_call_id: Optional[str] = None,
+        tool_name: Optional[str] = None,
+        tool_calls: Optional[List[Dict]] = None,
     ) -> None:
-        """
-        异步添加消息（线程安全）
-        """
         async with self.lock:
-            self.add_message(role, content, message_id, sender_id=sender_id, name=name)
+            self.add_message(
+                role, content, message_id,
+                sender_id=sender_id, name=name,
+                tool_call_id=tool_call_id, tool_name=tool_name,
+                tool_calls=tool_calls,
+            )
+
+    async def add_assistant_message_async(
+        self,
+        content: str,
+        message_id: Optional[str] = None,
+        tool_calls: Optional[List[Dict]] = None,
+    ) -> None:
+        async with self.lock:
+            self.add_assistant_message(content, message_id, tool_calls=tool_calls)
+
+    async def add_tool_result_async(
+        self,
+        tool_name: str,
+        content: str,
+        tool_call_id: str,
+    ) -> None:
+        async with self.lock:
+            self.add_tool_result(tool_name, content, tool_call_id)
+
+    # ── 修剪 (Pruning) — 纯内存，不修改原始数据 ──
+
+    @staticmethod
+    def _find_protected_boundary(
+        messages: List[ChatMessage], keep_last_assistants: int
+    ) -> int:
+        """找到保护区的起始索引（该索引之后的消息不做内容裁剪）"""
+        assistant_count = 0
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].role == "assistant":
+                assistant_count += 1
+                if assistant_count >= keep_last_assistants:
+                    return i
+        return 0
+
+    def get_pruned_history(
+        self,
+        max_messages: int = 12,
+        max_tool_results: int = 5,
+        keep_last_assistants: int = 3,
+        soft_trim: int = 3000,
+        hard_clear: int = 10000,
+    ) -> List[Dict]:
+        """获取经过裁剪的历史记录（纯内存，不修改原始 ChatMessage）"""
+        all_msgs = list(self.history)
+        if not all_msgs:
+            return []
+
+        boundary = self._find_protected_boundary(all_msgs, keep_last_assistants)
+
+        result = []
+        tool_count = 0
+
+        for i, msg in enumerate(all_msgs):
+            d = msg.to_dict()
+
+            if msg.role != "tool":
+                result.append(d)
+                continue
+
+            tool_count += 1
+            is_protected = i >= boundary
+            is_overflow = tool_count > max_tool_results
+
+            if is_protected and not is_overflow:
+                result.append(d)
+            else:
+                content = msg.content
+                if len(content) > hard_clear:
+                    d["content"] = (
+                        f"[工具 {msg.tool_name or '未知'} 的调用结果已裁剪]"
+                    )
+                elif len(content) > soft_trim:
+                    d["content"] = (
+                        content[:1500]
+                        + "\n\n…[中间内容已裁剪]…\n\n"
+                        + content[-1500:]
+                    )
+                result.append(d)
+
+        return result[-max_messages:]
+
+    # ── 压缩 (Compaction) — 调用 AI 总结旧对话 ──
+
+    def _format_for_summary(self, messages: List[ChatMessage]) -> str:
+        """将消息列表格式化为纯文本供 AI 总结"""
+        lines = []
+        for m in messages:
+            time_str = time.strftime(
+                "%m-%d %H:%M", time.localtime(m.timestamp)
+            )
+            if m.role == "user":
+                display_name = m.name or m.sender_id or "用户"
+                lines.append(f"[{time_str}] {display_name}: {m.content}")
+            elif m.role == "assistant":
+                if m.tool_calls:
+                    tools = ", ".join(
+                        tc["function"]["name"] for tc in m.tool_calls
+                    )
+                    lines.append(
+                        f"[{time_str}] 助手(调用工具: {tools}): {m.content}"
+                    )
+                else:
+                    lines.append(f"[{time_str}] 助手: {m.content}")
+            elif m.role == "tool":
+                tname = m.tool_name or "工具"
+                content_preview = m.content[:100].replace("\n", " ")
+                lines.append(
+                    f"[{time_str}] {tname} 返回: {content_preview}..."
+                )
+        return "\n".join(lines)
+
+    async def compact_history_if_needed(
+        self, ai_service: Any
+    ) -> bool:
+        """如果历史超过阈值，用 AI 将旧消息压缩为摘要。
+        返回 True 表示执行了压缩。
+        """
+        if len(self.history) < self.compact_threshold:
+            return False
+
+        all_msgs = list(self.history)
+        old_msgs = all_msgs[: -self.keep_recent]
+        recent_msgs = all_msgs[-self.keep_recent :]
+
+        if not old_msgs:
+            return False
+
+        text = self._format_for_summary(old_msgs)
+        _log.info(
+            f"正在压缩 [{self.chat_id[:12]}..] "
+            f"{len(old_msgs)} 条消息 → 摘要"
+        )
+
+        try:
+            summary = await ai_service.chat_completion(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是一个对话摘要助手。请将以下对话内容压缩为一段"
+                            "简洁的摘要，保留重要的事实、决定、用户偏好、约定等"
+                            "关键信息。不要添加原文没有的内容。"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"请总结以下对话：\n\n{text}",
+                    },
+                ],
+                max_tokens=500,
+            )
+        except Exception as e:
+            _log.warning(f"压缩失败: {e!r}")
+            return False
+
+        if not summary:
+            _log.warning("压缩返回空结果，跳过")
+            return False
+
+        summary.strip()
+        _log.info(f"压缩完成: {len(old_msgs)} 条 → 摘要 ({len(summary)} 字符)")
+
+        timestamp = old_msgs[0].timestamp
+        new_history = deque(maxlen=self.max_history)
+        new_history.append(ChatMessage(
+            role="assistant",
+            content=f"【历史对话摘要】\n{summary}",
+            timestamp=timestamp,
+            name="系统",
+        ))
+        for m in recent_msgs:
+            new_history.append(m)
+        self.history = new_history
+        return True
 
 
 class ChatContextManager:
@@ -201,37 +361,41 @@ class ChatContextManager:
     管理所有 chat_id 的上下文
     """
 
-    def __init__(self, max_history_per_chat: int = 8, cleanup_interval: int = 3600):
-        """
-        初始化上下文管理器
-
-        Args:
-            max_history_per_chat: 每个聊天最大历史记录数，默认为8条
-            cleanup_interval: 清理不活跃聊天的间隔（秒），默认为1小时
-        """
+    def __init__(
+        self,
+        max_history_per_chat: int = 30,
+        cleanup_interval: int = 3600,
+        compact_threshold: int = 25,
+        keep_recent: int = 8,
+        max_conversation_messages: int = 12,
+        max_tool_results: int = 5,
+        keep_last_assistants: int = 3,
+        soft_trim: int = 3000,
+        hard_clear: int = 10000,
+    ):
         self.max_history_per_chat = max_history_per_chat
         self.cleanup_interval = cleanup_interval
+        self.compact_threshold = compact_threshold
+        self.keep_recent = keep_recent
+        self.max_conversation_messages = max_conversation_messages
+        self.max_tool_results = max_tool_results
+        self.keep_last_assistants = keep_last_assistants
+        self.soft_trim = soft_trim
+        self.hard_clear = hard_clear
         self.contexts: Dict[str, ChatContext] = {}
         self.lock = asyncio.Lock()
 
     def get_context(self, chat_id: str) -> ChatContext:
-        """
-        获取或创建聊天上下文
-
-        Args:
-            chat_id: 聊天ID
-
-        Returns:
-            ChatContext 实例
-        """
         if chat_id not in self.contexts:
-            self.contexts[chat_id] = ChatContext(chat_id, self.max_history_per_chat)
+            self.contexts[chat_id] = ChatContext(
+                chat_id,
+                max_history=self.max_history_per_chat,
+                compact_threshold=self.compact_threshold,
+                keep_recent=self.keep_recent,
+            )
         return self.contexts[chat_id]
 
     async def get_context_async(self, chat_id: str) -> ChatContext:
-        """
-        异步获取或创建聊天上下文（线程安全）
-        """
         async with self.lock:
             return self.get_context(chat_id)
 
@@ -243,32 +407,28 @@ class ChatContextManager:
         sender_id: Optional[str] = None,
         name: Optional[str] = None,
     ) -> None:
-        """
-        添加用户消息到指定聊天
-
-        Args:
-            chat_id: 聊天ID
-            content: 消息内容
-            message_id: 消息ID（可选）
-            sender_id: 发送者ID（可选）
-            name: 发送者昵称/ID（可选）
-        """
         context = self.get_context(chat_id)
         context.add_user_message(content, message_id, sender_id=sender_id, name=name)
 
     def add_assistant_message(
-        self, chat_id: str, content: str, message_id: Optional[str] = None
+        self,
+        chat_id: str,
+        content: str,
+        message_id: Optional[str] = None,
+        tool_calls: Optional[List[Dict]] = None,
     ) -> None:
-        """
-        添加助手消息到指定聊天
-
-        Args:
-            chat_id: 聊天ID
-            content: 消息内容
-            message_id: 消息ID（可选）
-        """
         context = self.get_context(chat_id)
-        context.add_assistant_message(content, message_id)
+        context.add_assistant_message(content, message_id, tool_calls=tool_calls)
+
+    def add_tool_result(
+        self,
+        chat_id: str,
+        tool_name: str,
+        content: str,
+        tool_call_id: str,
+    ) -> None:
+        context = self.get_context(chat_id)
+        context.add_tool_result(tool_name, content, tool_call_id)
 
     async def add_user_message_async(
         self,
@@ -278,36 +438,34 @@ class ChatContextManager:
         sender_id: Optional[str] = None,
         name: Optional[str] = None,
     ) -> None:
-        """
-        异步添加用户消息（线程安全）
-        """
         async with self.lock:
             self.add_user_message(
                 chat_id, content, message_id, sender_id=sender_id, name=name
             )
 
     async def add_assistant_message_async(
-        self, chat_id: str, content: str, message_id: Optional[str] = None
+        self,
+        chat_id: str,
+        content: str,
+        message_id: Optional[str] = None,
+        tool_calls: Optional[List[Dict]] = None,
     ) -> None:
-        """
-        异步添加助手消息（线程安全）
-        """
         async with self.lock:
-            self.add_assistant_message(chat_id, content, message_id)
+            self.add_assistant_message(chat_id, content, message_id, tool_calls=tool_calls)
+
+    async def add_tool_result_async(
+        self,
+        chat_id: str,
+        tool_name: str,
+        content: str,
+        tool_call_id: str,
+    ) -> None:
+        async with self.lock:
+            self.add_tool_result(chat_id, tool_name, content, tool_call_id)
 
     def get_history(
         self, chat_id: str, max_messages: Optional[int] = None
     ) -> List[Dict]:
-        """
-        获取聊天历史记录
-
-        Args:
-            chat_id: 聊天ID
-            max_messages: 最大消息数
-
-        Returns:
-            历史消息字典列表
-        """
         if chat_id not in self.contexts:
             return []
         return self.contexts[chat_id].get_history_as_dicts(max_messages)
@@ -315,146 +473,79 @@ class ChatContextManager:
     def get_chat_history(
         self, chat_id: str, max_messages: Optional[int] = None
     ) -> List[Dict]:
-        """
-        获取聊天历史记录（兼容性别名）
-
-        Args:
-            chat_id: 聊天ID
-            max_messages: 最大消息数
-
-        Returns:
-            历史消息字典列表
-        """
         return self.get_history(chat_id, max_messages)
 
     async def get_chat_history_async(
         self, chat_id: str, max_messages: Optional[int] = None
     ) -> List[Dict]:
-        """
-        异步获取聊天历史记录（线程安全）
-        """
         async with self.lock:
             return self.get_chat_history(chat_id, max_messages)
+
+    async def get_pruned_history_async(
+        self,
+        chat_id: str,
+        max_messages: Optional[int] = None,
+    ) -> List[Dict]:
+        async with self.lock:
+            if chat_id not in self.contexts:
+                return []
+            ctx = self.contexts[chat_id]
+            return ctx.get_pruned_history(
+                max_messages=max_messages or self.max_conversation_messages,
+                max_tool_results=self.max_tool_results,
+                keep_last_assistants=self.keep_last_assistants,
+                soft_trim=self.soft_trim,
+                hard_clear=self.hard_clear,
+            )
 
     def get_conversation_context(
         self, chat_id: str, max_messages: Optional[int] = None
     ) -> str:
-        """
-        获取对话上下文文本
-
-        Args:
-            chat_id: 聊天ID
-            max_messages: 最大消息数
-
-        Returns:
-            格式化的对话上下文
-        """
         if chat_id not in self.contexts:
             return ""
         return self.contexts[chat_id].get_conversation_context(max_messages)
 
     def clear_history(self, chat_id: str) -> None:
-        """
-        清空指定聊天的历史记录
-
-        Args:
-            chat_id: 聊天ID
-        """
         if chat_id in self.contexts:
             self.contexts[chat_id].clear_history()
 
     def clear_chat_history(self, chat_id: str) -> None:
-        """
-        清空指定聊天的历史记录（兼容性别名）
-
-        Args:
-            chat_id: 聊天ID
-        """
         self.clear_history(chat_id)
 
     async def clear_chat_history_async(self, chat_id: str) -> None:
-        """
-        异步清空聊天历史记录（线程安全）
-        """
         async with self.lock:
             self.clear_chat_history(chat_id)
 
     def remove_context(self, chat_id: str) -> None:
-        """
-        移除聊天上下文
-
-        Args:
-            chat_id: 聊天ID
-        """
         if chat_id in self.contexts:
             del self.contexts[chat_id]
 
     def cleanup_inactive_contexts(self, max_inactivity: int = 7200) -> List[str]:
-        """
-        清理不活跃的聊天上下文
-
-        Args:
-            max_inactivity: 最大不活跃时间（秒），默认为2小时
-
-        Returns:
-            被清理的聊天ID列表
-        """
         removed = []
         current_time = time.time()
-
         for chat_id, context in list(self.contexts.items()):
             if context.get_inactivity_time() > max_inactivity:
                 removed.append(chat_id)
                 del self.contexts[chat_id]
-
         return removed
 
     async def cleanup_inactive_contexts_async(
         self, max_inactivity: int = 7200
     ) -> List[str]:
-        """
-        异步清理不活跃的聊天上下文（线程安全）
-        """
         async with self.lock:
             return self.cleanup_inactive_contexts(max_inactivity)
 
     def get_all_chat_ids(self) -> List[str]:
-        """
-        获取所有聊天ID
-
-        Returns:
-            聊天ID列表
-        """
         return list(self.contexts.keys())
 
     def get_all_chats(self) -> Dict[str, ChatContext]:
-        """
-        获取所有聊天上下文
-
-        Returns:
-            聊天ID到上下文的映射
-        """
         return self.contexts.copy()
 
     def get_context_count(self) -> int:
-        """
-        获取上下文数量
-
-        Returns:
-            上下文数量
-        """
         return len(self.contexts)
 
     def get_total_messages_count(self) -> int:
-        """
-        获取所有上下文中的总消息数
-
-        Returns:
-            总消息数
-        """
         total = 0
         for context in self.contexts.values():
             total += len(context.history)
         return total
-
-
