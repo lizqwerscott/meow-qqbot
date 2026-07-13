@@ -35,7 +35,10 @@ def ensure_messages_consistent(messages: List[dict]) -> None:
             continue
 
         # 检查此 assistant 之后是否有足够的 tool 响应
-        expected_ids = {tc["id"] for tc in tool_calls if tc.get("id")}
+        expected_ids = {
+            tc["id"] for tc in tool_calls
+            if isinstance(tc, dict) and tc.get("id")
+        }
         if not expected_ids:
             # tool_calls 没有 ID，可能格式异常，移除
             _log.warning(f"移除无 ID 的 tool_calls 消息: count={len(tool_calls)}")
