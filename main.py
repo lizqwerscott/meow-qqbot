@@ -65,7 +65,7 @@ async def main() -> None:
         timeout=openai_config.get("timeout", 30),
         max_retries=openai_config.get("max_retries", 3),
         temperature=openai_config.get("temperature", 0.7),
-        max_tokens=openai_config.get("max_tokens", 1000),
+        max_tokens=openai_config.get("max_tokens", 8192),
         reasoning_effort=openai_config.get("reasoning_effort"),
     )
 
@@ -96,16 +96,15 @@ async def main() -> None:
     # 上下文管理配置
     ctx_mgmt = config.get("context_management", {})
 
-    # 全局 ChatContextManager（短期记忆，不依赖 WS 生命周期）
+    # 全局 ChatContextManager（短期记忆，append-only，token 阈值触发 compaction）
     context_manager = ChatContextManager(
-        max_history_per_chat=ctx_mgmt.get("max_history", 30),
-        compact_threshold=ctx_mgmt.get("compact_threshold", 25),
-        keep_recent=ctx_mgmt.get("keep_recent", 8),
-        max_conversation_messages=ctx_mgmt.get("max_conversation_messages", 12),
+        max_history_per_chat=ctx_mgmt.get("max_history", 10000),
+        compact_threshold_tokens=ctx_mgmt.get("compact_threshold_tokens", 950000),
+        keep_recent_tokens=ctx_mgmt.get("keep_recent_tokens", 50000),
         max_tool_results=ctx_mgmt.get("max_tool_results", 5),
         keep_last_assistants=ctx_mgmt.get("keep_last_assistants", 3),
-        soft_trim=ctx_mgmt.get("soft_trim", 3000),
-        hard_clear=ctx_mgmt.get("hard_clear", 10000),
+        soft_trim=ctx_mgmt.get("soft_trim", 20000),
+        hard_clear=ctx_mgmt.get("hard_clear", 180000),
     )
 
     # 管理员 ID 列表

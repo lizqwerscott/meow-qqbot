@@ -23,7 +23,7 @@ class AIService:
         timeout: int = 30,
         max_retries: int = 3,
         temperature: float = 0.7,
-        max_tokens: int = 1000,
+        max_tokens: int = 8192,
         reasoning_effort: Optional[str] = None,
     ):
         """

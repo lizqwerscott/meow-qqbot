@@ -110,11 +110,13 @@ class AgentEngine:
         skill_managers: Optional[Any] = None,
         max_tool_rounds: int = -1,
         cost_tracker: Optional[CostTracker] = None,
+        context_window: int = 1000000,
     ):
         self.ai_service = ai_service
         self._max_tool_rounds = max_tool_rounds
         self.template_manager = template_manager
         self.context_manager = context_manager
+        self._context_window = context_window
         self._bot_id = bot_id
         self._admin_id = admin_id
         self._openai_config = openai_config
@@ -299,6 +301,34 @@ class AgentEngine:
 
     # ── 单条消息处理 ──
 
+    # ── 常量文本块（避免重复构建） ──
+
+    _MEMORY_SYSTEM_DESC = (
+        "\n\n【记忆系统】\n"
+        "你可以使用以下工具查询和保存长期记忆。\n"
+        "\n"
+        "**重要原则：不确定的先查记忆，不要猜测！**\n"
+        "- 当用户询问关于某人的背景、偏好、说过的话、过往经历时→ 先 search_memory，不要凭印象回答\n"
+        "- 当用户提到以前的事、上次的约定、之前讨论过的内容→ 先 search_memory 确认事实\n"
+        "- 当需要确认某个具体事实（如生日、爱好、说过的话）→ 先 search_memory 再回答\n"
+        "- 如果 search_memory 没有找到相关信息，如实告诉用户你不知道，不要编造\n"
+        "\n"
+        "可用工具：\n"
+        "- search_memory：搜索记忆（指定 person_name 可查群友，不指定则查当前用户），可查画像、经历、事实等\n"
+        "- search_relation：搜索两个人之间的关系记忆，系统会同时搜索双方记忆和当前用户的记载\n"
+        "- mark_important：记录重要信息。用户解释背景/喜好/事实时主动调用，立即存入长期记忆\n"
+    )
+
+    _TOOL_COOPERATION_TEXT = (
+        "\n\n【工具配合原则】\n"
+        "许多任务需要多个工具和技能配合完成：\n"
+        "- 先 view_skill 加载一个技能的方法论，执行完步骤后，\n"
+        "  再 view_skill 加载下一个技能继续后续步骤（技能串联）\n"
+        "- 先 search_memory 查背景信息，再制定方案，最后 execute_command 执行\n"
+        "- 先用工具 A 获取结果，再用工具 B 对结果进一步处理\n"
+        "如果当前工具返回的结果不够完整，考虑用另一个工具进一步获取。"
+    )
+
     async def _process_message(
         self,
         input_message: InputMessage,
@@ -309,27 +339,25 @@ class AgentEngine:
         is_group = input_message.is_group
         user_nickname = get_user_nickname(input_message.sender_id)
 
+        # ── 1. Token 阈值触发 compaction ──
         compacted = await self.context_manager.get_context_async(chat_id)
         compacted_result, compact_usage = await compacted.compact_history_if_needed(self.ai_service)
         if compact_usage:
             self.cost_tracker.record_turn(chat_id, self.ai_service.model, compact_usage)
 
-        context_messages = await self.context_manager.get_pruned_history_async(
-            chat_id,
-        )
-
+        # ── 2. 静态 system prompt（永不改变） ──
         if is_group:
-            system_prompt = self.template_manager.get_group_chat_prompt()
+            static_prompt = self.template_manager.get_group_chat_prompt()
         else:
-            system_prompt = self.template_manager.get_private_chat_prompt(
-                user_nickname
-            )
+            static_prompt = self.template_manager.get_private_chat_prompt(user_nickname)
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            *context_messages,
-        ]
+        # ── 3. 完整历史（append-only，不修剪） ──
+        history = compacted.get_history_as_dicts()
 
+        messages = [{"role": "system", "content": static_prompt}]
+        messages.extend(history)
+
+        # ── 4. 确定可用工具 ──
         has_emojis = self.emoji_manager is not None and self.emoji_manager.count_emojis() > 0
         if is_group and self._nm:
             has_users = any(
@@ -353,67 +381,41 @@ class AgentEngine:
             tools_to_use.extend(SKILL_TOOLS)
         tools_to_use = tools_to_use or None
 
-        if tools_to_use:
-            emoji_tags = self.emoji_manager.get_all_tags() if has_emojis else []
-            if is_group:
-                system_prompt = self.template_manager.get_group_chat_prompt(
-                    has_emojis=has_emojis,
-                    has_users=has_users,
-                    emoji_tags=emoji_tags,
-                )
-            else:
-                system_prompt = self.template_manager.get_private_chat_prompt(
-                    user_nickname,
-                    has_emojis=has_emojis,
-                    has_users=has_users,
-                    emoji_tags=emoji_tags,
-                )
-            messages[0] = {"role": "system", "content": system_prompt}
+        # ── 5. 动态上下文 → 末尾单独一个 system 消息 ──
+        dynamic_parts = []
 
-        if self.everos:
-            desc = (
-                "\n\n【记忆系统】\n"
-                "你可以使用以下工具查询和保存长期记忆。\n"
-                "\n"
-                "**重要原则：不确定的先查记忆，不要猜测！**\n"
-                "- 当用户询问关于某人的背景、偏好、说过的话、过往经历时→ 先 search_memory，不要凭印象回答\n"
-                "- 当用户提到以前的事、上次的约定、之前讨论过的内容→ 先 search_memory 确认事实\n"
-                "- 当需要确认某个具体事实（如生日、爱好、说过的话）→ 先 search_memory 再回答\n"
-                "- 如果 search_memory 没有找到相关信息，如实告诉用户你不知道，不要编造\n"
-                "\n"
-                "可用工具：\n"
-                "- search_memory：搜索记忆（指定 person_name 可查群友，不指定则查当前用户），可查画像、经历、事实等\n"
-                "- search_relation：搜索两个人之间的关系记忆，系统会同时搜索双方记忆和当前用户的记载\n"
-                "- mark_important：记录重要信息。用户解释背景/喜好/事实时主动调用，立即存入长期记忆\n"
-            )
-            messages[0]["content"] += desc
+        # 记忆上下文（查询 EverOS）
+        memory_text = await self._build_memory_context(
+            sender_id=input_message.sender_id,
+            input_message=input_message,
+        )
+        if memory_text:
+            dynamic_parts.append(memory_text)
 
+        # 当前时间
         _tz = timezone(timedelta(hours=8))
         now = datetime.now(_tz)
         weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
         time_info = now.strftime(f"%Y-%m-%d %H:%M:%S ({weekday_names[now.weekday()]})")
-        messages[0]["content"] += f"\n\n当前时间: {time_info}"
+        dynamic_parts.append(f"当前时间: {time_info}")
 
+        # 记忆系统说明
+        if self.everos:
+            dynamic_parts.append(self._MEMORY_SYSTEM_DESC)
+
+        # 技能列表
         if self._skill_managers and self._skill_managers.has_skills:
-            messages[0]["content"] += self._skill_managers.get_available_skills_block()
+            dynamic_parts.append(self._skill_managers.get_available_skills_block())
 
+        # 工具配合原则
         if tools_to_use:
-            messages[0]["content"] += (
-                "\n\n【工具配合原则】\n"
-                "许多任务需要多个工具和技能配合完成：\n"
-                "- 先 view_skill 加载一个技能的方法论，执行完步骤后，\n"
-                "  再 view_skill 加载下一个技能继续后续步骤（技能串联）\n"
-                "- 先 search_memory 查背景信息，再制定方案，最后 execute_command 执行\n"
-                "- 先用工具 A 获取结果，再用工具 B 对结果进一步处理\n"
-                "如果当前工具返回的结果不够完整，考虑用另一个工具进一步获取。"
-            )
+            dynamic_parts.append(self._TOOL_COOPERATION_TEXT)
 
-        await self._auto_inject_memory_context(
-            messages=messages,
-            chat_id=chat_id,
-            sender_id=input_message.sender_id,
-            input_message=input_message,
-        )
+        if dynamic_parts:
+            messages.append({
+                "role": "system",
+                "content": "\n\n".join(dynamic_parts),
+            })
 
         _log.info(
             f"请求 AI messages:\n{json.dumps(messages, ensure_ascii=False, indent=2)}"
@@ -421,6 +423,7 @@ class AgentEngine:
         if tools_to_use:
             _log.info(f"本次请求注入 {len(tools_to_use)} 个工具: {[t['function']['name'] for t in tools_to_use]}")
 
+        # ── 6. 工具调用循环 ──
         await self._execute_tool_calls(
             messages=messages,
             tools=tools_to_use,
@@ -434,21 +437,20 @@ class AgentEngine:
 
         _log.info(f"消息处理完成: {input_message.id}")
 
-    # ── 自动记忆注入 ──
+    # ── 构建记忆上下文（返回字符串，不修改 messages） ──
 
-    async def _auto_inject_memory_context(
+    async def _build_memory_context(
         self,
-        messages: list,
-        chat_id: str,
         sender_id: str,
         input_message: InputMessage,
-    ) -> None:
+    ) -> str:
+        """查询 EverOS 记忆，返回记忆上下文字符串，或空字符串。"""
         if not self.everos:
-            return
+            return ""
 
         query = input_message.content.strip()
         if not query:
-            return
+            return ""
 
         try:
             result = await self.everos.search(
@@ -462,9 +464,9 @@ class AgentEngine:
             profiles = result.get("profiles", [])
 
             if not episodes and not profiles:
-                return
+                return ""
 
-            parts = ["\n\n--- 相关记忆 ---"]
+            parts = ["--- 相关记忆 ---"]
 
             if profiles:
                 for p in profiles[:3]:
@@ -481,15 +483,14 @@ class AgentEngine:
 
             parts.append("--- 相关记忆结束 ---")
 
-            memory_text = "\n".join(parts)
-            messages[0]["content"] += memory_text
-
             _log.info(
-                f"自动记忆注入: chat={chat_id[:16]}.. sender={sender_id[:16]}.. "
+                f"自动记忆注入: sender={sender_id[:16]}.. "
                 f"注入{len(episodes)}条经历, {len(profiles)}条画像"
             )
+            return "\n".join(parts)
         except Exception as e:
             _log.warning(f"自动记忆注入失败: {e!r}")
+            return ""
 
     # ════════════════════════════════════════════════════════════
     # 工具调用循环
@@ -647,7 +648,7 @@ class AgentEngine:
         """从会话队列中 drain 新消息，注入到当前工具循环。
 
         同一用户 → 不注入记忆（减少冗余调用）
-        不同用户 → 走一次 _auto_inject_memory_context
+        不同用户 → 走一次 _build_memory_context
         """
         queue = await self.session_manager.get_queue(chat_id)
         drained: List[InputMessage] = []
@@ -681,12 +682,15 @@ class AgentEngine:
                     await self.everos.flush(session_id=chat_id)
 
             if msg.sender_id != current_sender_id and self.everos:
-                await self._auto_inject_memory_context(
-                    messages=messages,
-                    chat_id=chat_id,
+                memory_text = await self._build_memory_context(
                     sender_id=msg.sender_id,
                     input_message=msg,
                 )
+                if memory_text:
+                    steered.append({
+                        "role": "system",
+                        "content": memory_text,
+                    })
 
             queue.task_done()
 
