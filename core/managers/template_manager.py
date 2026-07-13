@@ -9,6 +9,7 @@ class TemplateManager:
 
     _PRIVATE_CHAT_TEMPLATE = "prompts/private_chat.j2"
     _GROUP_CHAT_TEMPLATE = "prompts/group_chat.j2"
+    _TASK_CHAT_TEMPLATE = "prompts/task_chat.j2"
 
     def __init__(self, config: Dict[str, Any]):
         """
@@ -132,9 +133,32 @@ class TemplateManager:
 
         return prompt
 
+    def get_task_chat_prompt(
+        self,
+        *,
+        current_time: str = "",
+    ) -> str:
+        """
+        获取后台任务系统提示（使用 task_chat.j2 模板）
+
+        Args:
+            current_time: 当前时间字符串
+
+        Returns:
+            后台任务系统提示文本
+        """
+        context = {
+            "current_time": current_time,
+        }
+        prompt = self.render_prompt_template(self._TASK_CHAT_TEMPLATE, context)
+        if not prompt:
+            prompt = "你是一个后台任务执行助手。请根据指令完成任务。"
+        return prompt
+
     def get_template_paths(self) -> Dict[str, str]:
         """获取所有模板路径"""
         return {
             "private_chat": self._PRIVATE_CHAT_TEMPLATE,
             "group_chat": self._GROUP_CHAT_TEMPLATE,
+            "task_chat": self._TASK_CHAT_TEMPLATE,
         }

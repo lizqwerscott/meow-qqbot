@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "aiofiles>=25.1.0",
     "colorlog>=6.10.1",
+    "croniter>=6.0.0",
     "deepseek-tokenizer>=0.3.0",
     "fastapi>=0.115.0",
     "jinja2>=3.1.6",

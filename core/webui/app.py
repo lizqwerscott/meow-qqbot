@@ -13,7 +13,7 @@ from starlette.responses import RedirectResponse as StarletteRedirectResponse
 from starlette.status import HTTP_303_SEE_OTHER
 
 from core.webui.auth import AuthMiddleware, verify_token
-from core.webui.routers import status, emojis, nicknames, sessions, learners
+from core.webui.routers import status, emojis, nicknames, sessions, learners, tasks
 
 _log = logging.getLogger(__name__)
 
@@ -82,6 +82,7 @@ def create_app(managers: Dict[str, Any], webui_config: Dict[str, Any]) -> FastAP
     app.include_router(nicknames.router)
     app.include_router(sessions.router)
     app.include_router(learners.router)
+    app.include_router(tasks.router)
 
     return app
 

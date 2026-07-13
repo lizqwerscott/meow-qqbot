@@ -21,6 +21,7 @@ from core.command_handlers import register_all_commands
 from core.tools.skill_managers import SkillManagers
 from core.plugins.manager import PluginManager
 from core.learners.orchestrator import LearningOrchestrator
+from core.tasks import TaskStore, TaskManager, CronJobManager, BackgroundTaskRunner, CronJobScheduler
 
 from core.webui import create_app, start_webui
 
@@ -150,6 +151,32 @@ async def main() -> None:
                 " — 记忆功能将降级运行"
             )
 
+    # ── 后台任务系统（Tasks + Cron） ──
+    tasks_config = config.get("tasks", {})
+    task_manager = None
+    cron_job_manager = None
+    background_task_runner = None
+    cron_scheduler = None
+
+    if tasks_config.get("enabled", True):
+        scheduler_cfg = tasks_config.get("scheduler", {})
+        task_store = TaskStore(
+            data_dir=tasks_config.get("data_dir", "data/tasks/"),
+            max_tasks=tasks_config.get("max_tasks", 1000),
+            task_ttl_days=tasks_config.get("task_ttl_days", 30),
+        )
+        task_manager = TaskManager(store=task_store)
+        cron_job_manager = CronJobManager(store=task_store)
+        background_task_runner = BackgroundTaskRunner(task_manager=task_manager)
+
+        if scheduler_cfg.get("enabled", True):
+            cron_scheduler = CronJobScheduler(
+                poll_interval=scheduler_cfg.get("poll_interval", 30),
+                catch_up_window=scheduler_cfg.get("catch_up_window", 3600),
+                max_concurrent=scheduler_cfg.get("max_concurrent", 3),
+            )
+        _log.info("后台任务系统已初始化")
+
     bot_id = config.get("bot_id", "")
 
     # ── NicknameManager（统一昵称管理，全局单例） ──
@@ -190,6 +217,33 @@ async def main() -> None:
         cost_tracker=cost_tracker,
     )
 
+    # ── 将任务管理器注入 AgentEngine（供 WebUI 访问） ──
+    if task_manager:
+        agent_engine._task_manager = task_manager
+    if cron_job_manager:
+        agent_engine._cron_job_manager = cron_job_manager
+
+    # ── 连接后台任务执行器与 AgentEngine ──
+    if background_task_runner and task_manager:
+        background_task_runner.set_execute_callback(
+            agent_engine.execute_background_task
+        )
+        # 投递回调用 QQ 的 reply 机制
+        background_task_runner.set_delivery_callback(
+            lambda chat_id, content, message_id, is_group=None: None
+        )
+
+    # ── 连接 Cron 调度器 ──
+    if cron_scheduler and cron_job_manager:
+        cron_scheduler.set_callbacks(
+            on_trigger=lambda job: background_task_runner.run_cron_job(
+                job=job,
+                timeout=config.get("tasks", {}).get("scheduler", {}).get("task_timeout", 300),
+            ),
+            get_jobs=cron_job_manager.list_jobs,
+            update_job=cron_job_manager.update_job,
+        )
+
     # ── 3. 创建 BotEngine ──
     router = Router(agent_engine=agent_engine)
 
@@ -216,6 +270,9 @@ async def main() -> None:
         api_client=engine.api,
         bot_engine=engine,
         ai_service=ai_service,
+        task_manager=task_manager,
+        cron_job_manager=cron_job_manager,
+        background_task_runner=background_task_runner,
     )
 
     # ── 4. 加载插件 ──
@@ -258,9 +315,31 @@ async def main() -> None:
     engine.start(gateway_url, loop)
     print(f"机器人已启动，WebSocket 网关: {gateway_url}")
 
+    # 启动 Cron 调度器（在 WS 就绪后）
+    if cron_scheduler:
+        cron_scheduler.start()
+
+    task_cleanup_task = None
+    if task_manager:
+        # 定期清理过期任务记录（每 1 小时）
+        async def _periodic_task_cleanup():
+            while True:
+                await asyncio.sleep(3600)
+                try:
+                    cleaned = task_manager.cleanup_old_tasks()
+                    if cleaned:
+                        _log.info(f"定时清理了 {cleaned} 条过期任务")
+                except Exception:
+                    pass
+        task_cleanup_task = asyncio.create_task(_periodic_task_cleanup())
+
     try:
         await asyncio.Event().wait()
     finally:
+        if cron_scheduler:
+            await cron_scheduler.stop()
+        if task_cleanup_task:
+            task_cleanup_task.cancel()
         await engine.stop()
 
 

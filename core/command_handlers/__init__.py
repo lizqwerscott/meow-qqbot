@@ -12,5 +12,7 @@ import core.command_handlers.approval_test
 import core.command_handlers.plugin_mgmt
 import core.command_handlers.cost
 import core.command_handlers.jargon
+import core.command_handlers.tasks
+import core.command_handlers.cron
 
 __all__ = ["command", "register_all_commands", "_HANDLER_REGISTRY"]
