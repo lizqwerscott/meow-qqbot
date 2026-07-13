@@ -8,7 +8,10 @@
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Callable, List, Optional
+
+from croniter import croniter
 
 from .models import CronJob, TaskRecord, TaskStatus
 from .store import TaskStore
@@ -141,6 +144,17 @@ class CronJobManager:
 
     # ── CRUD ──
 
+    @staticmethod
+    def _recalculate_next_run(job: CronJob) -> None:
+        """用 croniter 从当前时间计算 next_run_at。"""
+        try:
+            now = datetime.now(timezone.utc)
+            cron = croniter(job.cron_expression, now)
+            job.next_run_at = cron.get_next(float)
+        except (ValueError, KeyError) as e:
+            _log.error(f"定时任务 {job.name} cron 表达式解析失败: {e}")
+            job.next_run_at = None
+
     def create_job(
         self,
         name: str,
@@ -159,10 +173,12 @@ class CronJobManager:
             catch_up=catch_up,
             enabled=enabled,
         )
+        self._recalculate_next_run(job)
         self._store.add_job(job)
         _log.info(
             f"定时任务已创建: id={job.id[:12]}.. name={name} "
-            f"cron={cron_expression}"
+            f"cron={cron_expression} "
+            f"next_run={job.next_run_at}"
         )
         return job
 
@@ -195,6 +211,7 @@ class CronJobManager:
         if job is None:
             return False
         job.enabled = True
+        self._recalculate_next_run(job)
         self._store.update_job(job)
         _log.info(f"定时任务已启用: {job.name}")
         return True
