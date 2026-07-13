@@ -1,8 +1,10 @@
 import asyncio
+import json
 import logging
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from deepseek_tokenizer import ds_token
@@ -67,6 +69,21 @@ class ChatMessage:
                 d["reasoning_content"] = self.reasoning_content
         return d
 
+    @staticmethod
+    def from_dict(data: dict) -> "ChatMessage":
+        return ChatMessage(
+            role=data.get("role", "user"),
+            content=data.get("content", ""),
+            timestamp=data.get("timestamp", 0.0),
+            message_id=data.get("message_id"),
+            sender_id=data.get("sender_id"),
+            name=data.get("name"),
+            tool_call_id=data.get("tool_call_id"),
+            tool_name=data.get("tool_name"),
+            tool_calls=data.get("tool_calls"),
+            reasoning_content=data.get("reasoning_content"),
+        )
+
 
 class ChatContext:
     """
@@ -80,6 +97,7 @@ class ChatContext:
         max_history: int = 10000,
         compact_threshold_tokens: int = 950000,
         keep_recent_tokens: int = 50000,
+        cache_dir: Optional[str] = None,
     ):
         self.chat_id = chat_id
         self.max_history = max_history
@@ -88,6 +106,8 @@ class ChatContext:
         self.history = deque(maxlen=max_history)
         self.last_activity = time.time()
         self.lock = asyncio.Lock()
+        self._cache_dir: Optional[str] = cache_dir
+        self._save_task: Optional[asyncio.Task] = None
 
     def add_message(
         self,
@@ -115,6 +135,7 @@ class ChatContext:
         )
         self.history.append(message)
         self.last_activity = time.time()
+        self._try_schedule_save()
 
     def add_user_message(
         self,
@@ -192,6 +213,73 @@ class ChatContext:
 
     def get_inactivity_time(self) -> float:
         return time.time() - self.last_activity
+
+    # ── 本地缓存持久化 ──
+
+    def _get_cache_path(self) -> Optional[Path]:
+        if not self._cache_dir:
+            return None
+        return Path(self._cache_dir) / f"{self.chat_id}.json"
+
+    def _is_expired(self, max_age: float = 86400) -> bool:
+        if not self.history:
+            return True
+        latest = self.history[-1].timestamp
+        return (time.time() - latest) > max_age
+
+    def _serialize(self) -> list:
+        return [msg.to_dict() for msg in self.history]
+
+    def _deserialize(self, data: list) -> None:
+        for item in data:
+            self.history.append(ChatMessage.from_dict(item))
+
+    def save(self) -> None:
+        path = self._get_cache_path()
+        if not path:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = self._serialize()
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            _log.warning("保存会话缓存失败 [%s..]: %s", self.chat_id[:12], e)
+
+    def load(self) -> bool:
+        """从本地缓存加载历史。如果已过期则删除缓存文件并返回 False。"""
+        path = self._get_cache_path()
+        if not path or not path.exists():
+            return False
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not data:
+                return False
+            self._deserialize(data)
+            if self._is_expired():
+                _log.info("会话缓存已过期，遗忘 [%s..]", self.chat_id[:12])
+                self.history.clear()
+                path.unlink(missing_ok=True)
+                return False
+            self.last_activity = time.time()
+            _log.info("从本地缓存恢复会话 [%s..] (%d 条)", self.chat_id[:12], len(self.history))
+            return True
+        except Exception as e:
+            _log.warning("加载会话缓存失败 [%s..]: %s", self.chat_id[:12], e)
+            return False
+
+    async def _schedule_save(self) -> None:
+        if self._save_task and not self._save_task.done():
+            return
+        self._save_task = asyncio.create_task(asyncio.to_thread(self.save))
+
+    def _try_schedule_save(self) -> None:
+        if not self._cache_dir:
+            return
+        try:
+            asyncio.get_running_loop()
+            asyncio.ensure_future(self._schedule_save())
+        except RuntimeError:
+            pass
 
     async def add_message_async(
         self,
@@ -465,6 +553,7 @@ class ChatContextManager:
         keep_last_assistants: int = 3,
         soft_trim: int = 20000,
         hard_clear: int = 180000,
+        cache_dir: Optional[str] = None,
     ):
         self.max_history_per_chat = max_history_per_chat
         self.cleanup_interval = cleanup_interval
@@ -474,6 +563,7 @@ class ChatContextManager:
         self.keep_last_assistants = keep_last_assistants
         self.soft_trim = soft_trim
         self.hard_clear = hard_clear
+        self.cache_dir = cache_dir
         self.contexts: Dict[str, ChatContext] = {}
         self._ctx_lock = asyncio.Lock()                     # 保护 self.contexts 字典
         self._chat_locks: Dict[str, asyncio.Lock] = {}      # 每 chat 操作锁
@@ -486,12 +576,15 @@ class ChatContextManager:
 
     def get_context(self, chat_id: str) -> ChatContext:
         if chat_id not in self.contexts:
-            self.contexts[chat_id] = ChatContext(
+            ctx = ChatContext(
                 chat_id,
                 max_history=self.max_history_per_chat,
                 compact_threshold_tokens=self.compact_threshold_tokens,
                 keep_recent_tokens=self.keep_recent_tokens,
+                cache_dir=self.cache_dir,
             )
+            ctx.load()
+            self.contexts[chat_id] = ctx
         return self.contexts[chat_id]
 
     async def get_context_async(self, chat_id: str) -> ChatContext:
