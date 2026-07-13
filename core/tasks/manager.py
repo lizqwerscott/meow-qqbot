@@ -171,6 +171,7 @@ class CronJobManager:
         *,
         at: Optional[float] = None,
         delivery_channel: Optional[str] = None,
+        is_group: bool = True,
         catch_up: bool = True,
         enabled: bool = True,
         delete_after_run: bool = True,
@@ -189,6 +190,7 @@ class CronJobManager:
             prompt: AI 执行指令
             at: 一次性执行 UTC 时间戳（与 cron_expression 二选一）
             delivery_channel: 结果投递 chat_id
+            is_group: 来源聊天是否为群聊
             catch_up: 重启时补跑（仅周期任务）
             enabled: 是否启用
             delete_after_run: 一次性任务执行后自动删除
@@ -213,6 +215,7 @@ class CronJobManager:
             catch_up=catch_up,
             delete_after_run=delete_after_run,
             delivery_channel=delivery_channel,
+            is_group=is_group,
             session_mode=session_mode,
             custom_session_id=custom_session_id,
             payload_type=payload_type,

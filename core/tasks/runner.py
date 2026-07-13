@@ -76,12 +76,14 @@ class BackgroundTaskRunner:
         self,
         task: TaskRecord,
         timeout: float = 300.0,
+        is_group: bool = True,
     ) -> TaskRecord:
         """在独立 Session 中执行一个后台任务。
 
         Args:
             task: 待执行的任务记录（状态应为 PENDING）
             timeout: 单个工具循环超时（秒）
+            is_group: 来源聊天是否为群聊（影响工具如 send_emoji 的接口选择）
 
         Returns:
             更新后的 TaskRecord
@@ -116,6 +118,7 @@ class BackgroundTaskRunner:
                     chat_id=chat_id,
                     prompt=task.prompt,
                     sender_id="system",
+                    is_group=is_group,
                 ),
                 timeout=timeout,
             )
@@ -299,7 +302,7 @@ class BackgroundTaskRunner:
         elif job.payload_type == "system_event":
             task = await self._execute_system_event_payload(job, task)
         else:  # message（默认）
-            task = await self.run_task(task, timeout=timeout)
+            task = await self.run_task(task, timeout=timeout, is_group=job.is_group)
 
         # 投递结果
         if job.delivery_channel and task and self._delivery_cb:
@@ -315,7 +318,7 @@ class BackgroundTaskRunner:
                         chat_id=job.delivery_channel,
                         content=f"{prefix} 定时任务 [{job.name}] 执行{'成功' if task.status == TaskStatus.SUCCESS else '失败'}：\n{content[:500]}",
                         message_id="",
-                        is_group=True,
+                        is_group=job.is_group,
                     )
                 except Exception as e:
                     _log.error(f"投递任务结果失败: {e}")

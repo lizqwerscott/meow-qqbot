@@ -107,6 +107,7 @@ class CronJob:
     created_at: float = field(default_factory=_now)
     next_run_at: Optional[float] = None
     delivery_channel: Optional[str] = None  # 结果投递到的 chat_id
+    is_group: bool = True  # 来源聊天是否为群聊（影响 send_emoji 等工具使用群聊还是私聊接口）
     session_mode: str = SessionMode.ISOLATED.value  # isolated/current/custom/main
     custom_session_id: Optional[str] = None  # custom 模式下的命名 session ID
 
