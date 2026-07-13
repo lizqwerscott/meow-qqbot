@@ -69,6 +69,7 @@ class TaskRecord:
     result: Optional[str] = None    # AI 回复文本
     error: Optional[str] = None
     delivery_channel: Optional[str] = None  # 结果投递到的 chat_id
+    reply_to_message_id: str = ""           # 创建任务时的原始消息 ID（用于发消息时构造 msg_id）
 
     def __post_init__(self):
         if not self.session_id:

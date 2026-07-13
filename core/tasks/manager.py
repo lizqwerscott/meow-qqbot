@@ -35,6 +35,7 @@ class TaskManager:
         task_type: str = "manual",
         job_id: Optional[str] = None,
         delivery_channel: Optional[str] = None,
+        reply_to_message_id: str = "",
     ) -> TaskRecord:
         """创建一个新的后台任务（状态 = pending）。"""
         task = TaskRecord(
@@ -42,6 +43,7 @@ class TaskManager:
             prompt=prompt,
             job_id=job_id,
             delivery_channel=delivery_channel,
+            reply_to_message_id=reply_to_message_id,
         )
         self._store.add_task(task)
         _log.info(

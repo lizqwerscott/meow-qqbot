@@ -100,8 +100,13 @@ class ToolLoop:
         reply_callback: Callable,
         sender_id: str = "",
         get_user_nickname: Optional[Callable[[str], str]] = None,
+        delivery_channel: str = "",
+        reply_to_message_id: str = "",
     ) -> bool:
         """执行工具调用循环。
+
+        Args:
+            delivery_channel: 后台任务时传入真实聊天 ID，供 send_emoji 等工具使用
 
         Returns:
             sent_emoji: 是否在循环中发送了表情。
@@ -190,6 +195,8 @@ class ToolLoop:
                 reply_to=reply_to,
                 sender_id=sender_id,
                 reply_callback=reply_callback,
+                delivery_channel=delivery_channel,
+                reply_to_message_id=reply_to_message_id,
             )
 
             for tc in tool_calls:

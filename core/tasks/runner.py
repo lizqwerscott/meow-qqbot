@@ -59,7 +59,7 @@ class BackgroundTaskRunner:
     def set_execute_callback(self, cb: Callable) -> None:
         """注入任务执行回调。
 
-        cb: async (chat_id: str, prompt: str, sender_id: str) -> (result: str | None, error: str | None)
+        cb: async (chat_id: str, prompt: str, sender_id: str, is_group: bool = True, delivery_channel: str = "", reply_to_message_id: str = "") -> (result: str | None, error: str | None)
         """
         self._execute_prompt_cb = cb
 
@@ -119,6 +119,8 @@ class BackgroundTaskRunner:
                     prompt=task.prompt,
                     sender_id="system",
                     is_group=is_group,
+                    delivery_channel=task.delivery_channel or "",
+                    reply_to_message_id=task.reply_to_message_id,
                 ),
                 timeout=timeout,
             )

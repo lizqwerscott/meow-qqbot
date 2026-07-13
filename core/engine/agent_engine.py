@@ -350,6 +350,8 @@ class AgentEngine:
         prompt: str,
         sender_id: str,
         is_group: bool = True,
+        delivery_channel: str = "",
+        reply_to_message_id: str = "",
     ) -> tuple[Optional[str], Optional[str]]:
         """在独立会话中执行后台任务。
 
@@ -361,6 +363,8 @@ class AgentEngine:
             prompt: AI 执行指令
             sender_id: 发送者（如 "system"）
             is_group: 来源聊天是否为群聊（影响工具如 send_emoji 的接口选择）
+            delivery_channel: 真实聊天 ID，用于 send_emoji 等需要真实 chat_id 的工具
+            reply_to_message_id: 创建任务时的原始消息 ID，用于构造 msg_id
 
         Returns:
             (result_text, error_text)
@@ -418,6 +422,8 @@ class AgentEngine:
                 reply_to=msg.id,
                 reply_callback=capturing_reply_callback,
                 sender_id=sender_id,
+                delivery_channel=delivery_channel,
+                reply_to_message_id=reply_to_message_id,
             )
 
             result = "\n".join(captured_replies) if captured_replies else None
