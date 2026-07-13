@@ -130,10 +130,6 @@ class PromptBuilder:
             tools_to_use.extend(MARK_IMPORTANT_TOOL)
         if self._skill_managers and self._skill_managers.has_skills:
             tools_to_use.extend(SKILL_TOOLS)
-            if sender_id not in self._admin_ids:
-                # 非管理员看不到 execute_command
-                tools_to_use = [t for t in tools_to_use
-                                if t.get("function", {}).get("name") != "execute_command"]
         tools_to_use = tools_to_use or None
 
         # ── 3. 静态 system prompt ──
