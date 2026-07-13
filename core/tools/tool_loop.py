@@ -209,9 +209,6 @@ class ToolLoop:
                     content = result.content
                     if result.sent_emoji:
                         sent_emoji = True
-                        await self.context_manager.add_assistant_message_async(
-                            chat_id, "[助手发送了一个表情]", reply_to,
-                        )
                 except BaseException as e:
                     _log.error(f"工具 [{tc.function.name}] 执行异常: {e}")
                     content = json.dumps({"error": f"执行异常: {e}"}, ensure_ascii=False)
@@ -236,6 +233,12 @@ class ToolLoop:
                 await self.context_manager.add_tool_result_async(
                     chat_id, tc.function.name, content, tc.id,
                 )
+
+                # 在 tool 响应之后写入表情标记，避免插在 assistant(tc) 和 tool 之间
+                if result.sent_emoji:
+                    await self.context_manager.add_assistant_message_async(
+                        chat_id, "[助手发送了一个表情]", reply_to,
+                    )
 
             if get_user_nickname:
                 steer_msgs = await self._drain_steering_messages(
