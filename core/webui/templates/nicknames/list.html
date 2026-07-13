@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}昵称管理 - 猫猫管理{% endblock %}
+{% set nav_active = "nicknames" %}
+
+{% block content %}
+<h2 style="margin-bottom:20px">🏷️ 昵称管理</h2>
+
+<div class="card">
+    <h2>📝 手动昵称（优先）</h2>
+    <form method="post" action="/nicknames/manual" style="display:flex;gap:8px;margin-bottom:12px">
+        <input type="text" name="user_id" placeholder="用户 ID" required style="flex:1">
+        <input type="text" name="nickname" placeholder="昵称" required style="flex:1">
+        <button type="submit" class="btn btn-primary">添加/更新</button>
+    </form>
+    {% if manual_nicknames %}
+    <table>
+        <thead>
+            <tr><th>用户 ID</th><th>昵称</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+            {% for uid, name in manual_nicknames.items() %}
+            <tr>
+                <td><code>{{ uid[:16] }}..</code></td>
+                <td>{{ name }}</td>
+                <td>
+                    <form method="post" action="/nicknames/manual/{{ uid }}/delete" style="display:inline" onsubmit="return confirm('确定删除？')">
+                        <button type="submit" class="btn btn-sm btn-danger">删除</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="color:var(--text-secondary)">暂无手动昵称</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>🤖 自动收集昵称</h2>
+    {% if auto_nicknames %}
+    <table>
+        <thead>
+            <tr><th>用户 ID</th><th>昵称</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+            {% for uid, name in auto_nicknames.items() %}
+            <tr>
+                <td><code>{{ uid[:16] }}..</code></td>
+                <td>{{ name }}</td>
+                <td>
+                    <form method="post" action="/nicknames/auto/{{ uid }}/promote" style="display:inline">
+                        <button type="submit" class="btn btn-sm btn-primary" title="提升为手动昵称">提升</button>
+                    </form>
+                    <form method="post" action="/nicknames/auto/{{ uid }}/delete" style="display:inline" onsubmit="return confirm('确定删除？')">
+                        <button type="submit" class="btn btn-sm btn-danger">删除</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="color:var(--text-secondary)">暂无自动收集的昵称</p>
+    {% endif %}
+</div>
+{% endblock %}

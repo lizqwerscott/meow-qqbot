@@ -101,6 +101,10 @@ class ExpressionLearner:
             f"(min_freq={self._min_frequency}, window={self._observation_window})"
         )
 
+    @property
+    def store(self) -> "ExpressionStore":
+        return self._store
+
     # ── 核心入口 ──
 
     async def observe(

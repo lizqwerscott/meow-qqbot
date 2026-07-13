@@ -8,14 +8,17 @@ dependencies = [
     "aiofiles>=25.1.0",
     "colorlog>=6.10.1",
     "deepseek-tokenizer>=0.3.0",
+    "fastapi>=0.115.0",
     "jinja2>=3.1.6",
     "numpy>=2.4.6",
     "openai[aiohttp]>=2.26.0",
     "pillow>=12.2.0",
+    "python-multipart>=0.0.20",
     "psutil>=7.2.2",
     "pyyaml>=6.0",
     "qqbot-agent-sdk",
     "skillkit>=0.4.0",
+    "uvicorn[standard]>=0.34.0",
 ]
 
 [tool.uv.sources]

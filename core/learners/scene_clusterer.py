@@ -112,6 +112,10 @@ class SceneClusterer:
             f"reuse_threshold={self._reuse_threshold})"
         )
 
+    @property
+    def store(self) -> "SceneStore":
+        return self._store
+
     # ── 核心入口 ──
 
     async def observe(self, message_text: str) -> None:

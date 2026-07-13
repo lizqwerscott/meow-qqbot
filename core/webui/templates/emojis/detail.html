@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}表情详情 - 猫猫管理{% endblock %}
+{% set nav_active = "emojis" %}
+
+{% block content %}
+<h2 style="margin-bottom:20px">😊 表情详情</h2>
+
+<div class="card">
+    <div style="display:flex;gap:24px;align-items:flex-start">
+        <div>
+            {% if emoji.file_name %}
+            <img src="/static/emojis/{{ emoji.file_name }}" class="emoji-thumb-lg" alt="emoji" onerror="this.style.display='none'">
+            {% endif %}
+        </div>
+        <div style="flex:1">
+            <table>
+                <tbody>
+                    <tr><th style="width:120px">Hash</th><td><code>{{ emoji.hash }}</code></td></tr>
+                    <tr><th>原始 URL</th><td><a href="{{ emoji.url }}" target="_blank" style="word-break:break-all">{{ emoji.url[:60] }}..</a></td></tr>
+                    <tr><th>文件名</th><td>{{ emoji.file_name }}</td></tr>
+                    <tr><th>自动描述</th><td>{{ emoji.auto_description or '-' }}</td></tr>
+                    <tr><th>自动标签</th><td>{% for t in (emoji.auto_tags or []) %}<span class="badge">{{ t }}</span> {% else %}-{% endfor %}</td></tr>
+                    <tr><th>自定义描述</th><td>{{ emoji.user_description or '-' }}</td></tr>
+                    <tr><th>自定义标签</th><td>{% for t in (emoji.user_tags or []) %}<span class="badge success">{{ t }}</span> {% else %}-{% endfor %}</td></tr>
+                    <tr><th>使用次数</th><td>{{ emoji.used_count }}</td></tr>
+                    <tr><th>创建时间</th><td>{{ emoji.created_at }}</td></tr>
+                    <tr><th>更新时间</th><td>{{ emoji.updated_at }}</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>✏️ 编辑自定义描述/标签</h2>
+    <form method="post" action="/emojis/{{ emoji.hash }}">
+        <div class="form-group">
+            <label for="description">自定义描述</label>
+            <input type="text" id="description" name="description" value="{{ emoji.user_description or '' }}" placeholder="输入描述文字">
+        </div>
+        <div class="form-group">
+            <label for="tags">自定义标签（逗号分隔）</label>
+            <input type="text" id="tags" name="tags" value="{{ (emoji.user_tags or []) | join('、') }}" placeholder="标签1、标签2、标签3">
+        </div>
+        <div class="form-actions">
+            <button type="submit" class="btn btn-primary">保存</button>
+            <button type="submit" formaction="/emojis/{{ emoji.hash }}/reset" class="btn">重置为自动</button>
+        </div>
+    </form>
+</div>
+
+<a href="/emojis" class="btn">← 返回列表</a>
+{% endblock %}

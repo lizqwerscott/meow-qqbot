@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>猫猫管理 - 登录</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-page">
+    <div class="login-card">
+        <h1>🐱 猫猫管理</h1>
+        {% if error %}
+        <div class="flash error">{{ error }}</div>
+        {% endif %}
+        <form method="post" action="/login">
+            <div class="form-group">
+                <label for="token">访问令牌</label>
+                <input type="password" id="token" name="token" placeholder="输入 Token" required>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="btn btn-primary" style="width:100%">登录</button>
+            </div>
+        </form>
+    </div>
+</body>
+</html>

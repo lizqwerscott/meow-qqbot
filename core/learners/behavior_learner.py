@@ -73,6 +73,10 @@ class BehaviorLearner:
             f"decay_rate={self._decay_rate})"
         )
 
+    @property
+    def store(self) -> "BehaviorStore":
+        return self._store
+
     # ── 核心入口 ──
 
     async def observe(

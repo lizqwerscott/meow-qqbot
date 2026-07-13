@@ -136,6 +136,10 @@ class JargonMiner:
             f"cross_group_min={self._cross_group_min})"
         )
 
+    @property
+    def store(self) -> JargonStore:
+        return self._store
+
     # ── 核心入口 ──
 
     async def observe(self, message_text: str, chat_id: str) -> None:

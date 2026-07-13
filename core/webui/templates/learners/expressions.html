@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}表情映射 - 猫猫管理{% endblock %}
+{% set nav_active = "learners" %}
+
+{% block content %}
+<h2 style="margin-bottom:20px">🧠 学习数据</h2>
+
+<div style="display:flex;gap:8px;margin-bottom:16px">
+    <a href="/learners/jargons" class="btn">俚语词典</a>
+    <a href="/learners/expressions" class="btn btn-primary {% if tab == 'expressions' %}active{% endif %}">表情映射</a>
+    <a href="/learners/behaviors" class="btn {% if tab == 'behaviors' %}active{% endif %}">行为模式</a>
+    <a href="/learners/scenes" class="btn {% if tab == 'scenes' %}active{% endif %}">场景簇</a>
+</div>
+
+<div class="card">
+    <h2>🎭 表情映射</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>触发关键词</th>
+                <th>表情 Hash</th>
+                <th>状态</th>
+                <th>置信度</th>
+                <th>频率</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in items %}
+            <tr>
+                <td>
+                    {% for kw in (entry.trigger_keywords or [])[:3] %}
+                    <span class="badge">{{ kw }}</span>
+                    {% endfor %}
+                </td>
+                <td><code>{{ (entry.expression_hash or '')[:12] }}..</code></td>
+                <td>
+                    <span class="badge {% if entry.review_status == 'approved' %}success{% elif entry.review_status == 'rejected' %}danger{% else %}warning{% endif %}">
+                        {{ entry.review_status or 'pending' }}
+                    </span>
+                </td>
+                <td>{{ "%.2f"|format(entry.confidence_weight or 0) }}</td>
+                <td>{{ entry.frequency or 0 }}</td>
+                <td>
+                    <form method="post" action="/learners/expressions/{{ entry.expression_hash }}/delete" style="display:inline" onsubmit="return confirm('确定删除？')">
+                        <button type="submit" class="btn btn-sm btn-danger">删除</button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="6" style="text-align:center;color:var(--text-secondary)">暂无表情映射</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

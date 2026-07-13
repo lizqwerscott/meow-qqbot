@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}猫猫管理{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="layout">
+    <aside class="sidebar">
+        <h1><a href="/">🐱 猫猫管理</a></h1>
+        <nav>
+            <a href="/status" class="{% if nav_active == 'status' %}active{% endif %}">📊 系统状态</a>
+            <a href="/emojis" class="{% if nav_active == 'emojis' %}active{% endif %}">😊 表情管理</a>
+            <a href="/nicknames" class="{% if nav_active == 'nicknames' %}active{% endif %}">🏷️ 昵称管理</a>
+            <a href="/sessions" class="{% if nav_active == 'sessions' %}active{% endif %}">💬 会话历史</a>
+            <a href="/learners/jargons" class="{% if nav_active == 'learners' %}active{% endif %}">🧠 学习数据</a>
+        </nav>
+    </aside>
+    <main class="main">
+        {% for cat, msg in get_flashed_messages(request) %}
+        <div class="flash {{ cat }}">{{ msg }}</div>
+        {% endfor %}
+        {% block content %}{% endblock %}
+    </main>
+</div>
+</body>
+</html>

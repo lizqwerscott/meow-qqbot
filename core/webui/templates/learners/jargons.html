@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}俚语词典 - 猫猫管理{% endblock %}
+{% set nav_active = "learners" %}
+
+{% block content %}
+<h2 style="margin-bottom:20px">🧠 学习数据</h2>
+
+<div style="display:flex;gap:8px;margin-bottom:16px">
+    <a href="/learners/jargons" class="btn btn-primary {% if tab == 'jargons' %}active{% endif %}">俚语词典</a>
+    <a href="/learners/expressions" class="btn {% if tab == 'expressions' %}active{% endif %}">表情映射</a>
+    <a href="/learners/behaviors" class="btn {% if tab == 'behaviors' %}active{% endif %}">行为模式</a>
+    <a href="/learners/scenes" class="btn {% if tab == 'scenes' %}active{% endif %}">场景簇</a>
+</div>
+
+<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h2 style="margin:0">📖 俚语词典</h2>
+    </div>
+
+    <div class="search-bar">
+        <form method="get" action="/learners/jargons" style="display:flex;gap:8px;width:100%">
+            <input type="text" name="q" placeholder="搜索词条" value="{{ query or '' }}">
+            <button type="submit" class="btn btn-primary">搜索</button>
+            {% if query %}
+            <a href="/learners/jargons" class="btn">清除</a>
+            {% endif %}
+        </form>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>词条</th>
+                <th>定义</th>
+                <th>例句</th>
+                <th>推理等级</th>
+                <th>来源</th>
+                <th>频率</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in items %}
+            <tr>
+                <td><strong>{{ entry.term }}</strong></td>
+                <td>{{ (entry.definition or '')[:60] }}{% if entry.definition and entry.definition|length > 60 %}…{% endif %}</td>
+                <td>{{ ((entry.examples or [])[0] or '')[:40] }}{% if entry.examples and entry.examples[0]|length > 40 %}…{% endif %}</td>
+                <td>{{ entry.inference_level or 0 }}</td>
+                <td><code>{{ (entry.source or entry.added_by or 'auto')[:16] }}</code></td>
+                <td>{{ entry.frequency or 0 }}</td>
+                <td>
+                    <form method="post" action="/learners/jargons/{{ entry.term }}/delete" style="display:inline" onsubmit="return confirm('确定删除词条「{{ entry.term }}」？')">
+                        <button type="submit" class="btn btn-sm btn-danger">删除</button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7" style="text-align:center;color:var(--text-secondary)">暂无俚语数据</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
