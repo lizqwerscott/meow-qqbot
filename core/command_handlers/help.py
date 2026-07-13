@@ -2,7 +2,7 @@ import logging
 from typing import Any, Dict, List
 
 from core.command_handlers.base import command, make_reply
-from core.command_manager import CommandManager
+from core.managers.command_manager import CommandManager
 from core.message import InputMessage
 
 _log = logging.getLogger(__name__)

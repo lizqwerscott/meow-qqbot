@@ -18,13 +18,13 @@ from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
 from qqbot_agent_sdk.dto import MediaInfo, MessageToCreate, QQMessageType, WSReadyData
 from qqbot_agent_sdk.media_loader import MediaUploader
 
-from core.agent_engine import AgentEngine
-from core.command_manager import CommandManager
-from core.emoji_manager import EmojiManager, is_custom_emoji
+from core.engine.agent_engine import AgentEngine
+from core.managers.command_manager import CommandManager
+from core.managers.emoji_manager import EmojiManager, is_custom_emoji
 from core.message import InputMessage
 from core.ai.multimodal import MultimodalService
-from core.nickname_manager import NicknameManager
-from core.router import Router
+from core.managers.nickname_manager import NicknameManager
+from core.engine.router import Router
 
 _log = logging.getLogger(__name__)
 

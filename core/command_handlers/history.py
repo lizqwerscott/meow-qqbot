@@ -3,7 +3,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from core.command_handlers.base import command, make_reply
-from core.context_manager import ChatContextManager
+from core.managers.context_manager import ChatContextManager
 from core.message import InputMessage
 
 _log = logging.getLogger(__name__)

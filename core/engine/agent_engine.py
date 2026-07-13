@@ -15,17 +15,17 @@ from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from core.ai.service import AIService
-from core.context_manager import ChatContextManager
-from core.cost_tracker import CostTracker
-from core.emoji_manager import EmojiManager
+from core.managers.context_manager import ChatContextManager
+from core.managers.cost_tracker import CostTracker
+from core.managers.emoji_manager import EmojiManager
 from core.message import InputMessage
-from core.nickname_manager import NicknameManager
-from core.template_manager import TemplateManager
+from core.managers.nickname_manager import NicknameManager
+from core.managers.template_manager import TemplateManager
 from core.tools import ToolExecutor
 from core.learners.orchestrator import LearningOrchestrator
 
-from core.prompt_builder import PromptBuilder
-from core.session_manager import SessionTaskManager
+from core.engine.prompt_builder import PromptBuilder
+from core.managers.session_manager import SessionTaskManager
 from core.tools.tool_loop import ToolLoop
 
 _log = logging.getLogger(__name__)
@@ -160,7 +160,7 @@ class AgentEngine:
             _log.debug(f"消息钩子已注销 ({len(self._message_hooks)} 个)")
 
     def _register_builtin_hooks(self) -> None:
-        from core.duplicate_reply import DuplicateReplyDetector
+        from core.engine.duplicate_reply import DuplicateReplyDetector
         self._duplicate_reply = DuplicateReplyDetector(self.context_manager)
         self.add_message_hook(self._duplicate_reply.handle_message, priority=100)
 
