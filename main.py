@@ -244,8 +244,11 @@ async def main() -> None:
             },
             webui_config=webui_config,
         )
+        _webui_host = webui_config.get("host", "127.0.0.1")
         _webui_port = webui_config.get("port", 8080)
-        _log.info(f"WebUI 管理面板将在 http://127.0.0.1:{_webui_port} 启动")
+        _log.info(f"WebUI 管理面板将在 http://{_webui_host}:{_webui_port} 启动")
+        if _webui_host in ("0.0.0.0", "::"):
+            _log.info("局域网内可通过 http://<本机IP>:%d 访问", _webui_port)
         asyncio.create_task(start_webui(webui_app, webui_config))
 
     # ── 6. 启动 WebSocket ──
