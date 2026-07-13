@@ -51,7 +51,7 @@ class HistoryCommand:
             f"消息数: {count} (用户 {role_counts.get('user', 0)}, 助手 {role_counts.get('assistant', 0)}, 工具 {role_counts.get('tool', 0)})",
             f"最近活动: {last_time}",
             f"最近消息: {last_preview}",
-            f"最大历史: {ctx.max_history} | 压缩阈值: {ctx.compact_threshold}",
+            f"最大历史: {ctx.max_history} | 压缩阈值: {ctx.compact_threshold_tokens} tokens",
         ]
         return make_reply(input_message, "\n".join(parts))
 
@@ -83,11 +83,11 @@ class HistoryCommand:
         try:
             ctx = self.context_manager.get_context(target)
             old_count = ctx.get_history_count()
-            ok = await ctx.compact_history_if_needed(self.ai_service, force=True)
+            compacted, _ = await ctx.compact_history_if_needed(self.ai_service, force=True)
             new_count = ctx.get_history_count()
-            if ok:
+            if compacted:
                 return make_reply(input_message, f"会话 {target[:24]}… 压缩完成: {old_count} → {new_count} 条")
-            return make_reply(input_message, f"会话 {target[:24]}… 无需压缩 ({old_count} 条, 阈值 {ctx.compact_threshold})")
+            return make_reply(input_message, f"会话 {target[:24]}… 无需压缩 ({old_count} 条, 阈值 {ctx.compact_threshold_tokens} tokens)")
         except Exception as e:
             return make_reply(input_message, f"压缩失败: {e}")
 
