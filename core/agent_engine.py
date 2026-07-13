@@ -299,12 +299,10 @@ class AgentEngine:
 
         await self.session_manager.mark_consumer_done(chat_id)
 
-    # ── 单条消息处理 ──
-
-    # ── 常量文本块（避免重复构建） ──
+    # ── 常量文本块（供模板使用） ──
 
     _MEMORY_SYSTEM_DESC = (
-        "\n\n【记忆系统】\n"
+        "【记忆系统】\n"
         "你可以使用以下工具查询和保存长期记忆。\n"
         "\n"
         "**重要原则：不确定的先查记忆，不要猜测！**\n"
@@ -317,16 +315,6 @@ class AgentEngine:
         "- search_memory：搜索记忆（指定 person_name 可查群友，不指定则查当前用户），可查画像、经历、事实等\n"
         "- search_relation：搜索两个人之间的关系记忆，系统会同时搜索双方记忆和当前用户的记载\n"
         "- mark_important：记录重要信息。用户解释背景/喜好/事实时主动调用，立即存入长期记忆\n"
-    )
-
-    _TOOL_COOPERATION_TEXT = (
-        "\n\n【工具配合原则】\n"
-        "许多任务需要多个工具和技能配合完成：\n"
-        "- 先 view_skill 加载一个技能的方法论，执行完步骤后，\n"
-        "  再 view_skill 加载下一个技能继续后续步骤（技能串联）\n"
-        "- 先 search_memory 查背景信息，再制定方案，最后 execute_command 执行\n"
-        "- 先用工具 A 获取结果，再用工具 B 对结果进一步处理\n"
-        "如果当前工具返回的结果不够完整，考虑用另一个工具进一步获取。"
     )
 
     async def _process_message(
@@ -345,19 +333,7 @@ class AgentEngine:
         if compact_usage:
             self.cost_tracker.record_turn(chat_id, self.ai_service.model, compact_usage)
 
-        # ── 2. 静态 system prompt（永不改变） ──
-        if is_group:
-            static_prompt = self.template_manager.get_group_chat_prompt()
-        else:
-            static_prompt = self.template_manager.get_private_chat_prompt(user_nickname)
-
-        # ── 3. 完整历史（append-only，不修剪） ──
-        history = compacted.get_history_as_dicts()
-
-        messages = [{"role": "system", "content": static_prompt}]
-        messages.extend(history)
-
-        # ── 4. 确定可用工具 ──
+        # ── 2. 确定可用工具 / 能力状态 ──
         has_emojis = self.emoji_manager is not None and self.emoji_manager.count_emojis() > 0
         if is_group and self._nm:
             has_users = any(
@@ -381,8 +357,40 @@ class AgentEngine:
             tools_to_use.extend(SKILL_TOOLS)
         tools_to_use = tools_to_use or None
 
-        # ── 5. 动态上下文 → 末尾单独一个 system 消息 ──
+        # ── 3. 静态 system prompt（包含所有不变的引导说明） ──
+        skill_intro = self._skill_managers.get_skill_system_intro() if (self._skill_managers and self._skill_managers.has_skills) else ""
+        memory_desc = self._MEMORY_SYSTEM_DESC if self.everos else ""
+
+        if is_group:
+            static_prompt = self.template_manager.get_group_chat_prompt(
+                has_emojis=has_emojis,
+                has_users=has_users,
+                memory_system_desc=memory_desc,
+                skill_system_intro=skill_intro,
+            )
+        else:
+            static_prompt = self.template_manager.get_private_chat_prompt(
+                user_nickname,
+                has_emojis=has_emojis,
+                has_users=has_users,
+                memory_system_desc=memory_desc,
+                skill_system_intro=skill_intro,
+            )
+
+        # ── 4. 完整历史 ──
+        history = compacted.get_history_as_dicts()
+
+        messages = [{"role": "system", "content": static_prompt}]
+        messages.extend(history)
+
+        # ── 5. 动态上下文 → 末尾单独一个 system 消息（仅放变化的内容） ──
         dynamic_parts = []
+
+        # 技能条目列表（高优先级——仅 XML，不包含原则说明）
+        if self._skill_managers and self._skill_managers.has_skills:
+            entries = self._skill_managers.get_skill_entries_block()
+            if entries:
+                dynamic_parts.append(entries)
 
         # 记忆上下文（查询 EverOS）
         memory_text = await self._build_memory_context(
@@ -399,17 +407,21 @@ class AgentEngine:
         time_info = now.strftime(f"%Y-%m-%d %H:%M:%S ({weekday_names[now.weekday()]})")
         dynamic_parts.append(f"当前时间: {time_info}")
 
-        # 记忆系统说明
-        if self.everos:
-            dynamic_parts.append(self._MEMORY_SYSTEM_DESC)
+        # 表情标签列表（动态）
+        if has_emojis and self.emoji_manager:
+            tags = self.emoji_manager.get_all_tags()
+            if tags:
+                dynamic_parts.append("可用表情标签：" + "、".join(tags))
 
-        # 技能列表
-        if self._skill_managers and self._skill_managers.has_skills:
-            dynamic_parts.append(self._skill_managers.get_available_skills_block())
-
-        # 工具配合原则
-        if tools_to_use:
-            dynamic_parts.append(self._TOOL_COOPERATION_TEXT)
+        # 群友列表（动态）
+        if has_users and self._nm:
+            merged = self._nm.all_merged()
+            others = {uid: name for uid, name in merged.items() if uid != self._bot_id}
+            if others:
+                lines = ["【群友列表】"]
+                for uid, name in sorted(others.items(), key=lambda x: x[1]):
+                    lines.append(f"- {name} (id: {uid[:12]}..)")
+                dynamic_parts.append("\n".join(lines))
 
         if dynamic_parts:
             messages.append({
@@ -438,6 +450,12 @@ class AgentEngine:
         _log.info(f"消息处理完成: {input_message.id}")
 
     # ── 构建记忆上下文（返回字符串，不修改 messages） ──
+
+    _DIRTY_PATTERNS = (
+        "<available_skills", "<skill>", "<description>",
+        "<name>", "【工具配合原则】", "【记忆系统】",
+        "--- 技能系统 ---", "工具配合原则",
+    )
 
     async def _build_memory_context(
         self,
@@ -469,17 +487,29 @@ class AgentEngine:
             parts = ["--- 相关记忆 ---"]
 
             if profiles:
-                for p in profiles[:3]:
+                for p in profiles[:1]:
                     pd = p.get("profile_data", {})
                     if isinstance(pd, dict):
                         for k, v in pd.items():
-                            parts.append(f"- [{k}]: {v}")
+                            if isinstance(v, str) and any(p in v for p in self._DIRTY_PATTERNS):
+                                continue
+                            parts.append(f"- [{k}]: {str(v)[:150]}")
 
             if episodes:
-                for e in episodes[:5]:
-                    summary = e.get("summary", "") or e.get("episode", "")
-                    if summary:
-                        parts.append(f"- {summary[:300]}")
+                count = 0
+                for e in episodes:
+                    if count >= 3:
+                        break
+                    summary = (e.get("summary", "") or e.get("episode", "")).strip()
+                    if not summary:
+                        continue
+                    if any(p in summary for p in self._DIRTY_PATTERNS):
+                        continue
+                    parts.append(f"- {summary[:150]}")
+                    count += 1
+
+            if len(parts) == 1:
+                return ""
 
             parts.append("--- 相关记忆结束 ---")
 
