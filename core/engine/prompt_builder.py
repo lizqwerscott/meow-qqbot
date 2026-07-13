@@ -21,6 +21,7 @@ from core.tools.definitions import (
     SKILL_TOOLS,
     EXECUTE_COMMAND_TOOL,
     LEARNER_TOOLS,
+    TASK_TOOLS,
 )
 
 _log = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ class PromptBuilder:
         search_top_k: int = 3,
         admin_ids: Optional[List[str]] = None,
         learning_orchestrator: Any = None,
+        has_tasks: bool = False,
     ):
         self.template_manager = template_manager
         self.context_manager = context_manager
@@ -84,6 +86,7 @@ class PromptBuilder:
         self.learners = learning_orchestrator
         self._search_top_k = search_top_k
         self._admin_ids = admin_ids or []
+        self._has_tasks = has_tasks
 
     async def build(
         self,
@@ -135,6 +138,8 @@ class PromptBuilder:
             tools_to_use.extend(SKILL_TOOLS)
         if self.learners:
             tools_to_use.extend(LEARNER_TOOLS)
+        if self._has_tasks:
+            tools_to_use.extend(TASK_TOOLS)
         tools_to_use = tools_to_use or None
 
         # ── 3. 静态 system prompt ──
