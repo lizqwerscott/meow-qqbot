@@ -20,6 +20,7 @@ from core.tools.definitions import (
     MARK_IMPORTANT_TOOL,
     SKILL_TOOLS,
     EXECUTE_COMMAND_TOOL,
+    LEARNER_TOOLS,
 )
 
 _log = logging.getLogger(__name__)
@@ -70,6 +71,7 @@ class PromptBuilder:
         everos_memory: Any = None,
         search_top_k: int = 3,
         admin_ids: Optional[List[str]] = None,
+        learning_orchestrator: Any = None,
     ):
         self.template_manager = template_manager
         self.context_manager = context_manager
@@ -79,6 +81,7 @@ class PromptBuilder:
         self.emoji_manager = emoji_manager
         self._skill_managers = skill_managers
         self.everos = everos_memory
+        self.learners = learning_orchestrator
         self._search_top_k = search_top_k
         self._admin_ids = admin_ids or []
 
@@ -130,6 +133,8 @@ class PromptBuilder:
             tools_to_use.extend(MARK_IMPORTANT_TOOL)
         if self._skill_managers and self._skill_managers.has_skills:
             tools_to_use.extend(SKILL_TOOLS)
+        if self.learners:
+            tools_to_use.extend(LEARNER_TOOLS)
         tools_to_use = tools_to_use or None
 
         # ── 3. 静态 system prompt ──
@@ -178,6 +183,16 @@ class PromptBuilder:
         )
         if memory_text:
             dynamic_parts.append(memory_text)
+
+        # 学习上下文（俚语词典 + 行为模式）
+        if self.learners:
+            learning_ctx = await self.learners.enrich_prompt_context(
+                chat_id=chat_id,
+                sender_id=sender_id,
+                message_text=input_message.content,
+            )
+            if learning_ctx:
+                dynamic_parts.append(learning_ctx)
 
         # 当前时间
         _tz = timezone(timedelta(hours=8))

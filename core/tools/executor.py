@@ -68,6 +68,7 @@ class ToolExecutor:
         nickname_manager: Optional[NicknameManager] = None,
         bot_id: str = "",
         skill_managers=None,
+        learning_orchestrator=None,
         admin_ids: Optional[list] = None,
     ):
         self._emoji_manager = emoji_manager
@@ -77,6 +78,7 @@ class ToolExecutor:
         self._nm = nickname_manager
         self._bot_id = bot_id
         self._skill_managers = skill_managers
+        self._learners = learning_orchestrator
         self._admin_ids = admin_ids or []
 
         self._registry: Dict[str, tuple[Callable, bool]] = {}
@@ -98,6 +100,8 @@ class ToolExecutor:
         self._register("view_skill", self._exec_view_skill)
         self._register("execute_skill", self._exec_execute_skill, is_async=True)
         self._register("execute_command", self._exec_execute_command, is_async=True)
+        self._register("define_jargon", self._exec_define_jargon, is_async=True)
+        self._register("report_behavior_effect", self._exec_report_behavior_effect, is_async=True)
 
     # ── 懒注入（AgentEngine 在运行时更新引用）──
 
@@ -570,6 +574,68 @@ class ToolExecutor:
             workdir=workdir,
         )
         return ToolResult(content=json.dumps(result, ensure_ascii=False))
+
+    # ════════════════════════════════════════════════════════
+    # 学习工具
+    # ════════════════════════════════════════════════════════
+
+    async def _exec_define_jargon(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """执行 define_jargon — AI 主动学习/解释俚语。"""
+        if not self._learners:
+            return ToolResult(content=json.dumps(
+                {"error": "学习系统未就绪"}, ensure_ascii=False,
+            ))
+
+        term = (args.get("term") or "").strip()
+        definition = (args.get("definition") or "").strip()
+        example = (args.get("example") or "").strip()
+
+        if not term or not definition:
+            return ToolResult(content=json.dumps(
+                {"error": "请提供俚语词汇和含义"}, ensure_ascii=False,
+            ))
+
+        examples = [example] if example else []
+        await self._learners.add_jargon(
+            term=term,
+            definition=definition,
+            examples=examples,
+            added_by="AI",
+            chat_id=ctx.chat_id,
+        )
+
+        return ToolResult(content=json.dumps({
+            "success": True,
+            "message": f"已学习俚语「{term}」: {definition}",
+        }, ensure_ascii=False))
+
+    async def _exec_report_behavior_effect(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """执行 report_behavior_effect — AI 报告行为效果。"""
+        if not self._learners:
+            return ToolResult(content=json.dumps(
+                {"error": "学习系统未就绪"}, ensure_ascii=False,
+            ))
+
+        scene = (args.get("scene_summary") or "").strip()
+        action = (args.get("action_taken") or "").strip()
+        effect = (args.get("effect") or "neutral").strip()
+
+        if not scene or not action:
+            return ToolResult(content=json.dumps(
+                {"error": "请提供场景和行为描述"}, ensure_ascii=False,
+            ))
+
+        await self._learners.behavior.report_effect(
+            scene_summary=scene,
+            action_taken=action,
+            effect=effect,
+            chat_id=ctx.chat_id,
+        )
+
+        return ToolResult(content=json.dumps({
+            "success": True,
+            "message": f"已记录行为效果「{effect}」: {scene[:40]}..",
+        }, ensure_ascii=False))
 
     # ── 辅助 ──
 

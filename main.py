@@ -20,6 +20,7 @@ from core.everos_memory import EverOSMemory
 from core.command_handlers import register_all_commands
 from core.skill_managers import SkillManagers
 from core.plugin_manager import PluginManager
+from core.learners.orchestrator import LearningOrchestrator
 
 
 async def main() -> None:
@@ -155,6 +156,20 @@ async def main() -> None:
     # ── SkillManagers（技能系统，全局单例，仅从项目本地加载） ──
     skill_managers = SkillManagers(project_skill_dir="./.agents/skills/")
 
+    # ── LearningOrchestrator（学习系统） ──
+    learners_config = config.get("learners", {})
+    learning_orchestrator = None
+    if learners_config.get("enabled", True):
+        learning_orchestrator = LearningOrchestrator(
+            config=learners_config,
+            ai_service=ai_service,
+            data_dir=learners_config.get("data_dir", "data/learners/"),
+            emoji_manager=emoji_manager,
+        )
+        _log.info("学习系统已启用")
+    else:
+        _log.info("学习系统未启用")
+
     # ── 2. 创建 AgentEngine（全局单例） ──
     agent_engine = AgentEngine(
         ai_service=ai_service,
@@ -168,6 +183,7 @@ async def main() -> None:
         everos_memory=everos_memory,
         search_top_k=everos_config.get("search_top_k", 3),
         skill_managers=skill_managers,
+        learning_orchestrator=learning_orchestrator,
         max_tool_rounds=config.get("max_tool_rounds", -1),
         cost_tracker=cost_tracker,
     )
@@ -194,6 +210,7 @@ async def main() -> None:
         emoji_manager=emoji_manager,
         agent_engine=agent_engine,
         skill_managers=skill_managers,
+        learning_orchestrator=learning_orchestrator,
         api_client=engine.api,
         bot_engine=engine,
         ai_service=ai_service,

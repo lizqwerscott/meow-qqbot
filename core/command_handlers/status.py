@@ -53,6 +53,7 @@ class StatusCommand:
             total_queue = sum(queue_sizes.values())
             active_chats = stats.get("active_chats", 0)
             everos_health = stats.get("everos_health", {})
+            learner_stats = stats.get("learners", {})
 
             sm = self.agent_engine._skill_managers
             skill_count = len(sm.list_skill_names()) if sm and sm.has_skills else 0
@@ -92,6 +93,13 @@ class StatusCommand:
                 f"- EverOS: {_everos_status_line(everos_health)}",
                 *cost_lines,
             ]
+
+            if learner_stats.get("enabled"):
+                jargon_count = learner_stats.get("jargon_count", 0)
+                status_text.append("")
+                status_text.append("**学习系统**")
+                status_text.append(f"- 俚语词典: `{jargon_count}` 条")
+
             return make_reply(input_message, "\n".join(status_text))
         except ImportError:
             return make_reply(input_message, "无法获取系统状态信息，请安装psutil库。")

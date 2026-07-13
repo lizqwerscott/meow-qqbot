@@ -22,6 +22,7 @@ from core.message import InputMessage
 from core.nickname_manager import NicknameManager
 from core.template_manager import TemplateManager
 from core.tools import ToolExecutor
+from core.learners.orchestrator import LearningOrchestrator
 
 from core.prompt_builder import PromptBuilder
 from core.session_manager import SessionTaskManager
@@ -46,6 +47,7 @@ class AgentEngine:
         everos_memory: Optional[Any] = None,
         search_top_k: int = 3,
         skill_managers: Optional[Any] = None,
+        learning_orchestrator: Optional[LearningOrchestrator] = None,
         max_tool_rounds: int = -1,
         cost_tracker: Optional[CostTracker] = None,
         context_window: int = 1000000,
@@ -65,6 +67,7 @@ class AgentEngine:
 
         self.everos = everos_memory
         self._skill_managers = skill_managers
+        self.learners = learning_orchestrator
         self.cost_tracker = cost_tracker or CostTracker()
 
         self.tool_executor = ToolExecutor(
@@ -73,6 +76,7 @@ class AgentEngine:
             bot_id=bot_id,
             nickname_manager=nickname_manager,
             skill_managers=skill_managers,
+            learning_orchestrator=learning_orchestrator,
             admin_ids=admin_id,
         )
 
@@ -90,6 +94,7 @@ class AgentEngine:
             everos_memory=everos_memory,
             search_top_k=search_top_k,
             admin_ids=admin_id,
+            learning_orchestrator=self.learners,
         )
 
         self.tool_loop = ToolLoop(
@@ -218,6 +223,13 @@ class AgentEngine:
             if any(k in content_with_context for k in keywords):
                 await self.everos.flush(session_id=chat_id)
 
+        # 学习系统观察（异步，不阻塞）
+        if self.learners:
+            await self.learners.on_message(
+                message_text=content_with_context,
+                chat_id=chat_id,
+            )
+
         if input_message.content.startswith("[表情:") or input_message.content == "[自定义表情]":
             return
 
@@ -344,6 +356,10 @@ class AgentEngine:
             "cache_hit_rate": round(g.cache_hit_rate * 100, 1),
             "total_cost": round(g.cost, 4),
         }
+
+        if self.learners:
+            stats["learners"] = self.learners.get_stats()
+
         return stats
 
     # ── 生命周期 ──

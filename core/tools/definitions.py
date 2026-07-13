@@ -157,6 +157,61 @@ MARK_IMPORTANT_TOOL = [
 ]
 
 
+LEARNER_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "define_jargon",
+            "description": "学习社群俚语/黑话。当你听到某个生疏的词汇反复出现，或者用户询问某个俚语的含义时，主动调用此工具学习并记录该俚语。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "term": {
+                        "type": "string",
+                        "description": "俚语词汇本身，如 'YBB'、'暴龙'",
+                    },
+                    "definition": {
+                        "type": "string",
+                        "description": "俚语的含义解释",
+                    },
+                    "example": {
+                        "type": "string",
+                        "description": "一个使用该俚语的例句（可选）",
+                    },
+                },
+                "required": ["term", "definition"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "report_behavior_effect",
+            "description": "报告你刚才的回复风格是否获得了良好效果，用于学习优化未来行为。当你发现某种语气或策略让用户积极性明显提高，或用户给了负面反馈时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scene_summary": {
+                        "type": "string",
+                        "description": "场景简要描述，如'用户抱怨工作压力大'",
+                    },
+                    "action_taken": {
+                        "type": "string",
+                        "description": "你采取的行为策略，如'先用幽默缓和气氛，再给实用建议'",
+                    },
+                    "effect": {
+                        "type": "string",
+                        "enum": ["positive", "negative", "neutral"],
+                        "description": "效果评估：positive=用户反应积极，negative=用户反应差，neutral=无明显变化",
+                    },
+                },
+                "required": ["scene_summary", "action_taken", "effect"],
+            },
+        },
+    },
+]
+
+
 RESCAN_SKILLS_TOOL = [
     {
         "type": "function",
@@ -268,4 +323,5 @@ def tool_names() -> set[str]:
         "search_emoji", "send_emoji", "search_user",
         "search_memory", "mark_important", "search_relation",
         "rescan_skills", "view_skill", "execute_skill", "execute_command",
+        "define_jargon", "report_behavior_effect",
     }
