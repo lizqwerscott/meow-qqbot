@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}系统状态 - 猫猫管理{% endblock %}
+{% set nav_active = "status" %}
+
+{% block content %}
+<h2 style="margin-bottom:20px">📊 系统状态</h2>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.active_chats }}</div>
+        <div class="stat-label">活跃会话</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.total_messages }}</div>
+        <div class="stat-label">总消息数</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.queue_total }}</div>
+        <div class="stat-label">排队消息</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.cost.turn_count }}</div>
+        <div class="stat-label">AI 调用次数</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.cost.prompt_tokens }}</div>
+        <div class="stat-label">Prompt Tokens</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.cost.completion_tokens }}</div>
+        <div class="stat-label">Completion Tokens</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.cost.cache_hit_rate }}%</div>
+        <div class="stat-label">缓存命中率</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">${{ stats.cost.total_cost }}</div>
+        <div class="stat-label">总消耗</div>
+    </div>
+</div>
+
+<div class="card" style="margin-top:20px">
+    <h2>🤖 EverOS 记忆系统</h2>
+    {% set e = stats.everos_health %}
+    {% if e.status == "ok" %}
+    <p><span class="badge success">正常</span> 延迟: {{ e.latency_ms }}ms</p>
+    {% elif e.status == "disabled" %}
+    <p><span class="badge warning">已禁用</span></p>
+    {% else %}
+    <p><span class="badge danger">异常</span> {{ e.error }}</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>📋 活跃队列</h2>
+    {% if stats.queue_details %}
+    <table>
+        <thead>
+            <tr><th>会话 ID</th><th>排队消息数</th></tr>
+        </thead>
+        <tbody>
+            {% for cid, size in stats.queue_details %}
+            <tr>
+                <td><code>{{ cid[:16] }}..</code></td>
+                <td>{{ size }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="color:var(--text-secondary)">无排队消息</p>
+    {% endif %}
+</div>
+
+{% if stats.learners %}
+<div class="card">
+    <h2>🧠 学习系统</h2>
+    <table>
+        <thead>
+            <tr><th>模块</th><th>数据量</th></tr>
+        </thead>
+        <tbody>
+            {% for key, val in stats.learners.items() %}
+            <tr>
+                <td>{{ key }}</td>
+                <td>{{ val }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}

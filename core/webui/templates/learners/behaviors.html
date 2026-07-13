@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}行为模式 - 猫猫管理{% endblock %}
+{% set nav_active = "learners" %}
+
+{% block content %}
+<h2 style="margin-bottom:20px">🧠 学习数据</h2>
+
+<div style="display:flex;gap:8px;margin-bottom:16px">
+    <a href="/learners/jargons" class="btn">俚语词典</a>
+    <a href="/learners/expressions" class="btn">表情映射</a>
+    <a href="/learners/behaviors" class="btn btn-primary {% if tab == 'behaviors' %}active{% endif %}">行为模式</a>
+    <a href="/learners/scenes" class="btn {% if tab == 'scenes' %}active{% endif %}">场景簇</a>
+</div>
+
+<div class="card">
+    <h2>🔄 行为模式</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>场景描述</th>
+                <th>建议动作</th>
+                <th>预期效果</th>
+                <th>置信度</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in items %}
+            <tr>
+                <td>{{ (entry.scene_descriptor or '')[:60] }}</td>
+                <td>{{ (entry.suggested_action or '')[:60] }}</td>
+                <td>{{ (entry.expected_effect or '')[:40] }}</td>
+                <td>{{ "%.2f"|format(entry.confidence or 0) }}</td>
+                <td>
+                    <form method="post" action="/learners/behaviors/{{ loop.index0 }}/delete" style="display:inline" onsubmit="return confirm('确定删除？')">
+                        <button type="submit" class="btn btn-sm btn-danger">删除</button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" style="text-align:center;color:var(--text-secondary)">暂无行为模式</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

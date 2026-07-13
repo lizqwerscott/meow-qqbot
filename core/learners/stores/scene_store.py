@@ -54,6 +54,12 @@ class SceneStore:
     def get_all_clusters(self) -> List[TagCluster]:
         return [TagCluster.from_dict(d) for d in self._store.get_all()]
 
+    def get_all(self) -> List[dict]:
+        return self._store.get_all()
+
+    def keys(self) -> List[str]:
+        return self._store.keys()
+
     def count(self) -> int:
         return self._store.count()
 

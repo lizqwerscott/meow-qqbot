@@ -65,6 +65,15 @@ class JargonStore:
     def get_all_entries(self) -> List[JargonEntry]:
         return [JargonEntry.from_dict(d) for d in self._store.get_all()]
 
+    def get_all(self) -> List[dict]:
+        return self._store.get_all()
+
+    def keys(self) -> List[str]:
+        return self._store.keys()
+
+    async def delete(self, term: str) -> bool:
+        return await self._store.delete(term.lower().strip())
+
     def count(self) -> int:
         return self._store.count()
 

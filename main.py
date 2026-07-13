@@ -22,6 +22,8 @@ from core.tools.skill_managers import SkillManagers
 from core.plugins.manager import PluginManager
 from core.learners.orchestrator import LearningOrchestrator
 
+from core.webui import create_app, start_webui
+
 
 async def main() -> None:
     print("Hello from meow-qqbot!")
@@ -228,7 +230,25 @@ async def main() -> None:
         bot_engine=engine,
     )
 
-    # ── 5. 启动 WebSocket ──
+    # ── 5. 启动 WebUI（如果启用） ──
+    webui_config = config.get("webui", {})
+    if webui_config.get("enabled", False):
+        webui_app = create_app(
+            managers={
+                "emoji_manager": emoji_manager,
+                "nickname_manager": nickname_manager,
+                "context_manager": context_manager,
+                "cost_tracker": cost_tracker,
+                "agent_engine": agent_engine,
+                "learning_orchestrator": learning_orchestrator,
+            },
+            webui_config=webui_config,
+        )
+        _webui_port = webui_config.get("port", 8080)
+        _log.info(f"WebUI 管理面板将在 http://127.0.0.1:{_webui_port} 启动")
+        asyncio.create_task(start_webui(webui_app, webui_config))
+
+    # ── 6. 启动 WebSocket ──
     gateway_url = await engine.api.get_gateway_url()
     loop = asyncio.get_running_loop()
 

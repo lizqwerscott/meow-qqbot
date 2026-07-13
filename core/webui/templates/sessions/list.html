@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}会话列表 - 猫猫管理{% endblock %}
+{% set nav_active = "sessions" %}
+
+{% block content %}
+<h2 style="margin-bottom:20px">💬 会话列表</h2>
+
+<div class="search-bar">
+    <form method="get" action="/sessions" style="display:flex;gap:8px;width:100%">
+        <input type="text" name="q" placeholder="搜索会话 ID" value="{{ query or '' }}">
+        <button type="submit" class="btn btn-primary">搜索</button>
+        {% if query %}
+        <a href="/sessions" class="btn">清除</a>
+        {% endif %}
+    </form>
+</div>
+
+<table>
+    <thead>
+        <tr>
+            <th>会话 ID</th>
+            <th>消息数</th>
+            <th>最后活动</th>
+            <th>Tokens 估算</th>
+            <th>操作</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for s in sessions %}
+        <tr>
+            <td><code>{{ s.chat_id[:12] }}..</code></td>
+            <td>{{ s.message_count }}</td>
+            <td>{{ s.last_activity }}</td>
+            <td>{{ s.estimated_tokens }}</td>
+            <td>
+                <a href="/sessions/{{ s.chat_id }}" class="btn btn-sm">查看</a>
+                <form method="post" action="/sessions/{{ s.chat_id }}/clear" style="display:inline" onsubmit="return confirm('确定清空此会话？')">
+                    <button type="submit" class="btn btn-sm btn-danger">清空</button>
+                </form>
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" style="text-align:center;color:var(--text-secondary)">无活跃会话</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

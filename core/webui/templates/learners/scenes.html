@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}场景簇 - 猫猫管理{% endblock %}
+{% set nav_active = "learners" %}
+
+{% block content %}
+<h2 style="margin-bottom:20px">🧠 学习数据</h2>
+
+<div style="display:flex;gap:8px;margin-bottom:16px">
+    <a href="/learners/jargons" class="btn">俚语词典</a>
+    <a href="/learners/expressions" class="btn">表情映射</a>
+    <a href="/learners/behaviors" class="btn">行为模式</a>
+    <a href="/learners/scenes" class="btn btn-primary {% if tab == 'scenes' %}active{% endif %}">场景簇</a>
+</div>
+
+<div class="card">
+    <h2>🏷️ 场景簇</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>簇 ID</th>
+                <th>标签 (权重)</th>
+                <th>原型语句</th>
+                <th>成员数</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in items %}
+            <tr>
+                <td><code>{{ entry.cluster_id }}</code></td>
+                <td>
+                    {% for kw, weight in (entry.tags or {}).items() %}
+                    <span class="badge">{{ kw }}: {{ "%.2f"|format(weight) }}</span>
+                    {% endfor %}
+                </td>
+                <td>{{ (entry.prototype_utterance or '')[:50] }}</td>
+                <td>{{ entry.member_count or 0 }}</td>
+                <td>
+                    <form method="post" action="/learners/scenes/{{ entry.cluster_id }}/delete" style="display:inline" onsubmit="return confirm('确定删除？')">
+                        <button type="submit" class="btn btn-sm btn-danger">删除</button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" style="text-align:center;color:var(--text-secondary)">暂无场景簇</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
