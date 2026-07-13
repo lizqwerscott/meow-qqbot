@@ -234,7 +234,7 @@ async def main() -> None:
             agent_engine.execute_background_task
         )
         # 投递回调（将任务执行结果发回 QQ 聊天）
-        async def _deliver(chat_id, _content, _message_id, _is_group):
+        async def _deliver(chat_id, content, message_id, is_group):
             pass
         background_task_runner.set_delivery_callback(_deliver)
 
