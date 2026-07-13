@@ -25,7 +25,7 @@ async def session_list(
     templates = request.app.state.templates
     context_manager = managers.get("context_manager")
 
-    all_chat_ids = context_manager.get_all_chat_ids()
+    all_chat_ids = context_manager.get_all_disk_chat_ids()
     if q:
         all_chat_ids = [cid for cid in all_chat_ids if q.lower() in cid.lower()]
 

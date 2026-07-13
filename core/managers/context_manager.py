@@ -763,6 +763,16 @@ class ChatContextManager:
     def get_all_chat_ids(self) -> List[str]:
         return list(self.contexts.keys())
 
+    def get_all_disk_chat_ids(self) -> List[str]:
+        disk_ids: set[str] = set()
+        if self.cache_dir:
+            cache_path = Path(self.cache_dir)
+            if cache_path.is_dir():
+                for f in cache_path.glob("*.json"):
+                    disk_ids.add(f.stem)
+        memory_ids = set(self.contexts.keys())
+        return sorted(disk_ids | memory_ids)
+
     def get_all_chats(self) -> Dict[str, ChatContext]:
         return self.contexts.copy()
 
