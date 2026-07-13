@@ -109,7 +109,7 @@ async def main() -> None:
         keep_last_assistants=ctx_mgmt.get("keep_last_assistants", 3),
         soft_trim=ctx_mgmt.get("soft_trim", 20000),
         hard_clear=ctx_mgmt.get("hard_clear", 180000),
-        cache_dir=cache_cfg.get("dir", "data/sessions/") if cache_cfg.get("enabled", True) else None,
+        cache_dir=(cache_cfg.get("dir") or "data/sessions/") if cache_cfg.get("enabled", True) else None,
     )
 
     # 管理员 ID 列表

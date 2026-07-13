@@ -22,6 +22,7 @@ from core.message import InputMessage
 from core.managers.nickname_manager import NicknameManager
 from core.managers.template_manager import TemplateManager
 from core.tools import ToolExecutor
+from core.tools.definitions import FLUSH_KEYWORDS
 from core.learners.orchestrator import LearningOrchestrator
 
 from core.engine.prompt_builder import PromptBuilder
@@ -219,8 +220,7 @@ class AgentEngine:
                 content=content_with_context,
                 timestamp=input_message.timestamp,
             )
-            keywords = ["我喜欢", "我讨厌", "我叫", "我是", "我的", "记住", "我不喜欢", "我有", "别忘了"]
-            if any(k in content_with_context for k in keywords):
+            if any(k in content_with_context for k in FLUSH_KEYWORDS):
                 await self.everos.flush(session_id=chat_id)
 
         # 学习系统观察（异步，不阻塞）
