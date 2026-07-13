@@ -40,33 +40,15 @@ class MultimodalService:
         base_url: Optional[str] = None,
         model: str = "deepseek-v4-flash",
     ):
-        """
-        初始化多模态服务。
-
-        Args:
-            api_key: API 密钥
-            base_url: API 基础 URL（OpenAI 兼容格式）
-            model: 支持视觉能力的模型名
-        """
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.model = model
 
-        # 内存缓存：image_md5 → (description, emotion_tags)
-        # 防止同一图片在同 session 中重复请求 VLM
         self._cache: OrderedDict = OrderedDict()
         self._cache_max = 200
 
         _log.info(f"多模态服务已启动，模型: {self.model}")
 
     async def analyze_image(self, image_path: str) -> str:
-        """
-        分析普通图片，返回主要内容描述。
-
-        Args:
-            image_path: 本地图片文件路径
-        Returns:
-            图片内容描述文本，如 "一只橘猫坐在窗台上晒太阳"
-        """
         cache_key = self._get_cache_key(image_path, "image")
         if cache_key in self._cache:
             _log.debug(f"分析图片命中缓存: {image_path}")
@@ -86,16 +68,6 @@ class MultimodalService:
         return result
 
     async def analyze_emoji(self, image_path: str) -> Tuple[str, List[str]]:
-        """
-        分析表情/贴图图片，返回主要内容和情绪标签。
-
-        Args:
-            image_path: 本地图片文件路径
-        Returns:
-            (description, emotion_tags)
-            description: "一个微笑的卡通猫头，眼睛弯弯的"
-            emotion_tags: ["开心", "可爱", "友好"]
-        """
         cache_key = self._get_cache_key(image_path, "emoji")
         if cache_key in self._cache:
             _log.debug(f"分析表情命中缓存: {image_path}")
@@ -120,17 +92,7 @@ class MultimodalService:
         self._set_cache(cache_key, description, emotions)
         return description, emotions
 
-    # ── 内部方法 ──
-
     def _encode_image(self, image_path: str) -> str:
-        """
-        读取图片文件并转换为 base64 data URI。
-
-        Args:
-            image_path: 本地图片路径
-        Returns:
-            data URI 格式的 base64 字符串，如 "data:image/jpeg;base64,...."
-        """
         path = Path(image_path)
         if not path.exists():
             raise FileNotFoundError(f"图片文件不存在: {image_path}")
@@ -138,7 +100,6 @@ class MultimodalService:
         with open(path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("ascii")
 
-        # 从文件扩展名推断 MIME 类型
         ext = path.suffix.lower()
         mime_map = {
             ".jpg": "image/jpeg",
@@ -151,15 +112,6 @@ class MultimodalService:
         return f"data:{mime};base64,{b64}"
 
     async def _call_vlm(self, base64_image: str, prompt: str) -> Optional[str]:
-        """
-        调用视觉模型的核心方法。
-
-        Args:
-            base64_image: data URI 格式的 base64 图片
-            prompt: 分析提示词
-        Returns:
-            模型返回文本，或 None
-        """
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -175,8 +127,8 @@ class MultimodalService:
                         ],
                     }
                 ],
-                max_tokens=300,  # 图片描述不需要太多 token
-                temperature=0.3,  # 低温度，描述更精确
+                max_tokens=300,
+                temperature=0.3,
             )
             if response.choices and response.choices[0].message.content:
                 return response.choices[0].message.content
@@ -187,20 +139,10 @@ class MultimodalService:
 
     @staticmethod
     def _parse_emoji_result(result: str) -> Tuple[str, List[str]]:
-        """
-        解析表情分析返回的 JSON 格式结果。
-
-        期望格式：
-            {
-              "description": "一个微笑的卡通猫头",
-              "emotions": ["开心", "可爱", "友好"]
-            }
-        """
         import json
 
         text = result.strip()
 
-        # 移除模型有时会加的 markdown code block 包裹
         if text.startswith("```json"):
             text = text[7:]
         if text.startswith("```"):
@@ -208,8 +150,6 @@ class MultimodalService:
         if text.endswith("```"):
             text = text[:-3]
 
-        # 移除可能的前导/尾随非 JSON 字符
-        # 找到第一个 { 和最后一个 }
         first_brace = text.find("{")
         last_brace = text.rfind("}")
         if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
@@ -229,31 +169,22 @@ class MultimodalService:
             return desc, emotions
         except (json.JSONDecodeError, TypeError):
             _log.warning(f"解析表情 JSON 失败，原始返回: {result[:200]}")
-            # 兜底：返回原始文本作为描述
             return result.strip(), []
 
     def _get_cache_key(self, image_path: str, mode: str) -> str:
-        """
-        生成缓存 key。
-
-        使用文件内容前 8KB 的 MD5 + 分析模式，避免重复请求 VLM。
-        """
         try:
             with open(image_path, "rb") as f:
                 head = f.read(8192)
             h = hashlib.md5(head).hexdigest()
             return f"{h}:{mode}"
         except Exception:
-            # 如果读文件失败，用路径本身
             return f"{image_path}:{mode}"
 
     def _set_cache(self, key: str, description: str, tags: List[str]) -> None:
-        """写入缓存，淘汰最久未访问的条目。"""
         if len(self._cache) >= self._cache_max:
             self._cache.popitem(last=False)
         self._cache[key] = (description, tags)
 
     def clear_cache(self) -> None:
-        """清空内存缓存。"""
         self._cache.clear()
         _log.debug("多模态服务内存缓存已清空")

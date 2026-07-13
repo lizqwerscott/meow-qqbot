@@ -32,7 +32,6 @@ DENIED_COMMAND_PATTERNS = re.compile(
     r")\b"
 )
 
-# 这些只在作为独立命令（行首或管道后首词）时拒绝
 _SOFT_DENIED = re.compile(r"(?:^|\|\s*)(kill|passwd)(?:\s|$)")
 
 
@@ -62,7 +61,6 @@ class SkillManagers:
         return self._skills_loaded
 
     def get_skill_system_intro(self) -> str:
-        """技能系统原则说明（静态，放入 system prompt）"""
         return (
             "--- 技能系统 ---\n"
             "以下 <available_skills> 中列出的是我掌握的专业领域知识包（Skills）。\n"
@@ -84,7 +82,6 @@ class SkillManagers:
         )
 
     def get_skill_entries_block(self) -> str:
-        """仅返回 <available_skills> XML 条目列表（动态，放入动态上下文）"""
         skills = self._manager.list_skills()
         if not skills:
             return ""
@@ -100,7 +97,6 @@ class SkillManagers:
         return "\n".join(lines)
 
     def get_available_skills_block(self) -> str:
-        """完整块：原则说明 + 条目列表（旧接口，保持兼容）"""
         intro = self.get_skill_system_intro()
         entries = self.get_skill_entries_block()
         if not entries:

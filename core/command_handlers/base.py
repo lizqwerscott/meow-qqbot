@@ -2,7 +2,7 @@ import inspect
 import logging
 from typing import Any, Dict, List, Optional
 
-from core.commands import Command, PermissionLevel
+from core.command_manager import Command, PermissionLevel
 from core.message import InputMessage
 
 _log = logging.getLogger(__name__)

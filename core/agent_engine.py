@@ -14,10 +14,10 @@ import logging
 from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from core.ai_service import AIService
+from core.ai.service import AIService
 from core.context_manager import ChatContextManager
 from core.cost_tracker import CostTracker
-from core.emoji import EmojiManager
+from core.emoji_manager import EmojiManager
 from core.message import InputMessage
 from core.nickname_manager import NicknameManager
 from core.template_manager import TemplateManager
@@ -26,7 +26,7 @@ from core.learners.orchestrator import LearningOrchestrator
 
 from core.prompt_builder import PromptBuilder
 from core.session_manager import SessionTaskManager
-from core.tool_loop import ToolLoop
+from core.tools.tool_loop import ToolLoop
 
 _log = logging.getLogger(__name__)
 

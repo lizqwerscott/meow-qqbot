@@ -20,9 +20,9 @@ from qqbot_agent_sdk.media_loader import MediaUploader
 
 from core.agent_engine import AgentEngine
 from core.command_manager import CommandManager
-from core.emoji import EmojiManager, is_custom_emoji
+from core.emoji_manager import EmojiManager, is_custom_emoji
 from core.message import InputMessage
-from core.multimodal_service import MultimodalService
+from core.ai.multimodal import MultimodalService
 from core.nickname_manager import NicknameManager
 from core.router import Router
 

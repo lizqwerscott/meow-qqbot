@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 
 from core.command_handlers.base import command, make_reply
 from core.message import InputMessage
-from core.skill_managers import SkillManagers
+from core.tools.skill_managers import SkillManagers
 
 _log = logging.getLogger(__name__)
 

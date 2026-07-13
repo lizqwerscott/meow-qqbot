@@ -26,19 +26,6 @@ class AIService:
         max_tokens: int = 8192,
         reasoning_effort: Optional[str] = None,
     ):
-        """
-        初始化 AI 服务
-
-        Args:
-            api_key: OpenAI API 密钥，如果为 None 则从环境变量读取
-            base_url: API 基础 URL，支持 OpenAI 兼容接口
-            model: 模型名称
-            timeout: 请求超时时间（秒）
-            max_retries: 最大重试次数
-            temperature: 温度参数
-            max_tokens: 最大生成 token 数
-            reasoning_effort: 思考力度，可选 "low" / "medium" / "high"
-        """
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             raise ValueError(
@@ -55,7 +42,6 @@ class AIService:
         )
 
     async def close(self):
-        """关闭客户端"""
         await self.client.close()
 
     async def __aenter__(self):
@@ -71,18 +57,6 @@ class AIService:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> tuple[Optional[str], Optional[Dict]]:
-        """
-        发送聊天补全请求（纯文本，无工具调用）
-
-        Args:
-            messages: 消息列表
-            model: 模型名称，如果为 None 则使用默认模型
-            temperature: 温度参数
-            max_tokens: 最大生成 token 数
-
-        Returns:
-            (AI 生成的文本内容或 None, usage dict 或 None)
-        """
         model_to_use = model or self.model
         max_tokens_to_use = max_tokens if max_tokens is not None else self.max_tokens
         is_reasoning = self._is_reasoning_model(model_to_use)
@@ -133,20 +107,6 @@ class AIService:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> tuple[Optional[Any], Optional[Dict]]:
-        """
-        发送聊天补全请求（支持工具调用）。
-        返回 (ChatCompletionMessage, usage) 元组。
-
-        Args:
-            messages: 消息列表
-            tools: 工具定义列表（OpenAI function calling 格式）
-            model: 模型名称，如果为 None 则使用默认模型
-            temperature: 温度参数
-            max_tokens: 最大生成 token 数
-
-        Returns:
-            (ChatCompletionMessage 对象或 None, usage dict 或 None)
-        """
         model_to_use = model or self.model
         max_tokens_to_use = max_tokens if max_tokens is not None else self.max_tokens
         is_reasoning = self._is_reasoning_model(model_to_use)
