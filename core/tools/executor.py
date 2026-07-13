@@ -32,6 +32,8 @@ class ToolContext:
     reply_to: str
     sender_id: str
     reply_callback: Callable
+    delivery_channel: str = ""       # 真实聊天 ID（后台任务时与 chat_id 不同）
+    reply_to_message_id: str = ""    # 原始消息 ID（后台任务时 reply_to 是合成 ID，此为真实的）
 
 
 @dataclass
@@ -197,11 +199,15 @@ class ToolExecutor:
                 ensure_ascii=False,
             ))
 
+        # 后台任务时 delivery_channel 为真实聊天 ID，reply_to_message_id 为原始消息 ID
+        effective_chat_id = ctx.delivery_channel or ctx.chat_id
+        effective_reply_to = ctx.reply_to_message_id or ctx.reply_to
+
         success, description, file_name, error = await self._send_emoji_by_hash(
-            chat_id=ctx.chat_id,
+            chat_id=effective_chat_id,
             emoji_hash=emoji_hash,
             is_group=ctx.is_group,
-            reply_to=ctx.reply_to,
+            reply_to=effective_reply_to,
         )
 
         if success:
@@ -262,16 +268,21 @@ class ToolExecutor:
             )
 
             msg_seq = self._api_client.next_msg_seq() if self._api_client else 0
-            msg = MessageToCreate(
-                msg_type=QQMessageType.RICH_MEDIA,
-                msg_seq=msg_seq,
-                msg_id=reply_to,
-                media=MediaInfo(file_info=file_info),
-            )
 
             if is_group:
+                msg = MessageToCreate(
+                    msg_type=QQMessageType.RICH_MEDIA,
+                    msg_seq=msg_seq,
+                    msg_id=reply_to,
+                    media=MediaInfo(file_info=file_info),
+                )
                 await self._api_client.post_group_message(chat_id, msg)
             else:
+                msg = MessageToCreate(
+                    msg_type=QQMessageType.RICH_MEDIA,
+                    msg_seq=msg_seq,
+                    media=MediaInfo(file_info=file_info),
+                )
                 await self._api_client.post_c2c_message(chat_id, msg)
 
             record = self._emoji_manager.get_info(full_hash)
@@ -758,6 +769,7 @@ class ToolExecutor:
             prompt=prompt,
             task_type="manual",
             delivery_channel=ctx.chat_id,
+            reply_to_message_id=ctx.reply_to,
         )
         asyncio.create_task(self._background_task_runner.run_task(task))
 
