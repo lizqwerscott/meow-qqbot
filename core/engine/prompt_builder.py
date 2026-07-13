@@ -253,21 +253,31 @@ class PromptBuilder:
     ) -> Tuple[List[dict], Optional[List[dict]]]:
         """组装后台任务的 messages 列表（使用 task_chat.j2 模板）。
 
+        工具集与主对话一致（排除表情工具和递归任务工具）。
         Returns:
             (messages, tools_to_use)
         """
-        # 简易工具列表（后台任务可用）
         tools_to_use: List[dict] = []
-        if self._skill_managers and self._skill_managers.has_skills:
-            from core.tools.definitions import SKILL_TOOLS, EXECUTE_COMMAND_TOOL
-            tools_to_use.extend(SKILL_TOOLS)
+        from core.tools.definitions import (
+            EMOJI_TOOLS,
+            SEARCH_MEMORY_TOOL,
+            SEARCH_RELATION_TOOL,
+            MARK_IMPORTANT_TOOL,
+            EXECUTE_COMMAND_TOOL,
+            EXECUTE_SKILL_TOOL,
+            VIEW_SKILL_TOOL,
+        )
+
+        if self.emoji_manager and self.emoji_manager.count_emojis() > 0:
+            tools_to_use.extend(EMOJI_TOOLS)
         if self.everos:
-            from core.tools.definitions import (
-                SEARCH_MEMORY_TOOL,
-                MARK_IMPORTANT_TOOL,
-            )
             tools_to_use.extend(SEARCH_MEMORY_TOOL)
+            tools_to_use.extend(SEARCH_RELATION_TOOL)
             tools_to_use.extend(MARK_IMPORTANT_TOOL)
+        if self._skill_managers and self._skill_managers.has_skills:
+            tools_to_use.extend(EXECUTE_COMMAND_TOOL)
+            tools_to_use.extend(EXECUTE_SKILL_TOOL)
+            tools_to_use.extend(VIEW_SKILL_TOOL)
         tools_to_use = tools_to_use or None
 
         # 渲染 task prompt
