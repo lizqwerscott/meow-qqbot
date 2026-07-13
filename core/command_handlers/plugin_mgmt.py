@@ -34,7 +34,7 @@ def _parse_plugin_url(url: str) -> Optional[str]:
 )
 class PluginManageCommand:
     async def execute(self, input_message: InputMessage, args: str) -> List[dict]:
-        from core.plugin_manager import _current as _pm
+        from core.plugins.manager import _current as _pm
         self.pm = _pm
         if not self.pm:
             return make_reply(input_message, "插件管理器未就绪")

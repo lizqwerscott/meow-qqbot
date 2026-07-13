@@ -10,7 +10,7 @@ _log = logging.getLogger(__name__)
 
 def _plugin_command_names() -> Dict[str, List[str]]:
     """返回 {插件名: [命令名, ...]}"""
-    from core.plugin_manager import _current as _pm
+    from core.plugins.manager import _current as _pm
     if not _pm:
         return {}
     return dict(_pm._plugin_commands)

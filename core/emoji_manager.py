@@ -28,15 +28,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from qqbot_agent_sdk.dto import MessageAttachment
 
-from core.utils.utils_image import ImageUtils
+from core.image_utils import ImageUtils
 
 _log = logging.getLogger(__name__)
 
-# ============================================================
-# 辅助常量 & 函数
-# ============================================================
-
-# QQ 内置 faceType 大类映射（内置表情码用不到的，但保留用作 general 参考）
 QQ_FACE_CATEGORIES = {
     "0": "普通表情",
     "1": "动图",
@@ -44,79 +39,46 @@ QQ_FACE_CATEGORIES = {
     "3": "大表情",
     "4": "魔法表情",
     "5": "戳一戳",
-    "6": "自定义表情",  # 这是我们的关注点
+    "6": "自定义表情",
     "7": "红包",
     "8": "龙猫",
 }
 
 
 def is_custom_emoji(content: str, attachments: list) -> bool:
-    """
-    判断消息是否为 QQ 自定义表情。
-
-    QQ 自定义表情的特征：
-    - content 中只包含 <faceType=6,...> 标签，无其他实质文本
-    - attachments 中有图片文件
-
-    Args:
-        content: 消息文本内容
-        attachments: 消息附件列表 (List[MessageAttachment])
-    Returns:
-        True 如果是自定义表情消息
-    """
     if not attachments:
         return False
 
-    # 去掉所有 XML/HTML 标签，看剩下的是否为空
     cleaned = re.sub(r"<[^>]+>", "", content).strip()
     if cleaned:
-        # 还有实质文本 → 不是纯表情消息
         return False
 
-    # 检查是否为 faceType=6（自定义表情）
-    # content 可能有多种格式，但 faceType=6 是自定义表情的标识
     face_type_tags = re.findall(r'<faceType=(\d+)[^>]*>', content)
     if not face_type_tags:
-        return False  # 没有 faceType 标签
+        return False
 
-    # 只要有一个 faceType=6 就算（用户可能发多个表情）
     if "6" not in face_type_tags:
         return False
 
     return True
 
 
-# ============================================================
-# EmojiStorage — JSON 文件持久化
-# ============================================================
-
-
 class EmojiStorage:
-    """
-    Emoji 元数据的 JSON 文件存储。
-    线程安全（asyncio.Lock），单协程写。
-    """
-
     def __init__(self, json_path: str = "data/emojis/emojis.json"):
         self._path = Path(json_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
         self._data: Dict[str, Any] = self._load()
 
-    # ── 公开查询接口 ──
-
     def get(self, emoji_hash: str) -> Optional[dict]:
-        """根据 hash 获取 emoji 记录"""
         return self._data.get("emojis", {}).get(emoji_hash)
 
     async def save(self, record: dict) -> None:
-        """保存/更新一条 emoji 记录（异步刷盘）"""
         async with self._lock:
             self._data.setdefault("emojis", {})[record["hash"]] = record
             await self._flush_async()
 
     async def update(self, emoji_hash: str, **kwargs) -> bool:
-        """部分更新 emoji 记录字段。返回 True 表示成功。"""
         async with self._lock:
             emojis = self._data.setdefault("emojis", {})
             if emoji_hash not in emojis:
@@ -127,17 +89,12 @@ class EmojiStorage:
             return True
 
     def list_all(self) -> List[dict]:
-        """返回所有 emoji 记录列表"""
         return list(self._data.get("emojis", {}).values())
 
     def count(self) -> int:
-        """返回 emoji 总数"""
         return len(self._data.get("emojis", {}))
 
-    # ── 内部 IO ──
-
     def _load(self) -> dict:
-        """从 JSON 文件加载数据"""
         if not self._path.exists():
             _log.info(f"创建新的表情数据文件: {self._path}")
             return {"version": 1, "emojis": {}}
@@ -150,7 +107,6 @@ class EmojiStorage:
             return data
         except (json.JSONDecodeError, OSError) as e:
             _log.error(f"读取表情数据文件失败: {e}，备份并重置")
-            # 备份损坏文件
             backup = self._path.with_suffix(".json.bak")
             try:
                 if self._path.exists():
@@ -162,35 +118,20 @@ class EmojiStorage:
             return {"version": 1, "emojis": {}}
 
     def _flush_sync(self) -> None:
-        """同步将数据写回 JSON 文件（在 executor 线程中执行）。"""
         try:
             tmp = self._path.with_suffix(".json.tmp")
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, ensure_ascii=False, indent=2)
-            tmp.replace(self._path)  # 原子替换
+            tmp.replace(self._path)
         except OSError as e:
             _log.error(f"写入表情数据文件失败: {e}")
 
     async def _flush_async(self) -> None:
-        """异步将数据写回 JSON 文件（通过线程池避免阻塞事件循环）。"""
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._flush_sync)
 
 
-# ============================================================
-# EmojiManager — 表情管理器
-# ============================================================
-
-
 class EmojiManager:
-    """
-    表情管理器：下载、缓存、VLM 分析、用户自定义。
-
-    使用方式：
-        manager = EmojiManager(http_client, multimodal_service)
-        desc, tags = await manager.get_or_build(attachment)
-    """
-
     def __init__(
         self,
         http_client,
@@ -208,32 +149,13 @@ class EmojiManager:
             f"已有 {self._storage.count()} 个表情记录"
         )
 
-    # ════════════════════════════════════════════════════════════
-    # 核心接口
-    # ════════════════════════════════════════════════════════════
-
     async def get_or_build(
         self, attachment: MessageAttachment
     ) -> Tuple[str, List[str]]:
-        """
-        核心入口：获取表情的描述和情绪标签。
-
-        流程：下载 → 计算 hash → 检查缓存 → GIF 处理 → 保存文件
-              → VLM 分析（未命中时） → 缓存结果 → 返回
-
-        Args:
-            attachment: 消息附件（需包含 url、content_type、filename）
-        Returns:
-            (description, emotion_tags)
-            如 ("一个微笑的卡通猫头", ["开心", "可爱"])
-        """
-        # 1. 下载原始图片
         image_bytes = await self._download_emoji(attachment.resolved_url)
 
-        # 2. 计算 SHA-256 hash（内容寻址）
         emoji_hash = hashlib.sha256(image_bytes).hexdigest()
 
-        # 3. 检查缓存
         cached = self._storage.get(emoji_hash)
         if cached:
             desc = cached.get("user_description") or cached.get("auto_description", "") or "[自定义表情]"
@@ -243,7 +165,6 @@ class EmojiManager:
             )
             return (desc, tags)
 
-        # 4. GIF 转换 + 文件保存
         ext = self._infer_ext(attachment.content_type, attachment.filename)
         is_gif = ext == ".gif"
         save_bytes = image_bytes
@@ -251,18 +172,16 @@ class EmojiManager:
         if is_gif:
             try:
                 save_bytes = ImageUtils.gif_2_static_image(image_bytes)
-                ext = ".jpg"  # 保存为静态 JPEG
+                ext = ".jpg"
             except Exception as e:
                 _log.warning(f"GIF 转静态图失败，使用原始 GIF: {e}")
 
         file_path = self._emoji_dir / f"{emoji_hash}{ext}"
         file_path.write_bytes(save_bytes)
 
-        # 5. VLM 分析
         auto_desc, auto_tags = "", []
         if self._multimodal:
             try:
-                # 对图片做归一化处理后再分析
                 processed_path = self._maybe_normalize_image(file_path)
                 auto_desc, auto_tags = await self._multimodal.analyze_emoji(
                     str(processed_path)
@@ -276,11 +195,9 @@ class EmojiManager:
                 auto_desc = ""
                 auto_tags = []
         else:
-            # 未配置 VLM，跳过分析
             auto_desc = ""
             auto_tags = []
 
-        # 6. 写入缓存
         record = {
             "hash": emoji_hash,
             "file_name": f"{emoji_hash}{ext}",
@@ -295,13 +212,8 @@ class EmojiManager:
         }
         await self._storage.save(record)
 
-        # 返回时应用 fallback：全空时显示通用描述
         final_desc = auto_desc or "[自定义表情]"
         return (final_desc, auto_tags or [])
-
-    # ════════════════════════════════════════════════════════════
-    # 用户自定义接口
-    # ════════════════════════════════════════════════════════════
 
     async def set_custom(
         self,
@@ -309,16 +221,6 @@ class EmojiManager:
         description: Optional[str] = None,
         tags: Optional[List[str]] = None,
     ) -> bool:
-        """
-        自定义 emoji 的描述和标签。
-
-        Args:
-            emoji_hash: 表情 hash
-            description: 自定义描述（None 表示不修改）
-            tags: 自定义标签列表（None 表示不修改）
-        Returns:
-            True 如果更新成功
-        """
         record = self._storage.get(emoji_hash)
         if record is None:
             _log.warning(f"未找到 emoji: {emoji_hash[:12]}..")
@@ -328,7 +230,6 @@ class EmojiManager:
         if description is not None:
             updates["user_description"] = description
         if tags is not None:
-            # 去重 + 去除空值
             clean_tags = [t for t in tags if t.strip()]
             updates["user_tags"] = clean_tags
 
@@ -337,14 +238,6 @@ class EmojiManager:
         return True
 
     async def reset_to_auto(self, emoji_hash: str) -> bool:
-        """
-        恢复为 VLM 自动识别结果，清除用户自定义。
-
-        Args:
-            emoji_hash: 表情 hash
-        Returns:
-            True 如果恢复成功
-        """
         record = self._storage.get(emoji_hash)
         if record is None:
             return False
@@ -358,11 +251,9 @@ class EmojiManager:
         return True
 
     def count_emojis(self) -> int:
-        """返回已知表情总数。"""
         return self._storage.count()
 
     async def update_emoji(self, emoji_hash: str, **kwargs) -> bool:
-        """更新一条表情记录的字段，返回是否成功。"""
         record = self.get_info(emoji_hash)
         if not record:
             return False
@@ -370,30 +261,12 @@ class EmojiManager:
         return True
 
     def get_info(self, emoji_hash: str) -> Optional[dict]:
-        """
-        获取 emoji 的完整信息。
-
-        Args:
-            emoji_hash: 表情 hash
-        Returns:
-            记录 dict，或 None
-        """
         return self._storage.get(emoji_hash)
 
     def list_emojis(
         self, page: int = 1, page_size: int = 20
     ) -> Dict[str, Any]:
-        """
-        分页列出所有已知 emoji。
-
-        Args:
-            page: 页码（从 1 开始）
-            page_size: 每页数量
-        Returns:
-            {"total": N, "page": P, "page_size": S, "emojis": [...]}
-        """
         all_emojis = self._storage.list_all()
-        # 按使用次数降序排列
         all_emojis.sort(key=lambda r: r.get("used_count", 0), reverse=True)
 
         total = len(all_emojis)
@@ -408,12 +281,7 @@ class EmojiManager:
             "emojis": page_items,
         }
 
-    # ════════════════════════════════════════════════════════════
-    # 工具调用支持
-    # ════════════════════════════════════════════════════════════
-
     def find_by_hash(self, partial_hash: str) -> Optional[dict]:
-        """根据 hash（支持短前缀）查找 emoji 记录。"""
         records = self._storage.list_all()
         for e in records:
             if e["hash"] == partial_hash:
@@ -424,17 +292,6 @@ class EmojiManager:
         return None
 
     def find_emoji(self, query: str) -> Optional[dict]:
-        """
-        多关键词 OR 匹配，取最高分返回。
-
-        query 按空格分隔为多个关键词，每个关键词独立匹配标签和描述，
-        按匹配数 + 匹配精度累计打分，返回最佳的一个。
-
-        Args:
-            query: 空格分隔的关键词，如「开心 撒娇 猫娘」
-        Returns:
-            匹配度最高的单条 emoji 记录，或 None
-        """
         records = self._storage.list_all()
         if not records:
             return None
@@ -458,13 +315,10 @@ class EmojiManager:
             score = 0
 
             for k in keywords:
-                # 标签完全匹配 +10
                 if k in tags:
                     score += 10
-                # 标签子串匹配 +3
                 elif any(k in t for t in tags):
                     score += 3
-                # 描述包含 +5
                 if k in desc:
                     score += 5
 
@@ -475,18 +329,6 @@ class EmojiManager:
         return best_record
 
     def find_emojis(self, query: str, max_results: int = 5) -> List[dict]:
-        """
-        多关键词 OR 匹配，返回多条按匹配度排序。
-
-        query 按空格分隔为多个关键词，每个关键词独立匹配标签和描述，
-        命中关键词越多、匹配精度越高，得分越高。
-
-        Args:
-            query: 空格分隔的关键词，如「开心 撒娇 猫娘」
-            max_results: 最多返回数量
-        Returns:
-            按匹配度降序的 emoji 记录列表
-        """
         records = self._storage.list_all()
         if not records:
             return []
@@ -515,9 +357,7 @@ class EmojiManager:
                     matched_keywords += 1
                 score += kw_score
 
-            # 命中关键词数量 bonus（鼓励覆盖更多关键词）
             score += matched_keywords * 2
-            # 使用频率平局决胜
             if score > 0:
                 score += min(r.get("used_count", 0) / 10, 3)
 
@@ -529,7 +369,6 @@ class EmojiManager:
         return results
 
     def get_all_tags(self) -> List[str]:
-        """返回所有去重后的标签列表（去尖括号、去重、去空、排序）"""
         tags_set = set()
         for r in self._storage.list_all():
             for t in (r.get("user_tags") or r.get("auto_tags", []) or []):
@@ -539,21 +378,10 @@ class EmojiManager:
         return sorted(tags_set)
 
     def get_emoji_catalog_text(self, max_emojis: int = 30) -> str:
-        """
-        生成 AI 可读的表情目录文本。
-        格式：
-          - 描述 → [标签1, 标签2] (hash: a1b2c3...)
-
-        Args:
-            max_emojis: 最多列出多少个
-        Returns:
-            目录文本，如果没有表情则返回空字符串
-        """
         records = self._storage.list_all()
         if not records:
             return ""
 
-        # 按使用次数降序排列
         records.sort(key=lambda r: r.get("used_count", 0), reverse=True)
         records = records[:max_emojis]
 
@@ -570,21 +398,7 @@ class EmojiManager:
 
         return "\n".join(lines)
 
-    # ════════════════════════════════════════════════════════════
-    # 内部辅助
-    # ════════════════════════════════════════════════════════════
-
     async def _download_emoji(self, url: str) -> bytes:
-        """
-        下载 emoji 图片，带重试。
-
-        Args:
-            url: 图片 URL
-        Returns:
-            图片字节数据
-        Raises:
-            RuntimeError: 下载失败
-        """
         last_exc = None
         for attempt in range(3):
             try:
@@ -600,13 +414,6 @@ class EmojiManager:
 
     @staticmethod
     def _infer_ext(content_type: str, filename: str) -> str:
-        """
-        根据 content_type 和 filename 推断文件扩展名。
-
-        Returns:
-            扩展名，带点，如 ".png", ".jpg", ".gif"
-        """
-        # 优先用 content_type
         ct_map = {
             "image/jpeg": ".jpg",
             "image/png": ".png",
@@ -616,24 +423,15 @@ class EmojiManager:
         if content_type in ct_map:
             return ct_map[content_type]
 
-        # 退化用文件名
         if filename:
             ext = Path(filename).suffix.lower()
             if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
                 return ext if ext != ".jpeg" else ".jpg"
 
-        # 默认
         return ".png"
 
     @staticmethod
     def _maybe_normalize_image(image_path: Path) -> Path:
-        """
-        对图片做归一化处理，确保 VLM 能正常识别。
-        对小图片进行放大填边。
-
-        Returns:
-            归一化后的图片路径（可能是新文件）
-        """
         try:
             b64 = ImageUtils.image_path_to_base64(str(image_path))
             if b64 is None:
@@ -650,7 +448,6 @@ class EmojiManager:
             if not was_modified:
                 return image_path
 
-            # 保存归一化后的图片
             new_path = image_path.with_stem(image_path.stem + "_norm")
             import base64 as b64_mod
 

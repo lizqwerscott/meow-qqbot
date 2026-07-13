@@ -6,20 +6,20 @@ import logging
 import httpx
 from colorlog import ColoredFormatter
 
-from core.ai_service import AIService
+from core.ai.service import AIService
 from core.agent_engine import AgentEngine
 from core.client import BotEngine
 from core.context_manager import ChatContextManager
 from core.cost_tracker import CostTracker
-from core.emoji import EmojiManager
-from core.multimodal_service import MultimodalService
+from core.emoji_manager import EmojiManager
+from core.ai.multimodal import MultimodalService
 from core.nickname_manager import NicknameManager
 from core.router import Router
 from core.template_manager import TemplateManager
 from core.everos_memory import EverOSMemory
 from core.command_handlers import register_all_commands
-from core.skill_managers import SkillManagers
-from core.plugin_manager import PluginManager
+from core.tools.skill_managers import SkillManagers
+from core.plugins.manager import PluginManager
 from core.learners.orchestrator import LearningOrchestrator
 
 

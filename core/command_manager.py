@@ -1,12 +1,86 @@
-"""命令管理器模块"""
+"""命令系统模块"""
 
+import asyncio
 import logging
-from typing import Optional
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
 
-from core.commands import Command, CommandRegistry, PermissionLevel
 from core.message import InputMessage
 
 _log = logging.getLogger(__name__)
+
+
+class PermissionLevel(Enum):
+    """权限级别枚举"""
+
+    DEFAULT = "default"
+    ADMIN = "admin"
+
+
+class Command:
+    """命令类"""
+
+    def __init__(
+        self,
+        name: str,
+        handler: Callable,
+        aliases: list[str] | None = None,
+        permission: PermissionLevel = PermissionLevel.DEFAULT,
+        description: str = "",
+    ):
+        self.name = name
+        self.handler = handler
+        self.aliases = aliases or []
+        self.permission = permission
+        self.description = description
+
+    async def execute(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
+        result = self.handler(input_message, args)
+        if asyncio.iscoroutine(result):
+            result = await result
+        return result
+
+
+class CommandRegistry:
+    """命令注册表"""
+
+    def __init__(self):
+        self._commands: dict[str, Command] = {}
+
+    def register(self, command: Command) -> None:
+        self._commands[command.name.lower()] = command
+        for alias in command.aliases:
+            self._commands[alias.lower()] = command
+
+    def find(self, command_name: str) -> Optional[Command]:
+        return self._commands.get(command_name.lower())
+
+    def get_all_commands(self) -> list[Command]:
+        seen = set()
+        commands = []
+        for cmd in self._commands.values():
+            if cmd.name not in seen:
+                commands.append(cmd)
+                seen.add(cmd.name)
+        return commands
+
+    def count(self) -> int:
+        return len(set(cmd.name for cmd in self._commands.values()))
+
+    def unregister(self, command_name: str) -> Optional[Command]:
+        key = command_name.lower()
+        cmd = self._commands.get(key)
+        if cmd is None:
+            return None
+        keys_to_del = [cmd.name.lower()] + [a.lower() for a in cmd.aliases]
+        for k in keys_to_del:
+            self._commands.pop(k, None)
+        return cmd
+
+    def clear(self) -> None:
+        self._commands.clear()
 
 
 class CommandManager:

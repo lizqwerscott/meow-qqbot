@@ -2,7 +2,7 @@ import logging
 from typing import Any, Dict, List
 
 from core.command_handlers.base import command, make_reply
-from core.emoji import EmojiManager
+from core.emoji_manager import EmojiManager
 from core.message import InputMessage
 
 _log = logging.getLogger(__name__)

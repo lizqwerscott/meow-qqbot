@@ -8,8 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from core.commands import Command, PermissionLevel
-from core.plugin_base import _PLUGIN_REGISTRY, BasePlugin, PluginMeta
+from core.command_manager import Command, PermissionLevel
+from core.plugins.base import _PLUGIN_REGISTRY, BasePlugin, PluginMeta
 
 if TYPE_CHECKING:
     from core.command_manager import CommandManager
@@ -45,7 +45,6 @@ class PluginManager:
         return dict(self._loaded)
 
     def discover(self) -> List[str]:
-        """扫描插件目录，返回发现的插件名列表"""
         if not self._plugin_dir.is_dir():
             _log.info(f"插件目录不存在: {self._plugin_dir}")
             return []
@@ -62,7 +61,6 @@ class PluginManager:
             sys.path.insert(0, plugin_root)
 
     def load_all(self, **deps: Any) -> Dict[str, PluginMeta]:
-        """发现并加载所有插件"""
         self._deps = dict(deps)
         discovered = self.discover()
         if not discovered:
@@ -84,7 +82,6 @@ class PluginManager:
         return dict(self._loaded)
 
     def load_plugin(self, name: str, **deps: Any) -> Optional[PluginMeta]:
-        """加载单个插件"""
         from core.command_handlers.base import _HANDLER_REGISTRY
 
         self._deps = dict(deps)
@@ -100,11 +97,9 @@ class PluginManager:
             _log.error(f"导入插件 {name} 失败: {e}", exc_info=True)
             return None
 
-        # 计算新增的 _HANDLER_REGISTRY 条目
         after = len(_HANDLER_REGISTRY)
         new_handler_entries = _HANDLER_REGISTRY[before:]
 
-        # 查找插件对应的 PluginMeta
         meta = None
         for m in list(_PLUGIN_REGISTRY.values()):
             mod = sys.modules.get(m.cls.__module__)
@@ -113,7 +108,6 @@ class PluginManager:
                 break
 
         if meta is None:
-            # 如果没有 @plugin 装饰器，尝试遍历新注册的 @command 条目所属的模块
             _log.info(f"插件 {name} 未使用 @plugin 装饰器，将根据目录名注册元信息")
             meta = PluginMeta(cls=type(name, (), {}), name=name)
 
@@ -121,7 +115,6 @@ class PluginManager:
         meta.loaded = True
         self._plugin_registry_ranges[name] = (before, after)
 
-        # 注册命令
         command_manager = deps.get("command_manager")
         registered_cmds = []
         if command_manager and new_handler_entries:
@@ -149,7 +142,6 @@ class PluginManager:
                     _log.error(f"[插件:{name}] 注册命令 {cmd_name} 失败: {e}")
         self._plugin_commands[name] = registered_cmds
 
-        # on_load 钩子
         if isinstance(meta.cls, type) and issubclass(meta.cls, BasePlugin):
             try:
                 instance = meta.cls()
@@ -163,13 +155,11 @@ class PluginManager:
         return meta
 
     def unload_plugin(self, name: str) -> bool:
-        """卸载单个插件"""
         meta = self._loaded.get(name)
         if meta is None:
             _log.warning(f"插件 {name} 未加载，无法卸载")
             return False
 
-        # on_unload 钩子
         if isinstance(meta.cls, type) and issubclass(meta.cls, BasePlugin):
             try:
                 instance = meta.cls()
@@ -177,7 +167,6 @@ class PluginManager:
             except Exception as e:
                 _log.warning(f"插件 {name} on_unload 失败: {e}")
 
-        # 注销命令
         command_manager = self._deps.get("command_manager")
         if command_manager:
             for cmd_name in self._plugin_commands.get(name, []):
@@ -185,7 +174,6 @@ class PluginManager:
                 if removed:
                     _log.info(f"[插件:{name}] 注销命令: {cmd_name}")
 
-        # 清理追踪数据
         self._loaded.pop(name, None)
         self._plugin_commands.pop(name, None)
         self._plugin_registry_ranges.pop(name, None)
@@ -194,20 +182,16 @@ class PluginManager:
         return True
 
     def reload_plugin(self, name: str) -> Optional[PluginMeta]:
-        """重载单个插件"""
-        # 卸载（如果已加载）
         if name in self._loaded:
             self.unload_plugin(name)
 
-        # 清理已导入的模块缓存
         module_name = f"plugins.{name}"
         for m in list(sys.modules.keys()):
             if m == module_name or m.startswith(f"{module_name}."):
                 del sys.modules[m]
 
-        # 清理全局注册表中的旧条目
         from core.command_handlers.base import _HANDLER_REGISTRY
-        from core.plugin_base import _PLUGIN_REGISTRY
+        from core.plugins.base import _PLUGIN_REGISTRY
 
         _HANDLER_REGISTRY[:] = [
             entry for entry in _HANDLER_REGISTRY
@@ -218,11 +202,9 @@ class PluginManager:
         for k in old_keys:
             del _PLUGIN_REGISTRY[k]
 
-        # 加载
         return self.load_plugin(name, **self._deps)
 
     def _is_entry_from_plugin(self, entry: tuple, plugin_name: str) -> bool:
-        """判断 _HANDLER_REGISTRY 条目是否来自指定插件模块"""
         cls = entry[0]
         module = sys.modules.get(cls.__module__)
         if module is None:

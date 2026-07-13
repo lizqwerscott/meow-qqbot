@@ -33,7 +33,7 @@ class StatusCommand:
 
     @staticmethod
     def _plugin_count() -> int:
-        from core.plugin_manager import _current as _pm
+        from core.plugins.manager import _current as _pm
         return _pm.count if _pm else 0
 
     async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
