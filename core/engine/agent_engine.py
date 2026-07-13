@@ -55,6 +55,8 @@ class AgentEngine:
         context_window: int = 1000000,
         task_manager: Optional[Any] = None,
         cron_job_manager: Optional[Any] = None,
+        rule_router: Optional[Any] = None,
+        model_registry: Optional[Any] = None,
     ):
         self.ai_service = ai_service
         self.template_manager = template_manager
@@ -62,6 +64,8 @@ class AgentEngine:
         self._bot_id = bot_id
         self._admin_id = admin_id
         self._openai_config = openai_config
+        self.rule_router = rule_router
+        self.model_registry = model_registry
 
         self._nm = nickname_manager
         self.emoji_manager = emoji_manager
@@ -113,6 +117,7 @@ class AgentEngine:
             prompt_builder=self.prompt_builder,
             everos_memory=everos_memory,
             max_rounds=max_tool_rounds,
+            model_registry=model_registry,
         )
 
         # ── 消息钩子 ──
@@ -266,8 +271,38 @@ class AgentEngine:
             if not input_message.content.startswith("猫猫"):
                 needs_ai = False
 
-        # ── 路由模型智能分级（仅对需要 AI 的消息） ──
-        if needs_ai and self.router_model:
+        # ── 规则路由智能分级（ClawRouter 风格） ──
+        if needs_ai and self.rule_router and self.model_registry:
+            tier = self.rule_router.classify(input_message.content)
+            model_chain = self.model_registry.get_chain(tier)
+            input_message.model_chain = model_chain or None
+
+            from core.rule_router import is_simple_enough_for_direct
+            if tier == "simple" and is_simple_enough_for_direct(input_message.content):
+                _log.info(
+                    f"规则路由直接回复 (tier={tier}): "
+                    f"chat={chat_id[:12]}.. content={input_message.content[:30]}"
+                )
+                simple_model = model_chain[0] if model_chain else None
+                if simple_model:
+                    from core.rule_router import SIMPLE_SYSTEM_PROMPT as _simple_prompt
+                    reply = await self.model_registry.simple_chat(
+                        model_name=simple_model,
+                        messages=[
+                            {"role": "system", "content": _simple_prompt},
+                            {"role": "user", "content": input_message.content},
+                        ],
+                        max_tokens=200,
+                    )
+                    if reply:
+                        await reply_callback(
+                            chat_id, reply,
+                            input_message.id, input_message.is_group,
+                        )
+                        return
+                # fallback: 走 ToolLoop
+        elif needs_ai and self.router_model:
+            # 旧路由模型兼容（无 rule_router 时）
             decision = await self.router_model.route(
                 content=input_message.content,
                 chat_id=chat_id,
@@ -282,7 +317,6 @@ class AgentEngine:
                     input_message.id, input_message.is_group,
                 )
                 return
-            # escalate：重写消息内容，走主模型
             if decision.response != input_message.content:
                 _log.info(
                     f"路由 escalate: {input_message.content[:30]} -> {decision.response[:50]}"
@@ -375,6 +409,7 @@ class AgentEngine:
             reply_callback=reply_callback,
             sender_id=input_message.sender_id,
             get_user_nickname=get_user_nickname,
+            model_chain=input_message.model_chain,
         )
 
         _log.info(f"消息处理完成: {input_message.id}")

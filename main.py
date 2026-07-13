@@ -24,6 +24,8 @@ from core.learners.orchestrator import LearningOrchestrator
 from core.tasks import TaskStore, TaskManager, CronJobManager, BackgroundTaskRunner, CronJobScheduler
 from core.tasks.heartbeat import HeartbeatManager
 from core.router_model import RouterModel
+from core.rule_router import RuleRouter
+from core.ai.model_registry import ModelRegistry
 
 from core.webui import create_app, start_webui
 
@@ -201,9 +203,25 @@ async def main() -> None:
     else:
         _log.info("学习系统未启用")
 
-    # ── 路由模型（智能分级） ──
+    # ── 规则路由 / 模型注册表（ClawRouter 风格） ──
+    rule_router = None
+    model_registry = None
     router_model = None
-    if config.get("router_model", {}).get("enabled", False):
+    routing_enabled = config.get("routing", {}).get("enabled", False)
+
+    if routing_enabled:
+        models_config = config.get("models", {})
+        if models_config:
+            model_registry = ModelRegistry(models_config)
+            tier_config = config.get("routing", {}).get("tiers", {})
+            model_registry.configure_tiers(tier_config)
+            rule_router = RuleRouter()
+            _log.info("ClawRouter 规则路由已初始化")
+        else:
+            _log.warning("routing.enabled=true 但 models 配置为空")
+
+    # 旧版路由模型兼容（当 routing 关闭时使用）
+    if not routing_enabled and config.get("router_model", {}).get("enabled", False):
         character_card = getattr(template_manager, "character_card", "")
         router_model = RouterModel(config["router_model"], character_card=character_card)
 
@@ -225,6 +243,8 @@ async def main() -> None:
         cost_tracker=cost_tracker,
         task_manager=task_manager,
         cron_job_manager=cron_job_manager,
+        rule_router=rule_router,
+        model_registry=model_registry,
     )
 
     # ── 将后台任务执行器注入 ToolExecutor（供 AI 工具调用） ──
@@ -287,6 +307,7 @@ async def main() -> None:
         heartbeat_manager = HeartbeatManager(
             config=config["heartbeat"],
             router_model=router_model,
+            model_registry=model_registry,
             bot_id=bot_id,
             admin_ids=admin_ids,
             api_client=engine.api,

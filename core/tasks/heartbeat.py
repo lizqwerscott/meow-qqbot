@@ -54,14 +54,15 @@ class HeartbeatManager:
         self,
         config: dict,
         router_model: Any,
-        bot_id: str,
-        admin_ids: list,
-        api_client: Any,
-        agent_engine: Any,
+        model_registry: Any = None,
+        bot_id: str = "",
+        admin_ids: Optional[list] = None,
+        api_client: Any = None,
+        agent_engine: Any = None,
     ):
         self._enabled = config.get("enabled", False)
         self._every_minutes = config.get("every", 30)
-        self._use_router_model = config.get("use_router_model", True)
+        self._model_name = config.get("model", "")
         self._custom_prompt = config.get("prompt", "")
 
         active_hours = config.get("active_hours", {})
@@ -73,6 +74,7 @@ class HeartbeatManager:
         self._busy_idle_minutes = config.get("busy_idle_minutes", 10)
 
         self._router_model = router_model
+        self._model_registry = model_registry
         self._bot_id = bot_id
         self._admin_ids = admin_ids if isinstance(admin_ids, list) else []
         self._api = api_client
@@ -180,13 +182,19 @@ class HeartbeatManager:
 
         # 调用模型
         result = ""
-        if self._use_router_model and self._router_model:
+        if self._model_registry and self._model_name:
+            result = await self._model_registry.simple_chat(
+                model_name=self._model_name,
+                messages=[
+                    {"role": "system", "content": "你是一个群聊助手的心跳检查器。请检查是否有需要关注的事项。\n\n如果没有，只回复 HEARTBEAT_OK。如果有提醒，简短说明，不超过 100 字。"},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=300,
+            )
+        elif self._router_model:
             result = await self._router_model.simple_chat(prompt)
-        elif not self._use_router_model:
-            _log.debug("心跳跳过：未启用路由模型")
-            return
         else:
-            _log.warning("心跳跳过：路由模型未就绪")
+            _log.warning("心跳跳过：无可用模型")
             return
 
         if not result:

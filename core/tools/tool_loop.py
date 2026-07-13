@@ -80,6 +80,7 @@ class ToolLoop:
         prompt_builder: Any = None,
         everos_memory: Any = None,
         max_rounds: int = -1,
+        model_registry: Any = None,
     ):
         self.ai_service = ai_service
         self.tool_executor = tool_executor
@@ -89,6 +90,7 @@ class ToolLoop:
         self.prompt_builder = prompt_builder
         self.everos = everos_memory
         self._max_tool_rounds = max_rounds
+        self._model_registry = model_registry
 
     async def run(
         self,
@@ -102,16 +104,19 @@ class ToolLoop:
         get_user_nickname: Optional[Callable[[str], str]] = None,
         delivery_channel: str = "",
         reply_to_message_id: str = "",
+        model_chain: Optional[List[str]] = None,
     ) -> bool:
         """执行工具调用循环。
 
         Args:
             delivery_channel: 后台任务时传入真实聊天 ID，供 send_emoji 等工具使用
+            model_chain: 模型链（如 ["cheap", "primary"]），启用 fallback。
 
         Returns:
             sent_emoji: 是否在循环中发送了表情。
         """
         sent_emoji = False
+        current_model_name: Optional[str] = None
 
         if self._max_tool_rounds == -1:
             _rounds: Any = itertools.count()
@@ -122,12 +127,20 @@ class ToolLoop:
             # ── 防御：清理 messages 中孤立的 tool_calls ──
             ensure_messages_consistent(messages)
 
-            message, usage = await self.ai_service.chat_completion_with_tools(
-                messages=messages,
-                tools=tools,
-            )
+            if model_chain and self._model_registry:
+                message, usage, current_model_name = await self._model_registry.chat_with_fallback(
+                    model_chain, messages, tools,
+                )
+            else:
+                current_model_name = None
+                message, usage = await self.ai_service.chat_completion_with_tools(
+                    messages=messages,
+                    tools=tools,
+                )
+
+            model_for_cost = current_model_name or self.ai_service.model
             if usage and self.cost_tracker:
-                self.cost_tracker.record_turn(chat_id, self.ai_service.model, usage)
+                self.cost_tracker.record_turn(chat_id, model_for_cost, usage)
 
             if message is None:
                 await reply_callback(chat_id, "AI 服务异常", reply_to, is_group)
