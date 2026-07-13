@@ -10,5 +10,6 @@ import core.command_handlers.history
 import core.command_handlers.skills
 import core.command_handlers.approval_test
 import core.command_handlers.plugin_mgmt
+import core.command_handlers.cost
 
 __all__ = ["command", "register_all_commands", "_HANDLER_REGISTRY"]
