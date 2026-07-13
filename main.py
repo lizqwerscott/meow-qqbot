@@ -22,6 +22,8 @@ from core.tools.skill_managers import SkillManagers
 from core.plugins.manager import PluginManager
 from core.learners.orchestrator import LearningOrchestrator
 from core.tasks import TaskStore, TaskManager, CronJobManager, BackgroundTaskRunner, CronJobScheduler
+from core.tasks.heartbeat import HeartbeatManager
+from core.router_model import RouterModel
 
 from core.webui import create_app, start_webui
 
@@ -199,6 +201,11 @@ async def main() -> None:
     else:
         _log.info("学习系统未启用")
 
+    # ── 路由模型（智能分级） ──
+    router_model = None
+    if config.get("router_model", {}).get("enabled", False):
+        router_model = RouterModel(config["router_model"])
+
     # ── 2. 创建 AgentEngine（全局单例） ──
     agent_engine = AgentEngine(
         ai_service=ai_service,
@@ -227,6 +234,10 @@ async def main() -> None:
             background_task_runner=background_task_runner,
         )
         _log.info("任务管理器已注入 ToolExecutor")
+
+    # ── 注入路由模型 ──
+    if router_model:
+        agent_engine.set_router_model(router_model)
 
     # ── 连接后台任务执行器与 AgentEngine ──
     if background_task_runner and task_manager:
@@ -268,6 +279,18 @@ async def main() -> None:
         emoji_manager=emoji_manager,
         multimodal_service=multimodal_service,
     )
+
+    # ── 心跳系统 ──
+    heartbeat_manager = None
+    if config.get("heartbeat", {}).get("enabled", False):
+        heartbeat_manager = HeartbeatManager(
+            config=config["heartbeat"],
+            router_model=router_model,
+            bot_id=bot_id,
+            admin_ids=admin_ids,
+            api_client=engine.api,
+            agent_engine=agent_engine,
+        )
 
     # 注册命令处理器（从 core/command_handlers/ 自动发现）
     register_all_commands(
@@ -329,6 +352,10 @@ async def main() -> None:
     if cron_scheduler:
         cron_scheduler.start()
 
+    # 启动心跳
+    if heartbeat_manager:
+        await heartbeat_manager.start()
+
     task_cleanup_task = None
     if task_manager:
         # 定期清理过期任务记录（每 1 小时）
@@ -348,6 +375,8 @@ async def main() -> None:
     finally:
         if cron_scheduler:
             await cron_scheduler.stop()
+        if heartbeat_manager:
+            await heartbeat_manager.stop()
         if task_cleanup_task:
             task_cleanup_task.cancel()
         await engine.stop()
