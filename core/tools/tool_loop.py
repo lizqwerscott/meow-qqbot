@@ -13,11 +13,10 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from core.message import InputMessage
+from core.tools.definitions import FLUSH_KEYWORDS
 from core.tools.executor import ToolContext
 
 _log = logging.getLogger(__name__)
-
-_FLUSH_KEYWORDS = ["我喜欢", "我讨厌", "我叫", "我是", "我的", "记住", "我不喜欢", "我有", "别忘了"]
 
 
 class ToolLoop:
@@ -236,7 +235,7 @@ class ToolLoop:
                     content=content,
                     timestamp=msg.timestamp,
                 )
-                if any(k in msg.content for k in _FLUSH_KEYWORDS):
+                if any(k in msg.content for k in FLUSH_KEYWORDS):
                     await self.everos.flush(session_id=chat_id)
 
             if msg.sender_id != current_sender_id and self.everos and self.prompt_builder:
