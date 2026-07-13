@@ -142,12 +142,14 @@ class TaskStore:
         return results[:limit]
 
     def delete_task(self, task_id: str) -> bool:
+        found = False
         with self._lock:
             if task_id in self._tasks:
                 del self._tasks[task_id]
-                self.save_tasks()
-                return True
-            return False
+                found = True
+        if found:
+            self.save_tasks()
+        return found
 
     def cleanup_old_tasks(self) -> int:
         """清理超过 TTL 的终态任务。返回清理数量。"""
@@ -186,12 +188,14 @@ class TaskStore:
         return list(self._jobs.values())
 
     def delete_job(self, job_id: str) -> bool:
+        found = False
         with self._lock:
             if job_id in self._jobs:
                 del self._jobs[job_id]
-                self.save_jobs()
-                return True
-            return False
+                found = True
+        if found:
+            self.save_jobs()
+        return found
 
     # ── 统计 ──
 
