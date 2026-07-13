@@ -61,31 +61,34 @@ class SkillManagers:
     def has_skills(self) -> bool:
         return self._skills_loaded
 
-    def get_available_skills_block(self) -> str:
+    def get_skill_system_intro(self) -> str:
+        """技能系统原则说明（静态，放入 system prompt）"""
+        return (
+            "--- 技能系统 ---\n"
+            "以下 <available_skills> 中列出的是我掌握的专业领域知识包（Skills）。\n"
+            "每个技能包含该领域的完整思考框架、方法论和操作指南。\n"
+            "\n"
+            "当用户的问题涉及某个领域时，我应当：\n"
+            "1. 使用 view_skill 查看该技能的完整指导说明\n"
+            "2. 将技能中的方法论融入当前思考，按它的框架来处理问题\n"
+            "3. 如果技能附带可执行脚本，使用 execute_skill 运行\n"
+            "\n"
+            "多个技能可以组合使用。如果任务涉及多个步骤或不同专业领域，\n"
+            "先用 view_skill 加载第一个技能的指导说明执行相关步骤，\n"
+            "再用 view_skill 加载下一个技能的指导说明继续处理。\n"
+            "\n"
+            "注意：技能 ≠ 工具。\n"
+            "技能是「怎么思考」—— 一种专业方法的注入，\n"
+            "工具是「怎么执行」—— 一个具体的操作。\n"
+            "使用技能意味着我吸收了该领域的专业知识来指导行为。"
+        )
+
+    def get_skill_entries_block(self) -> str:
+        """仅返回 <available_skills> XML 条目列表（动态，放入动态上下文）"""
         skills = self._manager.list_skills()
         if not skills:
             return ""
-        lines = [
-            "\n\n--- 技能系统 ---",
-            "以下 <available_skills> 中列出的是我掌握的专业领域知识包（Skills）。",
-            "每个技能包含该领域的完整思考框架、方法论和操作指南。",
-            "",
-             "当用户的问题涉及某个领域时，我应当：",
-            "1. 使用 view_skill 查看该技能的完整指导说明",
-            "2. 将技能中的方法论融入当前思考，按它的框架来处理问题",
-            "3. 如果技能附带可执行脚本，使用 execute_skill 运行",
-            "",
-            "多个技能可以组合使用。如果任务涉及多个步骤或不同专业领域，",
-            "先用 view_skill 加载第一个技能的指导说明执行相关步骤，",
-            "再用 view_skill 加载下一个技能的指导说明继续处理。",
-            "",
-            "注意：技能 ≠ 工具。",
-            "技能是「怎么思考」—— 一种专业方法的注入，",
-            "工具是「怎么执行」—— 一个具体的操作。",
-            "使用技能意味着我吸收了该领域的专业知识来指导行为。",
-            "",
-            "<available_skills>",
-        ]
+        lines = ["<available_skills>"]
         for s in skills:
             name = s.name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             desc = (s.description or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -95,6 +98,14 @@ class SkillManagers:
             lines.append("  </skill>")
         lines.append("</available_skills>")
         return "\n".join(lines)
+
+    def get_available_skills_block(self) -> str:
+        """完整块：原则说明 + 条目列表（旧接口，保持兼容）"""
+        intro = self.get_skill_system_intro()
+        entries = self.get_skill_entries_block()
+        if not entries:
+            return ""
+        return "\n\n" + intro + "\n\n" + entries
 
     def get_skill_detail(self, skill_name: str) -> str:
         try:
