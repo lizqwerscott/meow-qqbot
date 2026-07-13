@@ -45,6 +45,8 @@ async def main() -> None:
     _handler.setFormatter(_formatter)
     logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
 
+    _log = logging.getLogger(__name__)
+
     config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
@@ -80,10 +82,8 @@ async def main() -> None:
             base_url=multimodal_config.get("base_url"),
             model=multimodal_config.get("model", "deepseek-v4-flash"),
         )
-        _log = logging.getLogger(__name__)
         _log.info(f"多模态服务已启用，模型: {multimodal_config.get('model')}")
     else:
-        _log = logging.getLogger(__name__)
         _log.info("多模态服务未启用（enabled=false），跳过 VLM 图片分析")
 
     # 全局 EmojiManager（依赖 http_client + multimodal_service）
@@ -126,12 +126,10 @@ async def main() -> None:
             project_id=everos_config.get("project_id", "production"),
             flush_threshold=everos_config.get("flush_threshold", 20),
         )
-        _log = logging.getLogger(__name__)
         _log.info(
             f"EverOS 记忆系统已启用: {everos_config.get('base_url', 'http://127.0.0.1:8000')}"
         )
     else:
-        _log = logging.getLogger(__name__)
         _log.info("EverOS 记忆系统未启用")
 
     # ── EverOS 启动健康检查 ──
