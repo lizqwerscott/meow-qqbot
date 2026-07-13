@@ -112,6 +112,10 @@ class AIService:
         is_reasoning = self._is_reasoning_model(model_to_use)
 
         try:
+            # 最终防线：清理孤立的 tool_calls，防止重启恢复后历史不完整导致 API 400
+            from core.tools.tool_loop import ensure_messages_consistent
+            ensure_messages_consistent(messages)
+
             kwargs: Dict[str, Any] = dict(
                 messages=messages,
                 model=model_to_use,
