@@ -247,6 +247,7 @@ async def main() -> None:
             ),
             get_jobs=cron_job_manager.list_jobs,
             update_job=cron_job_manager.update_job,
+            delete_job=cron_job_manager.delete_job,
         )
 
     # ── 3. 创建 BotEngine ──

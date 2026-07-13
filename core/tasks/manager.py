@@ -146,7 +146,13 @@ class CronJobManager:
 
     @staticmethod
     def _recalculate_next_run(job: CronJob) -> None:
-        """用 croniter 从当前时间计算 next_run_at。"""
+        """计算 next_run_at。
+        - 一次性任务（at 有值）：直接用 at 作为 next_run_at
+        - 周期性任务（cron）：用 croniter 计算
+        """
+        if job.at is not None:
+            job.next_run_at = job.at
+            return
         try:
             now = datetime.now(timezone.utc)
             cron = croniter(job.cron_expression, now)
@@ -158,26 +164,67 @@ class CronJobManager:
     def create_job(
         self,
         name: str,
-        cron_expression: str,
-        prompt: str,
+        cron_expression: str = "",
+        prompt: str = "",
+        *,
+        at: Optional[float] = None,
         delivery_channel: Optional[str] = None,
         catch_up: bool = True,
         enabled: bool = True,
+        delete_after_run: bool = True,
+        session_mode: str = "isolated",
+        custom_session_id: Optional[str] = None,
+        payload_type: str = "message",
+        command: str = "",
+        model: Optional[str] = None,
+        thinking: Optional[str] = None,
     ) -> CronJob:
-        """创建定时任务。"""
+        """创建定时或一次性任务。
+
+        Args:
+            name: 任务名称
+            cron_expression: 周期性 cron 表达式（与 at 二选一）
+            prompt: AI 执行指令
+            at: 一次性执行 UTC 时间戳（与 cron_expression 二选一）
+            delivery_channel: 结果投递 chat_id
+            catch_up: 重启时补跑（仅周期任务）
+            enabled: 是否启用
+            delete_after_run: 一次性任务执行后自动删除
+            session_mode: isolated/current/custom/main
+            custom_session_id: custom 模式的命名 session ID
+            payload_type: message/command/system_event
+            command: shell 命令（payload_type=command 时使用）
+            model: 模型覆盖
+            thinking: 思考级别
+        """
+        if not cron_expression and at is None:
+            raise ValueError("cron_expression 和 at 必须至少提供一个")
+        if cron_expression and at is not None:
+            raise ValueError("cron_expression 和 at 不能同时设置")
+
         job = CronJob(
             name=name,
             cron_expression=cron_expression,
+            at=at,
             prompt=prompt,
-            delivery_channel=delivery_channel,
-            catch_up=catch_up,
             enabled=enabled,
+            catch_up=catch_up,
+            delete_after_run=delete_after_run,
+            delivery_channel=delivery_channel,
+            session_mode=session_mode,
+            custom_session_id=custom_session_id,
+            payload_type=payload_type,
+            command=command,
+            model=model,
+            thinking=thinking,
         )
         self._recalculate_next_run(job)
         self._store.add_job(job)
+        schedule_desc = f"at={at}" if at is not None else f"cron={cron_expression}"
         _log.info(
             f"定时任务已创建: id={job.id[:12]}.. name={name} "
-            f"cron={cron_expression} "
+            f"{schedule_desc} session={session_mode} "
+            f"payload={payload_type} "
             f"next_run={job.next_run_at}"
         )
         return job

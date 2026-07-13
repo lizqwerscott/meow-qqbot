@@ -13,7 +13,7 @@
 外部依赖：croniter（cron 表达式解析）
 """
 
-from .models import TaskRecord, TaskStatus, CronJob
+from .models import TaskRecord, TaskStatus, CronJob, SessionMode
 from .store import TaskStore
 from .manager import TaskManager, CronJobManager
 from .scheduler import CronJobScheduler

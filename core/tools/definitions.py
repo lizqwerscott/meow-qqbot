@@ -362,27 +362,71 @@ TASK_TOOLS = [
         "function": {
             "name": "create_cron_job",
             "description": (
-                "创建一个定时任务。AI 可以在后台设置一个按 cron 表达式定期执行的任务，"
-                "例如每天早上8点发送早安消息、每小时检查一次服务器状态等。"
-                "使用标准的 5 字段 cron 表达式：分 时 日 月 周。"
+                "创建一个定时任务或一次性提醒任务。"
+                "两种模式二选一：\n"
+                "1. 周期性任务：设置 cron_expression（标准 5 字段 cron 表达式：分 时 日 月 周）\n"
+                "2. 一次性任务：设置 at（ISO 8601 格式时间，例如 '2027-01-01T08:00:00'），"
+                "到时间执行一次后自动删除"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "定时任务的名字，方便管理和查找，如'早安提醒'",
+                        "description": "任务的名字，方便管理和查找，如'早安提醒'、'新年提醒'",
                     },
                     "cron_expression": {
                         "type": "string",
-                        "description": "标准 5 字段 cron 表达式。例如：'0 8 * * *' 表示每天早上8点，'*/30 * * * *' 表示每30分钟",
+                        "description": "周期性 cron 表达式（与 at 二选一）。例如：'0 8 * * *' 每天早上8点，'*/30 * * * *' 每30分钟",
+                    },
+                    "at": {
+                        "type": "string",
+                        "description": "一次性执行时间，ISO 8601 格式（UTC 或带时区偏移）。例如：'2027-01-01T08:00:00Z' 或 '2027-01-01T16:00:00+08:00'。与 cron_expression 二选一",
                     },
                     "prompt": {
                         "type": "string",
-                        "description": "每次执行时 AI 要执行的指令。例如：'对大家说早上好，今天的天气是...'",
+                        "description": "执行时 AI 要执行的指令。例如：'对大家说早上好，今天的天气是...'",
+                    },
+                    "session_mode": {
+                        "type": "string",
+                        "enum": ["isolated", "current", "custom", "main"],
+                        "description": "任务执行所在的 session 模式。默认为 isolated。\n"
+                        "- isolated: 每次执行使用全新隔离 session（默认）\n"
+                        "- current: 在创建时绑定的当前对话中执行，共享聊天上下文\n"
+                        "- custom: 持久化命名 session，跨多次执行保留上下文\n"
+                        "- main: 专用系统提醒通道 cron:main",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "custom 模式下使用的命名 session ID。例如 'daily-standup' 会使用 cron:daily-standup session，跨多次执行积累上下文。仅在 session_mode=custom 时有效。",
+                    },
+                    "payload_type": {
+                        "type": "string",
+                        "enum": ["message", "command", "system_event"],
+                        "description": "任务载荷类型。默认为 message。\n"
+                        "- message: AI 智能体轮次（默认），执行 prompt\n"
+                        "- command: 在服务器上执行 shell 命令，使用 command 参数\n"
+                        "- system_event: 系统事件通知，仅记录日志并投递通知",
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "shell 命令，仅在 payload_type=command 时有效。受安全黑名单限制（禁止 rm/sudo/systemctl 等危险命令）。",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "AI 模型覆盖，仅对 message 载荷有效。例如 'deepseek-v4-pro'。不设置则使用系统默认模型。",
+                    },
+                    "thinking": {
+                        "type": "string",
+                        "enum": ["off", "low", "medium", "high"],
+                        "description": "AI 思考级别覆盖，仅对 message 载荷有效。不设置则使用系统默认。",
                     },
                 },
-                "required": ["name", "cron_expression", "prompt"],
+                "oneOf": [
+                    {"required": ["cron_expression"]},
+                    {"required": ["at"]},
+                ],
+                "required": ["name", "prompt"],
             },
         },
     },
