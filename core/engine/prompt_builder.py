@@ -228,6 +228,13 @@ class PromptBuilder:
                 "content": "\n\n".join(dynamic_parts),
             })
 
+        # ── 6. 防御：清理孤立的 tool_calls（防止 compaction 拆散配对） ──
+        try:
+            from core.tools.tool_loop import ensure_messages_consistent
+            ensure_messages_consistent(messages)
+        except ImportError:
+            pass
+
         _log.debug(
             f"请求 AI messages:\n{json.dumps(messages, ensure_ascii=False, indent=2)}"
         )
