@@ -549,13 +549,7 @@ class ToolExecutor:
         return ToolResult(content=json.dumps(result, ensure_ascii=False))
 
     async def _exec_execute_command(self, args: dict, ctx: ToolContext) -> ToolResult:
-        """执行 execute_command — 运行 bash 命令（仅管理员）。"""
-        if ctx.sender_id not in self._admin_ids:
-            _log.warning(f"execute_command 权限被拒: sender={ctx.sender_id}")
-            return ToolResult(content=json.dumps(
-                {"error": "此工具仅限管理员使用"}, ensure_ascii=False,
-            ))
-
+        """执行 execute_command — 运行 bash 命令。"""
         if not self._skill_managers:
             return ToolResult(content=json.dumps(
                 {"error": "技能系统未就绪"}, ensure_ascii=False,

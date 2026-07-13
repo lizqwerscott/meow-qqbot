@@ -230,7 +230,7 @@ EXECUTE_COMMAND_TOOL = [
         "type": "function",
         "function": {
             "name": "execute_command",
-            "description": "执行任意 bash 命令（受权限和黑名单限制）。可用于运行 git 操作、python 脚本、文件查看等。",
+            "description": "执行任意 bash 命令（受黑名单限制）。可用于运行 git 操作、python 脚本、文件查看等。",
             "parameters": {
                 "type": "object",
                 "properties": {
