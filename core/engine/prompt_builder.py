@@ -111,6 +111,11 @@ class PromptBuilder:
         if compact_usage and cost_tracker:
             cost_tracker.record_turn(chat_id, self.ai_service.model, compact_usage)
 
+        # ── 1b. 防御：清理 context 历史中孤立的 tool_calls ──
+        cleaned = ctx.remove_orphaned_tool_calls()
+        if cleaned:
+            _log.info(f"清理了 {cleaned} 条孤立 tool_calls 消息 [{chat_id[:12]}..]")
+
         # ── 2. 确定可用工具 / 能力状态 ──
         has_emojis = (
             self.emoji_manager is not None
@@ -229,11 +234,8 @@ class PromptBuilder:
             })
 
         # ── 6. 防御：清理孤立的 tool_calls（防止 compaction 拆散配对） ──
-        try:
-            from core.tools.tool_loop import ensure_messages_consistent
-            ensure_messages_consistent(messages)
-        except ImportError:
-            pass
+        from core.tools.tool_loop import ensure_messages_consistent
+        ensure_messages_consistent(messages)
 
         _log.debug(
             f"请求 AI messages:\n{json.dumps(messages, ensure_ascii=False, indent=2)}"

@@ -209,9 +209,22 @@ class ToolLoop:
                         await self.context_manager.add_assistant_message_async(
                             chat_id, "[助手发送了一个表情]", reply_to,
                         )
-                except Exception as e:
+                except BaseException as e:
                     _log.error(f"工具 [{tc.function.name}] 执行异常: {e}")
                     content = json.dumps({"error": f"执行异常: {e}"}, ensure_ascii=False)
+                    # 先记录 tool 响应再传播，避免历史中留下孤立 tool_calls
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": content,
+                    })
+                    await self.context_manager.add_tool_result_async(
+                        chat_id, tc.function.name, content, tc.id,
+                    )
+                    if isinstance(e, asyncio.CancelledError):
+                        raise
+                    continue
+
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
