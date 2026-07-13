@@ -1,9 +1,11 @@
 """消息钩子：群聊自动复读检测器"""
 
 import logging
-from typing import Dict
+from collections import OrderedDict
 
 _log = logging.getLogger(__name__)
+
+_MAX_CACHED_CHATS = 500
 
 
 class DuplicateReplyDetector:
@@ -11,7 +13,7 @@ class DuplicateReplyDetector:
 
     def __init__(self, context_manager):
         self._cm = context_manager
-        self._replied: Dict[str, str] = {}
+        self._replied: "OrderedDict[str, str]" = OrderedDict()
 
     async def handle_message(self, input_message, reply_callback, get_user_nickname) -> bool:
         if not input_message.is_group:
@@ -40,4 +42,7 @@ class DuplicateReplyDetector:
             input_message.chat_id, last_content, input_message.id,
         )
         self._replied[input_message.chat_id] = last_content
+        self._replied.move_to_end(input_message.chat_id)
+        if len(self._replied) > _MAX_CACHED_CHATS:
+            self._replied.popitem(last=False)
         return True
