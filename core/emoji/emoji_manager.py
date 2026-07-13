@@ -109,20 +109,22 @@ class EmojiStorage:
         """根据 hash 获取 emoji 记录"""
         return self._data.get("emojis", {}).get(emoji_hash)
 
-    def save(self, record: dict) -> None:
-        """保存/更新一条 emoji 记录（立即刷盘）"""
-        self._data.setdefault("emojis", {})[record["hash"]] = record
-        self._flush()
+    async def save(self, record: dict) -> None:
+        """保存/更新一条 emoji 记录（异步刷盘）"""
+        async with self._lock:
+            self._data.setdefault("emojis", {})[record["hash"]] = record
+            await self._flush_async()
 
-    def update(self, emoji_hash: str, **kwargs) -> bool:
+    async def update(self, emoji_hash: str, **kwargs) -> bool:
         """部分更新 emoji 记录字段。返回 True 表示成功。"""
-        emojis = self._data.setdefault("emojis", {})
-        if emoji_hash not in emojis:
-            return False
-        emojis[emoji_hash].update(kwargs)
-        emojis[emoji_hash]["updated_at"] = datetime.now().isoformat()
-        self._flush()
-        return True
+        async with self._lock:
+            emojis = self._data.setdefault("emojis", {})
+            if emoji_hash not in emojis:
+                return False
+            emojis[emoji_hash].update(kwargs)
+            emojis[emoji_hash]["updated_at"] = datetime.now().isoformat()
+            await self._flush_async()
+            return True
 
     def list_all(self) -> List[dict]:
         """返回所有 emoji 记录列表"""
@@ -159,8 +161,8 @@ class EmojiStorage:
                 pass
             return {"version": 1, "emojis": {}}
 
-    def _flush(self) -> None:
-        """将数据写回 JSON 文件"""
+    def _flush_sync(self) -> None:
+        """同步将数据写回 JSON 文件（在 executor 线程中执行）。"""
         try:
             tmp = self._path.with_suffix(".json.tmp")
             with open(tmp, "w", encoding="utf-8") as f:
@@ -168,6 +170,11 @@ class EmojiStorage:
             tmp.replace(self._path)  # 原子替换
         except OSError as e:
             _log.error(f"写入表情数据文件失败: {e}")
+
+    async def _flush_async(self) -> None:
+        """异步将数据写回 JSON 文件（通过线程池避免阻塞事件循环）。"""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._flush_sync)
 
 
 # ============================================================
@@ -231,7 +238,7 @@ class EmojiManager:
         if cached:
             desc = cached.get("user_description") or cached.get("auto_description", "") or "[自定义表情]"
             tags = cached.get("user_tags") or cached.get("auto_tags", [])
-            self._storage.update(
+            await self._storage.update(
                 emoji_hash, used_count=cached.get("used_count", 0) + 1
             )
             return (desc, tags)
@@ -286,7 +293,7 @@ class EmojiManager:
             "updated_at": datetime.now().isoformat(),
             "used_count": 1,
         }
-        self._storage.save(record)
+        await self._storage.save(record)
 
         # 返回时应用 fallback：全空时显示通用描述
         final_desc = auto_desc or "[自定义表情]"
@@ -296,7 +303,7 @@ class EmojiManager:
     # 用户自定义接口
     # ════════════════════════════════════════════════════════════
 
-    def set_custom(
+    async def set_custom(
         self,
         emoji_hash: str,
         description: Optional[str] = None,
@@ -325,11 +332,11 @@ class EmojiManager:
             clean_tags = [t for t in tags if t.strip()]
             updates["user_tags"] = clean_tags
 
-        self._storage.update(emoji_hash, **updates)
+        await self._storage.update(emoji_hash, **updates)
         _log.info(f"已更新 emoji [{emoji_hash[:12]}..]: desc={description}, tags={tags}")
         return True
 
-    def reset_to_auto(self, emoji_hash: str) -> bool:
+    async def reset_to_auto(self, emoji_hash: str) -> bool:
         """
         恢复为 VLM 自动识别结果，清除用户自定义。
 
@@ -342,7 +349,7 @@ class EmojiManager:
         if record is None:
             return False
 
-        self._storage.update(
+        await self._storage.update(
             emoji_hash,
             user_description=None,
             user_tags=None,
@@ -354,12 +361,12 @@ class EmojiManager:
         """返回已知表情总数。"""
         return self._storage.count()
 
-    def update_emoji(self, emoji_hash: str, **kwargs) -> bool:
+    async def update_emoji(self, emoji_hash: str, **kwargs) -> bool:
         """更新一条表情记录的字段，返回是否成功。"""
         record = self.get_info(emoji_hash)
         if not record:
             return False
-        self._storage.update(emoji_hash, **kwargs)
+        await self._storage.update(emoji_hash, **kwargs)
         return True
 
     def get_info(self, emoji_hash: str) -> Optional[dict]:

@@ -22,7 +22,7 @@ class EmojiResetCommand:
         if record is None:
             return make_reply(input_message, f"未找到表情「{emoji_hash}」。")
 
-        ok = self.emoji_manager.reset_to_auto(record["hash"])
+        ok = await self.emoji_manager.reset_to_auto(record["hash"])
         if ok:
             return make_reply(input_message, f"表情 {record['hash'][:12]}.. 已恢复为 AI 自动识别结果。")
         else:
