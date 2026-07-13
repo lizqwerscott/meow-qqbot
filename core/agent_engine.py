@@ -219,6 +219,7 @@ class AgentEngine:
                 sender_id=input_message.sender_id,
                 sender_name=user_nickname,
                 content=content_with_context,
+                timestamp=input_message.timestamp,
             )
             keywords = ["我喜欢", "我讨厌", "我叫", "我是", "我的", "记住", "我不喜欢", "我有", "别忘了"]
             if any(k in input_message.content for k in keywords):
@@ -706,6 +707,7 @@ class AgentEngine:
                     sender_id=msg.sender_id,
                     sender_name=nick,
                     content=content,
+                    timestamp=msg.timestamp,
                 )
                 keywords = ["我喜欢", "我讨厌", "我叫", "我是", "我的", "记住", "我不喜欢", "我有", "别忘了"]
                 if any(k in msg.content for k in keywords):
