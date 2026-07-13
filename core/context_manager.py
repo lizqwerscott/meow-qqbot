@@ -428,7 +428,14 @@ class ChatContextManager:
         self.soft_trim = soft_trim
         self.hard_clear = hard_clear
         self.contexts: Dict[str, ChatContext] = {}
-        self.lock = asyncio.Lock()
+        self._ctx_lock = asyncio.Lock()                     # 保护 self.contexts 字典
+        self._chat_locks: Dict[str, asyncio.Lock] = {}      # 每 chat 操作锁
+
+    async def _get_chat_lock(self, chat_id: str) -> asyncio.Lock:
+        async with self._ctx_lock:
+            if chat_id not in self._chat_locks:
+                self._chat_locks[chat_id] = asyncio.Lock()
+            return self._chat_locks[chat_id]
 
     def get_context(self, chat_id: str) -> ChatContext:
         if chat_id not in self.contexts:
@@ -441,7 +448,7 @@ class ChatContextManager:
         return self.contexts[chat_id]
 
     async def get_context_async(self, chat_id: str) -> ChatContext:
-        async with self.lock:
+        async with self._ctx_lock:
             return self.get_context(chat_id)
 
     def add_user_message(
@@ -488,7 +495,8 @@ class ChatContextManager:
         sender_id: Optional[str] = None,
         name: Optional[str] = None,
     ) -> None:
-        async with self.lock:
+        lock = await self._get_chat_lock(chat_id)
+        async with lock:
             self.add_user_message(
                 chat_id, content, message_id, sender_id=sender_id, name=name
             )
@@ -501,7 +509,8 @@ class ChatContextManager:
         tool_calls: Optional[List[Dict]] = None,
         reasoning_content: Optional[str] = None,
     ) -> None:
-        async with self.lock:
+        lock = await self._get_chat_lock(chat_id)
+        async with lock:
             self.add_assistant_message(
                 chat_id, content, message_id,
                 tool_calls=tool_calls,
@@ -515,7 +524,8 @@ class ChatContextManager:
         content: str,
         tool_call_id: str,
     ) -> None:
-        async with self.lock:
+        lock = await self._get_chat_lock(chat_id)
+        async with lock:
             self.add_tool_result(chat_id, tool_name, content, tool_call_id)
 
     def get_history(
@@ -533,7 +543,8 @@ class ChatContextManager:
     async def get_chat_history_async(
         self, chat_id: str, max_messages: Optional[int] = None
     ) -> List[Dict]:
-        async with self.lock:
+        lock = await self._get_chat_lock(chat_id)
+        async with lock:
             return self.get_chat_history(chat_id, max_messages)
 
     async def get_pruned_history_async(
@@ -541,7 +552,8 @@ class ChatContextManager:
         chat_id: str,
         max_messages: Optional[int] = None,
     ) -> List[Dict]:
-        async with self.lock:
+        lock = await self._get_chat_lock(chat_id)
+        async with lock:
             if chat_id not in self.contexts:
                 return []
             ctx = self.contexts[chat_id]
@@ -568,12 +580,14 @@ class ChatContextManager:
         self.clear_history(chat_id)
 
     async def clear_chat_history_async(self, chat_id: str) -> None:
-        async with self.lock:
+        lock = await self._get_chat_lock(chat_id)
+        async with lock:
             self.clear_chat_history(chat_id)
 
     def remove_context(self, chat_id: str) -> None:
         if chat_id in self.contexts:
             del self.contexts[chat_id]
+        self._chat_locks.pop(chat_id, None)
 
     def cleanup_inactive_contexts(self, max_inactivity: int = 7200) -> List[str]:
         removed = []
@@ -582,13 +596,17 @@ class ChatContextManager:
             if context.get_inactivity_time() > max_inactivity:
                 removed.append(chat_id)
                 del self.contexts[chat_id]
+                self._chat_locks.pop(chat_id, None)
         return removed
 
     async def cleanup_inactive_contexts_async(
         self, max_inactivity: int = 7200
     ) -> List[str]:
-        async with self.lock:
-            return self.cleanup_inactive_contexts(max_inactivity)
+        async with self._ctx_lock:
+            removed = self.cleanup_inactive_contexts(max_inactivity)
+            for cid in removed:
+                self._chat_locks.pop(cid, None)
+            return removed
 
     def get_all_chat_ids(self) -> List[str]:
         return list(self.contexts.keys())
