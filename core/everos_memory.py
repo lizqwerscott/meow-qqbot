@@ -82,8 +82,12 @@ class EverOSMemory:
         content: str,
         sender_name: Optional[str] = None,
         role: str = "user",
+        timestamp: Optional[float] = None,
     ) -> None:
-        """写入一条消息到缓冲区（入队后立即返回，不等待 HTTP）。"""
+        """写入一条消息到缓冲区（入队后立即返回，不等待 HTTP）。
+
+        timestamp: 消息的 Unix 时间戳（秒），不传则用当前时间。
+        """
         if not self._running:
             _log.warning(
                 f"EverOSMemory 已关闭，忽略 add_message (session={session_id[:16]}..)"
@@ -96,6 +100,7 @@ class EverOSMemory:
             "sender_name": sender_name,
             "content": content,
             "role": role,
+            "timestamp": timestamp,
         })
         _log.debug(f"EverOS 入队 add_message: session={session_id[:16]}..")
 
@@ -149,6 +154,7 @@ class EverOSMemory:
                 sender_name=task.get("sender_name"),
                 content=task["content"],
                 role=task.get("role", "user"),
+                timestamp=task.get("timestamp"),
             )
             if status is None:
                 return  # HTTP 失败，计数不变
@@ -192,11 +198,15 @@ class EverOSMemory:
         content: str,
         sender_name: Optional[str] = None,
         role: str = "user",
+        timestamp: Optional[float] = None,
     ) -> Optional[str]:
-        """真实的 HTTP POST /add。返回 status 或 None（失败）。"""
+        """真实的 HTTP POST /add。返回 status 或 None（失败）。
+
+        timestamp: 消息的 Unix 时间戳（秒），不传则用当前时间。
+        """
         try:
             client = await self._get_client()
-            ts = int(time.time() * 1000)
+            ts = int((timestamp or time.time()) * 1000)
             msg: Dict[str, Any] = {
                 "sender_id": sender_id,
                 "role": role,
