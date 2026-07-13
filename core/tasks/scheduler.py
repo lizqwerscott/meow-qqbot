@@ -12,7 +12,7 @@
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Callable, Optional
 
 from croniter import croniter
@@ -104,7 +104,9 @@ class CronJobScheduler:
         if job.at is not None:
             job.next_run_at = job.at
             return
-        now = datetime.now(timezone.utc)
+        # 使用 CST (UTC+8) 以匹配 AI prompt 注入的时间
+        _tz = timezone(timedelta(hours=8))
+        now = datetime.now(_tz)
         try:
             cron = croniter(job.cron_expression, now)
             job.next_run_at = cron.get_next(float)

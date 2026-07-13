@@ -154,7 +154,9 @@ class CronJobManager:
             job.next_run_at = job.at
             return
         try:
-            now = datetime.now(timezone.utc)
+            # 使用 CST (UTC+8) 以匹配 AI prompt 注入的时间
+            _tz = timezone(timedelta(hours=8))
+            now = datetime.now(_tz)
             cron = croniter(job.cron_expression, now)
             job.next_run_at = cron.get_next(float)
         except (ValueError, KeyError) as e:
