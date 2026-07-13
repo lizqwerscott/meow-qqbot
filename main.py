@@ -235,7 +235,11 @@ async def main() -> None:
         )
         # 投递回调（将任务执行结果发回 QQ 聊天）
         async def _deliver(chat_id, content, message_id, is_group):
-            pass
+            try:
+                chat_type = "group" if is_group else "c2c"
+                await engine.api.send_text(chat_type, chat_id, content, reply_to=None)
+            except Exception as e:
+                _log.error(f"投递任务结果失败: {e}")
         background_task_runner.set_delivery_callback(_deliver)
 
     # ── 连接 Cron 调度器 ──
