@@ -259,7 +259,7 @@ class ToolExecutor:
             record = self._emoji_manager.get_info(full_hash)
             if record:
                 count = record.get("used_count", 0) + 1
-                self._emoji_manager.update_emoji(full_hash, used_count=count)
+                await self._emoji_manager.update_emoji(full_hash, used_count=count)
 
             _log.info(f"表情图片已发送 [{full_hash[:12]}..]: {desc}")
             return True, desc, file_name, ""

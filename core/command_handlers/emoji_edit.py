@@ -36,7 +36,7 @@ class EmojiEditCommand:
         if record is None:
             return make_reply(input_message, f"未找到表情「{emoji_hash}」。「猫猫 /表情列表」查看所有。")
 
-        ok = self.emoji_manager.set_custom(record["hash"], description=desc, tags=tags)
+        ok = await self.emoji_manager.set_custom(record["hash"], description=desc, tags=tags)
         if ok:
             changes = []
             if desc is not None:

@@ -432,7 +432,7 @@ class ChatContext:
             _log.warning("压缩返回空结果，跳过")
             return False, usage
 
-        summary.strip()
+        summary = summary.strip()
         _log.info(f"压缩完成: {len(old_msgs)} 条 → 摘要 ({len(summary)} 字符)")
 
         timestamp = old_msgs[0].timestamp
@@ -630,6 +630,18 @@ class ChatContextManager:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             self.clear_chat_history(chat_id)
+
+    async def compact_history_if_needed(
+        self, chat_id: str, ai_service, force: bool = False
+    ) -> tuple[bool, Optional[Dict], "ChatContext"]:
+        """用 per-chat 锁保护压缩过程，与 add_user_message_async 共用同一锁。"""
+        lock = await self._get_chat_lock(chat_id)
+        async with lock:
+            context = self.get_context(chat_id)
+            compacted, usage = await context.compact_history_if_needed(
+                ai_service, force=force
+            )
+        return compacted, usage, context
 
     def remove_context(self, chat_id: str) -> None:
         if chat_id in self.contexts:

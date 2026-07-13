@@ -19,6 +19,7 @@ from core.tools.definitions import (
     SEARCH_RELATION_TOOL,
     MARK_IMPORTANT_TOOL,
     SKILL_TOOLS,
+    EXECUTE_COMMAND_TOOL,
 )
 
 _log = logging.getLogger(__name__)
@@ -68,6 +69,7 @@ class PromptBuilder:
         skill_managers: Any = None,
         everos_memory: Any = None,
         search_top_k: int = 3,
+        admin_ids: Optional[List[str]] = None,
     ):
         self.template_manager = template_manager
         self.context_manager = context_manager
@@ -78,6 +80,7 @@ class PromptBuilder:
         self._skill_managers = skill_managers
         self.everos = everos_memory
         self._search_top_k = search_top_k
+        self._admin_ids = admin_ids or []
 
     async def build(
         self,
@@ -96,9 +99,8 @@ class PromptBuilder:
             - tools_to_use: 本次可用的工具定义列表，或 None
         """
         # ── 1. Token 阈值触发 compaction ──
-        compacted = await self.context_manager.get_context_async(chat_id)
-        _, compact_usage = await compacted.compact_history_if_needed(
-            self.ai_service
+        _, compact_usage, ctx = await self.context_manager.compact_history_if_needed(
+            chat_id, self.ai_service
         )
         if compact_usage and cost_tracker:
             cost_tracker.record_turn(chat_id, self.ai_service.model, compact_usage)
@@ -128,6 +130,10 @@ class PromptBuilder:
             tools_to_use.extend(MARK_IMPORTANT_TOOL)
         if self._skill_managers and self._skill_managers.has_skills:
             tools_to_use.extend(SKILL_TOOLS)
+            if sender_id not in self._admin_ids:
+                # 非管理员看不到 execute_command
+                tools_to_use = [t for t in tools_to_use
+                                if t.get("function", {}).get("name") != "execute_command"]
         tools_to_use = tools_to_use or None
 
         # ── 3. 静态 system prompt ──
@@ -155,7 +161,7 @@ class PromptBuilder:
             )
 
         # ── 4. 完整历史 ──
-        history = compacted.get_history_as_dicts()
+        history = ctx.get_history_as_dicts()
 
         messages: List[dict] = [{"role": "system", "content": static_prompt}]
         messages.extend(history)
@@ -206,7 +212,7 @@ class PromptBuilder:
                 "content": "\n\n".join(dynamic_parts),
             })
 
-        _log.info(
+        _log.debug(
             f"请求 AI messages:\n{json.dumps(messages, ensure_ascii=False, indent=2)}"
         )
         if tools_to_use:
