@@ -97,6 +97,7 @@ async def main() -> None:
     ctx_mgmt = config.get("context_management", {})
 
     # 全局 ChatContextManager（短期记忆，append-only，token 阈值触发 compaction）
+    cache_cfg = ctx_mgmt.get("cache", {})
     context_manager = ChatContextManager(
         max_history_per_chat=ctx_mgmt.get("max_history", 10000),
         compact_threshold_tokens=ctx_mgmt.get("compact_threshold_tokens", 950000),
@@ -105,6 +106,7 @@ async def main() -> None:
         keep_last_assistants=ctx_mgmt.get("keep_last_assistants", 3),
         soft_trim=ctx_mgmt.get("soft_trim", 20000),
         hard_clear=ctx_mgmt.get("hard_clear", 180000),
+        cache_dir=cache_cfg.get("dir", "data/sessions/") if cache_cfg.get("enabled", True) else None,
     )
 
     # 管理员 ID 列表
