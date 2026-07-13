@@ -150,7 +150,25 @@ MARK_IMPORTANT_TOOL = [
             ),
             "parameters": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "profile_data": {
+                        "type": "string",
+                        "description": (
+                            "需要记住的关于用户的结构化信息，JSON 对象格式。"
+                            "例如 {\"name\": \"小明\", \"likes\": \"打篮球\", \"job\": \"程序员\"}。"
+                            "这些信息会写入长期记忆，下次查询时将作为该用户画像返回。"
+                            "如果不需要记录画像则不传。"
+                        ),
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": (
+                            "需要记住的重要事件或事实的一句话摘要，"
+                            "将作为该用户的一条经历存入长期记忆。"
+                            "如果不需要记录则不传。"
+                        ),
+                    },
+                },
             },
         },
     },

@@ -5,34 +5,32 @@
 
 import json
 import logging
+import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from skillkit import SkillManager
 
 _log = logging.getLogger(__name__)
 
 
-DENIED_COMMAND_PATTERNS = re.compile(
-    r"\b("
-    r"rm|chmod|chown|sudo|su|doas|"
-    r"dd|mkfs|mkfs\..*|fdisk|parted|mkswap|"
-    r"shutdown|reboot|poweroff|halt|init|systemctl|"
-    r"useradd|usermod|groupadd|userdel|groupdel|"
-    r"setuid|setgid|chattr|lsattr|"
-    r"tcpdump|nmap|tshark|"
-    r"pkill|killall|"
-    r"service|grub|grub-install|grub-mkconfig|"
-    r"modprobe|insmod|rmmod|"
-    r"iptables|ufw|"
-    r"wget\s+.*-O\s+/|curl\s+.*-o\s+/|"
-    r"python.*\s+-m\s+http\.server\s+\d+"
-    r")\b"
-)
+DENIED_COMMANDS: frozenset = frozenset({
+    "rm", "chmod", "chown", "sudo", "su", "doas",
+    "dd", "mkfs", "fdisk", "parted", "mkswap",
+    "shutdown", "reboot", "poweroff", "halt", "init", "systemctl",
+    "useradd", "usermod", "groupadd", "userdel", "groupdel",
+    "setuid", "setgid", "chattr", "lsattr",
+    "tcpdump", "nmap", "tshark",
+    "pkill", "killall", "kill", "passwd",
+    "service", "grub-install", "grub-mkconfig",
+    "modprobe", "insmod", "rmmod",
+    "iptables", "ufw",
+})
 
-_SOFT_DENIED = re.compile(r"(?:^|\|\s*)(kill|passwd)(?:\s|$)")
+_DANGEROUS_TARGET_PATTERNS = re.compile(r">/(?:dev|etc|boot|sys|proc)/")
 
 
 class SkillManagers:
@@ -59,6 +57,28 @@ class SkillManagers:
     @property
     def has_skills(self) -> bool:
         return self._skills_loaded
+
+    @staticmethod
+    def _parse_command_safe(raw_command: str) -> Optional[List[str]]:
+        """安全地将命令字符串解析为 args 列表。返回 None 表示解析失败。"""
+        try:
+            parts = shlex.split(raw_command)
+        except ValueError:
+            return None
+        if not parts:
+            return None
+        return parts
+
+    @staticmethod
+    def _check_command_safe(parts: List[str]) -> Optional[str]:
+        """检查命令是否安全。返回 None 表示通过，否则返回拒绝原因。"""
+        cmd_name = os.path.basename(parts[0])
+        if cmd_name in DENIED_COMMANDS:
+            return f"命令 '{cmd_name}' 被禁止执行"
+        for arg in parts[1:]:
+            if _DANGEROUS_TARGET_PATTERNS.search(arg):
+                return f"参数包含危险的重定向目标: {arg[:60]}"
+        return None
 
     def get_skill_system_intro(self) -> str:
         return (
@@ -148,31 +168,28 @@ class SkillManagers:
         if not command:
             return {"success": False, "error": "命令为空"}
 
-        denied_match = DENIED_COMMAND_PATTERNS.search(command.lower())
-        if denied_match:
-            denied_word = denied_match.group(0)
-            _log.warning(f"execute_command 被拒绝: 含危险命令 '{denied_word}'")
+        # 安全解析命令字符串为 args 列表
+        parts = self._parse_command_safe(command)
+        if parts is None:
+            _log.warning(f"execute_command 命令格式无效: {command[:80]}")
             return {
                 "success": False,
-                "error": f"命令包含不允许的危险命令: '{denied_word}'",
+                "error": f"命令格式无效（引号不匹配等）: {command[:80]}",
             }
 
-        soft_denied = _SOFT_DENIED.search(command.lower())
-        if soft_denied:
-            denied_word = soft_denied.group(1)
-            _log.warning(f"execute_command 被拒绝: 含危险命令 '{denied_word}'")
-            return {
-                "success": False,
-                "error": f"命令包含不允许的危险命令: '{denied_word}'",
-            }
+        # 安全检查 — 黑名单 + 危险重定向
+        reason = self._check_command_safe(parts)
+        if reason:
+            _log.warning(f"execute_command 被拒绝: {reason}")
+            return {"success": False, "error": reason}
 
         effective_timeout = min(timeout, 120)
         cwd = workdir or "."
 
         try:
             result = subprocess.run(
-                command,
-                shell=True,
+                parts,
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=effective_timeout,

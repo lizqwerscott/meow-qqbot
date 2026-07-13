@@ -385,13 +385,55 @@ class ToolExecutor:
         return ToolResult(content="\n".join(lines))
 
     async def _exec_mark_important(self, args: dict, ctx: ToolContext) -> ToolResult:
-        """执行 mark_important — 触发记忆提炼。"""
+        """执行 mark_important — 将重要信息注入记忆缓冲并触发提取。"""
         if not self._everos:
             return ToolResult(content=json.dumps({"error": "记忆系统未就绪"}, ensure_ascii=False))
+
+        profile_data_str = (args.get("profile_data") or "").strip()
+        summary = (args.get("summary") or "").strip()
+        stored = []
+
+        if profile_data_str:
+            try:
+                profile_dict = json.loads(profile_data_str)
+                if isinstance(profile_dict, dict) and profile_dict:
+                    facts = "；".join(
+                        f"{k}是{v}" for k, v in profile_dict.items()
+                    )
+                    profile_msg = (
+                        f"[这是关于我（{ctx.sender_id}）的自我介绍，请记住这些信息] {facts}"
+                    )
+                    await self._everos.add_message(
+                        session_id=ctx.chat_id,
+                        sender_id=ctx.sender_id,
+                        content=profile_msg,
+                        role="user",
+                        timestamp=None,
+                    )
+                    stored.append("画像信息")
+            except json.JSONDecodeError:
+                _log.warning(
+                    f"mark_important profile_data JSON 解析失败: {profile_data_str[:100]}"
+                )
+
+        if summary:
+            await self._everos.add_message(
+                session_id=ctx.chat_id,
+                sender_id=ctx.sender_id,
+                content=f"[重要事件] {summary}",
+                role="user",
+                timestamp=None,
+            )
+            stored.append("事件摘要")
+
         await self._everos.flush(session_id=ctx.chat_id)
+
+        msg = "已标记为重要记忆。"
+        if stored:
+            msg += f" 已记录：{'、'.join(stored)}。"
+
         return ToolResult(content=json.dumps(
-            {"success": True, "message": "已标记当前对话为重要，正在整理记忆中。"},
-            ensure_ascii=False,
+            {"success": True, "message": msg}, ensure_ascii=False,
         ))
 
     # ════════════════════════════════════════════════════════
