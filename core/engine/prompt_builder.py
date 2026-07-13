@@ -210,6 +210,7 @@ class PromptBuilder:
         weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
         time_info = now.strftime(f"%Y-%m-%d %H:%M:%S ({weekday_names[now.weekday()]})")
         dynamic_parts.append(f"当前时间: {time_info} (CST/UTC+8)")
+        dynamic_parts.append("注意：创建定时任务时请使用北京时间 (CST/UTC+8)，不要使用 UTC。")
 
         # 表情标签列表
         if has_emojis and self.emoji_manager:

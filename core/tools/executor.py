@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
 from qqbot_agent_sdk.dto import MediaInfo, MessageToCreate, QQMessageType
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from core.managers.nickname_manager import NicknameManager
 
@@ -768,11 +768,17 @@ class ToolExecutor:
         }, ensure_ascii=False))
 
     @staticmethod
+    @staticmethod
     def _parse_iso_datetime(s: str) -> Optional[float]:
-        """将 ISO 8601 时间字符串解析为 Unix 时间戳。"""
+        """将 ISO 8601 时间字符串解析为 Unix 时间戳。
+        
+        没有时区信息的默认视为北京时间 (CST/UTC+8)。
+        """
         try:
-            # 尝试标准 ISO 格式（含 Z 或 +08:00）
             dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                # 没有时区偏移 → 视为北京时间 CST (UTC+8)
+                dt = dt.replace(tzinfo=timezone(timedelta(hours=8)))
             return dt.timestamp()
         except (ValueError, AttributeError):
             return None

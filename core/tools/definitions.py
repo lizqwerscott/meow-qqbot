@@ -363,9 +363,11 @@ TASK_TOOLS = [
             "name": "create_cron_job",
             "description": (
                 "创建一个定时任务或一次性提醒任务。"
+                "所有时间均为北京时间 (CST/UTC+8)。\n"
                 "两种模式二选一：\n"
-                "1. 周期性任务：设置 cron_expression（标准 5 字段 cron 表达式：分 时 日 月 周）\n"
-                "2. 一次性任务：设置 at（ISO 8601 格式时间，例如 '2027-01-01T08:00:00'），"
+                "1. 周期性任务：设置 cron_expression（标准 5 字段 cron 表达式：分 时 日 月 周，"
+                "使用北京时间 CST/UTC+8 计算）\n"
+                "2. 一次性任务：设置 at（ISO 8601 格式时间，使用北京时间 CST/UTC+8），"
                 "到时间执行一次后自动删除"
             ),
             "parameters": {
@@ -377,11 +379,11 @@ TASK_TOOLS = [
                     },
                     "cron_expression": {
                         "type": "string",
-                        "description": "周期性 cron 表达式（与 at 二选一）。例如：'0 8 * * *' 每天早上8点，'*/30 * * * *' 每30分钟",
+                        "description": "周期性 cron 表达式（北京时间 CST/UTC+8，与 at 二选一）。例如：'0 8 * * *' 表示北京时间每天早上8点，'*/30 * * * *' 每30分钟",
                     },
                     "at": {
                         "type": "string",
-                        "description": "一次性执行时间，ISO 8601 格式（UTC 或带时区偏移）。例如：'2027-01-01T08:00:00Z' 或 '2027-01-01T16:00:00+08:00'。与 cron_expression 二选一",
+                        "description": "一次性执行时间，ISO 8601 格式（北京时间 CST/UTC+8，与 cron_expression 二选一）。例如：'2027-01-01T08:00:00+08:00' 表示北京时间2027年1月1日早上8点。如果省略时区偏移，默认视为北京时间",
                     },
                     "prompt": {
                         "type": "string",
