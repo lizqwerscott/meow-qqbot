@@ -13,6 +13,8 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
 from qqbot_agent_sdk.dto import MediaInfo, MessageToCreate, QQMessageType
 
+from datetime import datetime
+
 from core.managers.nickname_manager import NicknameManager
 
 _log = logging.getLogger(__name__)
@@ -765,8 +767,18 @@ class ToolExecutor:
             "message": f"后台任务已创建！ID: {task.id[:16]}.. 执行完成后可使用 /tasks show {task.id[:12]} 查看结果",
         }, ensure_ascii=False))
 
+    @staticmethod
+    def _parse_iso_datetime(s: str) -> Optional[float]:
+        """将 ISO 8601 时间字符串解析为 Unix 时间戳。"""
+        try:
+            # 尝试标准 ISO 格式（含 Z 或 +08:00）
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return dt.timestamp()
+        except (ValueError, AttributeError):
+            return None
+
     async def _exec_create_cron_job(self, args: dict, ctx: ToolContext) -> ToolResult:
-        """创建一个定时任务。"""
+        """创建定时或一次性任务。"""
         if not self._cron_job_manager:
             return ToolResult(content=json.dumps(
                 {"error": "定时任务系统未就绪"}, ensure_ascii=False,
@@ -774,11 +786,48 @@ class ToolExecutor:
 
         name = (args.get("name") or "").strip()
         cron_expression = (args.get("cron_expression") or "").strip()
+        at_str = (args.get("at") or "").strip()
         prompt = (args.get("prompt") or "").strip()
+        session_mode = (args.get("session_mode") or "isolated").strip()
+        session_id = (args.get("session_id") or "").strip()
+        payload_type = (args.get("payload_type") or "message").strip()
+        payload_command = (args.get("command") or "").strip()
+        payload_model = (args.get("model") or "").strip() or None
+        payload_thinking = (args.get("thinking") or "").strip() or None
 
-        if not name or not cron_expression or not prompt:
+        if not name or not prompt:
             return ToolResult(content=json.dumps(
-                {"error": "name、cron_expression、prompt 均不能为空"},
+                {"error": "name 和 prompt 不能为空"},
+                ensure_ascii=False,
+            ))
+        if not cron_expression and not at_str:
+            return ToolResult(content=json.dumps(
+                {"error": "cron_expression 和 at 必须至少提供一个"},
+                ensure_ascii=False,
+            ))
+
+        # 解析一次性时间
+        at_ts = None
+        if at_str:
+            at_ts = self._parse_iso_datetime(at_str)
+            if at_ts is None:
+                return ToolResult(content=json.dumps(
+                    {"error": f"时间格式无法解析: {at_str}。请使用 ISO 8601 格式，如 '2027-01-01T08:00:00Z'"},
+                    ensure_ascii=False,
+                ))
+
+        # 校验参数
+        valid_modes = {"isolated", "current", "custom", "main"}
+        if session_mode not in valid_modes:
+            session_mode = "isolated"
+        custom_session_id = session_id if session_mode == "custom" else None
+
+        valid_payloads = {"message", "command", "system_event"}
+        if payload_type not in valid_payloads:
+            payload_type = "message"
+        if payload_type == "command" and not payload_command:
+            return ToolResult(content=json.dumps(
+                {"error": "payload_type=command 时 command 不能为空"},
                 ensure_ascii=False,
             ))
 
@@ -786,15 +835,53 @@ class ToolExecutor:
             name=name,
             cron_expression=cron_expression,
             prompt=prompt,
+            at=at_ts,
             delivery_channel=ctx.chat_id,
+            session_mode=session_mode,
+            custom_session_id=custom_session_id,
+            payload_type=payload_type,
+            command=payload_command,
+            model=payload_model,
+            thinking=payload_thinking,
         )
+
+        # 构建描述
+        payload_labels = {
+            "message": "AI 消息",
+            "command": f"Shell 命令",
+            "system_event": "系统事件",
+        }
+        if job.is_one_shot:
+            desc = f"🕐 一次性{payload_labels.get(payload_type, '任务')}「{name}」已创建！将在 {at_str} 执行。"
+        else:
+            desc = f"定时{payload_labels.get(payload_type, '任务')}「{name}」已创建！"
+
+        if payload_type == "command":
+            desc += f"\n命令: `{payload_command[:80]}`"
+
+        # session 信息
+        mode_desc = {
+            "isolated": "每次执行使用全新隔离 session",
+            "current": "在当前聊天会话中执行",
+            "custom": f"在命名 session cron:{custom_session_id} 中执行（跨运行保留上下文）",
+            "main": "在专用通道 cron:main 中执行",
+        }.get(session_mode, "")
+        if mode_desc:
+            desc += f"\nSession 模式: {mode_desc}"
 
         return ToolResult(content=json.dumps({
             "success": True,
             "job_id": job.id[:16],
             "name": job.name,
-            "cron_expression": job.cron_expression,
-            "message": f"定时任务「{name}」已创建！表达式: {cron_expression}。可使用 /cron list 查看所有定时任务。",
+            "cron_expression": job.cron_expression or "",
+            "at": at_str,
+            "session_mode": session_mode,
+            "session_id": job.custom_session_id or "",
+            "payload_type": payload_type,
+            "command": payload_command or "",
+            "model": payload_model or "",
+            "thinking": payload_thinking or "",
+            "message": desc,
         }, ensure_ascii=False))
 
     async def _exec_cancel_task(self, args: dict, ctx: ToolContext) -> ToolResult:

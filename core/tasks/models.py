@@ -7,6 +7,21 @@ from enum import Enum
 from typing import Optional
 
 
+class SessionMode(str, Enum):
+    """任务执行 Session 模式。
+
+    对应 OpenClaw 的 --session 机制：
+    - isolated:  每次执行使用全新 session（task:<uuid>）
+    - current:   在创建时绑定的会话中执行（共享对话上下文）
+    - custom:    持久化命名 session（跨执行保留上下文）
+    - main:      专用 cron:main 通道（系统提醒）
+    """
+    ISOLATED = "isolated"
+    CURRENT = "current"
+    CUSTOM = "custom"
+    MAIN = "main"
+
+
 class TaskStatus(str, Enum):
     """任务状态枚举。"""
     PENDING = "pending"
@@ -73,20 +88,40 @@ class TaskRecord:
 
 @dataclass
 class CronJob:
-    """定时任务定义。
+    """定时 / 一次性任务定义。
 
-    持久化在 JSON 文件中，机器人重启后由 Scheduler 重新加载
-    并重新计算 next_run_at。
+    两种调度方式（二选一）：
+    - cron_expression: 标准 cron 表达式，周期性执行
+    - at: Unix 时间戳，一次性执行（执行后自动删除）
+
+    持久化在 JSON 文件中，机器人重启后重新计算 next_run_at。
     """
     id: str = field(default_factory=_new_id)
     name: str = ""
-    cron_expression: str = "0 * * * *"  # 默认每小时
+    cron_expression: str = ""           # 周期性 cron，如 "0 8 * * *"
+    at: Optional[float] = None          # 一次性执行时间戳（UTC），有值则优先
     prompt: str = ""                    # AI 执行指令
     enabled: bool = True
-    catch_up: bool = True               # 重启时是否补跑错过的任务
+    catch_up: bool = True               # 重启时是否补跑错过的任务（仅 cron 有效）
+    delete_after_run: bool = True       # 一次性任务执行后自动删除
     created_at: float = field(default_factory=_now)
     next_run_at: Optional[float] = None
     delivery_channel: Optional[str] = None  # 结果投递到的 chat_id
+    session_mode: str = SessionMode.ISOLATED.value  # isolated/current/custom/main
+    custom_session_id: Optional[str] = None  # custom 模式下的命名 session ID
+
+    # 载荷类型
+    payload_type: str = "message"           # message / command / system_event
+    command: str = ""                       # shell 命令（command 载荷时使用）
+
+    # AI 选项
+    model: Optional[str] = None             # 模型覆盖
+    thinking: Optional[str] = None          # 思考级别（off/low/medium/high）
+
+    @property
+    def is_one_shot(self) -> bool:
+        """是否是一次性任务。"""
+        return self.at is not None
 
     def to_dict(self) -> dict:
         d = asdict(self)

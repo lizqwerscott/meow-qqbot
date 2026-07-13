@@ -45,7 +45,8 @@ class CronJobScheduler:
         # 需要外部注入的回调
         self._on_trigger: Optional[Callable] = None  # async (job: CronJob) -> None
         self._get_jobs: Optional[Callable] = None     # () -> list[CronJob]
-        self._update_job: Optional[Callable] = None   # async (job: CronJob) -> None
+        self._update_job: Optional[Callable] = None   # (job: CronJob) -> None
+        self._delete_job: Optional[Callable] = None   # (job_id: str) -> bool
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -55,6 +56,7 @@ class CronJobScheduler:
         on_trigger: Callable,
         get_jobs: Callable,
         update_job: Callable,
+        delete_job: Optional[Callable] = None,
     ) -> None:
         """注入回调。
 
@@ -65,6 +67,7 @@ class CronJobScheduler:
         self._on_trigger = on_trigger
         self._get_jobs = get_jobs
         self._update_job = update_job
+        self._delete_job = delete_job
 
     # ── 启动/停止 ──
 
@@ -94,7 +97,13 @@ class CronJobScheduler:
     # ── 内部 ──
 
     def _recalculate_next_run(self, job: CronJob) -> None:
-        """从当前时间重新计算 next_run_at。"""
+        """计算 next_run_at。
+        - 一次性任务（at 有值）：直接用 at
+        - 周期性任务（cron）：用 croniter 从当前时间计算
+        """
+        if job.at is not None:
+            job.next_run_at = job.at
+            return
         now = datetime.now(timezone.utc)
         try:
             cron = croniter(job.cron_expression, now)
@@ -176,10 +185,16 @@ class CronJobScheduler:
                 _log.info(
                     f"定时任务到期: {job.name} (next_run_at={job.next_run_at})"
                 )
-                # 计算下一次，先更新再执行，防止重复触发
-                self._recalculate_next_run(job)
-                if self._update_job:
-                    self._update_job(job)
+
+                if job.is_one_shot:
+                    # 一次性任务：删除后执行（防止后续重复触发）
+                    if job.delete_after_run and self._delete_job:
+                        self._delete_job(job.id)
+                else:
+                    # 周期任务：计算下一次，先更新再执行，防止重复触发
+                    self._recalculate_next_run(job)
+                    if self._update_job:
+                        self._update_job(job)
 
                 # 非阻塞触发（fire-and-forget，不阻塞轮询）
                 asyncio.create_task(self._on_trigger(job))
