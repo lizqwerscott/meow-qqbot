@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 from core.message import InputMessage
 
 if TYPE_CHECKING:
-    from core.agent_engine import AgentEngine
-    from core.command_manager import CommandManager
+    from core.engine.agent_engine import AgentEngine
+    from core.managers.command_manager import CommandManager
 
 _log = logging.getLogger(__name__)
 

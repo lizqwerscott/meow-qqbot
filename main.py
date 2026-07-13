@@ -7,16 +7,16 @@ import httpx
 from colorlog import ColoredFormatter
 
 from core.ai.service import AIService
-from core.agent_engine import AgentEngine
-from core.client import BotEngine
-from core.context_manager import ChatContextManager
-from core.cost_tracker import CostTracker
-from core.emoji_manager import EmojiManager
+from core.engine.agent_engine import AgentEngine
+from core.engine.client import BotEngine
+from core.managers.context_manager import ChatContextManager
+from core.managers.cost_tracker import CostTracker
+from core.managers.emoji_manager import EmojiManager
 from core.ai.multimodal import MultimodalService
-from core.nickname_manager import NicknameManager
-from core.router import Router
-from core.template_manager import TemplateManager
-from core.everos_memory import EverOSMemory
+from core.managers.nickname_manager import NicknameManager
+from core.engine.router import Router
+from core.managers.template_manager import TemplateManager
+from core.engine.everos_memory import EverOSMemory
 from core.command_handlers import register_all_commands
 from core.tools.skill_managers import SkillManagers
 from core.plugins.manager import PluginManager

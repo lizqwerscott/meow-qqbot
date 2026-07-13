@@ -1,0 +1,19 @@
+"""管理器模块 — 各类 Manager 统一归入此子包"""
+
+from core.managers.command_manager import Command, CommandManager, CommandRegistry, PermissionLevel
+from core.managers.context_manager import ChatContext, ChatContextManager
+from core.managers.cost_tracker import CostTracker
+from core.managers.emoji_manager import EmojiManager, is_custom_emoji
+from core.managers.nickname_manager import NicknameManager
+from core.managers.session_manager import SessionTaskManager
+from core.managers.template_manager import TemplateManager
+
+__all__ = [
+    "Command", "CommandManager", "CommandRegistry", "PermissionLevel",
+    "ChatContext", "ChatContextManager",
+    "CostTracker",
+    "EmojiManager", "is_custom_emoji",
+    "NicknameManager",
+    "SessionTaskManager",
+    "TemplateManager",
+]

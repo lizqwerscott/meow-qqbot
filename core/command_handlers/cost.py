@@ -1,7 +1,7 @@
 import logging
 from typing import Any, Dict, List
 
-from core.agent_engine import AgentEngine
+from core.engine.agent_engine import AgentEngine
 from core.command_handlers.base import command, make_reply
 from core.message import InputMessage
 

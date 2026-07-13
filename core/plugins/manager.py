@@ -8,11 +8,11 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from core.command_manager import Command, PermissionLevel
+from core.managers.command_manager import Command, PermissionLevel
 from core.plugins.base import _PLUGIN_REGISTRY, BasePlugin, PluginMeta
 
 if TYPE_CHECKING:
-    from core.command_manager import CommandManager
+    from core.managers.command_manager import CommandManager
 
 _log = logging.getLogger(__name__)
 

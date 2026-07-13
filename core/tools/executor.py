@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
 from qqbot_agent_sdk.dto import MediaInfo, MessageToCreate, QQMessageType
 
-from core.nickname_manager import NicknameManager
+from core.managers.nickname_manager import NicknameManager
 
 _log = logging.getLogger(__name__)
 
