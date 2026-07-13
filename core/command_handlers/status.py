@@ -54,6 +54,18 @@ class StatusCommand:
             sm = self.agent_engine._skill_managers
             skill_count = len(sm.list_skill_names()) if sm and sm.has_skills else 0
 
+            cost = stats.get("cost", {})
+            cost_lines = []
+            if cost.get("turn_count", 0) > 0:
+                cost_lines = [
+                    "",
+                    "**AI 消耗**",
+                    f"- API 调用: `{cost['turn_count']}` 次",
+                    f"- 输入 tokens: `{cost.get('prompt_tokens', 0):,}` (命中 `{cost.get('cache_hit_rate', 0)}%`)",
+                    f"- 输出 tokens: `{cost.get('completion_tokens', 0):,}`",
+                    f"- 总费用: **¥{cost.get('total_cost', 0):.4f}**",
+                ]
+
             status_text = [
                 "**系统状态**",
                 f"`{time.strftime('%Y-%m-%d %H:%M:%S')}`",
@@ -75,6 +87,7 @@ class StatusCommand:
                 "",
                 "**记忆系统**",
                 f"- EverOS: {_everos_status_line(everos_health)}",
+                *cost_lines,
             ]
             return make_reply(input_message, "\n".join(status_text))
         except ImportError:

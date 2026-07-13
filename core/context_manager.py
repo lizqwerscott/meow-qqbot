@@ -337,19 +337,19 @@ class ChatContext:
 
     async def compact_history_if_needed(
         self, ai_service: Any, force: bool = False
-    ) -> bool:
+    ) -> tuple[bool, Optional[Dict]]:
         """如果历史超过阈值，用 AI 将旧消息压缩为摘要。
-        返回 True 表示执行了压缩。
+        返回 (是否执行了压缩, usage dict 或 None)。
         """
         if not force and len(self.history) < self.compact_threshold:
-            return False
+            return False, None
 
         all_msgs = list(self.history)
         old_msgs = all_msgs[: -self.keep_recent]
         recent_msgs = all_msgs[-self.keep_recent :]
 
         if not old_msgs:
-            return False
+            return False, None
 
         text = self._format_for_summary(old_msgs)
         _log.info(
@@ -358,7 +358,7 @@ class ChatContext:
         )
 
         try:
-            summary = await ai_service.chat_completion(
+            summary, usage = await ai_service.chat_completion(
                 messages=[
                     {
                         "role": "system",
@@ -377,11 +377,11 @@ class ChatContext:
             )
         except Exception as e:
             _log.warning(f"压缩失败: {e!r}")
-            return False
+            return False, None
 
         if not summary:
             _log.warning("压缩返回空结果，跳过")
-            return False
+            return False, usage
 
         summary.strip()
         _log.info(f"压缩完成: {len(old_msgs)} 条 → 摘要 ({len(summary)} 字符)")
@@ -397,7 +397,7 @@ class ChatContext:
         for m in recent_msgs:
             new_history.append(m)
         self.history = new_history
-        return True
+        return True, usage
 
 
 class ChatContextManager:

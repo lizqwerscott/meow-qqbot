@@ -70,7 +70,7 @@ class AIService:
         model: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-    ) -> str | None:
+    ) -> tuple[Optional[str], Optional[Dict]]:
         """
         发送聊天补全请求（纯文本，无工具调用）
 
@@ -81,7 +81,7 @@ class AIService:
             max_tokens: 最大生成 token 数
 
         Returns:
-            AI 生成的文本内容，或 None
+            (AI 生成的文本内容或 None, usage dict 或 None)
         """
         model_to_use = model or self.model
         max_tokens_to_use = max_tokens if max_tokens is not None else self.max_tokens
@@ -108,13 +108,14 @@ class AIService:
                 kwargs["extra_body"] = extra_body
 
             response = await self.client.chat.completions.create(**kwargs)
+            usage = response.usage.model_dump() if response.usage else None
             if hasattr(response, "choices") and response.choices:
-                return response.choices[0].message.content
+                return response.choices[0].message.content, usage
             else:
-                return None
+                return None, usage
         except Exception as e:
             _log.error(f"AI 请求失败: {e}")
-            return None
+            return None, None
 
     def _is_reasoning_model(self, model: str) -> bool:
         return any(k in model for k in ("o1", "o3", "deepseek", "reasoning"))
@@ -131,10 +132,10 @@ class AIService:
         model: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-    ) -> Optional[Any]:
+    ) -> tuple[Optional[Any], Optional[Dict]]:
         """
         发送聊天补全请求（支持工具调用）。
-        返回完整的 ChatCompletionMessage 对象（含 .content 和 .tool_calls）。
+        返回 (ChatCompletionMessage, usage) 元组。
 
         Args:
             messages: 消息列表
@@ -144,8 +145,7 @@ class AIService:
             max_tokens: 最大生成 token 数
 
         Returns:
-            ChatCompletionMessage 对象（有 .content 和 .tool_calls 属性），
-            或 None（请求失败时）
+            (ChatCompletionMessage 对象或 None, usage dict 或 None)
         """
         model_to_use = model or self.model
         max_tokens_to_use = max_tokens if max_tokens is not None else self.max_tokens
@@ -177,9 +177,10 @@ class AIService:
                 kwargs["tools"] = tools
 
             response = await self.client.chat.completions.create(**kwargs)
+            usage = response.usage.model_dump() if response.usage else None
             if hasattr(response, "choices") and response.choices:
-                return response.choices[0].message
-            return None
+                return response.choices[0].message, usage
+            return None, usage
         except Exception as e:
             _log.error(f"AI 请求失败（带工具）: {e}")
-            return None
+            return None, None

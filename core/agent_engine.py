@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 from core.ai_service import AIService
 from core.context_manager import ChatContextManager
+from core.cost_tracker import CostTracker
 from core.emoji import EmojiManager
 from core.message import InputMessage
 from core.nickname_manager import NicknameManager
@@ -108,6 +109,7 @@ class AgentEngine:
         search_top_k: int = 3,
         skill_managers: Optional[Any] = None,
         max_tool_rounds: int = -1,
+        cost_tracker: Optional[CostTracker] = None,
     ):
         self.ai_service = ai_service
         self._max_tool_rounds = max_tool_rounds
@@ -126,6 +128,7 @@ class AgentEngine:
         self.everos = everos_memory
         self._search_top_k = search_top_k
         self._skill_managers = skill_managers
+        self.cost_tracker = cost_tracker or CostTracker()
 
         self.tool_executor = ToolExecutor(
             emoji_manager=emoji_manager,
@@ -307,7 +310,9 @@ class AgentEngine:
         user_nickname = get_user_nickname(input_message.sender_id)
 
         compacted = await self.context_manager.get_context_async(chat_id)
-        await compacted.compact_history_if_needed(self.ai_service)
+        compacted_result, compact_usage = await compacted.compact_history_if_needed(self.ai_service)
+        if compact_usage:
+            self.cost_tracker.record_turn(chat_id, self.ai_service.model, compact_usage)
 
         context_messages = await self.context_manager.get_pruned_history_async(
             chat_id,
@@ -517,10 +522,12 @@ class AgentEngine:
             _rounds = range(self._max_tool_rounds)
 
         for round_idx in _rounds:
-            message = await self.ai_service.chat_completion_with_tools(
+            message, usage = await self.ai_service.chat_completion_with_tools(
                 messages=messages,
                 tools=tools,
             )
+            if usage:
+                self.cost_tracker.record_turn(chat_id, self.ai_service.model, usage)
 
             if message is None:
                 await reply_callback(chat_id, "AI 服务异常", reply_to, is_group)
@@ -745,6 +752,16 @@ class AgentEngine:
         else:
             stats["everos_health"] = {"status": "disabled"}
 
+        g = self.cost_tracker.get_global_stats()
+        stats["cost"] = {
+            "turn_count": g.turn_count,
+            "prompt_tokens": g.prompt_tokens,
+            "completion_tokens": g.completion_tokens,
+            "cache_hit_tokens": g.cache_hit_tokens,
+            "cache_miss_tokens": g.cache_miss_tokens,
+            "cache_hit_rate": round(g.cache_hit_rate * 100, 1),
+            "total_cost": round(g.cost, 4),
+        }
         return stats
 
     # ── 生命周期 ──

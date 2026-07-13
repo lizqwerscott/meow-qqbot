@@ -10,6 +10,7 @@ from core.ai_service import AIService
 from core.agent_engine import AgentEngine
 from core.client import BotEngine
 from core.context_manager import ChatContextManager
+from core.cost_tracker import CostTracker
 from core.emoji import EmojiManager
 from core.multimodal_service import MultimodalService
 from core.nickname_manager import NicknameManager
@@ -110,6 +111,12 @@ async def main() -> None:
     # 管理员 ID 列表
     admin_ids = config.get("admin_id", [])
 
+    # ── CostTracker（AI 消耗追踪） ──
+    cost_tracking_config = config.get("cost_tracking", {})
+    cost_tracker = CostTracker(
+        pricing=cost_tracking_config.get("pricing"),
+    ) if cost_tracking_config.get("enabled", True) else CostTracker()
+
     # ── EverOS 长期记忆系统 ──
     everos_config = config.get("everos", {})
     everos_memory = None
@@ -163,6 +170,7 @@ async def main() -> None:
         search_top_k=everos_config.get("search_top_k", 3),
         skill_managers=skill_managers,
         max_tool_rounds=config.get("max_tool_rounds", -1),
+        cost_tracker=cost_tracker,
     )
 
     # ── 3. 创建 BotEngine ──
