@@ -214,6 +214,46 @@ class ChatContext:
     def get_inactivity_time(self) -> float:
         return time.time() - self.last_activity
 
+    def remove_orphaned_tool_calls(self) -> int:
+        """移除历史中孤立的 assistant(tool_calls) 消息（没有对应 tool 响应的）。
+
+        当工具执行被 CancelledError 中断时，可能出现 assistant 已写入但
+        tool 响应未写入的情况。此方法清理这类孤立消息，防止后续 API 400 错误。
+
+        Returns:
+            移除的消息数量。
+        """
+        removed = 0
+        result = []
+        history_list = list(self.history)
+        i = 0
+        while i < len(history_list):
+            msg = history_list[i]
+            if msg.role == "assistant" and msg.tool_calls:
+                tc_ids = {tc.get("id") for tc in msg.tool_calls if tc.get("id")}
+                if tc_ids:
+                    found_ids = set()
+                    for j in range(i + 1, len(history_list)):
+                        m = history_list[j]
+                        if m.role == "tool" and m.tool_call_id:
+                            found_ids.add(m.tool_call_id)
+                    if not tc_ids.issubset(found_ids):
+                        missing = tc_ids - found_ids
+                        _log.warning(
+                            f"移除孤立 tool_calls [{self.chat_id[:12]}..]: "
+                            f"missing_ids={missing}"
+                        )
+                        i += 1
+                        removed += 1
+                        continue
+            result.append(msg)
+            i += 1
+
+        if removed > 0:
+            self.history = deque(result, maxlen=self.max_history)
+
+        return removed
+
     # ── 本地缓存持久化 ──
 
     def _get_cache_path(self) -> Optional[Path]:
