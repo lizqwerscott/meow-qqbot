@@ -419,10 +419,14 @@ class ChatContext:
         self, messages: List[ChatMessage], recent_budget: int
     ) -> Tuple[List[ChatMessage], List[ChatMessage]]:
         """按 token 预算将消息分为 old（待压缩）和 recent（保留原样）。
+
         返回 (old_msgs, recent_msgs)，其中 recent 的总 token 不超过 budget。
+        注意：保证 assistant(tool_calls) 和其对应的 tool(responses) 不被拆散。
         """
         recent: List[ChatMessage] = []
         total = 0
+        recent_tool_ids: set = set()  # 记录 recent 中出现的 tool_call_id
+
         for msg in reversed(messages):
             tokens = _estimate_tokens(msg.content)
             if msg.tool_calls:
@@ -431,10 +435,42 @@ class ChatContext:
                     tokens += _estimate_tokens(tc.get("function", {}).get("arguments"))
             if msg.reasoning_content:
                 tokens += _estimate_tokens(msg.reasoning_content)
+
             if total + tokens > recent_budget and recent:
+                # ── 决定 break 前，检查是否拆散了 tool 配对 ──
+                # 如果当前 msg 是 tool 响应，对应的 assistant(tc) 可能在 recent 中？
+                # 如果是 assistant(tc)，对应的 tool 响应在 recent 中但未被包含？
+                # 两种都要确保配对完整性。
+
+                # case 1: 当前 msg 是 tool 响应且其 call_id 在 recent 的 assistant 中
+                if msg.role == "tool" and msg.tool_call_id and msg.tool_call_id in recent_tool_ids:
+                    # tool 响应不能没有前面的 assistant → 加入 recent
+                    recent.insert(0, msg)
+                    total += tokens
+                    continue
+
+                # case 2: 当前 msg 是 assistant(tc)，检查其 tool_calls 是否已有响应在 recent 中
+                if msg.tool_calls:
+                    tc_ids = {tc.get("id") for tc in msg.tool_calls if tc.get("id")}
+                    if tc_ids & recent_tool_ids:
+                        # 对应响应已加入 recent，assistant 也必须加入
+                        recent.insert(0, msg)
+                        total += tokens
+                        for tc in msg.tool_calls:
+                            tid = tc.get("id")
+                            if tid:
+                                recent_tool_ids.discard(tid)
+                        continue
+
+                # 真的超预算了，break
                 break
+
             recent.insert(0, msg)
             total += tokens
+            # 记录 tool_call_id
+            if msg.role == "tool" and msg.tool_call_id:
+                recent_tool_ids.add(msg.tool_call_id)
+
         old = messages[: -len(recent)] if recent else messages[:-1] if len(messages) > 1 else []
         return old, recent
 
