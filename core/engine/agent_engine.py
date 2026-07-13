@@ -337,6 +337,105 @@ class AgentEngine:
 
         _log.info(f"消息处理完成: {input_message.id}")
 
+    # ── 后台任务执行 ──
+
+    async def execute_background_task(
+        self,
+        chat_id: str,
+        prompt: str,
+        sender_id: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """在独立会话中执行后台任务。
+
+        创建一个合成 InputMessage 并走完整的 PromptBuilding + ToolLoop 流程，
+        但回复被捕获而非实际发送。
+
+        Args:
+            chat_id: 任务会话 ID（如 task:<uuid>）
+            prompt: AI 执行指令
+            sender_id: 发送者（如 "system"）
+
+        Returns:
+            (result_text, error_text)
+            - result_text: AI 的最终文本回复
+            - error_text: 如果有错误则返回错误描述
+        """
+        _log.info(
+            f"开始后台任务: chat_id={chat_id[:20]}.. prompt={prompt[:60]}"
+        )
+
+        # 用于捕获回复的容器
+        captured_replies: list[str] = []
+
+        async def capturing_reply_callback(
+            chat_id: str,
+            content: str,
+            message_id: str,
+            is_group: bool,
+        ) -> None:
+            captured_replies.append(content)
+
+        # 确保会话上下文存在
+        from core.message import InputMessage
+        import time
+
+        # 创建合成 InputMessage
+        msg = InputMessage(
+            id=f"bg_{chat_id}_{int(time.time())}",
+            sender_id=sender_id,
+            chat_id=chat_id,
+            content=prompt,
+            is_group=True,      # 视为群聊模式（允许工具使用）
+            is_at_mention=False,
+        )
+
+        try:
+            # 写入用户消息到上下文
+            await self.context_manager.add_user_message_async(
+                chat_id, prompt, msg.id,
+                sender_id=sender_id, name="system",
+            )
+
+            # 构建 task 专用 messages
+            messages, tools_to_use = await self.prompt_builder.build_task_messages(
+                chat_id=chat_id,
+                prompt=prompt,
+            )
+
+            # 追加该会话的历史上下文（如果有）
+            history = self.context_manager.get_history_as_dicts(chat_id)
+            if history:
+                # 跳过首条 user 消息（已在 task_messages 中），避免重复
+                messages = messages[:1] + history + [messages[-1]]
+
+            # 执行工具循环
+            await self.tool_loop.run(
+                messages=messages,
+                tools=tools_to_use,
+                chat_id=chat_id,
+                is_group=True,
+                reply_to=msg.id,
+                reply_callback=capturing_reply_callback,
+                sender_id=sender_id,
+            )
+
+            result = "\n".join(captured_replies) if captured_replies else None
+            _log.info(
+                f"后台任务完成: chat_id={chat_id[:20]}.. "
+                f"result_len={len(result or '')}"
+            )
+            return result, None
+
+        except asyncio.CancelledError:
+            _log.warning(f"后台任务被取消: chat_id={chat_id[:20]}..")
+            return None, "任务被取消"
+        except Exception as e:
+            _log.error(
+                f"后台任务异常: chat_id={chat_id[:20]}.. error={e}",
+                exc_info=True,
+            )
+            return None, str(e)
+
     # ── 统计 ──
 
     def get_stats(self) -> dict:

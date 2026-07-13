@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}后台任务 - 猫猫管理{% endblock %}
+{% set nav_active = "tasks" %}
+{% block content %}
+<div class="page-header">
+    <h2>⚙️ 后台任务管理</h2>
+</div>
+
+<section class="card">
+    <h3>📋 定时任务（Cron Jobs）</h3>
+    {% if cron_jobs %}
+    <table>
+        <thead>
+            <tr>
+                <th>名称</th>
+                <th>表达式</th>
+                <th>状态</th>
+                <th>下次执行</th>
+                <th>指令</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for job in cron_jobs %}
+            <tr>
+                <td><strong>{{ job.name }}</strong><br><code>{{ job.id[:12] }}..</code></td>
+                <td><code>{{ job.cron_expression }}</code></td>
+                <td>{% if job.enabled %}✅ 启用{% else %}⛔ 暂停{% endif %}</td>
+                <td>{% if job.next_run_at and job.enabled %}{{ job.next_run_at|format_timestamp }}{% else %}—{% endif %}</td>
+                <td>{{ job.prompt[:50] }}{% if job.prompt|length > 50 %}...{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty">暂无定时任务。可在群聊中使用 <code>/cron create</code> 命令创建。</p>
+    {% endif %}
+</section>
+
+<section class="card">
+    <h3>📋 后台任务记录</h3>
+    <p class="meta">活跃: {{ active_tasks|length }} 个 | 共 {{ tasks|length }} 条</p>
+    {% if tasks %}
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>状态</th>
+                <th>类型</th>
+                <th>创建时间</th>
+                <th>指令</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in tasks %}
+            <tr>
+                <td><code>{{ t.id[:12] }}..</code></td>
+                <td>
+                    {% if t.status.value == "pending" %}⏳ 等待中
+                    {% elif t.status.value == "running" %}🔄 执行中
+                    {% elif t.status.value == "success" %}✅ 成功
+                    {% elif t.status.value == "failed" %}❌ 失败
+                    {% elif t.status.value == "cancelled" %}🚫 已取消
+                    {% elif t.status.value == "timeout" %}⏰ 超时
+                    {% else %}❓ {{ t.status.value }}{% endif %}
+                </td>
+                <td>{{ t.type }}</td>
+                <td>{{ t.created_at|format_timestamp }}</td>
+                <td>{{ t.prompt[:40] }}{% if t.prompt|length > 40 %}...{% endif %}</td>
+                <td><a href="/tasks/detail/{{ t.id }}">查看</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty">暂无任务记录。</p>
+    {% endif %}
+</section>
+{% endblock %}

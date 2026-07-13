@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}任务详情 - 猫猫管理{% endblock %}
+{% set nav_active = "tasks" %}
+{% block content %}
+<div class="page-header">
+    <h2>📋 任务详情</h2>
+    <a href="/tasks" class="btn">← 返回列表</a>
+</div>
+
+{% if task %}
+<section class="card">
+    <table>
+        <tr><th>ID</th><td><code>{{ task.id }}</code></td></tr>
+        <tr><th>类型</th><td>{{ task.type }}</td></tr>
+        <tr>
+            <th>状态</th>
+            <td>
+                {% if task.status.value == "pending" %}⏳ 等待中
+                {% elif task.status.value == "running" %}🔄 执行中
+                {% elif task.status.value == "success" %}✅ 成功
+                {% elif task.status.value == "failed" %}❌ 失败
+                {% elif task.status.value == "cancelled" %}🚫 已取消
+                {% elif task.status.value == "timeout" %}⏰ 超时
+                {% else %}❓ {{ task.status.value }}{% endif %}
+            </td>
+        </tr>
+        <tr><th>Session</th><td><code>{{ task.session_id }}</code></td></tr>
+        <tr><th>指令</th><td>{{ task.prompt }}</td></tr>
+        <tr><th>创建时间</th><td>{{ task.created_at|format_timestamp }}</td></tr>
+        {% if task.started_at %}<tr><th>开始时间</th><td>{{ task.started_at|format_timestamp }}</td></tr>{% endif %}
+        {% if task.finished_at %}<tr><th>完成时间</th><td>{{ task.finished_at|format_timestamp }}</td></tr>{% endif %}
+        {% if task.job_id %}<tr><th>关联定时任务</th><td><code>{{ task.job_id }}</code></td></tr>{% endif %}
+    </table>
+</section>
+
+{% if task.result %}
+<section class="card">
+    <h3>✅ 执行结果</h3>
+    <pre>{{ task.result }}</pre>
+</section>
+{% endif %}
+
+{% if task.error %}
+<section class="card">
+    <h3>❌ 错误信息</h3>
+    <pre class="error">{{ task.error }}</pre>
+</section>
+{% endif %}
+
+{% else %}
+<section class="card">
+    <p class="empty">未找到该任务。</p>
+</section>
+{% endif %}
+{% endblock %}

@@ -234,6 +234,44 @@ class PromptBuilder:
 
         return messages, tools_to_use
 
+    async def build_task_messages(
+        self,
+        chat_id: str,
+        prompt: str,
+    ) -> Tuple[List[dict], Optional[List[dict]]]:
+        """组装后台任务的 messages 列表（使用 task_chat.j2 模板）。
+
+        Returns:
+            (messages, tools_to_use)
+        """
+        # 简易工具列表（后台任务可用）
+        tools_to_use: List[dict] = []
+        if self._skill_managers and self._skill_managers.has_skills:
+            from core.tools.definitions import SKILL_TOOLS, EXECUTE_COMMAND_TOOL
+            tools_to_use.extend(SKILL_TOOLS)
+        if self.everos:
+            from core.tools.definitions import (
+                SEARCH_MEMORY_TOOL,
+                MARK_IMPORTANT_TOOL,
+            )
+            tools_to_use.extend(SEARCH_MEMORY_TOOL)
+            tools_to_use.extend(MARK_IMPORTANT_TOOL)
+        tools_to_use = tools_to_use or None
+
+        # 渲染 task prompt
+        from datetime import datetime, timezone, timedelta
+        _tz = timezone(timedelta(hours=8))
+        now = datetime.now(_tz)
+        system_prompt = self.template_manager.get_task_chat_prompt(
+            current_time=now.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+        messages: List[dict] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+        return messages, tools_to_use
+
     async def build_memory_context(self, sender_id: str, input_message: InputMessage) -> str:
         """构建记忆上下文字符串（公开，供 ToolLoop Queue Steering 使用）。"""
         return await self._build_memory_context(sender_id, input_message)
