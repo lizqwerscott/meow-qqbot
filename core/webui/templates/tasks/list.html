@@ -19,6 +19,7 @@
                 <th>状态</th>
                 <th>下次执行</th>
                 <th>指令</th>
+                <th>操作</th>
             </tr>
         </thead>
         <tbody>
@@ -46,6 +47,20 @@
                 <td>{% if job.enabled %}✅ 启用{% else %}⛔ 暂停{% endif %}</td>
                 <td>{% if job.next_run_at and job.enabled %}{{ job.next_run_at|format_timestamp }}{% else %}—{% endif %}</td>
                 <td>{{ job.prompt[:50] }}{% if job.prompt|length > 50 %}...{% endif %}</td>
+                <td class="actions">
+                    {% if job.enabled %}
+                    <form method="post" action="/tasks/cron/{{ job.id }}/pause" style="display:inline">
+                        <button type="submit" class="btn btn-sm">⏸️ 暂停</button>
+                    </form>
+                    {% else %}
+                    <form method="post" action="/tasks/cron/{{ job.id }}/resume" style="display:inline">
+                        <button type="submit" class="btn btn-sm">▶️ 恢复</button>
+                    </form>
+                    {% endif %}
+                    <form method="post" action="/tasks/cron/{{ job.id }}/delete" style="display:inline" onsubmit="return confirm('确定删除定时任务「{{ job.name }}」？')">
+                        <button type="submit" class="btn btn-sm btn-danger">🗑️ 删除</button>
+                    </form>
+                </td>
             </tr>
             {% endfor %}
         </tbody>
@@ -86,7 +101,19 @@
                 <td>{{ t.type }}</td>
                 <td>{{ t.created_at|format_timestamp }}</td>
                 <td>{{ t.prompt[:40] }}{% if t.prompt|length > 40 %}...{% endif %}</td>
-                <td><a href="/tasks/detail/{{ t.id }}">查看</a></td>
+                <td class="actions">
+                    <a href="/tasks/detail/{{ t.id }}" class="btn btn-sm">📄 查看</a>
+                    {% if t.status.value in ("pending", "running") %}
+                    <form method="post" action="/tasks/task/{{ t.id }}/cancel" style="display:inline">
+                        <button type="submit" class="btn btn-sm">🚫 取消</button>
+                    </form>
+                    {% endif %}
+                    {% if t.status.value in ("success", "failed", "cancelled", "timeout") %}
+                    <form method="post" action="/tasks/task/{{ t.id }}/delete" style="display:inline" onsubmit="return confirm('确定删除此任务记录？')">
+                        <button type="submit" class="btn btn-sm btn-danger">🗑️ 删除</button>
+                    </form>
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>
