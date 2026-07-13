@@ -74,6 +74,10 @@ class ToolLoop:
             _rounds = range(self._max_tool_rounds)
 
         for round_idx in _rounds:
+            # ── 防御：清理 messages 中孤立的 tool_calls ──
+            # 如果上轮出现异常导致 tool 响应未追加完整，下一个请求会 400
+            self._ensure_messages_consistent(messages)
+
             message, usage = await self.ai_service.chat_completion_with_tools(
                 messages=messages,
                 tools=tools,
@@ -191,6 +195,46 @@ class ToolLoop:
                 messages.extend(steer_msgs)
 
         return sent_emoji
+
+    @staticmethod
+    def _ensure_messages_consistent(messages: List[dict]) -> None:
+        """清理 messages 中孤立的 tool_calls。
+
+        场景：某轮 AI 返回了 tool_calls，但后续处理异常导致
+        对应的 tool 响应消息未追加完整。下次请求时 API 会 400。
+        修复：删除最后一个没有对应 tool 响应的 assistant 消息。
+        """
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            if msg.get("role") != "assistant":
+                continue
+            tool_calls = msg.get("tool_calls")
+            if not tool_calls:
+                continue
+
+            # 检查此 assistant 之后是否有足够的 tool 响应
+            expected_ids = {tc["id"] for tc in tool_calls if tc.get("id")}
+            if not expected_ids:
+                # tool_calls 没有 ID，可能格式异常，移除
+                _log.warning(f"移除无 ID 的 tool_calls 消息: {tool_calls}")
+                messages.pop(i)
+                continue
+
+            # 统计之后 tool 消息中出现的 tool_call_id
+            found_ids: set = set()
+            for j in range(i + 1, len(messages)):
+                if messages[j].get("role") == "tool":
+                    tid = messages[j].get("tool_call_id")
+                    if tid:
+                        found_ids.add(tid)
+
+            if not expected_ids.issubset(found_ids):
+                missing = expected_ids - found_ids
+                _log.warning(
+                    f"tool_calls 缺少响应: missing_ids={missing}, "
+                    f"移除第 {i} 条 assistant 消息"
+                )
+                messages.pop(i)
 
     async def _drain_steering_messages(
         self,
