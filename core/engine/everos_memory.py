@@ -372,14 +372,42 @@ class EverOSMemory:
             if queue is not None:
                 await queue.put({"type": "shutdown"})
 
-        # 等待所有 worker 结束
+        # 等待所有 worker 结束（带超时兜底）
         async with self._lock:
             workers = list(self._workers.values())
         if workers:
-            await asyncio.gather(*workers, return_exceptions=True)
+            done, pending = await asyncio.wait(
+                workers, timeout=10.0, return_when=asyncio.ALL_COMPLETED,
+            )
+            if pending:
+                _log.warning(
+                    f"EverOS {len(pending)}/{len(workers)} 个 worker 在 10s 内未响应 shutdown，强制取消"
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.wait(pending, timeout=3.0)
 
         # 关闭 HTTP 客户端
         if self._client:
             await self._client.aclose()
             self._client = None
             _log.info("EverOSMemory: HTTP 客户端已关闭")
+
+    async def cleanup_session(self, session_id: str) -> None:
+        """清理指定 session 的 worker，安全停止。"""
+        async with self._lock:
+            queue = self._queues.pop(session_id, None)
+            worker = self._workers.pop(session_id, None)
+            self._pending_counts.pop(session_id, None)
+
+        if queue is not None:
+            await queue.put({"type": "shutdown"})
+        if worker is not None and not worker.done():
+            try:
+                await asyncio.wait_for(worker, timeout=5.0)
+            except asyncio.TimeoutError:
+                worker.cancel()
+                try:
+                    await asyncio.wait_for(worker, timeout=2.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
