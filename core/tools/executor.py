@@ -843,6 +843,7 @@ class ToolExecutor:
             prompt=prompt,
             at=at_ts,
             delivery_channel=ctx.chat_id,
+            is_group=ctx.is_group,
             session_mode=session_mode,
             custom_session_id=custom_session_id,
             payload_type=payload_type,

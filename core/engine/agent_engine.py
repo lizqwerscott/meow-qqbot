@@ -349,6 +349,7 @@ class AgentEngine:
         chat_id: str,
         prompt: str,
         sender_id: str,
+        is_group: bool = True,
     ) -> tuple[Optional[str], Optional[str]]:
         """在独立会话中执行后台任务。
 
@@ -359,6 +360,7 @@ class AgentEngine:
             chat_id: 任务会话 ID（如 task:<uuid>）
             prompt: AI 执行指令
             sender_id: 发送者（如 "system"）
+            is_group: 来源聊天是否为群聊（影响工具如 send_emoji 的接口选择）
 
         Returns:
             (result_text, error_text)
@@ -390,7 +392,7 @@ class AgentEngine:
             sender_id=sender_id,
             chat_id=chat_id,
             content=prompt,
-            is_group=True,      # 视为群聊模式（允许工具使用）
+            is_group=is_group,
             is_at_mention=False,
         )
 
@@ -412,7 +414,7 @@ class AgentEngine:
                 messages=messages,
                 tools=tools_to_use,
                 chat_id=chat_id,
-                is_group=True,
+                is_group=is_group,
                 reply_to=msg.id,
                 reply_callback=capturing_reply_callback,
                 sender_id=sender_id,
