@@ -52,6 +52,8 @@ class AgentEngine:
         max_tool_rounds: int = -1,
         cost_tracker: Optional[CostTracker] = None,
         context_window: int = 1000000,
+        task_manager: Optional[Any] = None,
+        cron_job_manager: Optional[Any] = None,
     ):
         self.ai_service = ai_service
         self.template_manager = template_manager
@@ -70,6 +72,8 @@ class AgentEngine:
         self._skill_managers = skill_managers
         self.learners = learning_orchestrator
         self.cost_tracker = cost_tracker or CostTracker()
+        self._task_manager = task_manager
+        self._cron_job_manager = cron_job_manager
 
         self.tool_executor = ToolExecutor(
             emoji_manager=emoji_manager,
@@ -96,6 +100,7 @@ class AgentEngine:
             search_top_k=search_top_k,
             admin_ids=admin_id,
             learning_orchestrator=self.learners,
+            has_tasks=self._task_manager is not None,
         )
 
         self.tool_loop = ToolLoop(

@@ -215,13 +215,18 @@ async def main() -> None:
         learning_orchestrator=learning_orchestrator,
         max_tool_rounds=config.get("max_tool_rounds", -1),
         cost_tracker=cost_tracker,
+        task_manager=task_manager,
+        cron_job_manager=cron_job_manager,
     )
 
-    # ── 将任务管理器注入 AgentEngine（供 WebUI 访问） ──
-    if task_manager:
-        agent_engine._task_manager = task_manager
-    if cron_job_manager:
-        agent_engine._cron_job_manager = cron_job_manager
+    # ── 将后台任务执行器注入 ToolExecutor（供 AI 工具调用） ──
+    if task_manager or cron_job_manager or background_task_runner:
+        agent_engine.tool_executor.set_task_managers(
+            task_manager=task_manager,
+            cron_job_manager=cron_job_manager,
+            background_task_runner=background_task_runner,
+        )
+        _log.info("任务管理器已注入 ToolExecutor")
 
     # ── 连接后台任务执行器与 AgentEngine ──
     if background_task_runner and task_manager:

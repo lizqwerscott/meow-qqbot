@@ -80,6 +80,9 @@ class ToolExecutor:
         self._skill_managers = skill_managers
         self._learners = learning_orchestrator
         self._admin_ids = admin_ids or []
+        self._task_manager = None
+        self._cron_job_manager = None
+        self._background_task_runner = None
 
         self._registry: Dict[str, tuple[Callable, bool]] = {}
         self._register_all()
@@ -102,6 +105,9 @@ class ToolExecutor:
         self._register("execute_command", self._exec_execute_command, is_async=True)
         self._register("define_jargon", self._exec_define_jargon, is_async=True)
         self._register("report_behavior_effect", self._exec_report_behavior_effect, is_async=True)
+        self._register("create_task", self._exec_create_task, is_async=True)
+        self._register("create_cron_job", self._exec_create_cron_job, is_async=True)
+        self._register("cancel_task", self._exec_cancel_task, is_async=True)
 
     # ── 懒注入（AgentEngine 在运行时更新引用）──
 
@@ -113,6 +119,12 @@ class ToolExecutor:
 
     def set_nickname_manager(self, nm: NicknameManager):
         self._nm = nm
+
+    def set_task_managers(self, *, task_manager=None, cron_job_manager=None, background_task_runner=None):
+        """注入任务管理器引用（后台任务工具需要）。"""
+        self._task_manager = task_manager
+        self._cron_job_manager = cron_job_manager
+        self._background_task_runner = background_task_runner
 
     # ── 统一入口 ──
 
@@ -721,3 +733,101 @@ class ToolExecutor:
                 if dedup_key not in seen:
                     seen.add(dedup_key)
                     lines.append(f"- {content[:200]}")
+
+    # ════════════════════════════════════════════════════════
+    # 后台任务工具
+    # ════════════════════════════════════════════════════════
+
+    async def _exec_create_task(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """创建一个一次性后台任务。"""
+        if not self._task_manager or not self._background_task_runner:
+            return ToolResult(content=json.dumps(
+                {"error": "任务系统未就绪"}, ensure_ascii=False,
+            ))
+
+        prompt = (args.get("prompt") or "").strip()
+        if not prompt:
+            return ToolResult(content=json.dumps(
+                {"error": "任务指令不能为空"}, ensure_ascii=False,
+            ))
+
+        # 在后台 fire-and-forget 执行
+        task = self._task_manager.create_task(
+            prompt=prompt,
+            task_type="manual",
+            delivery_channel=ctx.chat_id,
+        )
+        asyncio.create_task(self._background_task_runner.run_task(task))
+
+        return ToolResult(content=json.dumps({
+            "success": True,
+            "task_id": task.id[:16],
+            "message": f"后台任务已创建！ID: {task.id[:16]}.. 执行完成后可使用 /tasks show {task.id[:12]} 查看结果",
+        }, ensure_ascii=False))
+
+    async def _exec_create_cron_job(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """创建一个定时任务。"""
+        if not self._cron_job_manager:
+            return ToolResult(content=json.dumps(
+                {"error": "定时任务系统未就绪"}, ensure_ascii=False,
+            ))
+
+        name = (args.get("name") or "").strip()
+        cron_expression = (args.get("cron_expression") or "").strip()
+        prompt = (args.get("prompt") or "").strip()
+
+        if not name or not cron_expression or not prompt:
+            return ToolResult(content=json.dumps(
+                {"error": "name、cron_expression、prompt 均不能为空"},
+                ensure_ascii=False,
+            ))
+
+        job = self._cron_job_manager.create_job(
+            name=name,
+            cron_expression=cron_expression,
+            prompt=prompt,
+            delivery_channel=ctx.chat_id,
+        )
+
+        return ToolResult(content=json.dumps({
+            "success": True,
+            "job_id": job.id[:16],
+            "name": job.name,
+            "cron_expression": job.cron_expression,
+            "message": f"定时任务「{name}」已创建！表达式: {cron_expression}。可使用 /cron list 查看所有定时任务。",
+        }, ensure_ascii=False))
+
+    async def _exec_cancel_task(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """取消一个后台任务。"""
+        if not self._task_manager:
+            return ToolResult(content=json.dumps(
+                {"error": "任务系统未就绪"}, ensure_ascii=False,
+            ))
+
+        task_id = (args.get("task_id") or "").strip()
+        if not task_id:
+            return ToolResult(content=json.dumps(
+                {"error": "task_id 不能为空"}, ensure_ascii=False,
+            ))
+
+        # 先精确查找，再模糊匹配
+        task = self._task_manager.get_task(task_id)
+        if task is None:
+            tasks = self._task_manager.list_tasks(limit=50)
+            matched = [t for t in tasks if t.id.startswith(task_id)]
+            if not matched:
+                return ToolResult(content=json.dumps({
+                    "error": f"未找到任务: {task_id}",
+                }, ensure_ascii=False))
+            task_id = matched[0].id
+
+        success = await self._task_manager.cancel_task(task_id)
+        if success:
+            return ToolResult(content=json.dumps({
+                "success": True,
+                "task_id": task_id[:16],
+                "message": f"任务 {task_id[:12]}.. 已取消。",
+            }, ensure_ascii=False))
+        return ToolResult(content=json.dumps({
+            "error": f"无法取消任务 {task_id[:12]}..",
+        }, ensure_ascii=False))

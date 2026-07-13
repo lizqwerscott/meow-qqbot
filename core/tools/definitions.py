@@ -335,6 +335,77 @@ SKILL_TOOLS = [
 ]
 
 
+TASK_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "create_task",
+            "description": (
+                "创建一个一次性后台任务。AI 可以在后台独立执行较长时间的工作"
+                "（如生成报告、批量查询、执行脚本等），执行期间不阻塞当前对话，"
+                "完成后可以通过 /tasks show 查看结果。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "后台任务要执行的指令或工作描述。越详细越好，AI 会根据这个指令独立完成任务。",
+                    },
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_cron_job",
+            "description": (
+                "创建一个定时任务。AI 可以在后台设置一个按 cron 表达式定期执行的任务，"
+                "例如每天早上8点发送早安消息、每小时检查一次服务器状态等。"
+                "使用标准的 5 字段 cron 表达式：分 时 日 月 周。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "定时任务的名字，方便管理和查找，如'早安提醒'",
+                    },
+                    "cron_expression": {
+                        "type": "string",
+                        "description": "标准 5 字段 cron 表达式。例如：'0 8 * * *' 表示每天早上8点，'*/30 * * * *' 表示每30分钟",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "每次执行时 AI 要执行的指令。例如：'对大家说早上好，今天的天气是...'",
+                    },
+                },
+                "required": ["name", "cron_expression", "prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_task",
+            "description": "取消一个正在运行或等待中的后台任务。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "要取消的任务 ID（完整 ID 或前 12 位短 ID）",
+                    },
+                },
+                "required": ["task_id"],
+            },
+        },
+    },
+]
+
+
 FLUSH_KEYWORDS = [
     "我喜欢", "我讨厌", "我叫", "我是", "我的",
     "记住", "我不喜欢", "我有", "别忘了",
@@ -348,4 +419,5 @@ def tool_names() -> set[str]:
         "search_memory", "mark_important", "search_relation",
         "rescan_skills", "view_skill", "execute_skill", "execute_command",
         "define_jargon", "report_behavior_effect",
+        "create_task", "create_cron_job", "cancel_task",
     }
