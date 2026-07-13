@@ -141,7 +141,7 @@ class AgentEngine:
             admin_ids=admin_id,
         )
 
-        self._auto_replied: Dict[str, str] = {}
+        self._message_hooks: list = []
 
         self._processed_ids: OrderedDict[str, bool] = OrderedDict()
         self._max_processed_ids = 1000
@@ -149,6 +149,8 @@ class AgentEngine:
         self._consumer_tasks: Set[asyncio.Task] = set()
 
         self.session_manager = SessionTaskManager()
+
+        self._register_builtin_hooks()
 
         _log.info("AgentEngine 已初始化")
 
@@ -173,6 +175,36 @@ class AgentEngine:
     def set_nickname_manager(self, nm: NicknameManager):
         self._nm = nm
         self.tool_executor.set_nickname_manager(nm)
+
+    # ── 消息钩子系统 ──
+
+    def add_message_hook(self, hook, priority: int = 100) -> None:
+        """注册消息钩子，priority 越小越先执行。"""
+        self._message_hooks.append((priority, hook))
+        self._message_hooks.sort(key=lambda x: x[0])
+        _log.debug(f"消息钩子已注册 (priority={priority}, 共 {len(self._message_hooks)} 个)")
+
+    def remove_message_hook(self, hook) -> None:
+        """注销消息钩子。"""
+        before = len(self._message_hooks)
+        self._message_hooks[:] = [(p, h) for p, h in self._message_hooks if h is not hook]
+        if len(self._message_hooks) < before:
+            _log.debug(f"消息钩子已注销 ({len(self._message_hooks)} 个)")
+
+    def _register_builtin_hooks(self) -> None:
+        """注册内置钩子（后续可拆为插件）。"""
+        from core.duplicate_reply import DuplicateReplyDetector
+        self._duplicate_reply = DuplicateReplyDetector(self.context_manager)
+        self.add_message_hook(self._duplicate_reply.handle_message, priority=100)
+
+    async def _run_hooks(self, input_message, reply_callback, get_user_nickname) -> None:
+        """按 priority 升序执行钩子，直到某个钩子返回 True 则短接。"""
+        for _, hook in list(self._message_hooks):
+            try:
+                if await hook(input_message, reply_callback, get_user_nickname):
+                    return
+            except Exception as e:
+                _log.error(f"消息钩子执行异常: {e}", exc_info=True)
 
     # ── 消息分发 ──
 
@@ -225,40 +257,27 @@ class AgentEngine:
             if any(k in input_message.content for k in keywords):
                 await self.everos.flush(session_id=chat_id)
 
-        if not (input_message.content.startswith("[表情:") or input_message.content == "[自定义表情]"):
-            reply_content = await self._check_auto_reply_duplicate(input_message)
-            if reply_content is not None:
-                _log.info(
-                    f"检测到重复消息 [{chat_id}]，自动复读: {reply_content[:30]}"
-                )
-                await reply_callback(
-                    chat_id=chat_id,
-                    content=reply_content,
-                    message_id=input_message.id,
-                    is_group=True,
-                )
-                await self.context_manager.add_assistant_message_async(
-                    chat_id, reply_content, input_message.id,
-                )
-                self._auto_replied[chat_id] = reply_content
-                return
+        if input_message.content.startswith("[表情:") or input_message.content == "[自定义表情]":
+            return
 
+        needs_ai = True
         if input_message.is_group and not input_message.is_at_mention:
             if not input_message.content.startswith("猫猫"):
-                _log.debug(f"跳过 AI 回复（非@且非猫猫开头）: {input_message.content[:30]}")
-                return
+                needs_ai = False
 
-        queue = await self.session_manager.get_queue(chat_id)
-        await queue.put(input_message)
-
-        should_start = await self.session_manager.try_start_consumer(chat_id)
-        if should_start:
-            task = asyncio.create_task(
-                self._consumer(chat_id, reply_callback, get_user_nickname)
-            )
-            self._consumer_tasks.add(task)
-            task.add_done_callback(self._consumer_tasks.discard)
-            _log.debug(f"已启动会话 {chat_id[:12]}.. 的消费者")
+        if needs_ai:
+            queue = await self.session_manager.get_queue(chat_id)
+            await queue.put(input_message)
+            should_start = await self.session_manager.try_start_consumer(chat_id)
+            if should_start:
+                task = asyncio.create_task(
+                    self._consumer(chat_id, reply_callback, get_user_nickname)
+                )
+                self._consumer_tasks.add(task)
+                task.add_done_callback(self._consumer_tasks.discard)
+                _log.debug(f"已启动会话 {chat_id[:12]}.. 的消费者")
+        else:
+            await self._run_hooks(input_message, reply_callback, get_user_nickname)
 
     # ── 会话消费者循环 ──
 
@@ -748,27 +767,6 @@ class AgentEngine:
             "然后在回复中使用 <qqbot-at-user id=\"用户ID\" /> 来@该用户。"
         )
         return catalog
-
-    # ── 自动复读检查 ──
-
-    async def _check_auto_reply_duplicate(self, input_message: InputMessage) -> Optional[str]:
-        if not input_message.is_group:
-            return None
-
-        context = await self.context_manager.get_context_async(input_message.chat_id)
-        user_msgs = [m for m in context.history if m.role == "user"]
-        if len(user_msgs) < 2:
-            return None
-
-        last_content = user_msgs[-1].content
-        prev_content = user_msgs[-2].content
-        if last_content != prev_content:
-            return None
-
-        if self._auto_replied.get(input_message.chat_id) == last_content:
-            return None
-
-        return last_content
 
     # ── 统计 ──
 
