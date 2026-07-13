@@ -204,7 +204,8 @@ async def main() -> None:
     # ── 路由模型（智能分级） ──
     router_model = None
     if config.get("router_model", {}).get("enabled", False):
-        router_model = RouterModel(config["router_model"])
+        character_card = getattr(template_manager, "character_card", "")
+        router_model = RouterModel(config["router_model"], character_card=character_card)
 
     # ── 2. 创建 AgentEngine（全局单例） ──
     agent_engine = AgentEngine(
