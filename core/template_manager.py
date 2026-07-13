@@ -70,35 +70,24 @@ class TemplateManager:
     def get_private_chat_prompt(
         self,
         user_name: str,
-        has_emojis: bool = False,
-        has_users: bool = False,
-        emoji_tags: Optional[list] = None,
     ) -> str:
         """
-        获取私聊系统提示
+        获取私聊系统提示（纯静态，不含动态工具/记忆说明）
 
         Args:
             user_name: 用户昵称
-            has_emojis: 是否有可用表情（可选），为 True 时注入表情工具说明
-            has_users: 是否有其他用户（可选），为 True 时注入 @ 用户工具说明
-            emoji_tags: 可用表情标签列表（可选）
 
         Returns:
             私聊系统提示文本
         """
 
-        # 使用模板渲染
         context = {
             "user_name": user_name,
             "character_card": self.character_card,
-            "has_emojis": has_emojis,
-            "has_users": has_users,
-            "emoji_tags": emoji_tags or [],
         }
 
         prompt = self.render_prompt_template(self.private_chat_template, context)
         if not prompt:
-            # 如果模板渲染失败，使用默认提示
             prompt = f"你是一个贴心的 AI 助手，正在与用户「{user_name}」进行一对一的私密对话。"
 
         return prompt
@@ -106,35 +95,24 @@ class TemplateManager:
     def get_group_chat_prompt(
         self,
         group_name: Optional[str] = None,
-        has_emojis: bool = False,
-        has_users: bool = False,
-        emoji_tags: Optional[list] = None,
     ) -> str:
         """
-        获取群聊系统提示
+        获取群聊系统提示（纯静态，不含动态工具/记忆说明）
 
         Args:
             group_name: 群组名称（可选）
-            has_emojis: 是否有可用表情（可选），为 True 时注入表情工具说明
-            has_users: 是否有其他用户（可选），为 True 时注入 @ 用户工具说明
-            emoji_tags: 可用表情标签列表（可选）
 
         Returns:
             群聊系统提示文本
         """
 
-        # 使用模板渲染
         context = {
             "group_name": group_name or "当前群组",
             "character_card": self.character_card,
-            "has_emojis": has_emojis,
-            "has_users": has_users,
-            "emoji_tags": emoji_tags or [],
         }
 
         prompt = self.render_prompt_template(self.group_chat_template, context)
         if not prompt:
-            # 如果模板渲染失败，使用默认提示
             prompt = "你是一个友好的QQ群机器人助手，正在与多个用户进行群聊对话。"
             if group_name:
                 prompt += f" 当前群组名称是「{group_name}」。"

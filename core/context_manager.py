@@ -5,7 +5,16 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from deepseek_tokenizer import ds_token
+
 _log = logging.getLogger(__name__)
+
+
+def _estimate_tokens(text: Optional[str]) -> int:
+    """用 deepseek-tokenizer 精确估算 token 数。"""
+    if not text:
+        return 0
+    return len(ds_token.encode(text))
 
 
 @dataclass
@@ -68,14 +77,14 @@ class ChatContext:
     def __init__(
         self,
         chat_id: str,
-        max_history: int = 30,
-        compact_threshold: int = 25,
-        keep_recent: int = 8,
+        max_history: int = 10000,
+        compact_threshold_tokens: int = 950000,
+        keep_recent_tokens: int = 50000,
     ):
         self.chat_id = chat_id
         self.max_history = max_history
-        self.compact_threshold = compact_threshold
-        self.keep_recent = keep_recent
+        self.compact_threshold_tokens = compact_threshold_tokens
+        self.keep_recent_tokens = keep_recent_tokens
         self.history = deque(maxlen=max_history)
         self.last_activity = time.time()
         self.lock = asyncio.Lock()
@@ -153,6 +162,19 @@ class ChatContext:
             time_str = time.strftime("%H:%M:%S", time.localtime(msg.timestamp))
             context_lines.append(f"[{time_str}] {role_label}: {msg.content}")
         return "\n".join(context_lines)
+
+    def estimate_tokens_for_history(self) -> int:
+        """估算当前历史的总 token 数"""
+        total = 0
+        for msg in self.history:
+            total += _estimate_tokens(msg.content)
+            if msg.tool_calls:
+                for tc in msg.tool_calls:
+                    total += _estimate_tokens(tc.get("function", {}).get("name"))
+                    total += _estimate_tokens(tc.get("function", {}).get("arguments"))
+            if msg.reasoning_content:
+                total += _estimate_tokens(msg.reasoning_content)
+        return total
 
     def clear_history(self) -> None:
         self.history.clear()
@@ -235,8 +257,8 @@ class ChatContext:
         max_messages: int = 12,
         max_tool_results: int = 5,
         keep_last_assistants: int = 3,
-        soft_trim: int = 3000,
-        hard_clear: int = 10000,
+        soft_trim: int = 20000,
+        hard_clear: int = 180000,
     ) -> List[Dict]:
         """获取经过裁剪的历史记录（纯内存，不修改原始 ChatMessage）"""
         all_msgs = list(self.history)
@@ -305,6 +327,29 @@ class ChatContext:
 
         return cleaned
 
+    def _split_by_token_budget(
+        self, messages: List[ChatMessage], recent_budget: int
+    ) -> Tuple[List[ChatMessage], List[ChatMessage]]:
+        """按 token 预算将消息分为 old（待压缩）和 recent（保留原样）。
+        返回 (old_msgs, recent_msgs)，其中 recent 的总 token 不超过 budget。
+        """
+        recent: List[ChatMessage] = []
+        total = 0
+        for msg in reversed(messages):
+            tokens = _estimate_tokens(msg.content)
+            if msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tokens += _estimate_tokens(tc.get("function", {}).get("name"))
+                    tokens += _estimate_tokens(tc.get("function", {}).get("arguments"))
+            if msg.reasoning_content:
+                tokens += _estimate_tokens(msg.reasoning_content)
+            if total + tokens > recent_budget and recent:
+                break
+            recent.insert(0, msg)
+            total += tokens
+        old = messages[: -len(recent)] if recent else messages[:-1] if len(messages) > 1 else []
+        return old, recent
+
     # ── 压缩 (Compaction) — 调用 AI 总结旧对话 ──
 
     def _format_for_summary(self, messages: List[ChatMessage]) -> str:
@@ -338,15 +383,18 @@ class ChatContext:
     async def compact_history_if_needed(
         self, ai_service: Any, force: bool = False
     ) -> tuple[bool, Optional[Dict]]:
-        """如果历史超过阈值，用 AI 将旧消息压缩为摘要。
+        """如果历史超过 token 阈值，用 AI 将旧消息压缩为摘要。
         返回 (是否执行了压缩, usage dict 或 None)。
+        触发条件：估算 token 数 > compact_threshold_tokens
         """
-        if not force and len(self.history) < self.compact_threshold:
+        estimated = self.estimate_tokens_for_history()
+        if not force and estimated < self.compact_threshold_tokens:
             return False, None
 
         all_msgs = list(self.history)
-        old_msgs = all_msgs[: -self.keep_recent]
-        recent_msgs = all_msgs[-self.keep_recent :]
+        old_msgs, recent_msgs = self._split_by_token_budget(
+            all_msgs, self.keep_recent_tokens
+        )
 
         if not old_msgs:
             return False, None
@@ -354,7 +402,8 @@ class ChatContext:
         text = self._format_for_summary(old_msgs)
         _log.info(
             f"正在压缩 [{self.chat_id[:12]}..] "
-            f"{len(old_msgs)} 条消息 → 摘要"
+            f"{len(old_msgs)} 条消息 → 摘要 "
+            f"(估算 {estimated} tokens > {self.compact_threshold_tokens})"
         )
 
         try:
@@ -408,21 +457,19 @@ class ChatContextManager:
 
     def __init__(
         self,
-        max_history_per_chat: int = 30,
+        max_history_per_chat: int = 10000,
         cleanup_interval: int = 3600,
-        compact_threshold: int = 25,
-        keep_recent: int = 8,
-        max_conversation_messages: int = 12,
+        compact_threshold_tokens: int = 950000,
+        keep_recent_tokens: int = 50000,
         max_tool_results: int = 5,
         keep_last_assistants: int = 3,
-        soft_trim: int = 3000,
-        hard_clear: int = 10000,
+        soft_trim: int = 20000,
+        hard_clear: int = 180000,
     ):
         self.max_history_per_chat = max_history_per_chat
         self.cleanup_interval = cleanup_interval
-        self.compact_threshold = compact_threshold
-        self.keep_recent = keep_recent
-        self.max_conversation_messages = max_conversation_messages
+        self.compact_threshold_tokens = compact_threshold_tokens
+        self.keep_recent_tokens = keep_recent_tokens
         self.max_tool_results = max_tool_results
         self.keep_last_assistants = keep_last_assistants
         self.soft_trim = soft_trim
@@ -442,8 +489,8 @@ class ChatContextManager:
             self.contexts[chat_id] = ChatContext(
                 chat_id,
                 max_history=self.max_history_per_chat,
-                compact_threshold=self.compact_threshold,
-                keep_recent=self.keep_recent,
+                compact_threshold_tokens=self.compact_threshold_tokens,
+                keep_recent_tokens=self.keep_recent_tokens,
             )
         return self.contexts[chat_id]
 
@@ -558,7 +605,7 @@ class ChatContextManager:
                 return []
             ctx = self.contexts[chat_id]
             return ctx.get_pruned_history(
-                max_messages=max_messages or self.max_conversation_messages,
+                max_messages=max_messages or len(ctx.history),
                 max_tool_results=self.max_tool_results,
                 keep_last_assistants=self.keep_last_assistants,
                 soft_trim=self.soft_trim,
