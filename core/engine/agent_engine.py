@@ -395,23 +395,17 @@ class AgentEngine:
         )
 
         try:
-            # 写入用户消息到上下文
+            # 写入用户消息到上下文（便于查阅，但不作为历史注入）
             await self.context_manager.add_user_message_async(
                 chat_id, prompt, msg.id,
                 sender_id=sender_id, name="system",
             )
 
-            # 构建 task 专用 messages
+            # 构建 task 专用 messages（system + user）
             messages, tools_to_use = await self.prompt_builder.build_task_messages(
                 chat_id=chat_id,
                 prompt=prompt,
             )
-
-            # 追加该会话的历史上下文（如果有）
-            history = self.context_manager.get_history_as_dicts(chat_id)
-            if history:
-                # 跳过首条 user 消息（已在 task_messages 中），避免重复
-                messages = messages[:1] + history + [messages[-1]]
 
             # 执行工具循环
             await self.tool_loop.run(

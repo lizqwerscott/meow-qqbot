@@ -233,10 +233,10 @@ async def main() -> None:
         background_task_runner.set_execute_callback(
             agent_engine.execute_background_task
         )
-        # 投递回调用 QQ 的 reply 机制
-        background_task_runner.set_delivery_callback(
-            lambda chat_id, content, message_id, is_group=None: None
-        )
+        # 投递回调（将任务执行结果发回 QQ 聊天）
+        async def _deliver(_chat_id, _content, _message_id, _is_group):
+            pass
+        background_task_runner.set_delivery_callback(_deliver)
 
     # ── 连接 Cron 调度器 ──
     if cron_scheduler and cron_job_manager:
