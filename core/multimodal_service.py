@@ -12,6 +12,7 @@
 import base64
 import hashlib
 import logging
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -52,7 +53,7 @@ class MultimodalService:
 
         # 内存缓存：image_md5 → (description, emotion_tags)
         # 防止同一图片在同 session 中重复请求 VLM
-        self._cache: Dict[str, Tuple[str, List[str]]] = {}
+        self._cache: OrderedDict = OrderedDict()
         self._cache_max = 200
 
         _log.info(f"多模态服务已启动，模型: {self.model}")
@@ -69,6 +70,7 @@ class MultimodalService:
         cache_key = self._get_cache_key(image_path, "image")
         if cache_key in self._cache:
             _log.debug(f"分析图片命中缓存: {image_path}")
+            self._cache.move_to_end(cache_key)
             return self._cache[cache_key][0]
 
         base64_data = self._encode_image(image_path)
@@ -97,6 +99,7 @@ class MultimodalService:
         cache_key = self._get_cache_key(image_path, "emoji")
         if cache_key in self._cache:
             _log.debug(f"分析表情命中缓存: {image_path}")
+            self._cache.move_to_end(cache_key)
             cached = self._cache[cache_key]
             return cached[0], cached[1]
 
@@ -245,12 +248,9 @@ class MultimodalService:
             return f"{image_path}:{mode}"
 
     def _set_cache(self, key: str, description: str, tags: List[str]) -> None:
-        """写入缓存，并控制缓存大小。"""
+        """写入缓存，淘汰最久未访问的条目。"""
         if len(self._cache) >= self._cache_max:
-            # 简单淘汰：清空一半
-            keys_to_remove = list(self._cache.keys())[: self._cache_max // 2]
-            for k in keys_to_remove:
-                del self._cache[k]
+            self._cache.popitem(last=False)
         self._cache[key] = (description, tags)
 
     def clear_cache(self) -> None:
