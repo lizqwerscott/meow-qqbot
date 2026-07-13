@@ -45,6 +45,9 @@ class StatusCommand:
             process_memory = process.memory_info().rss / (1024 ** 2)
             process_cpu = process.cpu_percent(interval=0.1)
 
+            if self.agent_engine.everos:
+                await self.agent_engine.everos.health()
+
             stats = self.agent_engine.get_stats()
             queue_sizes = stats.get("queue_sizes", {})
             total_queue = sum(queue_sizes.values())
