@@ -11,6 +11,7 @@
 
 import asyncio
 import logging
+import time
 from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -124,6 +125,11 @@ class AgentEngine:
         # ── 消费者管理 ──
         self._consumer_tasks: Set[asyncio.Task] = set()
 
+        # ── 路由模型 / 活跃追踪 ──
+        self.router_model = None
+        self.last_active_chat: str = ""
+        self.last_active_time: float = 0.0
+
         self._register_builtin_hooks()
 
         _log.info("AgentEngine 已初始化")
@@ -134,6 +140,10 @@ class AgentEngine:
         self.media_uploader = media_uploader
         self.tool_executor.set_media_uploader(media_uploader)
         _log.info("AgentEngine: MediaUploader 已注入")
+
+    def set_router_model(self, router_model: Any):
+        self.router_model = router_model
+        _log.info("AgentEngine: RouterModel 已注入")
 
     def set_api_client(self, api_client: Any):
         self._api_client = api_client
@@ -196,6 +206,10 @@ class AgentEngine:
 
         chat_id = input_message.chat_id
 
+        # 记录活跃追踪（供心跳 busy 检测用）
+        self.last_active_chat = chat_id
+        self.last_active_time = time.time()
+
         user_nickname = get_user_nickname(input_message.sender_id)
 
         content_with_context = input_message.content
@@ -251,6 +265,29 @@ class AgentEngine:
         if input_message.is_group and not input_message.is_at_mention:
             if not input_message.content.startswith("猫猫"):
                 needs_ai = False
+
+        # ── 路由模型智能分级（仅对需要 AI 的消息） ──
+        if needs_ai and self.router_model:
+            decision = await self.router_model.route(
+                content=input_message.content,
+                chat_id=chat_id,
+            )
+            if decision.action == "direct":
+                _log.info(
+                    f"路由模型直接回复: chat={chat_id[:12]}.. "
+                    f"content={input_message.content[:30]}"
+                )
+                await reply_callback(
+                    chat_id, decision.response,
+                    input_message.id, input_message.is_group,
+                )
+                return
+            # escalate：重写消息内容，走主模型
+            if decision.response != input_message.content:
+                _log.info(
+                    f"路由 escalate: {input_message.content[:30]} -> {decision.response[:50]}"
+                )
+                input_message.content = decision.response
 
         if needs_ai:
             queue = await self.session_manager.get_queue(chat_id)
