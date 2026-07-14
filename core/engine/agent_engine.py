@@ -23,7 +23,6 @@ from core.message import InputMessage, MessageType
 from core.managers.nickname_manager import NicknameManager
 from core.managers.template_manager import TemplateManager
 from core.tools import ToolExecutor
-from core.tools.definitions import FLUSH_KEYWORDS
 from core.learners.base import sanitize_for_learners
 from core.learners.orchestrator import LearningOrchestrator
 
@@ -47,7 +46,7 @@ class AgentEngine:
         openai_config: dict,
         nickname_manager: Optional[NicknameManager] = None,
         emoji_manager: Optional[EmojiManager] = None,
-        everos_memory: Optional[Any] = None,
+        hindsight_memory: Optional[Any] = None,
         search_top_k: int = 3,
         skill_managers: Optional[Any] = None,
         learning_orchestrator: Optional[LearningOrchestrator] = None,
@@ -74,7 +73,7 @@ class AgentEngine:
         self.multimodal_service = None
         self._api_client = None
 
-        self.everos = everos_memory
+        self.hindsight = hindsight_memory
         self._skill_managers = skill_managers
         self.learners = learning_orchestrator
         self.cost_tracker = cost_tracker or CostTracker()
@@ -83,7 +82,7 @@ class AgentEngine:
 
         self.tool_executor = ToolExecutor(
             emoji_manager=emoji_manager,
-            everos=everos_memory,
+            hindsight=hindsight_memory,
             bot_id=bot_id,
             nickname_manager=nickname_manager,
             skill_managers=skill_managers,
@@ -102,7 +101,7 @@ class AgentEngine:
             nickname_manager=nickname_manager,
             emoji_manager=emoji_manager,
             skill_managers=skill_managers,
-            everos_memory=everos_memory,
+            hindsight_memory=hindsight_memory,
             search_top_k=search_top_k,
             admin_ids=admin_id,
             learning_orchestrator=self.learners,
@@ -116,7 +115,7 @@ class AgentEngine:
             context_manager=context_manager,
             session_manager=self.session_manager,
             prompt_builder=self.prompt_builder,
-            everos_memory=everos_memory,
+            hindsight_memory=hindsight_memory,
             max_rounds=max_tool_rounds,
             model_registry=model_registry,
         )
@@ -237,16 +236,14 @@ class AgentEngine:
             name=user_nickname,
         )
 
-        if self.everos:
-            await self.everos.add_message(
+        if self.hindsight:
+            await self.hindsight.add_message(
                 session_id=chat_id,
                 sender_id=input_message.sender_id,
                 sender_name=user_nickname,
                 content=content_with_context,
                 timestamp=input_message.timestamp,
             )
-            if any(k in content_with_context for k in FLUSH_KEYWORDS):
-                await self.everos.flush(session_id=chat_id)
 
         # 学习系统观察（异步，不阻塞）
         if self.learners and input_message.msg_type != MessageType.CARD:
@@ -525,14 +522,14 @@ class AgentEngine:
             "total_messages": self.context_manager.get_total_messages_count(),
         }
 
-        if self.everos:
-            health = self.everos.last_health_status
+        if self.hindsight:
+            health = self.hindsight.last_health_status
             if health:
-                stats["everos_health"] = health
+                stats["hindsight_health"] = health
             else:
-                stats["everos_health"] = {"status": "unknown", "error": "待检查"}
+                stats["hindsight_health"] = {"status": "unknown", "error": "待检查"}
         else:
-            stats["everos_health"] = {"status": "disabled"}
+            stats["hindsight_health"] = {"status": "disabled"}
 
         g = self.cost_tracker.get_global_stats()
         stats["cost"] = {
@@ -560,7 +557,7 @@ class AgentEngine:
             self._consumer_tasks.clear()
         await self.session_manager.cleanup_all()
 
-        if self.everos:
-            await self.everos.close()
+        if self.hindsight:
+            await self.hindsight.close()
 
         _log.info("AgentEngine 已停止")

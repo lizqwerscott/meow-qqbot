@@ -11,7 +11,7 @@ from core.message import InputMessage
 _log = logging.getLogger(__name__)
 
 
-def _everos_status_line(health: dict) -> str:
+def _hindsight_status_line(health: dict) -> str:
     status = health.get("status", "unknown")
     if status == "disabled":
         return "未启用 🚫"
@@ -45,14 +45,11 @@ class StatusCommand:
             process_memory = process.memory_info().rss / (1024 ** 2)
             process_cpu = process.cpu_percent(interval=0.1)
 
-            if self.agent_engine.everos:
-                await self.agent_engine.everos.health()
-
             stats = self.agent_engine.get_stats()
             queue_sizes = stats.get("queue_sizes", {})
             total_queue = sum(queue_sizes.values())
             active_chats = stats.get("active_chats", 0)
-            everos_health = stats.get("everos_health", {})
+            hindsight_health = stats.get("hindsight_health", {})
             learner_stats = stats.get("learners", {})
 
             sm = self.agent_engine._skill_managers
@@ -90,7 +87,7 @@ class StatusCommand:
                 f"- 插件: `{self._plugin_count()}` 个",
                 "",
                 "**记忆系统**",
-                f"- EverOS: {_everos_status_line(everos_health)}",
+                f"- Hindsight: {_hindsight_status_line(hindsight_health)}",
                 *cost_lines,
             ]
 
