@@ -69,7 +69,7 @@ class PromptBuilder:
         nickname_manager: Any = None,
         emoji_manager: Any = None,
         skill_managers: Any = None,
-        everos_memory: Any = None,
+        hindsight_memory: Any = None,
         search_top_k: int = 3,
         admin_ids: Optional[List[str]] = None,
         learning_orchestrator: Any = None,
@@ -82,7 +82,7 @@ class PromptBuilder:
         self._nm = nickname_manager
         self.emoji_manager = emoji_manager
         self._skill_managers = skill_managers
-        self.everos = everos_memory
+        self.hindsight = hindsight_memory
         self.learners = learning_orchestrator
         self._search_top_k = search_top_k
         self._admin_ids = admin_ids or []
@@ -135,7 +135,7 @@ class PromptBuilder:
             tools_to_use.extend(EMOJI_TOOLS)
         if has_users:
             tools_to_use.extend(SEARCH_USER_TOOL)
-        if self.everos:
+        if self.hindsight:
             tools_to_use.extend(SEARCH_MEMORY_TOOL)
             tools_to_use.extend(SEARCH_RELATION_TOOL)
             tools_to_use.extend(MARK_IMPORTANT_TOOL)
@@ -153,7 +153,7 @@ class PromptBuilder:
             if (self._skill_managers and self._skill_managers.has_skills)
             else ""
         )
-        memory_desc = _MEMORY_SYSTEM_DESC if self.everos else ""
+        memory_desc = _MEMORY_SYSTEM_DESC if self.hindsight else ""
 
         if is_group:
             static_prompt = self.template_manager.get_group_chat_prompt(
@@ -273,7 +273,7 @@ class PromptBuilder:
 
         if self.emoji_manager and self.emoji_manager.count_emojis() > 0:
             tools_to_use.extend(EMOJI_TOOLS)
-        if self.everos:
+        if self.hindsight:
             tools_to_use.extend(SEARCH_MEMORY_TOOL)
             tools_to_use.extend(SEARCH_RELATION_TOOL)
             tools_to_use.extend(MARK_IMPORTANT_TOOL)
@@ -306,8 +306,8 @@ class PromptBuilder:
         sender_id: str,
         input_message: InputMessage,
     ) -> str:
-        """查询 EverOS 记忆，返回格式化的上下文字符串，或空字符串。"""
-        if not self.everos:
+        """查询 Hindsight 记忆，返回格式化的上下文字符串，或空字符串。"""
+        if not self.hindsight:
             return ""
 
         query = input_message.content.strip()
@@ -315,7 +315,7 @@ class PromptBuilder:
             return ""
 
         try:
-            result = await self.everos.search(
+            result = await self.hindsight.search(
                 user_id=sender_id,
                 query=query,
                 top_k=5,

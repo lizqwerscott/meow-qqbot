@@ -5,7 +5,7 @@ from core.engine.client import BotEngine
 from core.engine.router import Router
 from core.engine.prompt_builder import PromptBuilder
 from core.engine.duplicate_reply import DuplicateReplyDetector
-from core.engine.everos_memory import EverOSMemory
+from core.engine.hindsight_memory import HindsightMemory
 
 __all__ = [
     "AgentEngine",
@@ -13,5 +13,5 @@ __all__ = [
     "Router",
     "PromptBuilder",
     "DuplicateReplyDetector",
-    "EverOSMemory",
+    "HindsightMemory",
 ]

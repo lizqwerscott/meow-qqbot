@@ -13,7 +13,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from core.message import InputMessage
-from core.tools.definitions import FLUSH_KEYWORDS
+
 from core.tools.executor import ToolContext
 
 _log = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ class ToolLoop:
         context_manager: Any = None,
         session_manager: Any = None,
         prompt_builder: Any = None,
-        everos_memory: Any = None,
+        hindsight_memory: Any = None,
         max_rounds: int = -1,
         model_registry: Any = None,
     ):
@@ -88,7 +88,7 @@ class ToolLoop:
         self.context_manager = context_manager
         self.session_manager = session_manager
         self.prompt_builder = prompt_builder
-        self.everos = everos_memory
+        self.hindsight = hindsight_memory
         self._max_tool_rounds = max_rounds
         self._model_registry = model_registry
 
@@ -306,18 +306,16 @@ class ToolLoop:
                 sender_id=msg.sender_id, name=nick,
             )
 
-            if self.everos:
-                await self.everos.add_message(
+            if self.hindsight:
+                await self.hindsight.add_message(
                     session_id=chat_id,
                     sender_id=msg.sender_id,
                     sender_name=nick,
                     content=content,
                     timestamp=msg.timestamp,
                 )
-                if any(k in msg.content for k in FLUSH_KEYWORDS):
-                    await self.everos.flush(session_id=chat_id)
 
-            if msg.sender_id != current_sender_id and self.everos and self.prompt_builder:
+            if msg.sender_id != current_sender_id and self.hindsight and self.prompt_builder:
                 memory_text = await self.prompt_builder.build_memory_context(
                     sender_id=msg.sender_id,
                     input_message=msg,

@@ -67,7 +67,7 @@ class ToolExecutor:
         emoji_manager=None,
         media_uploader=None,
         api_client=None,
-        everos=None,
+        hindsight=None,
         nickname_manager: Optional[NicknameManager] = None,
         bot_id: str = "",
         skill_managers=None,
@@ -77,7 +77,7 @@ class ToolExecutor:
         self._emoji_manager = emoji_manager
         self._media_uploader = media_uploader
         self._api_client = api_client
-        self._everos = everos
+        self._hindsight = hindsight
         self._nm = nickname_manager
         self._bot_id = bot_id
         self._skill_managers = skill_managers
@@ -335,7 +335,7 @@ class ToolExecutor:
         return ToolResult(content=json.dumps(results[:10], ensure_ascii=False))
 
     # ════════════════════════════════════════════════════════
-    # EverOS 记忆工具
+    # Hindsight 记忆工具
     # ════════════════════════════════════════════════════════
 
     async def _exec_search_memory(self, args: dict, ctx: ToolContext) -> ToolResult:
@@ -374,10 +374,10 @@ class ToolExecutor:
                 ))
             target_id = matched_id
 
-        if not self._everos:
+        if not self._hindsight:
             return ToolResult(content=json.dumps({"error": "记忆系统未就绪"}, ensure_ascii=False))
 
-        result = await self._everos.search(
+        result = await self._hindsight.search(
             user_id=target_id,
             query=query,
             top_k=10,
@@ -412,7 +412,7 @@ class ToolExecutor:
 
     async def _exec_mark_important(self, args: dict, ctx: ToolContext) -> ToolResult:
         """执行 mark_important — 将重要信息注入记忆缓冲并触发提取。"""
-        if not self._everos:
+        if not self._hindsight:
             return ToolResult(content=json.dumps({"error": "记忆系统未就绪"}, ensure_ascii=False))
 
         profile_data_str = (args.get("profile_data") or "").strip()
@@ -429,7 +429,7 @@ class ToolExecutor:
                     profile_msg = (
                         f"[这是关于我（{ctx.sender_id}）的自我介绍，请记住这些信息] {facts}"
                     )
-                    await self._everos.add_message(
+                    await self._hindsight.add_message(
                         session_id=ctx.chat_id,
                         sender_id=ctx.sender_id,
                         content=profile_msg,
@@ -443,7 +443,7 @@ class ToolExecutor:
                 )
 
         if summary:
-            await self._everos.add_message(
+            await self._hindsight.add_message(
                 session_id=ctx.chat_id,
                 sender_id=ctx.sender_id,
                 content=f"[重要事件] {summary}",
@@ -451,8 +451,6 @@ class ToolExecutor:
                 timestamp=None,
             )
             stored.append("事件摘要")
-
-        await self._everos.flush(session_id=ctx.chat_id)
 
         msg = "已标记为重要记忆。"
         if stored:
@@ -478,7 +476,7 @@ class ToolExecutor:
                 {"error": "请指定两个人名或昵称"}, ensure_ascii=False
             ))
 
-        if not self._everos:
+        if not self._hindsight:
             return ToolResult(content=json.dumps({"error": "记忆系统未就绪"}, ensure_ascii=False))
 
         a_id, a_name = self._resolve_person(person_a_raw, ctx)
@@ -503,19 +501,19 @@ class ToolExecutor:
         tasks = []
         task_labels: Dict[int, Tuple[str, str, str]] = {}
 
-        tasks.append(self._everos.search(
+        tasks.append(self._hindsight.search(
             user_id=a_id, query=query_a, top_k=5, include_profile=True, method=method
         ))
         task_labels[len(tasks) - 1] = ("a", a_id, a_name)
 
         if b_id != a_id:
-            tasks.append(self._everos.search(
+            tasks.append(self._hindsight.search(
                 user_id=b_id, query=query_b, top_k=5, include_profile=True, method=method
             ))
             task_labels[len(tasks) - 1] = ("b", b_id, b_name)
 
         if ctx.sender_id not in (a_id, b_id):
-            tasks.append(self._everos.search(
+            tasks.append(self._hindsight.search(
                 user_id=ctx.sender_id, query=query_speaker, top_k=5,
                 include_profile=False, method=method,
             ))

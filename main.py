@@ -16,7 +16,7 @@ from core.ai.multimodal import MultimodalService
 from core.managers.nickname_manager import NicknameManager
 from core.engine.router import Router
 from core.managers.template_manager import TemplateManager
-from core.engine.everos_memory import EverOSMemory
+from core.engine.hindsight_memory import HindsightMemory
 from core.command_handlers import register_all_commands
 from core.tools.skill_managers import SkillManagers
 from core.plugins.manager import PluginManager
@@ -126,32 +126,30 @@ async def main() -> None:
         pricing=cost_tracking_config.get("pricing"),
     ) if cost_tracking_config.get("enabled", True) else CostTracker()
 
-    # ── EverOS 长期记忆系统 ──
-    everos_config = config.get("everos", {})
-    everos_memory = None
-    if everos_config.get("enabled", True):
-        everos_memory = EverOSMemory(
-            base_url=everos_config.get("base_url", "http://127.0.0.1:8000"),
-            app_id=everos_config.get("app_id", "qq_bot"),
-            project_id=everos_config.get("project_id", "production"),
-            flush_threshold=everos_config.get("flush_threshold", 20),
+    # ── Hindsight 长期记忆系统 ──
+    hindsight_config = config.get("hindsight", {})
+    hindsight_memory = None
+    if hindsight_config.get("enabled", True):
+        hindsight_memory = HindsightMemory(
+            base_url=hindsight_config.get("base_url", "http://127.0.0.1:8888"),
+            bank_id=hindsight_config.get("bank_id", "qq_bot"),
         )
         _log.info(
-            f"EverOS 记忆系统已启用: {everos_config.get('base_url', 'http://127.0.0.1:8000')}"
+            f"Hindsight 记忆系统已启用: {hindsight_config.get('base_url', 'http://127.0.0.1:8888')}"
         )
     else:
-        _log.info("EverOS 记忆系统未启用")
+        _log.info("Hindsight 记忆系统未启用")
 
-    # ── EverOS 启动健康检查 ──
-    if everos_memory:
-        health_result = await everos_memory.health()
+    # ── Hindsight 启动健康检查 ──
+    if hindsight_memory:
+        health_result = await hindsight_memory.health()
         if health_result.get("status") == "ok":
             _log.info(
-                f"EverOS 健康检查通过 ({health_result.get('latency_ms')}ms)"
+                f"Hindsight 健康检查通过 ({health_result.get('latency_ms')}ms)"
             )
         else:
             _log.warning(
-                f"EverOS 健康检查失败: {health_result.get('error')}"
+                f"Hindsight 健康检查失败: {health_result.get('error')}"
                 " — 记忆功能将降级运行"
             )
 
@@ -235,8 +233,8 @@ async def main() -> None:
         openai_config=openai_config,
         nickname_manager=nickname_manager,
         emoji_manager=emoji_manager,
-        everos_memory=everos_memory,
-        search_top_k=everos_config.get("search_top_k", 3),
+        hindsight_memory=hindsight_memory,
+        search_top_k=hindsight_config.get("search_top_k", 5),
         skill_managers=skill_managers,
         learning_orchestrator=learning_orchestrator,
         max_tool_rounds=config.get("max_tool_rounds", -1),
