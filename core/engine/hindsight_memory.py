@@ -59,7 +59,7 @@ class HindsightMemory:
         """保留一条消息到记忆库。同一 session 共享 document_id 持续追加。"""
         try:
             prefix = f"[{sender_name}]: " if sender_name else ""
-            self._client.retain(
+            await self._client.aretain(
                 bank_id=self._bank_id,
                 content=f"{prefix}{content}",
                 document_id=f"session-{session_id}",
@@ -86,7 +86,7 @@ class HindsightMemory:
     ) -> Dict[str, Any]:
         """搜索记忆。适配返回 {episodes, profiles} 格式。"""
         try:
-            response = self._client.recall(
+            response = await self._client.arecall(
                 bank_id=self._bank_id,
                 query=query,
                 tags=[f"user:{user_id}"],
@@ -117,7 +117,7 @@ class HindsightMemory:
 
         start = time.monotonic()
         try:
-            self._client.get_version()
+            self._client.get_version()   # 同步 API 在独立调用中没问题（不在事件循环内）
             latency = (time.monotonic() - start) * 1000
             result = {"status": "ok", "latency_ms": round(latency, 1)}
         except Exception as e:
