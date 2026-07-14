@@ -160,7 +160,7 @@ class EmojiManager:
 
     async def get_or_build(
         self, attachment: MessageAttachment
-    ) -> Tuple[str, List[str]]:
+    ) -> Tuple[str, List[str], str]:
         image_bytes = await self._download_emoji(attachment.resolved_url)
 
         emoji_hash = hashlib.sha256(image_bytes).hexdigest()
@@ -172,7 +172,7 @@ class EmojiManager:
             await self._storage.update(
                 emoji_hash, used_count=cached.get("used_count", 0) + 1
             )
-            return (desc, tags)
+            return (desc, tags, emoji_hash)
 
         ext = self._infer_ext(attachment.content_type, attachment.filename)
         is_gif = ext == ".gif"
@@ -224,7 +224,7 @@ class EmojiManager:
         await self._storage.save(record)
 
         final_desc = auto_desc or "[自定义表情]"
-        return (final_desc, auto_tags or [])
+        return (final_desc, auto_tags or [], emoji_hash)
 
     async def set_custom(
         self,

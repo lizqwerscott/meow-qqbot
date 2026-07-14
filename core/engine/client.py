@@ -22,7 +22,7 @@ from core.card_parser import parse_card
 from core.engine.agent_engine import AgentEngine
 from core.managers.command_manager import CommandManager
 from core.managers.emoji_manager import EmojiManager, is_custom_emoji
-from core.message import InputMessage, MessageType
+from core.message import InputMessage, MessageType, ResourceMeta
 from core.ai.multimodal import MultimodalService
 from core.managers.nickname_manager import NicknameManager
 from core.engine.router import Router
@@ -188,6 +188,8 @@ class BotEngine:
         _log.info(f"[{event.chat_scope}][({event_type})] {event.user_id}: {event.content}")
 
         msg_type: MessageType = MessageType.TEXT
+        resources: List[ResourceMeta] = []
+        emoji_hash = ""
 
         # ── 检测自定义表情（faceType=6 + attachments）──
         if is_custom_emoji(event.content, event.attachments):
@@ -195,13 +197,23 @@ class BotEngine:
             msg_type = MessageType.EMOJI
             try:
                 if self.emoji_manager:
-                    desc, tags = await self.emoji_manager.get_or_build(
+                    desc, tags, emoji_hash = await self.emoji_manager.get_or_build(
                         event.attachments[0]
                     )
                     tag_str = " ".join(tags) if tags else ""
                     event.content = f"[表情: {desc}]"
                     if tag_str:
                         event.content += f" [情绪: {tag_str}]"
+                    resources = [
+                        ResourceMeta(
+                            resource_type="emoji",
+                            resource_id=emoji_hash,
+                            hash=emoji_hash,
+                            mime_type=event.attachments[0].content_type or "",
+                            filename=event.attachments[0].filename or "",
+                            size=event.attachments[0].size or 0,
+                        )
+                    ]
                 else:
                     event.content = "[自定义表情]"
             except Exception as e:
@@ -232,6 +244,18 @@ class BotEngine:
             else:
                 msg_type = MessageType.FILE
             _log.info(f"检测到{msg_type}消息: {event.attachments[0].filename}")
+            resources = [
+                ResourceMeta(
+                    resource_type=str(msg_type),
+                    resource_id=att.url.strip(),
+                    mime_type=att.content_type or "",
+                    height=att.height or 0,
+                    width=att.width or 0,
+                    size=att.size or 0,
+                    filename=att.filename or "",
+                )
+                for att in event.attachments
+            ]
 
         else:
             # 跳过空内容或仅 QQ 内置表情
@@ -275,7 +299,7 @@ class BotEngine:
             if elem.attachments and is_custom_emoji(elem.content or "", elem.attachments):
                 try:
                     if self.emoji_manager:
-                        desc, tags = await self.emoji_manager.get_or_build(
+                        desc, tags, _ = await self.emoji_manager.get_or_build(
                             elem.attachments[0]
                         )
                         tag_str = " ".join(tags) if tags else ""
@@ -313,6 +337,8 @@ class BotEngine:
             replied_content=replied_content,
             replied_author=replied_author,
             msg_type=msg_type,
+            resources=resources,
+            emoji_hash=emoji_hash,
         )
 
         await self.router.route(
