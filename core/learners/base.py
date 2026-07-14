@@ -1,9 +1,46 @@
 """Base — 学习系统的公共类型与工具函数。"""
 
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+
+
+# ── 学习系统文本清洗 ──
+
+_REPLY_PREFIX = re.compile(r'^\[正在回复[^\]]*\]\n?')
+_EMOJI_MARKER = re.compile(r'\[表情:[^\]]*\]')
+_EMOTION_MARKER = re.compile(r'\[情绪:[^\]]*\]')
+_AT_MENTION = re.compile(r'@[a-zA-Z0-9_]+')
+_JSON_LIKE = re.compile(r'^\s*[\{\[].*[\}\]]\s*$', re.DOTALL)
+
+
+def sanitize_for_learners(text: str) -> str:
+    """去掉 QQ 结构标记，返回纯用户文本供学习系统使用。
+
+    清理项：
+    - [正在回复 ...] 回复上下文前缀
+    - [表情: ...] 表情描述
+    - [情绪: ...] 情绪标签
+    - @昵称 提及
+    - JSON 风格的卡片消息内容
+    """
+    if not text:
+        return text
+
+    text = _REPLY_PREFIX.sub('', text)
+    text = _EMOJI_MARKER.sub('', text)
+    text = _EMOTION_MARKER.sub('', text)
+    text = _AT_MENTION.sub('', text)
+    text = text.strip()
+
+    if not text:
+        return ''
+    if _JSON_LIKE.match(text):
+        return ''
+
+    return text
 
 
 # ── 余弦相似度 ──

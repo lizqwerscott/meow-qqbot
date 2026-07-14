@@ -24,6 +24,7 @@ from core.managers.nickname_manager import NicknameManager
 from core.managers.template_manager import TemplateManager
 from core.tools import ToolExecutor
 from core.tools.definitions import FLUSH_KEYWORDS
+from core.learners.base import sanitize_for_learners
 from core.learners.orchestrator import LearningOrchestrator
 
 from core.engine.prompt_builder import PromptBuilder
@@ -249,19 +250,20 @@ class AgentEngine:
 
         # 学习系统观察（异步，不阻塞）
         if self.learners:
-            text_for_learners = content_with_context
-            if input_message.replied_content:
-                lines = text_for_learners.split("\n", 1)
-                if len(lines) == 2 and lines[1].startswith("猫猫"):
-                    lines[1] = lines[1][len("猫猫"):].lstrip()
-                    text_for_learners = "\n".join(lines)
-            elif text_for_learners.startswith("猫猫"):
-                text_for_learners = text_for_learners[len("猫猫"):].lstrip()
+            text_for_learners = sanitize_for_learners(content_with_context)
+            if text_for_learners:
+                if input_message.replied_content:
+                    lines = text_for_learners.split("\n", 1)
+                    if len(lines) == 2 and lines[1].startswith("猫猫"):
+                        lines[1] = lines[1][len("猫猫"):].lstrip()
+                        text_for_learners = "\n".join(lines)
+                elif text_for_learners.startswith("猫猫"):
+                    text_for_learners = text_for_learners[len("猫猫"):].lstrip()
 
-            await self.learners.on_message(
-                message_text=text_for_learners,
-                chat_id=chat_id,
-            )
+                await self.learners.on_message(
+                    message_text=text_for_learners,
+                    chat_id=chat_id,
+                )
 
         if input_message.content.startswith("[表情:") or input_message.content == "[自定义表情]":
             return
