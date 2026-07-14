@@ -67,7 +67,7 @@ class MultimodalService:
         self._set_cache(cache_key, result, [])
         return result
 
-    async def analyze_emoji(self, image_path: str) -> Tuple[str, List[str]]:
+    async def analyze_emoji(self, image_path: str, is_gif: bool = False) -> Tuple[str, List[str]]:
         cache_key = self._get_cache_key(image_path, "emoji")
         if cache_key in self._cache:
             _log.debug(f"分析表情命中缓存: {image_path}")
@@ -76,15 +76,28 @@ class MultimodalService:
             return cached[0], cached[1]
 
         base64_data = self._encode_image(image_path)
-        prompt = (
-            '请分析这张表情/贴图图片，仅返回以下 JSON 格式'
-            '（不要包含其他文字或 markdown 包裹）：\n'
-            '{\n'
-            '  "description": "一句话描述图片中的主要内容",\n'
-            '  "emotions": ["标签1", "标签2", "标签3"]\n'
-            '}\n'
-            '其中 emotions 给出 1-3 个情绪/情感标签。'
-        )
+
+        if is_gif:
+            prompt = (
+                '这是一张将动图各帧从左到右拼接的图片，展示了一个动态动画过程。'
+                '请分析这个动画表现的内容和动作，仅返回以下 JSON 格式'
+                '（不要包含其他文字或 markdown 包裹）：\n'
+                '{\n'
+                '  "description": "一句话描述这个动画表达的内容和动作",\n'
+                '  "emotions": ["标签1", "标签2", "标签3"]\n'
+                '}\n'
+                '其中 emotions 给出 1-3 个情绪/情感标签，反映这个动画传递的情感。'
+            )
+        else:
+            prompt = (
+                '请分析这张表情/贴图图片，仅返回以下 JSON 格式'
+                '（不要包含其他文字或 markdown 包裹）：\n'
+                '{\n'
+                '  "description": "一句话描述图片中的主要内容",\n'
+                '  "emotions": ["标签1", "标签2", "标签3"]\n'
+                '}\n'
+                '其中 emotions 给出 1-3 个情绪/情感标签。'
+            )
 
         result = await self._call_vlm(base64_data, prompt)
         description, emotions = self._parse_emoji_result(result or "")
