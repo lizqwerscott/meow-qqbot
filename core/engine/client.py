@@ -206,20 +206,14 @@ class BotEngine:
                 event.content = "[自定义表情]"
 
         # ── 检测卡片消息（ARK/EMBED）──
-        elif event.message_type in (3, 4):
+        elif event.raw and ("ark" in event.raw or "ark_data" in event.raw or "embed" in event.raw or event.message_type in (3, 4)):
             card_text = parse_card(event.raw or {}, event.message_type)
             if card_text:
                 _log.info(f"检测到卡片消息，解析为: {card_text}")
-                try:
-                    await self._send_reply(
-                        event.chat_id,
-                        card_text,
-                        message_id=event.message_id,
-                        is_group=(event.chat_scope == "group"),
-                    )
-                except Exception as e:
-                    _log.error(f"发送卡片解析回复失败: {e}")
-            return
+                event.content = card_text
+            else:
+                _log.info("卡片消息解析失败，跳过")
+                return
 
         else:
             # 跳过空内容或仅 QQ 内置表情
