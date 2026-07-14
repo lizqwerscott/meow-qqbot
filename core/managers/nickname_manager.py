@@ -1,8 +1,7 @@
-import asyncio
 import json
 import logging
 import os
-from typing import Dict, Optional
+from typing import Dict
 
 _log = logging.getLogger(__name__)
 
@@ -14,7 +13,7 @@ class NicknameManager:
     负责：
     - 昵称数据的手动/自动加载与持久化
     - 按优先级查询（手动 > 自动 > 原始 ID）
-    - 运行时采集用户昵称（带防抖保存）
+    - 运行时采集用户昵称（实时持久化）
 
     所有 nickname 相关的数据读取/写入都通过此类的实例进行，
     各模块通过持有同一实例引用来共享数据。
@@ -24,24 +23,24 @@ class NicknameManager:
         self.bot_id = bot_id
         self.nicknames: Dict[str, str] = {}
         self.auto_nicknames: Dict[str, str] = {}
-        self._save_task: Optional[asyncio.Task] = None
+        self._initial_loaded = False
 
     # ── 生命周期 ──
 
     def load_all(self) -> None:
+        if self._initial_loaded:
+            _log.debug("已加载过昵称，跳过重复加载")
+            return
         self.nicknames = self._load_nicknames()
         self.auto_nicknames = self._load_auto_nicknames()
+        self._initial_loaded = True
         _log.info(
             f"已加载 {len(self.nicknames)} 个手动昵称 + "
             f"{len(self.auto_nicknames)} 个自动昵称"
         )
 
     async def flush_save(self) -> None:
-        if self._save_task and not self._save_task.done():
-            try:
-                await asyncio.wait_for(self._save_task, timeout=3.0)
-            except asyncio.TimeoutError:
-                pass
+        pass
 
     def save_auto(self) -> None:
         self._save_auto_nicknames()
@@ -73,8 +72,7 @@ class NicknameManager:
             return
         self.auto_nicknames[user_id] = username
         _log.debug(f"已采集昵称: {username} ({user_id[:12]}..)")
-        if self._save_task is None or self._save_task.done():
-            self._save_task = asyncio.create_task(self._debounced_save())
+        self._save_auto_nicknames()
 
     # ── 内部文件操作 ──
 
@@ -109,6 +107,4 @@ class NicknameManager:
         except Exception as e:
             _log.error(f"保存自动昵称失败: {e}")
 
-    async def _debounced_save(self) -> None:
-        await asyncio.sleep(10)
-        self._save_auto_nicknames()
+
