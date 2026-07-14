@@ -91,6 +91,15 @@ class EmojiStorage:
     def list_all(self) -> List[dict]:
         return list(self._data.get("emojis", {}).values())
 
+    async def delete(self, emoji_hash: str) -> bool:
+        async with self._lock:
+            emojis = self._data.setdefault("emojis", {})
+            if emoji_hash not in emojis:
+                return False
+            del emojis[emoji_hash]
+            await self._flush_async()
+            return True
+
     def count(self) -> int:
         return len(self._data.get("emojis", {}))
 
@@ -252,6 +261,70 @@ class EmojiManager:
         _log.info(f"已重置 emoji [{emoji_hash[:12]}..] 为自动识别结果")
         return True
 
+    async def delete_emoji(self, emoji_hash: str) -> bool:
+        record = self._storage.get(emoji_hash)
+        if not record:
+            return False
+        file_name = record.get("file_name")
+        if file_name:
+            file_path = self._emoji_dir / file_name
+            if file_path.exists():
+                file_path.unlink()
+                _log.info(f"已删除表情文件: {file_name}")
+        result = await self._storage.delete(emoji_hash)
+        if result:
+            _log.info(f"已删除表情记录: {emoji_hash[:12]}..")
+        return result
+
+    async def reanalyze_emoji(self, emoji_hash: str) -> bool:
+        record = self._storage.get(emoji_hash)
+        if not record:
+            _log.warning(f"重新分析失败，未找到 emoji: {emoji_hash[:12]}..")
+            return False
+        if not self._multimodal:
+            _log.warning("重新分析失败，多模态服务未配置")
+            return False
+
+        file_name = record.get("file_name")
+        if not file_name:
+            return False
+        file_path = self._emoji_dir / file_name
+        if not file_path.exists():
+            _log.warning(f"重新分析失败，图片文件不存在: {file_path}")
+            return False
+
+        is_gif = file_name.lower().endswith(".gif")
+
+        try:
+            if is_gif:
+                image_bytes = file_path.read_bytes()
+                static_bytes = ImageUtils.gif_2_static_image(image_bytes)
+                analysis_path = file_path.with_suffix(".analysis.jpg")
+                analysis_path.write_bytes(static_bytes)
+                processed_path = self._maybe_normalize_image(analysis_path)
+                auto_desc, auto_tags = await self._multimodal.analyze_emoji(
+                    str(processed_path), is_gif=True
+                )
+                for p in [analysis_path, processed_path]:
+                    if p != file_path and p.exists():
+                        p.unlink()
+            else:
+                processed_path = self._maybe_normalize_image(file_path)
+                auto_desc, auto_tags = await self._multimodal.analyze_emoji(
+                    str(processed_path), is_gif=False
+                )
+
+            await self._storage.update(
+                emoji_hash,
+                auto_description=auto_desc,
+                auto_tags=auto_tags,
+            )
+            _log.info(f"表情重新分析完成 [{emoji_hash[:12]}..]: desc={auto_desc}, tags={auto_tags}")
+            return True
+        except Exception as e:
+            _log.warning(f"表情重新分析失败 [{emoji_hash[:12]}..]: {e}")
+            return False
+
     def count_emojis(self) -> int:
         return self._storage.count()
 
@@ -266,10 +339,27 @@ class EmojiManager:
         return self._storage.get(emoji_hash)
 
     def list_emojis(
-        self, page: int = 1, page_size: int = 20
+        self, page: int = 1, page_size: int = 20,
+        sort_by: str = "has_tags", sort_order: str = "desc",
     ) -> Dict[str, Any]:
         all_emojis = self._storage.list_all()
-        all_emojis.sort(key=lambda r: r.get("used_count", 0), reverse=True)
+
+        sort_fns = {
+            "used_count": lambda r: r.get("used_count", 0),
+            "has_tags": lambda r: (
+                1 if (r.get("user_tags") or r.get("auto_tags")) else 0
+            ),
+            "has_description": lambda r: (
+                1 if (r.get("user_description") or r.get("auto_description", "")) else 0
+            ),
+            "has_custom": lambda r: (
+                1 if (r.get("user_description") or r.get("user_tags")) else 0
+            ),
+            "created_at": lambda r: r.get("created_at", ""),
+            "hash": lambda r: r.get("hash", ""),
+        }
+        key_fn = sort_fns.get(sort_by, sort_fns["has_tags"])
+        all_emojis.sort(key=key_fn, reverse=(sort_order != "asc"))
 
         total = len(all_emojis)
         start = (page - 1) * page_size

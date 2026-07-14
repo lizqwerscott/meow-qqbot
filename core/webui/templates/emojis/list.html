@@ -20,10 +20,10 @@
         <tr>
             <th>预览</th>
             <th>Hash</th>
-            <th>描述</th>
-            <th>标签</th>
-            <th>使用次数</th>
-            <th>来源</th>
+            <th><a href="?sort_by=has_description&amp;sort_order={% if sort_by == 'has_description' and sort_order == 'desc' %}asc{% else %}desc{% endif %}{% if query %}&amp;q={{ query }}{% endif %}{% if page > 1 %}&amp;page={{ page }}{% endif %}" class="sort-link">描述 {% if sort_by == 'has_description' %}<span class="sort-arrow">{{ '↓' if sort_order == 'desc' else '↑' }}</span>{% endif %}</a></th>
+            <th><a href="?sort_by=has_tags&amp;sort_order={% if sort_by == 'has_tags' and sort_order == 'desc' %}asc{% else %}desc{% endif %}{% if query %}&amp;q={{ query }}{% endif %}{% if page > 1 %}&amp;page={{ page }}{% endif %}" class="sort-link">标签 {% if sort_by == 'has_tags' %}<span class="sort-arrow">{{ '↓' if sort_order == 'desc' else '↑' }}</span>{% endif %}</a></th>
+            <th><a href="?sort_by=used_count&amp;sort_order={% if sort_by == 'used_count' and sort_order == 'desc' %}asc{% else %}desc{% endif %}{% if query %}&amp;q={{ query }}{% endif %}{% if page > 1 %}&amp;page={{ page }}{% endif %}" class="sort-link">使用次数 {% if sort_by == 'used_count' %}<span class="sort-arrow">{{ '↓' if sort_order == 'desc' else '↑' }}</span>{% endif %}</a></th>
+            <th><a href="?sort_by=has_custom&amp;sort_order={% if sort_by == 'has_custom' and sort_order == 'desc' %}asc{% else %}desc{% endif %}{% if query %}&amp;q={{ query }}{% endif %}{% if page > 1 %}&amp;page={{ page }}{% endif %}" class="sort-link">来源 {% if sort_by == 'has_custom' %}<span class="sort-arrow">{{ '↓' if sort_order == 'desc' else '↑' }}</span>{% endif %}</a></th>
             <th>操作</th>
         </tr>
     </thead>
@@ -40,6 +40,8 @@
             <td>
                 {% for tag in (emoji.user_tags or emoji.auto_tags or []) %}
                 <span class="badge">{{ tag }}</span>
+                {% else %}
+                <span class="text-muted">-</span>
                 {% endfor %}
             </td>
             <td>{{ emoji.used_count }}</td>
@@ -49,6 +51,9 @@
             </td>
             <td>
                 <a href="/emojis/{{ emoji.hash }}" class="btn btn-sm">详情</a>
+                <form method="post" action="/emojis/{{ emoji.hash }}/delete" style="display:inline" onsubmit="return confirm('确定要删除这个表情吗？')">
+                    <button type="submit" class="btn btn-sm btn-danger">删除</button>
+                </form>
             </td>
         </tr>
         {% else %}

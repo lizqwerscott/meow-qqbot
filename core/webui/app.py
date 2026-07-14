@@ -46,13 +46,13 @@ def create_app(managers: Dict[str, Any], webui_config: Dict[str, Any]) -> FastAP
     app.state.webui_config = webui_config
     app.state.templates = templates
 
-    # Static files
-    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
-
-    # Mount emoji images directory if it exists
+    # Mount emoji images directory first so it takes precedence over /static
     emoji_dir = Path("data/emojis")
     if emoji_dir.exists():
         app.mount("/static/emojis", StaticFiles(directory=str(emoji_dir)), name="emoji-files")
+
+    # Static files
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     # Auth middleware
     token = webui_config.get("token", "")

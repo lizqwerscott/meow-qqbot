@@ -379,6 +379,31 @@ tr:hover td {
 
 /* ── Emoji thumbnail ── */
 
+/* ── Sort links ── */
+
+.sort-link {
+    color: inherit;
+    text-decoration: none;
+}
+.sort-link:hover {
+    text-decoration: none;
+    color: var(--accent-light);
+}
+
+.sort-arrow {
+    font-size: 11px;
+    margin-left: 2px;
+}
+
+/* ── Muted text ── */
+
+.text-muted {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+/* ── Emoji thumbnail ── */
+
 .emoji-thumb {
     width: 48px;
     height: 48px;
