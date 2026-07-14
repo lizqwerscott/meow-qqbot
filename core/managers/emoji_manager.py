@@ -167,25 +167,32 @@ class EmojiManager:
 
         ext = self._infer_ext(attachment.content_type, attachment.filename)
         is_gif = ext == ".gif"
-        save_bytes = image_bytes
-
-        if is_gif:
-            try:
-                save_bytes = ImageUtils.gif_2_static_image(image_bytes)
-                ext = ".jpg"
-            except Exception as e:
-                _log.warning(f"GIF 转静态图失败，使用原始 GIF: {e}")
 
         file_path = self._emoji_dir / f"{emoji_hash}{ext}"
-        file_path.write_bytes(save_bytes)
+        file_path.write_bytes(image_bytes)
 
         auto_desc, auto_tags = "", []
         if self._multimodal:
             try:
-                processed_path = self._maybe_normalize_image(file_path)
+                if is_gif:
+                    # GIF: 用静态帧做 VLM 分析
+                    static_bytes = ImageUtils.gif_2_static_image(image_bytes)
+                    analysis_path = file_path.with_suffix(".analysis.jpg")
+                    analysis_path.write_bytes(static_bytes)
+                    processed_path = self._maybe_normalize_image(analysis_path)
+                else:
+                    processed_path = self._maybe_normalize_image(file_path)
+
                 auto_desc, auto_tags = await self._multimodal.analyze_emoji(
                     str(processed_path)
                 )
+
+                # 清理 GIF 分析产生的临时文件
+                if is_gif:
+                    for p in [analysis_path, processed_path]:
+                        if p != file_path and p.exists():
+                            p.unlink()
+
                 _log.info(
                     f"VLM 表情分析完成 [{emoji_hash[:12]}..]: "
                     f"desc={auto_desc}, tags={auto_tags}"
