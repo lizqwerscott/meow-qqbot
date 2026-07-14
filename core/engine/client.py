@@ -189,7 +189,6 @@ class BotEngine:
 
         msg_type: MessageType = MessageType.TEXT
         resources: List[ResourceMeta] = []
-        emoji_hash = ""
 
         # ── 检测自定义表情（faceType=6 + attachments）──
         if is_custom_emoji(event.content, event.attachments):
@@ -338,7 +337,6 @@ class BotEngine:
             replied_author=replied_author,
             msg_type=msg_type,
             resources=resources,
-            emoji_hash=emoji_hash,
         )
 
         await self.router.route(

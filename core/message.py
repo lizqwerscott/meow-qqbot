@@ -47,7 +47,6 @@ class InputMessage:
     timestamp: float = None
     model_chain: Optional[List[str]] = None
     resources: List[ResourceMeta] = field(default_factory=list)
-    emoji_hash: str = ""  # deprecated, 用 resources[0].hash 替代
 
     def __post_init__(self):
         if self.timestamp is None:
