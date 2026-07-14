@@ -26,6 +26,8 @@ async def emoji_list(
     request: Request,
     page: int = Query(1, ge=1),
     q: Optional[str] = Query(None),
+    sort_by: str = Query("has_tags"),
+    sort_order: str = Query("desc"),
 ):
     managers = request.app.state.managers
     templates = request.app.state.templates
@@ -33,13 +35,13 @@ async def emoji_list(
 
     if q:
         all_items = emoji_manager.find_emojis(q, max_results=100) if hasattr(emoji_manager, 'find_emojis') else []
+        total = len(all_items)
+        total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     else:
-        result = emoji_manager.list_emojis(page=page, page_size=PAGE_SIZE)
+        result = emoji_manager.list_emojis(page=page, page_size=PAGE_SIZE, sort_by=sort_by, sort_order=sort_order)
         all_items = result.get("emojis", [])
         total = result.get("total", 0)
         total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-    total = len(all_items)
-    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
 
     return templates.TemplateResponse(request, "emojis/list.html", {
         "request": request,
@@ -47,6 +49,8 @@ async def emoji_list(
         "page": page,
         "total_pages": total_pages,
         "query": q or "",
+        "sort_by": sort_by,
+        "sort_order": sort_order,
     })
 
 
@@ -95,3 +99,27 @@ async def emoji_reset(request: Request, emoji_hash: str):
         return _make_flash_redirect(f"/emojis/{emoji_hash}", "error", "重置失败")
 
     return _make_flash_redirect(f"/emojis/{emoji_hash}", "success", "已重置为自动识别")
+
+
+@router.post("/emojis/{emoji_hash}/delete")
+async def emoji_delete(request: Request, emoji_hash: str):
+    managers = request.app.state.managers
+    emoji_manager = managers.get("emoji_manager")
+
+    success = await emoji_manager.delete_emoji(emoji_hash)
+    if not success:
+        return _make_flash_redirect("/emojis", "error", f"删除失败: {emoji_hash[:12]}..")
+
+    return _make_flash_redirect("/emojis", "success", f"已删除表情 {emoji_hash[:12]}..")
+
+
+@router.post("/emojis/{emoji_hash}/reanalyze")
+async def emoji_reanalyze(request: Request, emoji_hash: str):
+    managers = request.app.state.managers
+    emoji_manager = managers.get("emoji_manager")
+
+    success = await emoji_manager.reanalyze_emoji(emoji_hash)
+    if not success:
+        return _make_flash_redirect(f"/emojis/{emoji_hash}", "error", "重新分析失败")
+
+    return _make_flash_redirect(f"/emojis/{emoji_hash}", "success", "已重新使用 VLM 分析")

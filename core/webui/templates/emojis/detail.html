@@ -49,5 +49,17 @@
     </form>
 </div>
 
+<div class="card">
+    <h2>🔧 高级操作</h2>
+    <div class="form-actions">
+        <form method="post" action="/emojis/{{ emoji.hash }}/reanalyze" style="display:inline">
+            <button type="submit" class="btn">重新使用 VLM 分析</button>
+        </form>
+        <form method="post" action="/emojis/{{ emoji.hash }}/delete" style="display:inline" onsubmit="return confirm('确定要永久删除这个表情吗？此操作不可撤销。')">
+            <button type="submit" class="btn btn-danger">删除此表情</button>
+        </form>
+    </div>
+</div>
+
 <a href="/emojis" class="btn">← 返回列表</a>
 {% endblock %}
