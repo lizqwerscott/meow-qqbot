@@ -70,15 +70,27 @@ def _extract_ark_source(ark: Dict[str, Any]) -> str:
 def parse_ark(ark: dict) -> Optional[str]:
     """解析 ARK 消息为统一分享格式。
 
-    QQ 小程序/分享卡片通常在 ``ark.kv[].obj[].obj_kv`` 中携带
-    title / desc / url / source 等字段。
+    支持两种格式：
+    - QQ 小程序格式 (``ark_type=miniapp``)，字段在 ``fields`` 字典中
+    - 标准 ARK 格式，数据在 ``kv[]`` 数组中
     """
     if not isinstance(ark, dict):
         return None
 
-    title = _extract_ark_title(ark)
-    url = _extract_ark_url(ark)
-    source = _extract_ark_source(ark)
+    title = source = url = ""
+
+    # 格式A: QQ 小程序 (fields + prompt)
+    if ark.get("ark_type") == "miniapp" or "fields" in ark:
+        fields = ark.get("fields", {}) or {}
+        title = fields.get("title", "") or ""
+        source = fields.get("source", "") or ""
+
+    # 格式B: 标准 ARK (kv 数组)
+    if not title:
+        title = _extract_ark_title(ark)
+        url = _extract_ark_url(ark)
+    if not source:
+        source = _extract_ark_source(ark)
 
     parts = []
     if source:
@@ -115,22 +127,30 @@ def parse_embed(embed: dict) -> Optional[str]:
 def parse_card(raw: dict, message_type: int) -> Optional[str]:
     """解析卡片消息，返回统一分享格式文本。
 
-    :param raw: 消息的原始 dict（含 ``ark`` 或 ``embed`` 字段）
+    :param raw: 消息的原始 dict（含 ``ark`` / ``ark_data`` / ``embed`` 字段）
     :param message_type: 3=ARK, 4=EMBED
     :returns: 统一格式文本，解析失败返回 None
     """
+    # 自动检测：message_type 非 3/4 但 raw 里有 ark_data/ark/embed
+    if message_type not in (3, 4):
+        if "ark" in raw or "ark_data" in raw:
+            message_type = 3
+        elif "embed" in raw:
+            message_type = 4
+
     if message_type == 3:
-        if "ark" in raw:
-            result = parse_ark(raw["ark"])
+        ark_data = raw.get("ark") or raw.get("ark_data")
+        if ark_data:
+            result = parse_ark(ark_data)
             if result:
                 return result
-        _log.info("CardParser: ARK 消息解析失败或无数据，使用原始 content")
+        _log.info("CardParser: ARK 消息解析失败或无数据")
 
     elif message_type == 4:
         if "embed" in raw:
             result = parse_embed(raw["embed"])
             if result:
                 return result
-        _log.info("CardParser: EMBED 消息解析失败或无数据，使用原始 content")
+        _log.info("CardParser: EMBED 消息解析失败或无数据")
 
     return None
