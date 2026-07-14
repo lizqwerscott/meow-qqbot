@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
-from qqbot_agent_sdk.dto import MediaInfo, MessageToCreate, QQMessageType
 
 from datetime import datetime, timedelta, timezone
 
@@ -84,6 +83,7 @@ class ToolExecutor:
         self._skill_managers = skill_managers
         self._learners = learning_orchestrator
         self._admin_ids = admin_ids or []
+        self._bot_engine = None
         self._task_manager = None
         self._cron_job_manager = None
         self._background_task_runner = None
@@ -120,6 +120,9 @@ class ToolExecutor:
 
     def set_api_client(self, client):
         self._api_client = client
+
+    def set_bot_engine(self, engine):
+        self._bot_engine = engine
 
     def set_nickname_manager(self, nm: NicknameManager):
         self._nm = nm
@@ -200,8 +203,10 @@ class ToolExecutor:
             ))
 
         # 后台任务时 delivery_channel 为真实聊天 ID，reply_to_message_id 为原始消息 ID
+        # 后台任务 → 主动发送（不传 msg_id）；正常对话 → 回复
         effective_chat_id = ctx.delivery_channel or ctx.chat_id
-        effective_reply_to = ctx.reply_to_message_id or ctx.reply_to
+        is_background = bool(ctx.delivery_channel)
+        effective_reply_to = None if is_background else ctx.reply_to
 
         success, description, file_name, error = await self._send_emoji_by_hash(
             chat_id=effective_chat_id,
@@ -233,7 +238,7 @@ class ToolExecutor:
         chat_id: str,
         emoji_hash: str,
         is_group: bool,
-        reply_to: str,
+        reply_to: Optional[str] = None,
     ) -> Tuple[bool, str, str, str]:
         """上传并发送已缓存的 emoji 图片到聊天。"""
         if self._emoji_manager is None or self._media_uploader is None:
@@ -267,23 +272,19 @@ class ToolExecutor:
                 file_name=file_name,
             )
 
-            msg_seq = self._api_client.next_msg_seq() if self._api_client else 0
-
-            if is_group:
-                msg = MessageToCreate(
-                    msg_type=QQMessageType.RICH_MEDIA,
-                    msg_seq=msg_seq,
-                    msg_id=reply_to,
-                    media=MediaInfo(file_info=file_info),
+            if reply_to:
+                await self._bot_engine.send_reply(
+                    chat_id=chat_id,
+                    is_group=is_group,
+                    message_id=reply_to,
+                    media_file_info=file_info,
                 )
-                await self._api_client.post_group_message(chat_id, msg)
             else:
-                msg = MessageToCreate(
-                    msg_type=QQMessageType.RICH_MEDIA,
-                    msg_seq=msg_seq,
-                    media=MediaInfo(file_info=file_info),
+                await self._bot_engine.send_proactive(
+                    chat_id=chat_id,
+                    is_group=is_group,
+                    media_file_info=file_info,
                 )
-                await self._api_client.post_c2c_message(chat_id, msg)
 
             record = self._emoji_manager.get_info(full_hash)
             if record:

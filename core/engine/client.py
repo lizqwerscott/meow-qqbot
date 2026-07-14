@@ -15,7 +15,7 @@ from qqbot_agent_sdk import (
     parse_approval_button_data,
 )
 from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
-from qqbot_agent_sdk.dto import MediaInfo, MessageToCreate, QQMessageType, WSReadyData
+from qqbot_agent_sdk.dto import InlineKeyboard, MediaInfo, MessageToCreate, QQMessageType, WSReadyData
 from qqbot_agent_sdk.media_loader import MediaUploader
 
 from core.engine.agent_engine import AgentEngine
@@ -314,9 +314,10 @@ class BotEngine:
                     "allow-always": "⭐ 已始终允许",
                     "deny": "❌ 已拒绝",
                 }
-                await self.api.send_text(
-                    chat_type, chat_id,
+                await self.send_proactive(
+                    chat_id,
                     responses.get(decision, f"❓ 审批结果: {decision}"),
+                    is_group=(chat_type == "group"),
                 )
                 _log.info(f"审批响应: {decision}")
             return
@@ -324,18 +325,96 @@ class BotEngine:
         # 自定义键盘
         if interaction.data.resolved.button_data.startswith("test_keyboard:"):
             choice = interaction.data.resolved.button_data.split(":")[-1]
-            await self.api.send_text(
-                chat_type, chat_id,
+            await self.send_proactive(
+                chat_id,
                 f"✓ 你选择了: {choice.upper()}",
+                is_group=(chat_type == "group"),
             )
             _log.info(f"自定义键盘选择: {choice}")
 
-    # ── 发送回复 ──
+    # ── 统一发送接口 ──
+
+    async def send_reply(
+        self,
+        chat_id: str,
+        content: str = "",
+        *,
+        message_id: str,
+        is_group: bool = False,
+        media_file_info: Optional[str] = None,
+        markdown: bool = True,
+        keyboard: Optional[InlineKeyboard] = None,
+    ) -> Dict[str, Any]:
+        """发送回复消息（被动消息，带 msg_id 上下文）。
+
+        统一处理文本 / markdown / 富媒体。根据参数自动选择：
+        - media_file_info 非空 → 富媒体 msg_type=7
+        - keyboard 非空 → 附加内联键盘
+        - 其他 → 文本 / markdown，走 SDK 内置重试
+        """
+        chat_type = "group" if is_group else "c2c"
+
+        if media_file_info:
+            msg = MessageToCreate(
+                msg_type=QQMessageType.RICH_MEDIA,
+                msg_seq=self.api.next_msg_seq(),
+                msg_id=message_id,
+                media=MediaInfo(file_info=media_file_info),
+            )
+            if is_group:
+                return await self.api.post_group_message(chat_id, msg, keyboard=keyboard)
+            return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
+
+        if keyboard:
+            msg = self.api.build_text_body(content, reply_to=message_id, markdown=markdown)
+            if is_group:
+                return await self.api.post_group_message(chat_id, msg, keyboard=keyboard)
+            return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
+
+        return await self.api.send_text(
+            chat_type, chat_id, content,
+            reply_to=message_id,
+            markdown=markdown,
+        )
+
+    async def send_proactive(
+        self,
+        chat_id: str,
+        content: str = "",
+        *,
+        is_group: bool = False,
+        media_file_info: Optional[str] = None,
+        markdown: bool = True,
+        keyboard: Optional[InlineKeyboard] = None,
+    ) -> Dict[str, Any]:
+        """发送主动消息（无被动消息上下文，不含 msg_id）。"""
+        chat_type = "group" if is_group else "c2c"
+
+        if media_file_info:
+            msg = MessageToCreate(
+                msg_type=QQMessageType.RICH_MEDIA,
+                msg_seq=self.api.next_msg_seq(),
+                media=MediaInfo(file_info=media_file_info),
+            )
+            if is_group:
+                return await self.api.post_group_message(chat_id, msg, keyboard=keyboard)
+            return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
+
+        if keyboard:
+            msg = self.api.build_text_body(content, reply_to=None, markdown=markdown)
+            if is_group:
+                return await self.api.post_group_message(chat_id, msg, keyboard=keyboard)
+            return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
+
+        return await self.api.send_text(
+            chat_type, chat_id, content,
+            reply_to=None,
+            markdown=markdown,
+        )
 
     async def _send_reply(
         self, chat_id: str, content: str, message_id: str, is_group: bool = False
     ) -> None:
-        """发送回复——使用 SDK send_text 自动路由 + 重试。"""
-        chat_type = "group" if is_group else "c2c"
-        await self.api.send_text(chat_type, chat_id, content, reply_to=message_id)
+        """发送回复——委托给 send_reply。"""
+        await self.send_reply(chat_id, content, message_id=message_id, is_group=is_group)
 

@@ -268,8 +268,7 @@ async def main() -> None:
         # 投递回调（将任务执行结果发回 QQ 聊天）
         async def _deliver(chat_id, content, message_id, is_group):
             try:
-                chat_type = "group" if is_group else "c2c"
-                await engine.api.send_text(chat_type, chat_id, content, reply_to=None)
+                await engine.send_proactive(chat_id, content, is_group=is_group)
             except Exception as e:
                 _log.error(f"投递任务结果失败: {e}")
         background_task_runner.set_delivery_callback(_deliver)
@@ -300,6 +299,9 @@ async def main() -> None:
         emoji_manager=emoji_manager,
         multimodal_service=multimodal_service,
     )
+
+    # ── 将 BotEngine 注入 ToolExecutor（供 AI 工具统一发消息） ──
+    agent_engine.tool_executor.set_bot_engine(engine)
 
     # ── 心跳系统 ──
     heartbeat_manager = None
