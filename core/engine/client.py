@@ -22,7 +22,7 @@ from core.card_parser import parse_card
 from core.engine.agent_engine import AgentEngine
 from core.managers.command_manager import CommandManager
 from core.managers.emoji_manager import EmojiManager, is_custom_emoji
-from core.message import InputMessage
+from core.message import InputMessage, MessageType
 from core.ai.multimodal import MultimodalService
 from core.managers.nickname_manager import NicknameManager
 from core.engine.router import Router
@@ -187,9 +187,12 @@ class BotEngine:
 
         _log.info(f"[{event.chat_scope}][({event_type})] {event.user_id}: {event.content}")
 
+        msg_type: MessageType = MessageType.TEXT
+
         # ── 检测自定义表情（faceType=6 + attachments）──
         if is_custom_emoji(event.content, event.attachments):
             _log.info(f"检测到自定义表情，用户: {event.user_id}")
+            msg_type = MessageType.EMOJI
             try:
                 if self.emoji_manager:
                     desc, tags = await self.emoji_manager.get_or_build(
@@ -212,6 +215,7 @@ class BotEngine:
             if card_text:
                 _log.info(f"检测到卡片消息，解析为: {card_text}")
                 event.content = card_text
+                msg_type = MessageType.CARD
             else:
                 _log.info("卡片消息解析失败，跳过")
                 return
@@ -295,6 +299,7 @@ class BotEngine:
             mentioned_ids=mentioned_ids,
             replied_content=replied_content,
             replied_author=replied_author,
+            msg_type=msg_type,
         )
 
         await self.router.route(

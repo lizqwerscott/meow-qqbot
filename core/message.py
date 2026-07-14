@@ -1,6 +1,13 @@
 import time
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import List, Optional
+
+
+class MessageType(StrEnum):
+    TEXT = "text"
+    CARD = "card"
+    EMOJI = "emoji"
 
 
 @dataclass
@@ -16,6 +23,7 @@ class InputMessage:
     mentioned_ids: List[str] = field(default_factory=list)
     replied_content: str = ""
     replied_author: str = ""
+    msg_type: MessageType = MessageType.TEXT
     timestamp: float = None
     model_chain: Optional[List[str]] = None
 

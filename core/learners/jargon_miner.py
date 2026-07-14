@@ -282,7 +282,6 @@ class JargonMiner:
             messages = [{"role": "user", "content": prompt}]
             response_text, _ = await self._ai.chat_completion(
                 messages=messages,
-                model="gpt-4o-mini",
                 max_tokens=300,
             )
             if response_text:
