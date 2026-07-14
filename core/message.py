@@ -8,6 +8,10 @@ class MessageType(StrEnum):
     TEXT = "text"
     CARD = "card"
     EMOJI = "emoji"
+    IMAGE = "image"
+    VOICE = "voice"
+    VIDEO = "video"
+    FILE = "file"
 
 
 @dataclass

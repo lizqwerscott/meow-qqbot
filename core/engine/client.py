@@ -220,6 +220,19 @@ class BotEngine:
                 _log.info("卡片消息解析失败，跳过")
                 return
 
+        # ── 检测附件类型（图片/语音/视频/文件）──
+        elif event.attachments:
+            ct = (event.attachments[0].content_type or "").lower()
+            if ct.startswith("image/"):
+                msg_type = MessageType.IMAGE
+            elif "voice" in ct or "audio" in ct or ct.endswith(".silk") or ct.endswith(".amr"):
+                msg_type = MessageType.VOICE
+            elif ct.startswith("video/"):
+                msg_type = MessageType.VIDEO
+            else:
+                msg_type = MessageType.FILE
+            _log.info(f"检测到{msg_type}消息: {event.attachments[0].filename}")
+
         else:
             # 跳过空内容或仅 QQ 内置表情
             stripped = event.content.strip()
