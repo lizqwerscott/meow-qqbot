@@ -79,11 +79,12 @@ def parse_ark(ark: dict) -> Optional[str]:
 
     title = source = url = ""
 
-    # 格式A: QQ 小程序 (fields + prompt)
-    if ark.get("ark_type") == "miniapp" or "fields" in ark:
+    # 格式A: QQ 小程序 / 图文H5 (fields + prompt)
+    if "fields" in ark:
         fields = ark.get("fields", {}) or {}
         title = fields.get("title", "") or ""
-        source = fields.get("source", "") or ""
+        source = fields.get("source") or fields.get("tag") or ""
+        url = fields.get("jump_url") or ""
 
     # 格式B: 标准 ARK (kv 数组)
     if not title:

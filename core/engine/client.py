@@ -207,6 +207,7 @@ class BotEngine:
 
         # ── 检测卡片消息（ARK/EMBED）──
         elif event.raw and ("ark" in event.raw or "ark_data" in event.raw or "embed" in event.raw or event.message_type in (3, 4)):
+            _log.info(f"Card raw: {event.raw}")
             card_text = parse_card(event.raw or {}, event.message_type)
             if card_text:
                 _log.info(f"检测到卡片消息，解析为: {card_text}")
@@ -429,4 +430,3 @@ class BotEngine:
     ) -> None:
         """发送回复——委托给 send_reply。"""
         await self.send_reply(chat_id, content, message_id=message_id, is_group=is_group)
-
