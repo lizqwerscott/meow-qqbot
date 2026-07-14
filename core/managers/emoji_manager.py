@@ -184,7 +184,7 @@ class EmojiManager:
                     processed_path = self._maybe_normalize_image(file_path)
 
                 auto_desc, auto_tags = await self._multimodal.analyze_emoji(
-                    str(processed_path)
+                    str(processed_path), is_gif=is_gif
                 )
 
                 # 清理 GIF 分析产生的临时文件
@@ -199,11 +199,6 @@ class EmojiManager:
                 )
             except Exception as e:
                 _log.warning(f"VLM 分析表情失败 [{emoji_hash[:12]}..]: {e}")
-                auto_desc = ""
-                auto_tags = []
-        else:
-            auto_desc = ""
-            auto_tags = []
 
         record = {
             "hash": emoji_hash,
