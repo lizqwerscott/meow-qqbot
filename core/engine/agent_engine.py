@@ -19,7 +19,7 @@ from core.ai.service import AIService
 from core.managers.context_manager import ChatContextManager
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager
-from core.message import InputMessage
+from core.message import InputMessage, MessageType
 from core.managers.nickname_manager import NicknameManager
 from core.managers.template_manager import TemplateManager
 from core.tools import ToolExecutor
@@ -249,7 +249,7 @@ class AgentEngine:
                 await self.everos.flush(session_id=chat_id)
 
         # 学习系统观察（异步，不阻塞）
-        if self.learners:
+        if self.learners and input_message.msg_type != MessageType.CARD:
             text_for_learners = sanitize_for_learners(content_with_context)
             if text_for_learners:
                 if input_message.replied_content:
@@ -265,7 +265,7 @@ class AgentEngine:
                     chat_id=chat_id,
                 )
 
-        if input_message.content.startswith("[表情:") or input_message.content == "[自定义表情]":
+        if input_message.msg_type == MessageType.EMOJI:
             return
 
         needs_ai = True
@@ -461,7 +461,6 @@ class AgentEngine:
             captured_replies.append(content)
 
         # 确保会话上下文存在
-        from core.message import InputMessage
         import time
 
         # 创建合成 InputMessage
