@@ -18,6 +18,7 @@ from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
 from qqbot_agent_sdk.dto import InlineKeyboard, MediaInfo, MessageToCreate, QQMessageType, WSReadyData
 from qqbot_agent_sdk.media_loader import MediaUploader
 
+from core.card_parser import parse_card
 from core.engine.agent_engine import AgentEngine
 from core.managers.command_manager import CommandManager
 from core.managers.emoji_manager import EmojiManager, is_custom_emoji
@@ -203,6 +204,23 @@ class BotEngine:
             except Exception as e:
                 _log.error(f"自定义表情处理失败: {e}")
                 event.content = "[自定义表情]"
+
+        # ── 检测卡片消息（ARK/EMBED）──
+        elif event.message_type in (3, 4):
+            card_text = parse_card(event.raw or {}, event.message_type)
+            if card_text:
+                _log.info(f"检测到卡片消息，解析为: {card_text}")
+                try:
+                    await self._send_reply(
+                        event.chat_id,
+                        card_text,
+                        message_id=event.message_id,
+                        is_group=(event.chat_scope == "group"),
+                    )
+                except Exception as e:
+                    _log.error(f"发送卡片解析回复失败: {e}")
+            return
+
         else:
             # 跳过空内容或仅 QQ 内置表情
             stripped = event.content.strip()
