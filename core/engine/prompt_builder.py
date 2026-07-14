@@ -194,7 +194,7 @@ class PromptBuilder:
         if memory_text:
             dynamic_parts.append(memory_text)
 
-        # 学习上下文（俚语词典 + 行为模式）
+        # 学习上下文（社群俚语词典）
         if self.learners:
             learning_ctx = await self.learners.enrich_prompt_context(
                 chat_id=chat_id,
