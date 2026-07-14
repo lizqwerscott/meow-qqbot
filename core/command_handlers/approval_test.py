@@ -98,12 +98,11 @@ class ApprovalTestCommand:
             )
         )
 
-        msg = self.api.build_text_body(
-            "📋 请选择一个选项：", reply_to=input_message.id, markdown=True
+        await self.bot_engine.send_reply(
+            chat_id, "📋 请选择一个选项：",
+            message_id=input_message.id,
+            is_group=input_message.is_group,
+            keyboard=keyboard,
         )
-        if chat_type == "c2c":
-            await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
-        else:
-            await self.api.post_group_message(chat_id, msg, keyboard=keyboard)
 
         return make_reply(input_message, "✅ 已发送审批消息和自定义键盘测试，请在聊天中查看并点击按钮")
