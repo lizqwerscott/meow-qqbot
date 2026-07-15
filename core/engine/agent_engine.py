@@ -243,15 +243,20 @@ class AgentEngine:
             content_with_context,
             input_message.id,
             sender_id=input_message.sender_id,
-            name=user_nickname,
+            name=input_message.sender_id,
         )
 
         if self.hindsight and input_message.msg_type != MessageType.CARD:
+            hs_content = self._format_hindsight_content(
+                content_with_context,
+                input_message.sender_id,
+                input_message.mentioned_ids,
+                nm=self._nm,
+            )
             await self.hindsight.add_message(
                 session_id=chat_id,
+                content=hs_content,
                 sender_id=input_message.sender_id,
-                sender_name=user_nickname,
-                content=content_with_context,
                 context=self.hindsight.msg_type_to_context(input_message.msg_type),
                 timestamp=input_message.timestamp,
                 resources=input_message.resources,
@@ -347,6 +352,22 @@ class AgentEngine:
                 _log.debug(f"已启动会话 {chat_id[:12]}.. 的消费者")
         else:
             await self._run_hooks(input_message, reply_callback, get_user_nickname)
+
+    # ── 辅助方法 ──
+
+    @staticmethod
+    def _format_hindsight_content(content: str, sender_id: str, mentioned_ids: list, nm=None) -> str:
+        """将 ID 格式的消息格式化为 Hindsight 的 [ID(别名)] 格式。"""
+        aliases = nm.get_aliases(sender_id) if nm else []
+        alias_str = "，".join(aliases) if aliases else sender_id
+        prefix = f"[{sender_id}({alias_str})]: "
+
+        for uid in mentioned_ids:
+            u_aliases = nm.get_aliases(uid) if nm else []
+            u_name = u_aliases[-1] if u_aliases else uid
+            content = content.replace(f"@{uid}", f"@{uid}({u_name})")
+
+        return prefix + content
 
     # ── 会话消费者循环 ──
 

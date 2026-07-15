@@ -333,19 +333,16 @@ class ToolExecutor:
         results = []
         seen = set()
 
-        for source_dict, source_name in (
-            [(self._nm.nicknames, "手动"), (self._nm.auto_nicknames, "自动")]
-            if self._nm else []
-        ):
-            for uid, nickname in source_dict.items():
+        if self._nm:
+            for uid, aliases in self._nm.iter_users():
                 if uid in seen:
                     continue
-                if query in nickname.lower() or query in uid.lower():
+                if query in uid.lower() or any(query in a.lower() for a in aliases):
                     seen.add(uid)
                     results.append({
                         "id": uid,
-                        "nickname": nickname,
-                        "source": source_name,
+                        "nickname": aliases[-1] if aliases else uid,
+                        "aliases": aliases,
                     })
 
         if not results:
@@ -380,16 +377,11 @@ class ToolExecutor:
                 return ToolResult(content=json.dumps(
                     {"error": "昵称管理器未就绪"}, ensure_ascii=False
                 ))
-            merged = self._nm.all_merged()
-
-            matched_id = None
-            for uid, nickname in merged.items():
-                if person_name.lower() in nickname.lower() or person_name.lower() in uid.lower():
-                    matched_id = uid
-                    display_name = nickname
-                    break
-
+            result_data = self._resolve_person(person_name, ctx)
+            matched_id, display_name = result_data
             if not matched_id:
+                if display_name.startswith("找到多个匹配"):
+                    return ToolResult(content=json.dumps({"error": display_name}, ensure_ascii=False))
                 return ToolResult(content=json.dumps(
                     {"error": f"在昵称列表中找不到叫「{person_name}」的人"},
                     ensure_ascii=False,
@@ -742,25 +734,46 @@ class ToolExecutor:
         if not self._nm:
             return None, ""
 
-        sender_nick = self._nm.get(ctx.sender_id)
+        sender_aliases = self._nm.get_aliases(ctx.sender_id)
+        sender_display = sender_aliases[0] if sender_aliases else ctx.sender_id
 
         if raw_lower in ("我", "自己", "myself"):
-            return ctx.sender_id, sender_nick if sender_nick != ctx.sender_id else "当前用户"
-        if sender_nick and raw_lower == sender_nick.lower():
-            return ctx.sender_id, sender_nick
+            return ctx.sender_id, "当前用户"
         if raw_lower == ctx.sender_id.lower():
-            return ctx.sender_id, sender_nick if sender_nick != ctx.sender_id else "当前用户"
+            return ctx.sender_id, sender_display
+        if any(raw_lower == a.lower() for a in sender_aliases):
+            return ctx.sender_id, sender_display
 
         if not ctx.is_group:
             return None, ""
 
-        merged = self._nm.all_merged()
+        best_score = 0
+        best_candidates = []
 
-        for uid, nickname in merged.items():
-            if raw_lower in nickname.lower() or raw_lower in uid.lower():
-                return uid, nickname
+        for uid, aliases in self._nm.iter_users():
+            score = 0
+            if raw_lower == uid.lower():
+                score = 10
+            elif any(raw_lower == a.lower() for a in aliases):
+                score = 8
+            elif any(raw_lower in a.lower() for a in aliases):
+                score = 3
+            elif raw_lower in uid.lower():
+                score = 1
 
-        return None, ""
+            if score > best_score:
+                best_score = score
+                best_candidates = [(uid, aliases[-1] if aliases else uid)]
+            elif score == best_score and score > 0:
+                best_candidates.append((uid, aliases[-1] if aliases else uid))
+
+        if not best_candidates:
+            return None, ""
+        if len(best_candidates) == 1:
+            return best_candidates[0]
+
+        names = "、".join(f"「{n}」({u[:12]}..)" for u, n in best_candidates)
+        return None, f"找到多个匹配「{raw}」的用户: {names}"
 
     @staticmethod
     def _append_deduped(lines: List[str], episodes: list, seen: Set[str]):

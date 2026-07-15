@@ -52,20 +52,19 @@ class HindsightMemory:
     async def add_message(
         self,
         session_id: str,
-        sender_id: str,
         content: str,
-        sender_name: Optional[str] = None,
-        role: str = "user",
+        sender_id: str = "",
         timestamp: Optional[float] = None,
         context: Optional[str] = None,
         resources: Optional[List[ResourceMeta]] = None,
     ) -> None:
-        """保留一条消息到记忆库。同一 session 共享 document_id 持续追加。"""
+        """保留一条消息到记忆库。同一 session 共享 document_id 持续追加。
+        content 已由调用方（agent_engine）预格式化，格式为 [ID(别名)]: 消息正文。
+        """
         try:
-            prefix = f"[{sender_name}]: " if sender_name else ""
             kwargs: dict = dict(
                 bank_id=self._bank_id,
-                content=f"{prefix}{content}",
+                content=content,
                 document_id=f"session-{session_id}",
                 update_mode="append",
                 tags=[f"user:{sender_id}", f"chat:{session_id}"],
