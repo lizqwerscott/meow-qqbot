@@ -3,10 +3,7 @@
 独立 asyncio 循环，不创建 TaskRecord/CronJob。
 让 AI 定期检查是否有需要关注的事项，有提醒则发给管理员。
 
-HEARTBEAT.md 读取优先级：
-  1. workspace HEARTBEAT.md（如果存在）
-  2. config prompt 字段（手工覆盖）
-  3. HEARTBEAT_DEFAULT_PROMPT（硬编码 fallback）
+HEARTBEAT.md 不存在时自动跳过；存在时预读文件内容注入 prompt。
 """
 
 import asyncio
@@ -18,16 +15,7 @@ from typing import Any, Optional
 
 _log = logging.getLogger(__name__)
 
-HEARTBEAT_DEFAULT_PROMPT = """现在是 {time}，{tz}。
-
-你是一个群聊助手的心跳检查。
-请检查是否有需要关注的事项：
-- 有没有什么需要提醒的？
-- 群里的气氛或状态有没有异常？
-- 有没有待办的任务超时了？
-
-如果没有需要关注的事项，只回复 HEARTBEAT_OK。
-如果有需要提醒的，简短说明即可，不要超过 100 字。"""
+_SYSTEM_PROMPT = "你是一个群聊助手的心跳检查器。请检查是否有需要关注的事项。\n\n如果没有，只回复 HEARTBEAT_OK。如果有提醒，简短说明，不超过 100 字。"
 
 
 class HeartbeatManager:
@@ -40,8 +28,7 @@ class HeartbeatManager:
         config: {
             "enabled": bool,
             "every": int,              # 分钟
-            "use_router_model": bool,
-            "prompt": str (optional),
+            "model": str or list,      # 模型名称（models 注册表中的 key）
             "active_hours": {
                 "start": "09:00",
                 "end": "24:00",
@@ -49,7 +36,8 @@ class HeartbeatManager:
             "skip_when_busy": bool,
             "busy_idle_minutes": int,
         }
-        router_model: RouterModel 实例（use_router_model=True 时需要）
+        ai_service: AIService 实例
+        model_registry: ModelRegistry 实例
         bot_id: 机器人 ID
         admin_ids: 管理员 ID 列表
         api_client: QQApiClient 实例（用于发消息）
@@ -79,7 +67,6 @@ class HeartbeatManager:
         else:
             self._model_names = []
 
-        self._custom_prompt = config.get("prompt", "")
         self._heartbeat_path = heartbeat_path
 
         active_hours = config.get("active_hours", {})
@@ -188,24 +175,25 @@ class HeartbeatManager:
 
     async def _do_heartbeat(self):
         """执行心跳：调用模型 → 判断 → 投递。"""
-        # 构造 prompt
+        hb_path = Path(self._heartbeat_path) if self._heartbeat_path else None
+        if not hb_path or not hb_path.exists():
+            _log.debug("心跳跳过：HEARTBEAT.md 不存在")
+            return
+
         tz_name = "CST (UTC+8)"
         now_str = datetime.now(timezone(timedelta(hours=8))).strftime(
             "%Y-%m-%d %H:%M"
         )
-        # 优先级：config.prompt > HEARTBEAT.md 文件 > 硬编码默认
-        if self._custom_prompt:
-            prompt = self._custom_prompt.format(time=now_str, tz=tz_name)
-        else:
-            file_prompt = ""
-            if self._heartbeat_path:
-                try:
-                    raw = Path(self._heartbeat_path).read_text(encoding="utf-8").strip()
-                    if raw:
-                        file_prompt = raw
-                except Exception:
-                    pass
-            prompt = (file_prompt or HEARTBEAT_DEFAULT_PROMPT).format(time=now_str, tz=tz_name)
+
+        hb_content = hb_path.read_text(encoding="utf-8").strip()
+
+        prompt = (
+            f"现在时间是 {now_str}（{tz_name}）。\n\n"
+            f"Read HEARTBEAT.md if it exists (workspace context). Follow it strictly.\n\n"
+            f"---HEARTBEAT.md---\n{hb_content}\n---\n\n"
+            f"如果没有需要关注的事项，只回复 HEARTBEAT_OK。"
+            f"如果有提醒，简短说明即可，不要超过 100 字。"
+        )
 
         # 调用模型（按优先级链尝试）
         result = ""
@@ -214,7 +202,7 @@ class HeartbeatManager:
                 result = await self._model_registry.simple_chat(
                     model_name=model_name,
                     messages=[
-                        {"role": "system", "content": "你是一个群聊助手的心跳检查器。请检查是否有需要关注的事项。\n\n如果没有，只回复 HEARTBEAT_OK。如果有提醒，简短说明，不超过 100 字。"},
+                        {"role": "system", "content": _SYSTEM_PROMPT},
                         {"role": "user", "content": prompt},
                     ],
                     max_tokens=300,
@@ -226,7 +214,7 @@ class HeartbeatManager:
         elif self._ai_service:
             result = await self._ai_service.chat_completion(
                 messages=[
-                    {"role": "system", "content": "你是一个群聊助手的心跳检查器。请检查是否有需要关注的事项。\n\n如果没有，只回复 HEARTBEAT_OK。如果有提醒，简短说明，不超过 100 字。"},
+                    {"role": "system", "content": _SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=300,
