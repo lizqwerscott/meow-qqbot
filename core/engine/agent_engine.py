@@ -57,6 +57,7 @@ class AgentEngine:
         cron_job_manager: Optional[Any] = None,
         rule_router: Optional[Any] = None,
         model_registry: Optional[Any] = None,
+        permission_manager=None,
     ):
         self.ai_service = ai_service
         self.template_manager = template_manager
@@ -88,6 +89,7 @@ class AgentEngine:
             skill_managers=skill_managers,
             learning_orchestrator=learning_orchestrator,
             admin_ids=admin_id,
+            permission_manager=permission_manager,
         )
 
         # ── 子模块 ──
@@ -106,6 +108,7 @@ class AgentEngine:
             admin_ids=admin_id,
             learning_orchestrator=self.learners,
             has_tasks=self._task_manager is not None,
+            permission_manager=permission_manager,
         )
 
         self.tool_loop = ToolLoop(

@@ -74,6 +74,7 @@ class PromptBuilder:
         admin_ids: Optional[List[str]] = None,
         learning_orchestrator: Any = None,
         has_tasks: bool = False,
+        permission_manager=None,
     ):
         self.template_manager = template_manager
         self.context_manager = context_manager
@@ -87,6 +88,7 @@ class PromptBuilder:
         self._search_top_k = search_top_k
         self._admin_ids = admin_ids or []
         self._has_tasks = has_tasks
+        self._perm = permission_manager
 
     async def build(
         self,
@@ -176,6 +178,20 @@ class PromptBuilder:
 
         messages: List[dict] = [{"role": "system", "content": static_prompt}]
         messages.extend(history)
+
+        # ── 4b. 按角色过滤工具列表 ──
+        if tools_to_use and self._perm:
+            role = self._perm.get_user_role(sender_id)
+            before_count = len(tools_to_use)
+            tools_to_use = [
+                t for t in tools_to_use
+                if self._perm.can_use_tool(t["function"]["name"], role)
+            ]
+            if len(tools_to_use) < before_count:
+                _log.info(
+                    f"角色过滤: sender={sender_id[:16]}.. role={role} "
+                    f"tools={before_count}→{len(tools_to_use)}"
+                )
 
         # ── 5. 动态上下文（末尾单独一个 system 消息） ──
         dynamic_parts: List[str] = []
