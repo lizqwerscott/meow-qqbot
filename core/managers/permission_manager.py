@@ -49,6 +49,10 @@ class PermissionManager:
                 return role_name
         return "default"
 
+    def get_role_ids(self, role_name: str) -> list:
+        """返回指定角色的用户 ID 列表。"""
+        return list(self._data.get("roles", {}).get(role_name, []))
+
     def _role_level(self, role: str) -> int:
         return ROLE_LEVEL.get(role, 1)
 

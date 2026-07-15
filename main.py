@@ -1,7 +1,6 @@
 import asyncio
 import os
-
-import yaml
+import tomllib
 import logging
 import httpx
 from colorlog import ColoredFormatter
@@ -23,7 +22,6 @@ from core.plugins.manager import PluginManager
 from core.learners.orchestrator import LearningOrchestrator
 from core.tasks import TaskStore, TaskManager, CronJobManager, BackgroundTaskRunner, CronJobScheduler
 from core.tasks.heartbeat import HeartbeatManager
-from core.router_model import RouterModel
 from core.rule_router import RuleRouter
 from core.ai.model_registry import ModelRegistry
 from core.managers.permission_manager import PermissionManager
@@ -56,9 +54,8 @@ async def main() -> None:
 
     _log = logging.getLogger(__name__)
 
-    config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    with open("config.toml", "rb") as f:
+        config = tomllib.load(f)
 
     # ── 1. 初始化全局单例服务 ──
     # 共享 HTTP 客户端
@@ -67,17 +64,18 @@ async def main() -> None:
     # 模板管理器
     template_manager = TemplateManager(config)
 
-    # AI 服务
-    openai_config = config.get("openai", {})
+    # 默认 AI 服务（从 models 注册表中取 primary 作为默认）
+    models_config = config.get("models", {})
+    default_model_config = models_config.get("primary", next(iter(models_config.values()), {}))
     ai_service = AIService(
-        api_key=openai_config.get("api_key"),
-        base_url=openai_config.get("base_url"),
-        model=openai_config.get("model", "gpt-3.5-turbo"),
-        timeout=openai_config.get("timeout", 30),
-        max_retries=openai_config.get("max_retries", 3),
-        temperature=openai_config.get("temperature", 0.7),
-        max_tokens=openai_config.get("max_tokens", 8192),
-        reasoning_effort=openai_config.get("reasoning_effort"),
+        api_key=default_model_config.get("api_key"),
+        base_url=default_model_config.get("base_url"),
+        model=default_model_config.get("model", "gpt-3.5-turbo"),
+        timeout=default_model_config.get("timeout", 30),
+        max_retries=default_model_config.get("max_retries", 3),
+        temperature=default_model_config.get("temperature", 0.7),
+        max_tokens=default_model_config.get("max_tokens", 8192),
+        reasoning_effort=default_model_config.get("reasoning_effort"),
     )
 
     # 多模态配置
@@ -117,9 +115,6 @@ async def main() -> None:
         hard_clear=ctx_mgmt.get("hard_clear", 180000),
         cache_dir=(cache_cfg.get("dir") or "data/sessions/") if cache_cfg.get("enabled", True) else None,
     )
-
-    # 管理员 ID 列表
-    admin_ids = config.get("admin_id", [])
 
     # ── CostTracker（AI 消耗追踪） ──
     cost_tracking_config = config.get("cost_tracking", {})
@@ -184,6 +179,7 @@ async def main() -> None:
 
     # ── Permissions（权限管理器，全局单例） ──
     permission_manager = PermissionManager("allowlist.toml")
+    admin_ids = permission_manager.get_role_ids("admin")
 
     # ── NicknameManager（统一昵称管理，全局单例） ──
     nickname_manager = NicknameManager(bot_id=bot_id)
@@ -211,11 +207,9 @@ async def main() -> None:
     # ── 规则路由 / 模型注册表（ClawRouter 风格） ──
     rule_router = None
     model_registry = None
-    router_model = None
     routing_enabled = config.get("routing", {}).get("enabled", False)
 
     if routing_enabled:
-        models_config = config.get("models", {})
         if models_config:
             model_registry = ModelRegistry(models_config)
             tier_config = config.get("routing", {}).get("tiers", {})
@@ -225,11 +219,6 @@ async def main() -> None:
         else:
             _log.warning("routing.enabled=true 但 models 配置为空")
 
-    # 旧版路由模型兼容（当 routing 关闭时使用）
-    if not routing_enabled and config.get("router_model", {}).get("enabled", False):
-        character_card = getattr(template_manager, "character_card", "")
-        router_model = RouterModel(config["router_model"], character_card=character_card)
-
     # ── 2. 创建 AgentEngine（全局单例） ──
     agent_engine = AgentEngine(
         ai_service=ai_service,
@@ -237,7 +226,7 @@ async def main() -> None:
         context_manager=context_manager,
         bot_id=bot_id,
         admin_id=admin_ids,
-        openai_config=openai_config,
+        openai_config=default_model_config,
         nickname_manager=nickname_manager,
         emoji_manager=emoji_manager,
         hindsight_memory=hindsight_memory,
@@ -261,10 +250,6 @@ async def main() -> None:
             background_task_runner=background_task_runner,
         )
         _log.info("任务管理器已注入 ToolExecutor")
-
-    # ── 注入路由模型 ──
-    if router_model:
-        agent_engine.set_router_model(router_model)
 
     # ── 连接后台任务执行器与 AgentEngine ──
     if background_task_runner and task_manager:
@@ -301,6 +286,7 @@ async def main() -> None:
         agent_engine=agent_engine,
         router=router,
         admin_id=admin_ids,
+        permission_manager=permission_manager,
         nickname_manager=nickname_manager,
         emoji_manager=emoji_manager,
         multimodal_service=multimodal_service,
@@ -314,7 +300,7 @@ async def main() -> None:
     if config.get("heartbeat", {}).get("enabled", False):
         heartbeat_manager = HeartbeatManager(
             config=config["heartbeat"],
-            router_model=router_model,
+            ai_service=ai_service,
             model_registry=model_registry,
             bot_id=bot_id,
             admin_ids=admin_ids,

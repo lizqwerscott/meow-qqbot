@@ -86,8 +86,9 @@ class CommandRegistry:
 class CommandManager:
     """命令管理器"""
 
-    def __init__(self, admin_id: list[str]):
+    def __init__(self, admin_id: list[str], permission_manager=None):
         self.admin_id = admin_id
+        self._perm = permission_manager
         self.registry = CommandRegistry()
 
     def register_command(self, command: Command) -> None:
@@ -109,7 +110,7 @@ class CommandManager:
         if command.permission == PermissionLevel.DEFAULT:
             return True
         if command.permission == PermissionLevel.ADMIN:
-            return user_id in self.admin_id
+            return self._perm.get_user_role(user_id) == "admin" if self._perm else (user_id in self.admin_id)
 
     async def process_message(self, input_message: InputMessage) -> list[dict]:
         """
