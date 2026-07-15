@@ -251,20 +251,17 @@ class PromptBuilder:
         if self._workspace_manager and not is_group and chat_id in self._admin_ids:
             hb_path = self._workspace_manager.heartbeat_path()
             if hb_path.exists():
-                try:
-                    hb_content = hb_path.read_text(encoding="utf-8").strip()
-                    if hb_content:
-                        dynamic_parts.append("【心跳配置 (HEARTBEAT.md)】\n你可以在本工作区查看和管理心跳配置。\n当前心跳配置内容如下：\n\n" + hb_content)
-                except Exception:
-                    pass
+                dynamic_parts.append(
+                    "【心跳配置 (HEARTBEAT.md)】\n"
+                    "心跳配置文件存在于 workspaces/HEARTBEAT.md，"
+                    "你可以使用 read_file 工具查看和 write_file 工具修改。"
+                    "心跳执行时 AI 会自主读取此文件。"
+                )
             else:
                 dynamic_parts.append(
                     "【心跳配置 (HEARTBEAT.md)】\n"
-                    "心跳配置用于定义定时检查任务（每天 9:00-24:00 每 30 分钟执行），"
-                    "AI 会检查是否有需要关注的事项并通知你。\n\n"
-                    "你可以在 workspaces/ 根目录创建 HEARTBEAT.md 文件来自定义心跳提示词，"
-                    "格式为 Markdown，支持使用 {time} 和 {tz} 变量。\n"
-                    "使用 write_file 工具写入 HEARTBEAT.md 即可。"
+                    "你可以在 workspaces/ 根目录创建 HEARTBEAT.md 来定义心跳检查清单，"
+                    "文件不存在时心跳自动跳过。使用 write_file 工具写入 HEARTBEAT.md 即可。"
                 )
 
         # 表情标签列表
