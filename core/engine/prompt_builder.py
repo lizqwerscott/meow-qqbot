@@ -22,6 +22,7 @@ from core.tools.definitions import (
     EXECUTE_COMMAND_TOOL,
     LEARNER_TOOLS,
     TASK_TOOLS,
+    FILE_TOOLS,
 )
 
 _log = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ class PromptBuilder:
         learning_orchestrator: Any = None,
         has_tasks: bool = False,
         permission_manager=None,
+        workspace_manager=None,
     ):
         self.template_manager = template_manager
         self.context_manager = context_manager
@@ -89,6 +91,7 @@ class PromptBuilder:
         self._admin_ids = admin_ids or []
         self._has_tasks = has_tasks
         self._perm = permission_manager
+        self._workspace_manager = workspace_manager
 
     async def build(
         self,
@@ -147,6 +150,8 @@ class PromptBuilder:
             tools_to_use.extend(LEARNER_TOOLS)
         if self._has_tasks:
             tools_to_use.extend(TASK_TOOLS)
+        if self._workspace_manager:
+            tools_to_use.extend(FILE_TOOLS)
         tools_to_use = tools_to_use or None
 
         # ── 3. 静态 system prompt ──
@@ -228,6 +233,29 @@ class PromptBuilder:
         dynamic_parts.append(f"当前时间: {time_info} (CST/UTC+8)")
         dynamic_parts.append("注意：创建定时任务时请使用北京时间 (CST/UTC+8)，不要使用 UTC。")
 
+        # 工作区上下文
+        if self._workspace_manager:
+            ws_type = "群聊" if is_group else "私聊"
+            dynamic_parts.append(f"当前{ws_type}工作区: {chat_id[:12]}")
+            dynamic_parts.append(
+                "read_file / write_file / edit_file 三个文件工具仅限当前工作区内使用。"
+            )
+
+        # HEARTBEAT.md（管理员的私聊专属）
+        if (
+            self._workspace_manager
+            and not is_group
+            and chat_id in self._admin_ids
+        ):
+            hb_path = self._workspace_manager.heartbeat_path()
+            if hb_path.exists():
+                try:
+                    hb_content = hb_path.read_text(encoding="utf-8").strip()
+                    if hb_content:
+                        dynamic_parts.append("【心跳配置 (HEARTBEAT.md)】\n你可以在本工作区查看和管理心跳配置。\n当前心跳配置内容如下：\n\n" + hb_content)
+                except Exception:
+                    pass
+
         # 表情标签列表
         if has_emojis and self.emoji_manager:
             tags = self.emoji_manager.get_all_tags()
@@ -297,6 +325,8 @@ class PromptBuilder:
             tools_to_use.extend(EXECUTE_COMMAND_TOOL)
             tools_to_use.extend(EXECUTE_SKILL_TOOL)
             tools_to_use.extend(VIEW_SKILL_TOOL)
+        if self._workspace_manager:
+            tools_to_use.extend(FILE_TOOLS)
         tools_to_use = tools_to_use or None
 
         # 渲染 task prompt

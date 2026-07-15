@@ -19,6 +19,9 @@ data/emojis/*
 # 会话历史缓存
 data/sessions/*
 
+# 工作区（运行时沙箱文件，不进入版本控制）
+workspaces/*
+
 # 插件（独立 git 仓库，不作为项目一部分）
 plugins/*
 !plugins/__init__.py
