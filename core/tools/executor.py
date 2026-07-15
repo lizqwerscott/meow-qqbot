@@ -434,6 +434,7 @@ class ToolExecutor:
                         sender_id=ctx.sender_id,
                         content=profile_msg,
                         role="user",
+                        context="用户自我描述",
                         timestamp=None,
                     )
                     stored.append("画像信息")
@@ -448,6 +449,7 @@ class ToolExecutor:
                 sender_id=ctx.sender_id,
                 content=f"[重要事件] {summary}",
                 role="user",
+                context="重要事件记录",
                 timestamp=None,
             )
             stored.append("事件摘要")
