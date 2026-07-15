@@ -56,6 +56,7 @@ class BotEngine:
         nickname_manager: NicknameManager,
         emoji_manager: Optional[EmojiManager] = None,
         multimodal_service: Optional[MultimodalService] = None,
+        permission_manager=None,
     ):
         self._app_id = app_id
         self._client_secret = client_secret
@@ -75,7 +76,11 @@ class BotEngine:
         self.nickname_manager = nickname_manager
         self.emoji_manager = emoji_manager
         self.multimodal_service = multimodal_service
-        self.command_manager: CommandManager = CommandManager(admin_id=admin_id)
+        self.permission_manager = permission_manager
+        self.command_manager: CommandManager = CommandManager(
+            admin_id=admin_id,
+            permission_manager=permission_manager,
+        )
         self.router.command_manager = self.command_manager
         self.media_uploader = None
         self._bot_name: str = "机器人"

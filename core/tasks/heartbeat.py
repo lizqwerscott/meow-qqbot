@@ -53,7 +53,8 @@ class HeartbeatManager:
     def __init__(
         self,
         config: dict,
-        router_model: Any,
+        router_model: Any = None,
+        ai_service: Any = None,
         model_registry: Any = None,
         bot_id: str = "",
         admin_ids: Optional[list] = None,
@@ -74,6 +75,7 @@ class HeartbeatManager:
         self._busy_idle_minutes = config.get("busy_idle_minutes", 10)
 
         self._router_model = router_model
+        self._ai_service = ai_service
         self._model_registry = model_registry
         self._bot_id = bot_id
         self._admin_ids = admin_ids if isinstance(admin_ids, list) else []
@@ -193,6 +195,15 @@ class HeartbeatManager:
             )
         elif self._router_model:
             result = await self._router_model.simple_chat(prompt)
+        elif self._ai_service:
+            result = await self._ai_service.chat_completion(
+                messages=[
+                    {"role": "system", "content": "你是一个群聊助手的心跳检查器。请检查是否有需要关注的事项。\n\n如果没有，只回复 HEARTBEAT_OK。如果有提醒，简短说明，不超过 100 字。"},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=300,
+            )
+            result = getattr(result, "content", "") if result else ""
         else:
             _log.warning("心跳跳过：无可用模型")
             return
