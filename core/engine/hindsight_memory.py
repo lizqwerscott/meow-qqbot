@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from hindsight_client import Hindsight
 
-from core.message import MessageType
+from core.message import MessageType, ResourceMeta
 
 _log = logging.getLogger(__name__)
 
@@ -58,6 +58,7 @@ class HindsightMemory:
         role: str = "user",
         timestamp: Optional[float] = None,
         context: Optional[str] = None,
+        resources: Optional[List[ResourceMeta]] = None,
     ) -> None:
         """保留一条消息到记忆库。同一 session 共享 document_id 持续追加。"""
         try:
@@ -73,6 +74,20 @@ class HindsightMemory:
             )
             if context:
                 kwargs["context"] = context
+            if resources:
+                r = resources[0]
+                meta: Dict[str, str] = {}
+                if r.resource_type:
+                    meta["res_type"] = r.resource_type
+                if r.hash:
+                    meta["res_hash"] = r.hash
+                if r.resource_id:
+                    meta["res_id"] = r.resource_id
+                if r.filename:
+                    meta["res_filename"] = r.filename
+                if r.mime_type:
+                    meta["res_mime"] = r.mime_type
+                kwargs["metadata"] = meta
             await self._client.aretain(**kwargs)
             self._cache_health({"status": "ok"})
         except Exception as e:

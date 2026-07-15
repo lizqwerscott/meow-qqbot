@@ -314,6 +314,7 @@ class ToolLoop:
                     content=content,
                     context=self.hindsight.msg_type_to_context(msg.msg_type),
                     timestamp=msg.timestamp,
+                    resources=msg.resources,
                 )
 
             if msg.sender_id != current_sender_id and self.hindsight and self.prompt_builder:

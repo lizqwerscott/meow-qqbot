@@ -244,6 +244,7 @@ class AgentEngine:
                 content=content_with_context,
                 context=self.hindsight.msg_type_to_context(input_message.msg_type),
                 timestamp=input_message.timestamp,
+                resources=input_message.resources,
             )
 
         # 学习系统观察（异步，不阻塞）
