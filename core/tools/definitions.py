@@ -335,6 +335,77 @@ SKILL_TOOLS = [
 ]
 
 
+FILE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "读取工作区内的文件内容。路径相对于当前聊天的 files/ 目录。不支持路径穿越(..)。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "文件相对路径，例如 'note.txt' 或 'dir/file.md'",
+                    },
+                },
+                "required": ["file_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "写入文件到工作区。路径相对于当前聊天的 files/ 目录，父目录自动创建。已存在的文件会被覆盖。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "文件相对路径，例如 'note.txt' 或 'dir/file.md'",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "要写入的文件内容",
+                    },
+                },
+                "required": ["file_path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "编辑工作区内的文件，进行精确的字符串替换。路径相对于当前聊天的 files/ 目录。比使用 sed 更可靠，推荐用于文本修改。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "文件相对路径，例如 'note.txt' 或 'dir/file.md'",
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "要被替换的旧文本，必须完全匹配（包括空格和换行）",
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "替换后的新文本",
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "是否替换所有匹配。false 时仅替换第一个，存在多处匹配时会报错",
+                    },
+                },
+                "required": ["file_path", "old_string", "new_string"],
+            },
+        },
+    },
+]
+
+
 TASK_TOOLS = [
     {
         "type": "function",
@@ -460,4 +531,5 @@ def tool_names() -> set[str]:
         "rescan_skills", "view_skill", "execute_skill", "execute_command",
         "define_jargon", "report_behavior_effect",
         "create_task", "create_cron_job", "cancel_task",
+        "read_file", "write_file", "edit_file",
     }

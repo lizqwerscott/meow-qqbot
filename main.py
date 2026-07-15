@@ -25,6 +25,7 @@ from core.tasks.heartbeat import HeartbeatManager
 from core.rule_router import RuleRouter
 from core.ai.model_registry import ModelRegistry
 from core.managers.permission_manager import PermissionManager
+from core.managers.workspace_manager import WorkspaceManager
 
 from core.webui import create_app, start_webui
 
@@ -181,6 +182,12 @@ async def main() -> None:
     permission_manager = PermissionManager("allowlist.toml")
     admin_ids = permission_manager.get_role_ids("admin")
 
+    # ── WorkspaceManager（工作区路径管理与沙箱） ──
+    workspace_config = config.get("workspace", {})
+    workspace_manager = WorkspaceManager(
+        root=workspace_config.get("root", "workspaces"),
+    )
+
     # ── NicknameManager（统一昵称管理，全局单例） ──
     nickname_manager = NicknameManager(bot_id=bot_id)
 
@@ -240,6 +247,7 @@ async def main() -> None:
         rule_router=rule_router,
         model_registry=model_registry,
         permission_manager=permission_manager,
+        workspace_manager=workspace_manager,
     )
 
     # ── 将后台任务执行器注入 ToolExecutor（供 AI 工具调用） ──
@@ -306,6 +314,7 @@ async def main() -> None:
             admin_ids=admin_ids,
             api_client=engine.api,
             agent_engine=agent_engine,
+            heartbeat_path=str(workspace_manager.heartbeat_path()),
         )
 
     # 注册命令处理器（从 core/command_handlers/ 自动发现）

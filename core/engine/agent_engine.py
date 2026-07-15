@@ -58,6 +58,7 @@ class AgentEngine:
         rule_router: Optional[Any] = None,
         model_registry: Optional[Any] = None,
         permission_manager=None,
+        workspace_manager=None,
     ):
         self.ai_service = ai_service
         self.template_manager = template_manager
@@ -92,6 +93,11 @@ class AgentEngine:
             permission_manager=permission_manager,
         )
 
+        # ── 工作区 ──
+        self._workspace_manager = workspace_manager
+        if workspace_manager:
+            self.tool_executor.set_workspace_manager(workspace_manager)
+
         # ── 子模块 ──
         self.session_manager = SessionTaskManager()
 
@@ -109,6 +115,7 @@ class AgentEngine:
             learning_orchestrator=self.learners,
             has_tasks=self._task_manager is not None,
             permission_manager=permission_manager,
+            workspace_manager=workspace_manager,
         )
 
         self.tool_loop = ToolLoop(

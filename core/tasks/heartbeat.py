@@ -2,12 +2,18 @@
 
 独立 asyncio 循环，不创建 TaskRecord/CronJob。
 让 AI 定期检查是否有需要关注的事项，有提醒则发给管理员。
+
+HEARTBEAT.md 读取优先级：
+  1. workspace HEARTBEAT.md（如果存在）
+  2. config prompt 字段（手工覆盖）
+  3. HEARTBEAT_DEFAULT_PROMPT（硬编码 fallback）
 """
 
 import asyncio
 import logging
 import time
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Any, Optional
 
 _log = logging.getLogger(__name__)
@@ -60,11 +66,13 @@ class HeartbeatManager:
         admin_ids: Optional[list] = None,
         api_client: Any = None,
         agent_engine: Any = None,
+        heartbeat_path: str = "",
     ):
         self._enabled = config.get("enabled", False)
         self._every_minutes = config.get("every", 30)
         self._model_name = config.get("model", "")
         self._custom_prompt = config.get("prompt", "")
+        self._heartbeat_path = heartbeat_path
 
         active_hours = config.get("active_hours", {})
         self._active_start = active_hours.get("start", "00:00")
@@ -177,10 +185,19 @@ class HeartbeatManager:
         now_str = datetime.now(timezone(timedelta(hours=8))).strftime(
             "%Y-%m-%d %H:%M"
         )
+        # 优先级：config.prompt > HEARTBEAT.md 文件 > 硬编码默认
         if self._custom_prompt:
             prompt = self._custom_prompt.format(time=now_str, tz=tz_name)
         else:
-            prompt = HEARTBEAT_DEFAULT_PROMPT.format(time=now_str, tz=tz_name)
+            file_prompt = ""
+            if self._heartbeat_path:
+                try:
+                    raw = Path(self._heartbeat_path).read_text(encoding="utf-8").strip()
+                    if raw:
+                        file_prompt = raw
+                except Exception:
+                    pass
+            prompt = (file_prompt or HEARTBEAT_DEFAULT_PROMPT).format(time=now_str, tz=tz_name)
 
         # 调用模型
         result = ""

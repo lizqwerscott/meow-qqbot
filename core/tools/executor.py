@@ -15,6 +15,7 @@ from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
 from datetime import datetime, timedelta, timezone
 
 from core.managers.nickname_manager import NicknameManager
+from core.managers.workspace_manager import WorkspaceManager
 
 _log = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ class ToolExecutor:
         self._task_manager = None
         self._cron_job_manager = None
         self._background_task_runner = None
+        self._workspace_manager = None
 
         self._registry: Dict[str, tuple[Callable, bool]] = {}
         self._register_all()
@@ -114,6 +116,9 @@ class ToolExecutor:
         self._register("create_task", self._exec_create_task, is_async=True)
         self._register("create_cron_job", self._exec_create_cron_job, is_async=True)
         self._register("cancel_task", self._exec_cancel_task, is_async=True)
+        self._register("read_file", self._exec_read_file, is_async=True)
+        self._register("write_file", self._exec_write_file, is_async=True)
+        self._register("edit_file", self._exec_edit_file, is_async=True)
 
     # ── 懒注入（AgentEngine 在运行时更新引用）──
 
@@ -128,6 +133,9 @@ class ToolExecutor:
 
     def set_nickname_manager(self, nm: NicknameManager):
         self._nm = nm
+
+    def set_workspace_manager(self, wm: WorkspaceManager):
+        self._workspace_manager = wm
 
     def set_task_managers(self, *, task_manager=None, cron_job_manager=None, background_task_runner=None):
         """注入任务管理器引用（后台任务工具需要）。"""
@@ -954,4 +962,163 @@ class ToolExecutor:
             }, ensure_ascii=False))
         return ToolResult(content=json.dumps({
             "error": f"无法取消任务 {task_id[:12]}..",
+        }, ensure_ascii=False))
+
+    # ════════════════════════════════════════════════════════
+    # 文件工具
+    # ════════════════════════════════════════════════════════
+
+    async def _exec_read_file(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """执行 read_file — 读取工作区文件。"""
+        if not self._workspace_manager:
+            return ToolResult(content=json.dumps(
+                {"error": "工作区未就绪"}, ensure_ascii=False,
+            ))
+
+        file_path = (args.get("file_path") or "").strip()
+        if not file_path:
+            return ToolResult(content=json.dumps(
+                {"error": "请提供 file_path"}, ensure_ascii=False,
+            ))
+
+        try:
+            target = self._workspace_manager.resolve_safe_path(
+                ctx.is_group, ctx.chat_id, file_path
+            )
+        except ValueError as e:
+            return ToolResult(content=json.dumps(
+                {"error": str(e)}, ensure_ascii=False,
+            ))
+
+        if not target.exists():
+            return ToolResult(content=json.dumps(
+                {"error": f"文件不存在: {file_path}"}, ensure_ascii=False,
+            ))
+        if not target.is_file():
+            return ToolResult(content=json.dumps(
+                {"error": f"路径不是文件: {file_path}"}, ensure_ascii=False,
+            ))
+
+        try:
+            content = target.read_text(encoding="utf-8")
+        except Exception as e:
+            return ToolResult(content=json.dumps(
+                {"error": f"读取失败: {e}"}, ensure_ascii=False,
+            ))
+
+        return ToolResult(content=json.dumps({
+            "success": True,
+            "content": content,
+            "path": file_path,
+        }, ensure_ascii=False))
+
+    async def _exec_write_file(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """执行 write_file — 写入文件到工作区。"""
+        if not self._workspace_manager:
+            return ToolResult(content=json.dumps(
+                {"error": "工作区未就绪"}, ensure_ascii=False,
+            ))
+
+        file_path = (args.get("file_path") or "").strip()
+        content = (args.get("content") or "")
+        if not file_path:
+            return ToolResult(content=json.dumps(
+                {"error": "请提供 file_path"}, ensure_ascii=False,
+            ))
+
+        try:
+            target = self._workspace_manager.resolve_safe_path(
+                ctx.is_group, ctx.chat_id, file_path
+            )
+        except ValueError as e:
+            return ToolResult(content=json.dumps(
+                {"error": str(e)}, ensure_ascii=False,
+            ))
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            target.write_text(content, encoding="utf-8")
+        except Exception as e:
+            return ToolResult(content=json.dumps(
+                {"error": f"写入失败: {e}"}, ensure_ascii=False,
+            ))
+
+        return ToolResult(content=json.dumps({
+            "success": True,
+            "path": file_path,
+            "size": len(content),
+        }, ensure_ascii=False))
+
+    async def _exec_edit_file(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """执行 edit_file — 精确字符串替换编辑文件。"""
+        if not self._workspace_manager:
+            return ToolResult(content=json.dumps(
+                {"error": "工作区未就绪"}, ensure_ascii=False,
+            ))
+
+        file_path = (args.get("file_path") or "").strip()
+        old_string = (args.get("old_string") or "")
+        new_string = (args.get("new_string") or "")
+        replace_all = args.get("replace_all", False)
+
+        if not file_path:
+            return ToolResult(content=json.dumps(
+                {"error": "请提供 file_path"}, ensure_ascii=False,
+            ))
+        if not old_string:
+            return ToolResult(content=json.dumps(
+                {"error": "请提供 old_string"}, ensure_ascii=False,
+            ))
+
+        try:
+            target = self._workspace_manager.resolve_safe_path(
+                ctx.is_group, ctx.chat_id, file_path
+            )
+        except ValueError as e:
+            return ToolResult(content=json.dumps(
+                {"error": str(e)}, ensure_ascii=False,
+            ))
+
+        if not target.exists():
+            return ToolResult(content=json.dumps(
+                {"error": f"文件不存在: {file_path}"}, ensure_ascii=False,
+            ))
+
+        try:
+            current = target.read_text(encoding="utf-8")
+        except Exception as e:
+            return ToolResult(content=json.dumps(
+                {"error": f"读取失败: {e}"}, ensure_ascii=False,
+            ))
+
+        if replace_all:
+            if old_string not in current:
+                return ToolResult(content=json.dumps(
+                    {"error": f"未找到匹配: {old_string[:60]}"}, ensure_ascii=False,
+                ))
+            new_content = current.replace(old_string, new_string)
+        else:
+            count = current.count(old_string)
+            if count == 0:
+                return ToolResult(content=json.dumps(
+                    {"error": f"未找到匹配: {old_string[:60]}"}, ensure_ascii=False,
+                ))
+            if count > 1:
+                return ToolResult(content=json.dumps(
+                    {"error": f"找到 {count} 处匹配，请提供更多上下文或使用 replaceAll"},
+                    ensure_ascii=False,
+                ))
+            new_content = current.replace(old_string, new_string, 1)
+
+        try:
+            target.write_text(new_content, encoding="utf-8")
+        except Exception as e:
+            return ToolResult(content=json.dumps(
+                {"error": f"写入失败: {e}"}, ensure_ascii=False,
+            ))
+
+        return ToolResult(content=json.dumps({
+            "success": True,
+            "path": file_path,
+            "replaced": not replace_all,
         }, ensure_ascii=False))
