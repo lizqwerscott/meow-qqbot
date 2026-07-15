@@ -999,9 +999,10 @@ class ToolExecutor:
                 {"error": "请提供 file_path"}, ensure_ascii=False,
             ))
 
+        admin_override = self._is_admin_private(ctx)
         try:
             target = self._workspace_manager.resolve_safe_path(
-                ctx.is_group, ctx.chat_id, file_path
+                ctx.is_group, ctx.chat_id, file_path, admin_override=admin_override,
             )
         except ValueError as e:
             return ToolResult(content=json.dumps(
@@ -1044,9 +1045,10 @@ class ToolExecutor:
                 {"error": "请提供 file_path"}, ensure_ascii=False,
             ))
 
+        admin_override = self._is_admin_private(ctx)
         try:
             target = self._workspace_manager.resolve_safe_path(
-                ctx.is_group, ctx.chat_id, file_path
+                ctx.is_group, ctx.chat_id, file_path, admin_override=admin_override,
             )
         except ValueError as e:
             return ToolResult(content=json.dumps(
@@ -1088,9 +1090,10 @@ class ToolExecutor:
                 {"error": "请提供 old_string"}, ensure_ascii=False,
             ))
 
+        admin_override = self._is_admin_private(ctx)
         try:
             target = self._workspace_manager.resolve_safe_path(
-                ctx.is_group, ctx.chat_id, file_path
+                ctx.is_group, ctx.chat_id, file_path, admin_override=admin_override,
             )
         except ValueError as e:
             return ToolResult(content=json.dumps(
@@ -1141,13 +1144,17 @@ class ToolExecutor:
             "replaced": not replace_all,
         }, ensure_ascii=False))
 
-    def _sandbox_target(self, is_group: bool, chat_id: str, rel_path: str) -> Path:
+    def _is_admin_private(self, ctx: ToolContext) -> bool:
+        """私聊且发送者是管理员。"""
+        return not ctx.is_group and ctx.sender_id in self._admin_ids
+
+    def _sandbox_target(self, is_group: bool, chat_id: str, rel_path: str, admin_override: bool = False) -> Path:
         """解析沙箱路径，支持 '.' 表示根目录。"""
-        sandbox = self._workspace_manager.sandbox_dir(is_group, chat_id)
+        sandbox = self._workspace_manager.root_dir() if admin_override else self._workspace_manager.sandbox_dir(is_group, chat_id)
         if rel_path in ("", "."):
             return sandbox
         try:
-            return self._workspace_manager.resolve_safe_path(is_group, chat_id, rel_path)
+            return self._workspace_manager.resolve_safe_path(is_group, chat_id, rel_path, admin_override=admin_override)
         except ValueError as e:
             raise
 
@@ -1158,11 +1165,12 @@ class ToolExecutor:
                 {"error": "工作区未就绪"}, ensure_ascii=False,
             ))
 
+        admin_override = self._is_admin_private(ctx)
         rel_path = (args.get("path") or ".").strip()
         pattern = (args.get("pattern") or "").strip()
 
         try:
-            target = self._sandbox_target(ctx.is_group, ctx.chat_id, rel_path)
+            target = self._sandbox_target(ctx.is_group, ctx.chat_id, rel_path, admin_override=admin_override)
         except ValueError as e:
             return ToolResult(content=json.dumps(
                 {"error": str(e)}, ensure_ascii=False,
@@ -1191,7 +1199,7 @@ class ToolExecutor:
                 {"error": "无权限访问该目录"}, ensure_ascii=False,
             ))
 
-        sandbox = self._workspace_manager.sandbox_dir(ctx.is_group, ctx.chat_id)
+        sandbox = self._workspace_manager.root_dir() if admin_override else self._workspace_manager.sandbox_dir(ctx.is_group, ctx.chat_id)
         files_result = []
         dirs_result = []
         for item in items:
@@ -1226,11 +1234,12 @@ class ToolExecutor:
                 {"error": "请提供搜索模式 pattern"}, ensure_ascii=False,
             ))
 
+        admin_override = self._is_admin_private(ctx)
         rel_path = (args.get("path") or ".").strip()
         glob_filter = (args.get("glob") or "").strip()
 
         try:
-            search_root = self._sandbox_target(ctx.is_group, ctx.chat_id, rel_path)
+            search_root = self._sandbox_target(ctx.is_group, ctx.chat_id, rel_path, admin_override=admin_override)
         except ValueError as e:
             return ToolResult(content=json.dumps(
                 {"error": str(e)}, ensure_ascii=False,
@@ -1241,7 +1250,7 @@ class ToolExecutor:
                 {"error": f"路径不存在: {rel_path}"}, ensure_ascii=False,
             ))
 
-        sandbox = self._workspace_manager.sandbox_dir(ctx.is_group, ctx.chat_id)
+        sandbox = self._workspace_manager.root_dir() if admin_override else self._workspace_manager.sandbox_dir(ctx.is_group, ctx.chat_id)
 
         try:
             cmd = ["rg", "-n", "--no-heading", "--color", "never"]

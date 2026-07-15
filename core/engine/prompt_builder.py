@@ -236,17 +236,19 @@ class PromptBuilder:
         # 工作区上下文
         if self._workspace_manager:
             ws_type = "群聊" if is_group else "私聊"
+            is_admin_private = not is_group and chat_id in self._admin_ids
             dynamic_parts.append(f"当前{ws_type}工作区: {chat_id[:12]}")
-            dynamic_parts.append(
-                "read_file / write_file / edit_file / list_files / search_files 五个文件工具仅限当前工作区内使用。"
-            )
+            if is_admin_private:
+                dynamic_parts.append(
+                    "read_file / write_file / edit_file / list_files / search_files 五个文件工具可访问整个 workspaces/ 根目录（管理员权限）。"
+                )
+            else:
+                dynamic_parts.append(
+                    "read_file / write_file / edit_file / list_files / search_files 五个文件工具仅限当前工作区内使用。"
+                )
 
         # HEARTBEAT.md（管理员的私聊专属）
-        if (
-            self._workspace_manager
-            and not is_group
-            and chat_id in self._admin_ids
-        ):
+        if self._workspace_manager and not is_group and chat_id in self._admin_ids:
             hb_path = self._workspace_manager.heartbeat_path()
             if hb_path.exists():
                 try:
@@ -255,6 +257,15 @@ class PromptBuilder:
                         dynamic_parts.append("【心跳配置 (HEARTBEAT.md)】\n你可以在本工作区查看和管理心跳配置。\n当前心跳配置内容如下：\n\n" + hb_content)
                 except Exception:
                     pass
+            else:
+                dynamic_parts.append(
+                    "【心跳配置 (HEARTBEAT.md)】\n"
+                    "心跳配置用于定义定时检查任务（每天 9:00-24:00 每 30 分钟执行），"
+                    "AI 会检查是否有需要关注的事项并通知你。\n\n"
+                    "你可以在 workspaces/ 根目录创建 HEARTBEAT.md 文件来自定义心跳提示词，"
+                    "格式为 Markdown，支持使用 {time} 和 {tz} 变量。\n"
+                    "使用 write_file 工具写入 HEARTBEAT.md 即可。"
+                )
 
         # 表情标签列表
         if has_emojis and self.emoji_manager:
