@@ -70,7 +70,15 @@ class HeartbeatManager:
     ):
         self._enabled = config.get("enabled", False)
         self._every_minutes = config.get("every", 30)
-        self._model_name = config.get("model", "")
+
+        raw_models = config.get("model", "")
+        if isinstance(raw_models, str):
+            self._model_names = [raw_models] if raw_models else []
+        elif isinstance(raw_models, list):
+            self._model_names = raw_models
+        else:
+            self._model_names = []
+
         self._custom_prompt = config.get("prompt", "")
         self._heartbeat_path = heartbeat_path
 
@@ -199,17 +207,20 @@ class HeartbeatManager:
                     pass
             prompt = (file_prompt or HEARTBEAT_DEFAULT_PROMPT).format(time=now_str, tz=tz_name)
 
-        # 调用模型
+        # 调用模型（按优先级链尝试）
         result = ""
-        if self._model_registry and self._model_name:
-            result = await self._model_registry.simple_chat(
-                model_name=self._model_name,
-                messages=[
-                    {"role": "system", "content": "你是一个群聊助手的心跳检查器。请检查是否有需要关注的事项。\n\n如果没有，只回复 HEARTBEAT_OK。如果有提醒，简短说明，不超过 100 字。"},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=300,
-            )
+        if self._model_registry and self._model_names:
+            for model_name in self._model_names:
+                result = await self._model_registry.simple_chat(
+                    model_name=model_name,
+                    messages=[
+                        {"role": "system", "content": "你是一个群聊助手的心跳检查器。请检查是否有需要关注的事项。\n\n如果没有，只回复 HEARTBEAT_OK。如果有提醒，简短说明，不超过 100 字。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=300,
+                )
+                if result:
+                    break
         elif self._router_model:
             result = await self._router_model.simple_chat(prompt)
         elif self._ai_service:

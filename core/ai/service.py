@@ -25,6 +25,7 @@ class AIService:
         temperature: float = 0.7,
         max_tokens: int = 8192,
         reasoning_effort: Optional[str] = None,
+        http_client: Optional[Any] = None,
     ):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
@@ -38,7 +39,8 @@ class AIService:
         self.reasoning_effort = reasoning_effort
 
         self.client = AsyncOpenAI(
-            api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries
+            api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries,
+            http_client=http_client,
         )
 
     async def close(self):
