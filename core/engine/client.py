@@ -277,17 +277,14 @@ class BotEngine:
             uid = m.get("id")
             if uid:
                 mentioned_ids.append(uid)
-                nickname = m.get("username") or uid
-                if m.get("is_you"):
-                    nickname = self._bot_name
-                event.content = event.content.replace(f"<@{uid}>", f"@{nickname}")
+                event.content = event.content.replace(f"<@{uid}>", f"@{uid}")
         event.content = event.content.strip()
 
         is_at_mention = any(m.get("is_you") for m in mentions_data)
 
         # 如果机器人被 @，剥离 @bot_name 前缀并替换为 猫猫 前缀
         if is_at_mention:
-            at_prefix = f"@{self._bot_name}"
+            at_prefix = f"@{self._bot_id}"
             if event.content.startswith(at_prefix):
                 rest = event.content[len(at_prefix):].strip()
                 event.content = f"猫猫 {rest}" if rest else "猫猫"

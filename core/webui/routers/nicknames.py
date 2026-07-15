@@ -102,7 +102,13 @@ async def nickname_promote(request: Request, user_id: str):
         return _make_flash_redirect("/nicknames", "error", "未找到该昵称")
 
     manual = _load_json(MANUAL_PATH)
-    manual[user_id] = auto[user_id]
+    entry = auto[user_id]
+    if isinstance(entry, dict):
+        aliases = entry.get("aliases", [])
+        latest = aliases[-1] if aliases else user_id
+    else:
+        latest = entry
+    manual[user_id] = latest
     _save_json(MANUAL_PATH, manual)
 
     auto.pop(user_id)

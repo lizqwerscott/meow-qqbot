@@ -44,10 +44,18 @@
             <tr><th>用户 ID</th><th>昵称</th><th>操作</th></tr>
         </thead>
         <tbody>
-            {% for uid, name in auto_nicknames.items() %}
+            {% for uid, entry in auto_nicknames.items() %}
+            {% if entry is mapping %}
+            {% set aliases = entry.get('aliases', []) %}
+            {% set display = aliases[-1] if aliases else uid %}
+            {% set full_alias = '，'.join(aliases) if aliases else uid %}
+            {% else %}
+            {% set display = entry %}
+            {% set full_alias = entry %}
+            {% endif %}
             <tr>
                 <td><code>{{ uid[:16] }}..</code></td>
-                <td>{{ name }}</td>
+                <td>{{ full_alias }}</td>
                 <td>
                     <form method="post" action="/nicknames/auto/{{ uid }}/promote" style="display:inline">
                         <button type="submit" class="btn btn-sm btn-primary" title="提升为手动昵称">提升</button>

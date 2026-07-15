@@ -264,12 +264,11 @@ class PromptBuilder:
 
         # 群友列表
         if has_users and self._nm:
-            merged = self._nm.all_merged()
-            others = {uid: name for uid, name in merged.items() if uid != self._bot_id}
-            if others:
-                lines = ["【群友列表】"]
-                for uid, name in sorted(others.items(), key=lambda x: x[1]):
-                    lines.append(f"- {name} (id: {uid[:12]}..)")
+            lines = ["【群友列表】"]
+            for uid, aliases in sorted(self._nm.iter_users(), key=lambda x: "，".join(x[1])):
+                alias_str = "，".join(aliases)
+                lines.append(f"- {uid}（{alias_str}）")
+            if lines:
                 dynamic_parts.append("\n".join(lines))
 
         if dynamic_parts:
