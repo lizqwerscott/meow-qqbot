@@ -221,6 +221,10 @@ class AgentEngine:
 
         chat_id = input_message.chat_id
 
+        # 自动创建工作区目录
+        if self._workspace_manager:
+            self._workspace_manager.sandbox_dir(input_message.is_group, chat_id)
+
         # 记录活跃追踪（供心跳 busy 检测用）
         self.last_active_chat = chat_id
         self.last_active_time = time.time()
