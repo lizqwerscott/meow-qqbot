@@ -211,20 +211,20 @@ async def main() -> None:
     else:
         _log.info("学习系统未启用")
 
-    # ── 规则路由 / 模型注册表（ClawRouter 风格） ──
-    rule_router = None
+    # ── 模型注册表（始终创建，供 heartbeat / fallback 使用） ──
     model_registry = None
-    routing_enabled = config.get("routing", {}).get("enabled", False)
+    if models_config:
+        model_registry = ModelRegistry(models_config)
+        _log.info(f"模型注册表已初始化: {len(models_config)} 个模型")
 
-    if routing_enabled:
-        if models_config:
-            model_registry = ModelRegistry(models_config)
-            tier_config = config.get("routing", {}).get("tiers", {})
-            model_registry.configure_tiers(tier_config)
-            rule_router = RuleRouter()
-            _log.info("ClawRouter 规则路由已初始化")
-        else:
-            _log.warning("routing.enabled=true 但 models 配置为空")
+    # ── 规则路由（ClawRouter 风格，可选） ──
+    rule_router = None
+    routing_enabled = config.get("routing", {}).get("enabled", False)
+    if routing_enabled and model_registry:
+        tier_config = config.get("routing", {}).get("tiers", {})
+        model_registry.configure_tiers(tier_config)
+        rule_router = RuleRouter()
+        _log.info("ClawRouter 规则路由已初始化")
 
     # ── 2. 创建 AgentEngine（全局单例） ──
     agent_engine = AgentEngine(

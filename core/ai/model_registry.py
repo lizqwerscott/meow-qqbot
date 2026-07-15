@@ -30,22 +30,36 @@ class ModelRegistry:
         self._default_service: Optional[AIService] = None
 
         for name, cfg in models_config.items():
-            svc = AIService(
-                api_key=cfg.get("api_key", ""),
-                base_url=cfg.get("base_url"),
-                model=cfg.get("model", "gpt-3.5-turbo"),
-                timeout=cfg.get("timeout", 30),
-                max_retries=cfg.get("max_retries", 0),
-                temperature=cfg.get("temperature", 0.7),
-                max_tokens=cfg.get("max_tokens", 8192),
-                reasoning_effort=cfg.get("reasoning_effort"),
-            )
+            provider = cfg.get("provider", "openai")
+            if provider == "modelscope":
+                from core.ai.modelscope_service import ModelScopeService
+                svc = ModelScopeService(
+                    api_key=cfg.get("api_key", ""),
+                    base_url=cfg.get("base_url"),
+                    model=cfg.get("model", "gpt-3.5-turbo"),
+                    timeout=cfg.get("timeout", 30),
+                    max_retries=cfg.get("max_retries", 0),
+                    temperature=cfg.get("temperature", 0.7),
+                    max_tokens=cfg.get("max_tokens", 8192),
+                    reasoning_effort=cfg.get("reasoning_effort"),
+                )
+            else:
+                svc = AIService(
+                    api_key=cfg.get("api_key", ""),
+                    base_url=cfg.get("base_url"),
+                    model=cfg.get("model", "gpt-3.5-turbo"),
+                    timeout=cfg.get("timeout", 30),
+                    max_retries=cfg.get("max_retries", 0),
+                    temperature=cfg.get("temperature", 0.7),
+                    max_tokens=cfg.get("max_tokens", 8192),
+                    reasoning_effort=cfg.get("reasoning_effort"),
+                )
             self._services[name] = svc
             if self._default_service is None:
                 self._default_service = svc
 
             _log.info(
-                f"模型 [{name}]: {cfg.get('model')} @ {cfg.get('base_url')}"
+                f"模型 [{name}]({provider}): {cfg.get('model')} @ {cfg.get('base_url')}"
             )
 
     @property
