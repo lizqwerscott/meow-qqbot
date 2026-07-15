@@ -29,18 +29,23 @@ class WorkspaceManager:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def resolve_safe_path(self, is_group: bool, chat_id: str, relative_path: str) -> Path:
+    def resolve_safe_path(self, is_group: bool, chat_id: str, relative_path: str, admin_override: bool = False) -> Path:
         """解析沙箱内相对路径，防止目录穿越。
 
+        admin_override=True 时以 workspaces/ 根目录为沙箱（仅限管理员私聊）。
         Raises ValueError 如果路径越界。
         """
-        sandbox = self.sandbox_dir(is_group, chat_id)
+        sandbox = self._root if admin_override else self.sandbox_dir(is_group, chat_id)
         safe = relative_path.lstrip("/").lstrip("\\")
         target = (sandbox / safe).resolve()
         sandbox_str = str(sandbox.resolve()) + "/"
         if not str(target).startswith(sandbox_str):
             raise ValueError(f"路径越界: {relative_path}")
         return target
+
+    def root_dir(self) -> Path:
+        """返回工作区根目录 workspaces/。"""
+        return self._root
 
     def heartbeat_path(self) -> Path:
         """返回全局 HEARTBEAT.md 路径。"""
