@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 
 from hindsight_client import Hindsight
 
+from core.message import MessageType
+
 _log = logging.getLogger(__name__)
 
 
@@ -55,11 +57,12 @@ class HindsightMemory:
         sender_name: Optional[str] = None,
         role: str = "user",
         timestamp: Optional[float] = None,
+        context: Optional[str] = None,
     ) -> None:
         """保留一条消息到记忆库。同一 session 共享 document_id 持续追加。"""
         try:
             prefix = f"[{sender_name}]: " if sender_name else ""
-            await self._client.aretain(
+            kwargs: dict = dict(
                 bank_id=self._bank_id,
                 content=f"{prefix}{content}",
                 document_id=f"session-{session_id}",
@@ -68,10 +71,29 @@ class HindsightMemory:
                 timestamp=self._to_datetime(timestamp),
                 retain_async=True,
             )
+            if context:
+                kwargs["context"] = context
+            await self._client.aretain(**kwargs)
             self._cache_health({"status": "ok"})
         except Exception as e:
             self._cache_health({"status": "unreachable", "error": str(e)})
             _log.warning(f"Hindsight add_message 失败: {e!r}")
+
+    @staticmethod
+    def msg_type_to_context(msg_type: MessageType) -> Optional[str]:
+        """根据消息类型返回 Hindsight context 标签。
+
+        context 注入 LLM 提取提示词，让提取器知道内容来源场景。
+        纯文本不需要额外 context（返回 None 即不传 context 参数）。
+        """
+        mapping = {
+            MessageType.EMOJI: "用户发送了一张表情",
+            MessageType.IMAGE: "用户发送了一张图片",
+            MessageType.VOICE: "用户发送了一条语音消息",
+            MessageType.VIDEO: "用户发送了一个视频",
+            MessageType.FILE: "用户发送了一个文件",
+        }
+        return mapping.get(msg_type)
 
     async def flush(self, session_id: str) -> None:
         """无操作 — Hindsight 在 retain 时自动提取事实。"""

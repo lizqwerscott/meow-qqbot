@@ -236,12 +236,13 @@ class AgentEngine:
             name=user_nickname,
         )
 
-        if self.hindsight:
+        if self.hindsight and input_message.msg_type != MessageType.CARD:
             await self.hindsight.add_message(
                 session_id=chat_id,
                 sender_id=input_message.sender_id,
                 sender_name=user_nickname,
                 content=content_with_context,
+                context=self.hindsight.msg_type_to_context(input_message.msg_type),
                 timestamp=input_message.timestamp,
             )
 

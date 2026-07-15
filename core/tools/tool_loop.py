@@ -12,7 +12,7 @@ import json
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
-from core.message import InputMessage
+from core.message import InputMessage, MessageType
 
 from core.tools.executor import ToolContext
 
@@ -306,12 +306,13 @@ class ToolLoop:
                 sender_id=msg.sender_id, name=nick,
             )
 
-            if self.hindsight:
+            if self.hindsight and msg.msg_type != MessageType.CARD:
                 await self.hindsight.add_message(
                     session_id=chat_id,
                     sender_id=msg.sender_id,
                     sender_name=nick,
                     content=content,
+                    context=self.hindsight.msg_type_to_context(msg.msg_type),
                     timestamp=msg.timestamp,
                 )
 
