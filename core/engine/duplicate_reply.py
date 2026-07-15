@@ -3,6 +3,8 @@
 import logging
 from collections import OrderedDict
 
+from core.message import MessageType
+
 _log = logging.getLogger(__name__)
 
 _MAX_CACHED_CHATS = 500
@@ -19,6 +21,9 @@ class DuplicateReplyDetector:
         if not input_message.is_group:
             return False
 
+        if input_message.msg_type != MessageType.TEXT:
+            return False
+
         context = await self._cm.get_context_async(input_message.chat_id)
         user_msgs = [m for m in context.history if m.role == "user"]
         if len(user_msgs) < 2:
@@ -26,6 +31,8 @@ class DuplicateReplyDetector:
 
         last_content = user_msgs[-1].content
         prev_content = user_msgs[-2].content
+        if not last_content.strip():
+            return False
         if last_content != prev_content:
             return False
         if self._replied.get(input_message.chat_id) == last_content:
