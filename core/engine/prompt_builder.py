@@ -238,7 +238,7 @@ class PromptBuilder:
             ws_type = "群聊" if is_group else "私聊"
             dynamic_parts.append(f"当前{ws_type}工作区: {chat_id[:12]}")
             dynamic_parts.append(
-                "read_file / write_file / edit_file 三个文件工具仅限当前工作区内使用。"
+                "read_file / write_file / edit_file / list_files / search_files 五个文件工具仅限当前工作区内使用。"
             )
 
         # HEARTBEAT.md（管理员的私聊专属）

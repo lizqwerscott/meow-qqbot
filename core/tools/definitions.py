@@ -403,6 +403,51 @@ FILE_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": "列出工作区内的文件和子目录。路径相对于当前聊天的 files/ 目录。支持 glob 模式过滤文件。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "要列出的目录路径。留空或 '.' 表示当前工作区根目录，例如 '.'、'subdir'",
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "glob 过滤模式，例如 '*.py' 只显示 Python 文件，'*.*' 只显示有后缀的文件，'**/*.md' 递归显示所有 md 文件。不填则显示全部",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_files",
+            "description": "搜索工作区内的文件内容，支持正则表达式。使用 ripgrep 引擎，比 grep 更快更智能。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "要搜索的正则表达式模式，例如 'TODO'、'def \\w+'、'error.*timeout'",
+                    },
+                    "glob": {
+                        "type": "string",
+                        "description": "文件过滤 glob，例如 '*.py' 只搜索 Python 文件。不填则搜索工作区内所有文件",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "搜索范围路径，相对于当前聊天的 files/ 目录。不填则搜索整个工作区",
+                    },
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
 ]
 
 
@@ -532,4 +577,5 @@ def tool_names() -> set[str]:
         "define_jargon", "report_behavior_effect",
         "create_task", "create_cron_job", "cancel_task",
         "read_file", "write_file", "edit_file",
+        "list_files", "search_files",
     }
