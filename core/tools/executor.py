@@ -7,7 +7,10 @@
 import asyncio
 import json
 import logging
+import re
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
@@ -119,6 +122,8 @@ class ToolExecutor:
         self._register("read_file", self._exec_read_file, is_async=True)
         self._register("write_file", self._exec_write_file, is_async=True)
         self._register("edit_file", self._exec_edit_file, is_async=True)
+        self._register("list_files", self._exec_list_files, is_async=True)
+        self._register("search_files", self._exec_search_files, is_async=True)
 
     # ── 懒注入（AgentEngine 在运行时更新引用）──
 
@@ -1135,3 +1140,172 @@ class ToolExecutor:
             "path": file_path,
             "replaced": not replace_all,
         }, ensure_ascii=False))
+
+    def _sandbox_target(self, is_group: bool, chat_id: str, rel_path: str) -> Path:
+        """解析沙箱路径，支持 '.' 表示根目录。"""
+        sandbox = self._workspace_manager.sandbox_dir(is_group, chat_id)
+        if rel_path in ("", "."):
+            return sandbox
+        try:
+            return self._workspace_manager.resolve_safe_path(is_group, chat_id, rel_path)
+        except ValueError as e:
+            raise
+
+    async def _exec_list_files(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """执行 list_files — 列出工作区文件。"""
+        if not self._workspace_manager:
+            return ToolResult(content=json.dumps(
+                {"error": "工作区未就绪"}, ensure_ascii=False,
+            ))
+
+        rel_path = (args.get("path") or ".").strip()
+        pattern = (args.get("pattern") or "").strip()
+
+        try:
+            target = self._sandbox_target(ctx.is_group, ctx.chat_id, rel_path)
+        except ValueError as e:
+            return ToolResult(content=json.dumps(
+                {"error": str(e)}, ensure_ascii=False,
+            ))
+
+        if not target.exists():
+            return ToolResult(content=json.dumps(
+                {"error": f"路径不存在: {rel_path}"}, ensure_ascii=False,
+            ))
+        if not target.is_dir():
+            return ToolResult(content=json.dumps(
+                {"error": f"路径不是目录: {rel_path}"}, ensure_ascii=False,
+            ))
+
+        try:
+            if pattern:
+                items = list(target.rglob(pattern)) if "**" in pattern else list(target.glob(pattern))
+                items.sort(key=lambda p: (not p.is_dir(), p.name.lower()))
+            else:
+                items = sorted(
+                    target.iterdir(),
+                    key=lambda p: (not p.is_dir(), p.name.lower()),
+                )
+        except PermissionError:
+            return ToolResult(content=json.dumps(
+                {"error": "无权限访问该目录"}, ensure_ascii=False,
+            ))
+
+        sandbox = self._workspace_manager.sandbox_dir(ctx.is_group, ctx.chat_id)
+        files_result = []
+        dirs_result = []
+        for item in items:
+            try:
+                rel = str(item.relative_to(sandbox))
+            except ValueError:
+                continue
+            if item.is_dir():
+                dirs_result.append(rel + "/")
+            else:
+                size = item.stat().st_size if item.is_file() else 0
+                files_result.append({"path": rel, "size": size})
+
+        return ToolResult(content=json.dumps({
+            "success": True,
+            "path": rel_path,
+            "directories": dirs_result,
+            "files": files_result,
+            "total": len(dirs_result) + len(files_result),
+        }, ensure_ascii=False))
+
+    async def _exec_search_files(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """执行 search_files — 搜索文件内容（rg）。"""
+        if not self._workspace_manager:
+            return ToolResult(content=json.dumps(
+                {"error": "工作区未就绪"}, ensure_ascii=False,
+            ))
+
+        pattern = (args.get("pattern") or "").strip()
+        if not pattern:
+            return ToolResult(content=json.dumps(
+                {"error": "请提供搜索模式 pattern"}, ensure_ascii=False,
+            ))
+
+        rel_path = (args.get("path") or ".").strip()
+        glob_filter = (args.get("glob") or "").strip()
+
+        try:
+            search_root = self._sandbox_target(ctx.is_group, ctx.chat_id, rel_path)
+        except ValueError as e:
+            return ToolResult(content=json.dumps(
+                {"error": str(e)}, ensure_ascii=False,
+            ))
+
+        if not search_root.exists():
+            return ToolResult(content=json.dumps(
+                {"error": f"路径不存在: {rel_path}"}, ensure_ascii=False,
+            ))
+
+        sandbox = self._workspace_manager.sandbox_dir(ctx.is_group, ctx.chat_id)
+
+        try:
+            cmd = ["rg", "-n", "--no-heading", "--color", "never"]
+            if glob_filter:
+                cmd.extend(["-g", glob_filter])
+            cmd.extend([pattern, str(search_root)])
+
+            proc = await asyncio.to_thread(
+                subprocess.run, cmd,
+                capture_output=True, text=True, timeout=15,
+            )
+
+            if proc.returncode not in (0, 1):
+                return ToolResult(content=json.dumps({
+                    "error": f"搜索失败: {proc.stderr.strip()[:200]}",
+                }, ensure_ascii=False))
+
+            if not proc.stdout.strip():
+                return ToolResult(content=json.dumps({
+                    "success": True,
+                    "pattern": pattern,
+                    "matches": [],
+                    "total": 0,
+                }, ensure_ascii=False))
+
+            matches = []
+            MAX_MATCHES = 50
+            for line in proc.stdout.splitlines():
+                if len(matches) >= MAX_MATCHES:
+                    break
+                try:
+                    raw_path, line_no, content = line.split(":", 2)
+                    try:
+                        rel = str(Path(raw_path).resolve().relative_to(sandbox))
+                    except (ValueError, RuntimeError):
+                        rel = raw_path
+                    matches.append({
+                        "file": rel,
+                        "line": int(line_no) if line_no.isdigit() else 0,
+                        "content": content.strip()[:200],
+                    })
+                except ValueError:
+                    continue
+
+            total = proc.stdout.count("\n")
+            truncated = len(matches) < total
+
+            return ToolResult(content=json.dumps({
+                "success": True,
+                "pattern": pattern,
+                "matches": matches,
+                "total": min(total, MAX_MATCHES),
+                "truncated": truncated,
+            }, ensure_ascii=False))
+
+        except subprocess.TimeoutExpired:
+            return ToolResult(content=json.dumps(
+                {"error": "搜索超时（15秒）"}, ensure_ascii=False,
+            ))
+        except FileNotFoundError:
+            return ToolResult(content=json.dumps(
+                {"error": "rg (ripgrep) 未安装，请使用 execute_command 替代"}, ensure_ascii=False,
+            ))
+        except Exception as e:
+            return ToolResult(content=json.dumps(
+                {"error": f"搜索异常: {e}"}, ensure_ascii=False,
+            ))
