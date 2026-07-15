@@ -130,13 +130,21 @@ class CommandManager:
             args = ""
 
             if input_message.is_group:
-                # 群聊：只认 猫猫 /<命令>
+                # 群聊：猫猫 /<命令> 或 @bot_id /<命令>
                 if content.startswith("猫猫 /"):
                     raw = content[len("猫猫 /"):].strip()
                     if raw:
                         parts = raw.split(maxsplit=1)
                         command_name = parts[0]
                         args = parts[1] if len(parts) > 1 else ""
+                elif input_message.is_at_mention and input_message.bot_id:
+                    prefix = f"@{input_message.bot_id} /"
+                    if content.startswith(prefix):
+                        raw = content[len(prefix):].strip()
+                        if raw:
+                            parts = raw.split(maxsplit=1)
+                            command_name = parts[0]
+                            args = parts[1] if len(parts) > 1 else ""
             else:
                 # 私聊：只认 /<命令>
                 if content.startswith("/"):

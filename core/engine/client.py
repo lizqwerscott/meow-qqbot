@@ -282,13 +282,6 @@ class BotEngine:
 
         is_at_mention = any(m.get("is_you") for m in mentions_data)
 
-        # 如果机器人被 @，剥离 @bot_name 前缀并替换为 猫猫 前缀
-        if is_at_mention:
-            at_prefix = f"@{self._bot_id}"
-            if event.content.startswith(at_prefix):
-                rest = event.content[len(at_prefix):].strip()
-                event.content = f"猫猫 {rest}" if rest else "猫猫"
-
         # 提取引用消息
         replied_content = ""
         replied_author = ""
@@ -334,6 +327,7 @@ class BotEngine:
             content=event.content,
             is_group=(event.chat_scope == "group"),
             is_at_mention=is_at_mention,
+            bot_id=self._bot_id,
             mentioned_ids=mentioned_ids,
             replied_content=replied_content,
             replied_author=replied_author,
