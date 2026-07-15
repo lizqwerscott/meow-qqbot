@@ -73,6 +73,7 @@ class ToolExecutor:
         skill_managers=None,
         learning_orchestrator=None,
         admin_ids: Optional[list] = None,
+        permission_manager=None,
     ):
         self._emoji_manager = emoji_manager
         self._media_uploader = media_uploader
@@ -83,6 +84,7 @@ class ToolExecutor:
         self._skill_managers = skill_managers
         self._learners = learning_orchestrator
         self._admin_ids = admin_ids or []
+        self._perm = permission_manager
         self._bot_engine = None
         self._task_manager = None
         self._cron_job_manager = None
@@ -141,6 +143,18 @@ class ToolExecutor:
         if entry is None:
             _log.warning(f"未知工具调用: {name}")
             return ToolResult(content=json.dumps({"error": f"未知工具: {name}"}))
+
+        # ── 工具权限检查 ──
+        if self._perm:
+            role = self._perm.get_user_role(ctx.sender_id)
+            if not self._perm.can_use_tool(name, role):
+                _log.warning(
+                    f"工具权限拒绝: {name} role={role} sender={ctx.sender_id[:16]}.."
+                )
+                return ToolResult(content=json.dumps(
+                    {"error": f"你没有权限使用该工具（需要 {self._perm._require_level(name)} 及以上）"},
+                    ensure_ascii=False,
+                ))
 
         _log.info(
             f"[工具调用] {name}: {json.dumps(args, ensure_ascii=False)[:200]}"
@@ -636,10 +650,13 @@ class ToolExecutor:
         timeout = args.get("timeout", 30)
         workdir = args.get("workdir")
 
+        role = self._perm.get_user_role(ctx.sender_id) if self._perm else "admin"
+
         result = self._skill_managers.execute_command(
             command=command,
             timeout=timeout,
             workdir=workdir,
+            user_role=role,
         )
         return ToolResult(content=json.dumps(result, ensure_ascii=False))
 

@@ -28,15 +28,21 @@ DENIED_COMMANDS: frozenset = frozenset({
     "service", "grub-install", "grub-mkconfig",
     "modprobe", "insmod", "rmmod",
     "iptables", "ufw",
+    "docker", "podman",
+    "crontab", "at",
+    "mount", "umount",
+    "swapon", "swapoff",
+    "sysctl",
+    "unshare", "nsenter",
 })
 
-_DANGEROUS_TARGET_PATTERNS = re.compile(r">/(?:dev|etc|boot|sys|proc)/")
+_DANGEROUS_TARGET_PATTERNS = re.compile(r">(?:/[^/\s]+){1,4}(?:/[^/\s]+)?")
 
 
 class SkillManagers:
     """SkillManager 封装，提供技能发现、查看和执行能力。"""
 
-    def __init__(self, project_skill_dir: str = "./.agents/skills/"):
+    def __init__(self, project_skill_dir: str = "./.agents/skills/", permission_manager=None):
         skill_path = Path(project_skill_dir)
         if skill_path.exists() and skill_path.is_dir():
             self._manager = SkillManager(project_skill_dir=str(skill_path.resolve()))
@@ -50,6 +56,7 @@ class SkillManagers:
             )
         self._manager.discover()
         self._skills_loaded = len(self._manager.list_skills()) > 0
+        self._perm = permission_manager
         _log.info(
             f"SkillManagers 已初始化: 发现 {len(self._manager.list_skills())} 个技能"
         )
@@ -163,6 +170,7 @@ class SkillManagers:
         command: str,
         timeout: int = 30,
         workdir: Optional[str] = None,
+        user_role: str = "admin",
     ) -> Dict[str, Any]:
         command = command.strip()
         if not command:
@@ -182,6 +190,13 @@ class SkillManagers:
         if reason:
             _log.warning(f"execute_command 被拒绝: {reason}")
             return {"success": False, "error": reason}
+
+        # 白名单检查（非 admin）
+        if user_role != "admin" and self._perm:
+            reason = self._perm.check_command_allowed(command, parts, user_role)
+            if reason:
+                _log.warning(f"execute_command 白名单拒绝: {reason}")
+                return {"success": False, "error": reason}
 
         effective_timeout = min(timeout, 120)
         cwd = workdir or "."

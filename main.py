@@ -26,6 +26,7 @@ from core.tasks.heartbeat import HeartbeatManager
 from core.router_model import RouterModel
 from core.rule_router import RuleRouter
 from core.ai.model_registry import ModelRegistry
+from core.managers.permission_manager import PermissionManager
 
 from core.webui import create_app, start_webui
 
@@ -181,11 +182,17 @@ async def main() -> None:
 
     bot_id = config.get("bot_id", "")
 
+    # ── Permissions（权限管理器，全局单例） ──
+    permission_manager = PermissionManager("allowlist.toml")
+
     # ── NicknameManager（统一昵称管理，全局单例） ──
     nickname_manager = NicknameManager(bot_id=bot_id)
 
     # ── SkillManagers（技能系统，全局单例，仅从项目本地加载） ──
-    skill_managers = SkillManagers(project_skill_dir="./.agents/skills/")
+    skill_managers = SkillManagers(
+        project_skill_dir="./.agents/skills/",
+        permission_manager=permission_manager,
+    )
 
     # ── LearningOrchestrator（学习系统） ──
     learners_config = config.get("learners", {})
@@ -243,6 +250,7 @@ async def main() -> None:
         cron_job_manager=cron_job_manager,
         rule_router=rule_router,
         model_registry=model_registry,
+        permission_manager=permission_manager,
     )
 
     # ── 将后台任务执行器注入 ToolExecutor（供 AI 工具调用） ──
