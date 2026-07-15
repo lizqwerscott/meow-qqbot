@@ -40,6 +40,7 @@ class InputMessage:
     content: str
     is_group: bool
     is_at_mention: bool = False
+    bot_id: str = ""
     mentioned_ids: List[str] = field(default_factory=list)
     replied_content: str = ""
     replied_author: str = ""

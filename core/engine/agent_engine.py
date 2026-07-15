@@ -268,11 +268,17 @@ class AgentEngine:
             if text_for_learners:
                 if input_message.replied_content:
                     lines = text_for_learners.split("\n", 1)
-                    if len(lines) == 2 and lines[1].startswith("猫猫"):
-                        lines[1] = lines[1][len("猫猫"):].lstrip()
-                        text_for_learners = "\n".join(lines)
-                elif text_for_learners.startswith("猫猫"):
-                    text_for_learners = text_for_learners[len("猫猫"):].lstrip()
+                    for prefix in ("猫猫", f"@{self._bot_id}"):
+                        if len(lines) == 2 and lines[1].strip().startswith(prefix):
+                            lines[1] = lines[1].strip()[len(prefix):].lstrip()
+                            text_for_learners = "\n".join(lines)
+                            break
+                else:
+                    text_stripped = text_for_learners.strip()
+                    for prefix in ("猫猫", f"@{self._bot_id}"):
+                        if text_stripped.startswith(prefix):
+                            text_for_learners = text_stripped[len(prefix):].lstrip()
+                            break
 
                 await self.learners.on_message(
                     message_text=text_for_learners,

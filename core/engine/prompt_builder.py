@@ -262,6 +262,10 @@ class PromptBuilder:
             if tags:
                 dynamic_parts.append("可用表情标签：" + "、".join(tags))
 
+        # 自身 ID 映射
+        if is_group and self._bot_id:
+            dynamic_parts.append(f"你的 ID: {self._bot_id}（群友 @ 你时显示为 @{self._bot_id}）")
+
         # 群友列表
         if has_users and self._nm:
             lines = ["【群友列表】"]
