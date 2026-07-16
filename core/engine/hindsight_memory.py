@@ -154,7 +154,7 @@ class HindsightMemory:
 
         start = time.monotonic()
         try:
-            await asyncio.to_thread(self._client.get_version)
+            await self._client.aget_version()
             latency = (time.monotonic() - start) * 1000
             result = {"status": "ok", "latency_ms": round(latency, 1)}
         except Exception as e:
