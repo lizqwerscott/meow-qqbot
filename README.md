@@ -15,7 +15,7 @@
 ```
 meow-qqbot/
 ├── main.py              # 主程序入口
-├── config.yaml          # 配置文件
+├── config.toml          # 配置文件
 ├── pyproject.toml       # 项目依赖配置
 ├── core/
 │   ├── __init__.py
@@ -40,10 +40,10 @@ pip install -e .
 
 1. 复制配置文件模板：
 ```bash
-cp config.yaml.example config.yaml
+cp config.toml.example config.toml
 ```
 
-2. 编辑 `config.yaml` 文件：
+2. 编辑 `config.toml` 文件：
 ```yaml
 appid: "你的QQ机器人AppID"
 secret: "你的QQ机器人Secret"
