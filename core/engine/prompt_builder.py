@@ -23,6 +23,7 @@ from core.tools.definitions import (
     LEARNER_TOOLS,
     TASK_TOOLS,
     FILE_TOOLS,
+    HEARTBEAT_RESPOND_TOOL,
 )
 
 _log = logging.getLogger(__name__)
@@ -345,6 +346,53 @@ class PromptBuilder:
         _tz = timezone(timedelta(hours=8))
         now = datetime.now(_tz)
         system_prompt = self.template_manager.get_task_chat_prompt(
+            current_time=now.strftime("%Y-%m-%d %H:%M:%S (CST/UTC+8)"),
+        )
+
+        messages: List[dict] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+        return messages, tools_to_use
+
+    async def build_heartbeat_messages(
+        self,
+        prompt: str,
+        chat_id: str = "heartbeat:main",
+        is_group: bool = False,
+    ) -> Tuple[List[dict], Optional[List[dict]]]:
+        """组装心跳检查的 messages 列表（使用 heartbeat_chat.j2 模板）。
+
+        工具集：文件工具 + 记忆工具 + heartbeat_respond + execute_command。
+        不包含表情工具和任务创建工具。
+
+        Returns:
+            (messages, tools_to_use)
+        """
+        tools_to_use: List[dict] = []
+
+        # 记忆工具
+        if self.hindsight:
+            tools_to_use.extend(SEARCH_MEMORY_TOOL)
+            tools_to_use.extend(SEARCH_RELATION_TOOL)
+            tools_to_use.extend(MARK_IMPORTANT_TOOL)
+
+        # 文件工具
+        if self._workspace_manager:
+            tools_to_use.extend(FILE_TOOLS)
+
+        # 命令工具（管理员才有权限，让 AI 尝试，权限系统会拦截）
+        tools_to_use.extend(EXECUTE_COMMAND_TOOL)
+
+        # 心跳响应工具
+        tools_to_use.extend(HEARTBEAT_RESPOND_TOOL)
+
+        tools_to_use = tools_to_use or None
+
+        from datetime import datetime, timezone, timedelta
+        _tz = timezone(timedelta(hours=8))
+        now = datetime.now(_tz)
+        system_prompt = self.template_manager.get_heartbeat_prompt(
             current_time=now.strftime("%Y-%m-%d %H:%M:%S (CST/UTC+8)"),
         )
 

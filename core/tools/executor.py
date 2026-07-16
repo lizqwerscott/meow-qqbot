@@ -94,6 +94,7 @@ class ToolExecutor:
         self._cron_job_manager = None
         self._background_task_runner = None
         self._workspace_manager = None
+        self._heartbeat_response: dict = {}
 
         self._registry: Dict[str, tuple[Callable, bool]] = {}
         self._register_all()
@@ -124,6 +125,7 @@ class ToolExecutor:
         self._register("edit_file", self._exec_edit_file, is_async=True)
         self._register("list_files", self._exec_list_files, is_async=True)
         self._register("search_files", self._exec_search_files, is_async=True)
+        self._register("heartbeat_respond", self._exec_heartbeat_respond)
 
     # ── 懒注入（AgentEngine 在运行时更新引用）──
 
@@ -1318,3 +1320,26 @@ class ToolExecutor:
             return ToolResult(content=json.dumps(
                 {"error": f"搜索异常: {e}"}, ensure_ascii=False,
             ))
+
+    # ── Heartbeat ──
+
+    def _exec_heartbeat_respond(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """存储心跳响应状态，供 HeartbeatManager 读取。"""
+        self._heartbeat_response = {
+            "notify": bool(args.get("notify", False)),
+            "notification_text": (args.get("notification_text") or "").strip(),
+        }
+        _log.info(
+            f"心跳响应: notify={self._heartbeat_response['notify']} "
+            f"text={self._heartbeat_response['notification_text'][:80]!r}"
+        )
+        return ToolResult(content=json.dumps({
+            "success": True,
+            "acknowledged": True,
+        }, ensure_ascii=False))
+
+    def consume_heartbeat_response(self) -> dict:
+        """读取并清空心跳响应状态（供 HeartbeatManager 调用）。"""
+        resp = self._heartbeat_response
+        self._heartbeat_response = {}
+        return resp

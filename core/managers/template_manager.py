@@ -10,6 +10,7 @@ class TemplateManager:
     _PRIVATE_CHAT_TEMPLATE = "prompts/private_chat.j2"
     _GROUP_CHAT_TEMPLATE = "prompts/group_chat.j2"
     _TASK_CHAT_TEMPLATE = "prompts/task_chat.j2"
+    _HEARTBEAT_CHAT_TEMPLATE = "prompts/heartbeat_chat.j2"
 
     def __init__(self, config: Dict[str, Any]):
         """
@@ -153,6 +154,28 @@ class TemplateManager:
         prompt = self.render_prompt_template(self._TASK_CHAT_TEMPLATE, context)
         if not prompt:
             prompt = "你是一个后台任务执行助手。请根据指令完成任务。"
+        return prompt
+
+    def get_heartbeat_prompt(
+        self,
+        *,
+        current_time: str = "",
+    ) -> str:
+        """
+        获取心跳检查系统提示（使用 heartbeat_chat.j2 模板）
+
+        Args:
+            current_time: 当前时间字符串
+
+        Returns:
+            心跳系统提示文本
+        """
+        context = {
+            "current_time": current_time,
+        }
+        prompt = self.render_prompt_template(self._HEARTBEAT_CHAT_TEMPLATE, context)
+        if not prompt:
+            prompt = "你是一个心跳检查器。检查是否有需要关注的事项。如果没有，回复 HEARTBEAT_OK。"
         return prompt
 
     def get_template_paths(self) -> Dict[str, str]:

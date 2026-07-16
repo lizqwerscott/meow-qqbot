@@ -1,21 +1,22 @@
-"""HeartbeatManager — 周期心跳。
+"""HeartbeatManager — 周期心跳（OpenClaw 风格工具调用流）。
 
 独立 asyncio 循环，不创建 TaskRecord/CronJob。
-让 AI 定期检查是否有需要关注的事项，有提醒则发给管理员。
+让 AI 通过工具调用循环定期检查是否有需要关注的事项，有提醒则发给管理员。
 
-HEARTBEAT.md 不存在时自动跳过；存在时预读文件内容注入 prompt。
+AI 在工具循环中可以：
+- read_file(HEARTBEAT.md) 读取心跳检查清单
+- search_memory 搜索待办事项和提醒
+- 检查工作区文件
+- 最终通过 heartbeat_respond(notify, notification_text) 工具回应
 """
 
 import asyncio
 import logging
 import time
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 from typing import Any, Optional
 
 _log = logging.getLogger(__name__)
-
-_SYSTEM_PROMPT = "你是一个群聊助手的心跳检查器。请检查是否有需要关注的事项。\n\n如果没有，只回复 HEARTBEAT_OK。如果有提醒，简短说明，不超过 100 字。"
 
 
 class HeartbeatManager:
@@ -23,12 +24,12 @@ class HeartbeatManager:
 
     不依赖 CronJobScheduler / TaskStore。
     独立 asyncio 循环，不创建 TaskRecord。
+    使用 AgentEngine.execute_heartbeat() 走完整工具调用循环。
 
     Args:
         config: {
             "enabled": bool,
             "every": int,              # 分钟
-            "model": str or list,      # 模型名称（models 注册表中的 key）
             "active_hours": {
                 "start": "09:00",
                 "end": "24:00",
@@ -36,12 +37,9 @@ class HeartbeatManager:
             "skip_when_busy": bool,
             "busy_idle_minutes": int,
         }
-        ai_service: AIService 实例
-        model_registry: ModelRegistry 实例
-        bot_id: 机器人 ID
-        admin_ids: 管理员 ID 列表
+        agent_engine: AgentEngine 实例（用于 execute_heartbeat 和 last_active_time）
         api_client: QQApiClient 实例（用于发消息）
-        agent_engine: AgentEngine 实例（用于读取 last_active_time）
+        admin_ids: 管理员 ID 列表
     """
 
     def __init__(
@@ -174,10 +172,9 @@ class HeartbeatManager:
         return elapsed < self._busy_idle_minutes * 60
 
     async def _do_heartbeat(self):
-        """执行心跳：调用模型 → 判断 → 投递。"""
-        hb_path = Path(self._heartbeat_path) if self._heartbeat_path else None
-        if not hb_path or not hb_path.exists():
-            _log.debug("心跳跳过：HEARTBEAT.md 不存在")
+        """执行心跳：走 AgentEngine 工具调用循环 → 判断是否投递。"""
+        if not self._agent_engine:
+            _log.warning("心跳跳过：AgentEngine 未就绪")
             return
 
         tz_name = "CST (UTC+8)"
@@ -185,65 +182,16 @@ class HeartbeatManager:
             "%Y-%m-%d %H:%M"
         )
 
-        hb_content = hb_path.read_text(encoding="utf-8").strip()
-
         prompt = (
-            f"现在时间是 {now_str}（{tz_name}）。\n\n"
-            f"Read HEARTBEAT.md if it exists (workspace context). Follow it strictly.\n\n"
-            f"---HEARTBEAT.md---\n{hb_content}\n---\n\n"
-            f"如果没有需要关注的事项，只回复 HEARTBEAT_OK。"
-            f"如果有提醒，简短说明即可，不要超过 100 字。"
+            f"现在时间是 {now_str}（{tz_name}）。"
         )
 
-        # 调用模型（按优先级链尝试）
-        result = ""
-        if self._model_registry and self._model_names:
-            for model_name in self._model_names:
-                result = await self._model_registry.simple_chat(
-                    model_name=model_name,
-                    messages=[
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt},
-                    ],
-                    max_tokens=300,
-                )
-                if result:
-                    break
-        elif self._router_model:
-            result = await self._router_model.simple_chat(prompt)
-        elif self._ai_service:
-            result = await self._ai_service.chat_completion(
-                messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=300,
-            )
-            result = getattr(result, "content", "") if result else ""
+        should_notify, text = await self._agent_engine.execute_heartbeat(prompt)
+
+        if should_notify and text:
+            await self._deliver_to_admin(text)
         else:
-            _log.warning("心跳跳过：无可用模型")
-            return
-
-        if not result:
-            _log.debug("心跳无返回")
-            return
-
-        # HEARTBEAT_OK 检测
-        stripped = result.strip()
-        if stripped == "HEARTBEAT_OK":
-            _log.debug("心跳 HEARTBEAT_OK，静默")
-            return
-        # 如果开头或结尾是 HEARTBEAT_OK，移除后检查剩余
-        if stripped.startswith("HEARTBEAT_OK"):
-            stripped = stripped[len("HEARTBEAT_OK"):].strip()
-        if stripped.endswith("HEARTBEAT_OK"):
-            stripped = stripped[:-len("HEARTBEAT_OK")].strip()
-        if not stripped or len(stripped) < 5:
-            _log.debug("心跳内容过短（HEARTBEAT_OK 变体），静默")
-            return
-
-        # 投递到管理员
-        await self._deliver_to_admin(stripped)
+            _log.debug("心跳无需投递")
 
     async def _deliver_to_admin(self, text: str):
         """发送心跳提醒给第一个管理员。"""
