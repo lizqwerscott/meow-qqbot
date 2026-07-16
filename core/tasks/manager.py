@@ -189,6 +189,13 @@ class CronJobManager:
         if cron_expression and at is not None:
             raise ValueError("cron_expression 和 at 不能同时设置")
 
+        if payload_type == "command":
+            prompt = ""
+        elif payload_type == "system_event":
+            command = ""
+        else:
+            command = ""
+
         job = CronJob(
             name=name,
             cron_expression=cron_expression,
