@@ -556,45 +556,30 @@ class AgentEngine:
             )
             return None, str(e)
 
-    async def execute_heartbeat(self, prompt: str, session: str = "isolated") -> tuple[bool, str | None]:
+    async def execute_heartbeat(
+        self,
+        prompt: str,
+        session: str = "isolated",
+        system_prompt_mode: str = "minimal",
+    ) -> tuple[bool, str | None]:
         """执行心跳检查的工具调用循环。
 
-        AI 可以在循环中：读取 HEARTBEAT.md、搜索记忆、检查文件，
-        最后通过 heartbeat_respond(notify, notification_text) 工具或 HEARTBEAT_OK 文本来回应。
+        工具调用：搜索记忆、检查文件，最终通过 heartbeat_respond 工具回应。
+
+        HEARTBEAT.md 内容已由 HeartbeatManager 预读并注入 prompt。
+        聊天历史由 build_heartbeat_messages 按独立消息对注入。
 
         Args:
-            prompt: 心跳检查的 prompt
-            session: 会话模式，"isolated"（隔离，无历史）或 "main"（主会话，含最近历史）
+            prompt: 完整的 user message（HEARTBEAT.md 内容 + 时间）
+            session: "isolated"（无历史）或 "main"（含最近历史）
+            system_prompt_mode: "normal"（复用完整角色卡 SP）或 "minimal"（极简 SP）
 
         Returns:
             (should_notify, notification_text)
-            - should_notify=False: 无需通知（HEARTBEAT_OK / notify=false）
-            - should_notify=True:  需要投递 notification_text
         """
         chat_id = "heartbeat:main"
-        _log.info(f"开始心跳检查: session={session} prompt={prompt[:80]}")
+        _log.info(f"开始心跳检查: session={session} mode={system_prompt_mode} prompt={prompt[:80]}")
         prompt = prompt or ""
-
-        # ── main 模式：注入最近聊天历史 ──
-        if session == "main" and self._admin_id:
-            main_chat_id = self._admin_id[0]
-            try:
-                recent = await self.context_manager.get_chat_history_async(
-                    main_chat_id, max_messages=20,
-                )
-                history_lines = []
-                for msg in recent:
-                    role = msg.get("role", "unknown")
-                    content = (msg.get("content") or "")[:300]
-                    if role == "user":
-                        history_lines.append(f"用户: {content}")
-                    elif role == "assistant":
-                        history_lines.append(f"助手: {content}")
-                if history_lines:
-                    prompt += "\n\n--- 最近的聊天记录 ---\n" + "\n".join(history_lines[-15:]) + "\n---"
-                    _log.info(f"心跳主会话模式: history_lines={len(history_lines)}")
-            except Exception as e:
-                _log.warning(f"心跳读取历史失败，回退隔离模式: {e}")
 
         captured_replies: list[str] = []
 
@@ -612,6 +597,9 @@ class AgentEngine:
         try:
             messages, tools_to_use = await self.prompt_builder.build_heartbeat_messages(
                 prompt=prompt,
+                system_prompt_mode=system_prompt_mode,
+                session_mode=session,
+                admin_chat_id=self._admin_id[0] if self._admin_id else "",
             )
 
             self.tool_executor._heartbeat_response = {}

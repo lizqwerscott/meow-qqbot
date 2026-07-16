@@ -314,6 +314,7 @@ async def main() -> None:
             admin_ids=admin_ids,
             api_client=engine.api,
             agent_engine=agent_engine,
+            context_manager=context_manager,
             heartbeat_path=str(workspace_manager.heartbeat_path()),
         )
 

@@ -44,6 +44,20 @@ _MEMORY_SYSTEM_DESC = (
     "- mark_important：记录重要信息。用户解释背景/喜好/事实时主动调用，立即存入长期记忆\n"
 )
 
+HEARTBEAT_MINIMAL_SYSTEM_PROMPT = (
+    "你是一个群聊助手的心跳检查器，运行在独立的 Heartbeat Session 中。\n\n"
+    "可用工具：文件工具、记忆工具、命令工具、heartbeat_respond。\n\n"
+    "回应方式：\n"
+    "- 如果没有任何需要关注的事项，调用 heartbeat_respond(notify=false)\n"
+    "- 如果有需要提醒的事项，调用 heartbeat_respond(notify=true, notification_text=\"...\")\n"
+    "  提醒文本简洁明了，不要超过 200 字\n"
+    "- 不要闲聊或回复额外内容\n\n"
+    "规则：\n"
+    "1. 不要凭印象回答，不确定的先查记忆\n"
+    "2. 不要编造事实\n"
+    "3. 只汇报真正需要关注的事项，不要过度打扰管理员"
+)
+
 _DIRTY_PATTERNS = (
     "<available_skills", "<skill>", "<description>",
     "<name>", "【工具配合原则】", "【记忆系统】",
@@ -358,13 +372,19 @@ class PromptBuilder:
     async def build_heartbeat_messages(
         self,
         prompt: str,
+        *,
+        system_prompt_mode: str = "minimal",
+        session_mode: str = "isolated",
+        admin_chat_id: str = "",
         chat_id: str = "heartbeat:main",
-        is_group: bool = False,
     ) -> Tuple[List[dict], Optional[List[dict]]]:
-        """组装心跳检查的 messages 列表（使用 heartbeat_chat.j2 模板）。
+        """组装心跳检查的 messages 列表。
 
         工具集：文件工具 + 记忆工具 + heartbeat_respond + execute_command。
-        不包含表情工具和任务创建工具。
+        system_prompt_mode:
+          - "normal": 复用正常聊天的角色卡 SP（角色卡 + 技能介绍 + 记忆系统描述 + 动态上下文）
+          - "minimal": 极简 heartbeat 专用 SP
+        session_mode="main": 从管理员真实 chat_id 读取历史，作为独立消息对注入。
 
         Returns:
             (messages, tools_to_use)
@@ -389,18 +409,74 @@ class PromptBuilder:
 
         tools_to_use = tools_to_use or None
 
-        from datetime import datetime, timezone, timedelta
-        _tz = timezone(timedelta(hours=8))
-        now = datetime.now(_tz)
-        system_prompt = self.template_manager.get_heartbeat_prompt(
-            current_time=now.strftime("%Y-%m-%d %H:%M:%S (CST/UTC+8)"),
+        # ── system message ──
+        if system_prompt_mode == "normal":
+            system_prompt = self._build_normal_heartbeat_system_prompt(chat_id)
+        else:
+            system_prompt = HEARTBEAT_MINIMAL_SYSTEM_PROMPT
+
+        messages: List[dict] = [{"role": "system", "content": system_prompt}]
+
+        # ── 聊天历史（作为独立消息对，仅 session=main） ──
+        if session_mode == "main" and admin_chat_id:
+            try:
+                recent = await self.context_manager.get_chat_history_async(
+                    admin_chat_id, max_messages=20,
+                )
+                inserted = 0
+                for msg in recent[-15:]:
+                    role = msg.get("role")
+                    if role in ("user", "assistant"):
+                        content = (msg.get("content") or "")
+                        if content:
+                            messages.append({"role": role, "content": content[:300]})
+                            inserted += 1
+                if inserted:
+                    _log.info(f"心跳历史注入: {inserted} 条消息（来自 {admin_chat_id[:12]}..）")
+            except Exception as e:
+                _log.warning(f"心跳读取历史失败，回退隔离模式: {e}")
+
+        # ── heartbeat user message ──
+        messages.append({"role": "user", "content": prompt})
+
+        return messages, tools_to_use
+
+    def _build_normal_heartbeat_system_prompt(self, chat_id: str) -> str:
+        """构建"normal"模式的 system prompt（类似正常聊天的 SP，不含历史）。"""
+        memory_desc = _MEMORY_SYSTEM_DESC if self.hindsight else ""
+
+        skill_intro = (
+            self._skill_managers.get_skill_system_intro()
+            if (self._skill_managers and self._skill_managers.has_skills)
+            else ""
         )
 
-        messages: List[dict] = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
-        ]
-        return messages, tools_to_use
+        static_prompt = self.template_manager.get_private_chat_prompt(
+            user_name="管理员",
+            has_emojis=False,
+            has_users=False,
+            memory_system_desc=memory_desc,
+            skill_system_intro=skill_intro,
+        )
+
+        # 动态上下文
+        dynamic_parts: List[str] = []
+
+        _tz = timezone(timedelta(hours=8))
+        now = datetime.now(_tz)
+        weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+        dynamic_parts.append(
+            f"当前时间: {now.strftime(f'%Y-%m-%d %H:%M:%S ({weekday_names[now.weekday()]})')} (CST/UTC+8)"
+        )
+
+        if self._workspace_manager:
+            dynamic_parts.append(f"当前工作区: {chat_id[:12]}")
+            dynamic_parts.append(
+                "read_file / write_file / edit_file / list_files / search_files "
+                "五个文件工具可访问整个 workspaces/ 根目录（管理员权限）。"
+            )
+
+        return static_prompt + "\n\n" + "\n\n".join(dynamic_parts)
 
     async def build_memory_context(self, sender_id: str, input_message: InputMessage) -> str:
         """构建记忆上下文字符串（公开，供 ToolLoop Queue Steering 使用）。"""

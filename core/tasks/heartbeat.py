@@ -3,11 +3,8 @@
 独立 asyncio 循环，不创建 TaskRecord/CronJob。
 让 AI 通过工具调用循环定期检查是否有需要关注的事项，有提醒则发给管理员。
 
-AI 在工具循环中可以：
-- read_file(HEARTBEAT.md) 读取心跳检查清单
-- search_memory 搜索待办事项和提醒
-- 检查工作区文件
-- 最终通过 heartbeat_respond(notify, notification_text) 工具回应
+HEARTBEAT.md 由框架预读后直接注入 user message（AI 不需要 tool call 读取）。
+通知 DM 同时写入 context_manager，保证后续心跳能感知反馈链路。
 """
 
 import asyncio
@@ -18,6 +15,12 @@ from typing import Any, Optional
 
 _log = logging.getLogger(__name__)
 
+HEARTBEAT_DEFAULT_PROMPT = (
+    "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. "
+    "Do not infer or repeat old tasks from past chats. "
+    "If nothing needs attention, reply HEARTBEAT_OK."
+)
+
 
 class HeartbeatManager:
     """周期心跳管理器。
@@ -27,19 +30,11 @@ class HeartbeatManager:
     使用 AgentEngine.execute_heartbeat() 走完整工具调用循环。
 
     Args:
-        config: {
-            "enabled": bool,
-            "every": int,              # 分钟
-            "active_hours": {
-                "start": "09:00",
-                "end": "24:00",
-            },
-            "skip_when_busy": bool,
-            "busy_idle_minutes": int,
-        }
-        agent_engine: AgentEngine 实例（用于 execute_heartbeat 和 last_active_time）
-        api_client: QQApiClient 实例（用于发消息）
+        config: heartbeat 配置段
+        agent_engine: AgentEngine 实例
+        api_client: QQApiClient 实例
         admin_ids: 管理员 ID 列表
+        context_manager: ChatContextManager（用于记录通知 DM）
     """
 
     def __init__(
@@ -53,6 +48,7 @@ class HeartbeatManager:
         api_client: Any = None,
         agent_engine: Any = None,
         heartbeat_path: str = "",
+        context_manager: Any = None,
     ):
         self._enabled = config.get("enabled", False)
         self._every_minutes = config.get("every", 30)
@@ -82,12 +78,15 @@ class HeartbeatManager:
         self._admin_ids = admin_ids if isinstance(admin_ids, list) else []
         self._api = api_client
         self._agent_engine = agent_engine
+        self._context_manager = context_manager
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._heartbeat_lock = asyncio.Lock()
         self._last_heartbeat_time: float = 0.0
         self._session = config.get("session", "isolated")
+        self._system_prompt_mode = config.get("system_prompt", "minimal")
+        self._config_prompt = config.get("prompt", "")
 
     async def start(self):
         if not self._enabled:
@@ -152,20 +151,31 @@ class HeartbeatManager:
         async with self._heartbeat_lock:
             return await self._run_heartbeat(prompt)
 
-    async def _run_heartbeat(self, prompt: str = "") -> tuple[bool, str | None]:
-        """内部执行心跳（调用方需持有 _heartbeat_lock）。"""
+    async def _run_heartbeat(self, manual_prompt: str = "") -> tuple[bool, str | None]:
+        """内部执行心跳（调用方需持有 _heartbeat_lock）。
+
+        user message 组装优先级：
+        manual_prompt（手动触发）>
+        config.prompt >
+        HEARTBEAT.md 文件内容 >
+        HEARTBEAT_DEFAULT_PROMPT
+        """
         if not self._agent_engine:
             _log.warning("心跳跳过：AgentEngine 未就绪")
             return False, None
 
-        if not prompt:
-            tz_name = "CST (UTC+8)"
-            now_str = datetime.now(timezone(timedelta(hours=8))).strftime(
-                "%Y-%m-%d %H:%M"
-            )
-            prompt = f"现在时间是 {now_str}（{tz_name}）。"
+        hb_content = await self._load_heartbeat_content(manual_prompt)
+        tz_name = "CST (UTC+8)"
+        now_str = datetime.now(timezone(timedelta(hours=8))).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        user_prompt = f"{hb_content}\n\n当前时间：{now_str}（{tz_name}）。"
 
-        should_notify, text = await self._agent_engine.execute_heartbeat(prompt, session=self._session)
+        should_notify, text = await self._agent_engine.execute_heartbeat(
+            prompt=user_prompt,
+            session=self._session,
+            system_prompt_mode=self._system_prompt_mode,
+        )
         self._last_heartbeat_time = time.time()
 
         if should_notify and text:
@@ -175,6 +185,42 @@ class HeartbeatManager:
             _log.debug("心跳无需投递")
 
         return should_notify, text
+
+    async def _load_heartbeat_content(self, manual_prompt: str = "") -> str:
+        """加载心跳指令内容。
+        优先级：manual_prompt > config.prompt > HEARTBEAT.md > HEARTBEAT_DEFAULT_PROMPT
+        """
+        if manual_prompt and manual_prompt.strip():
+            return manual_prompt.strip()
+
+        if self._config_prompt and self._config_prompt.strip():
+            return self._config_prompt.strip()
+
+        content = await self._read_heartbeat_file()
+        if content and content.strip():
+            return content.strip()
+
+        return HEARTBEAT_DEFAULT_PROMPT
+
+    async def _read_heartbeat_file(self) -> str:
+        """异步读取 HEARTBEAT.md 文件内容。"""
+        if not self._heartbeat_path:
+            return ""
+        try:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, self._sync_read_heartbeat_file)
+        except Exception:
+            return ""
+
+    def _sync_read_heartbeat_file(self) -> str:
+        try:
+            with open(self._heartbeat_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            return content.strip() if content.strip() else ""
+        except FileNotFoundError:
+            return ""
+        except Exception:
+            return ""
 
     def _in_active_hours(self) -> bool:
         try:
@@ -205,7 +251,7 @@ class HeartbeatManager:
         return elapsed < self._busy_idle_minutes * 60
 
     async def _deliver_to_admin(self, text: str):
-        """发送心跳提醒给第一个管理员。"""
+        """发送心跳提醒给第一个管理员，同时写入 context_manager 保证反馈链路。"""
         if not self._admin_ids:
             _log.warning("心跳无法投递：未配置管理员 ID")
             return
@@ -218,5 +264,11 @@ class HeartbeatManager:
         try:
             await self._api.send_text("c2c", admin_id, content, reply_to=None)
             _log.info(f"心跳提醒已投递到管理员 {admin_id[:12]}..")
+
+            # 写入 context_manager，后续心跳（session=main）能感知反馈链路
+            if self._context_manager:
+                await self._context_manager.add_assistant_message_async(
+                    admin_id, content, f"hb_{int(time.time())}"
+                )
         except Exception as e:
             _log.error(f"心跳投递失败: {e}")
