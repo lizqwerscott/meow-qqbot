@@ -859,10 +859,13 @@ class ToolExecutor:
         payload_model = (args.get("model") or "").strip() or None
         payload_thinking = (args.get("thinking") or "").strip() or None
 
-        if not name or not prompt:
+        if not name:
             return ToolResult(content=json.dumps(
-                {"error": "name 和 prompt 不能为空"},
-                ensure_ascii=False,
+                {"error": "name 不能为空"}, ensure_ascii=False,
+            ))
+        if not prompt and payload_type not in ("command", "system_event"):
+            return ToolResult(content=json.dumps(
+                {"error": "prompt 不能为空"}, ensure_ascii=False,
             ))
         if not cron_expression and not at_str:
             return ToolResult(content=json.dumps(
