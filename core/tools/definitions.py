@@ -612,6 +612,139 @@ TASK_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_cron_jobs",
+            "description": "列出所有定时/一次性任务。返回任务的 ID、名称、调度表达式、启用状态、下次执行时间等信息。",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_cron_job",
+            "description": (
+                "修改一个已有定时/一次性任务的参数。只修改提供的字段，未提供的字段保持不变。"
+                "所有时间均为北京时间 (CST/UTC+8)。\n"
+                "可通过 cron_expression、at、prompt、session_mode、session_id、"
+                "payload_type、command、model、thinking 参数修改对应设置。\n"
+                "如果要修改执行时间：传入 cron_expression 会覆盖为周期性任务，传入 at 会覆盖为一次性任务。\n"
+                "job_id 支持完整 ID 或任务名称前缀模糊匹配。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "要修改的任务 ID（完整 ID 或名称前缀模糊匹配）",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "新的任务名字",
+                    },
+                    "cron_expression": {
+                        "type": "string",
+                        "description": "新的周期性 cron 表达式（北京时间 CST/UTC+8）。传入此参数会覆盖 at 变为周期性任务。例如：'0 8 * * *' 每天早上8点",
+                    },
+                    "at": {
+                        "type": "string",
+                        "description": "新的一次性执行时间，ISO 8601 格式（北京时间 CST/UTC+8）。传入此参数会覆盖 cron_expression 变为一次性任务。例如：'2027-01-01T08:00:00+08:00'",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "新的 AI 执行指令",
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "是否启用。false 表示暂停，true 表示启用",
+                    },
+                    "session_mode": {
+                        "type": "string",
+                        "enum": ["isolated", "custom", "main"],
+                        "description": "新的 session 模式",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "custom 模式下新的命名 session ID",
+                    },
+                    "payload_type": {
+                        "type": "string",
+                        "enum": ["message", "command", "system_event"],
+                        "description": "新的载荷类型",
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "新的 shell 命令（payload_type=command 时）",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "新的 AI 模型覆盖",
+                    },
+                    "thinking": {
+                        "type": "string",
+                        "enum": ["off", "low", "medium", "high"],
+                        "description": "新的 AI 思考级别",
+                    },
+                },
+                "required": ["job_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_cron_job",
+            "description": "删除一个定时/一次性任务。job_id 支持完整 ID 或任务名称前缀模糊匹配。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "要删除的任务 ID（完整 ID 或名称前缀模糊匹配）",
+                    },
+                },
+                "required": ["job_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "enable_cron_job",
+            "description": "启用一个已暂停的定时任务。job_id 支持完整 ID 或任务名称前缀模糊匹配。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "要启用的任务 ID（完整 ID 或名称前缀模糊匹配）",
+                    },
+                },
+                "required": ["job_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "disable_cron_job",
+            "description": "暂停一个定时任务（不会删除，后续可用 enable_cron_job 恢复）。job_id 支持完整 ID 或任务名称前缀模糊匹配。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "要暂停的任务 ID（完整 ID 或名称前缀模糊匹配）",
+                    },
+                },
+                "required": ["job_id"],
+            },
+        },
+    },
 ]
 
 
@@ -623,6 +756,8 @@ def tool_names() -> set[str]:
         "rescan_skills", "view_skill", "execute_skill", "execute_command",
         "define_jargon", "report_behavior_effect",
         "create_task", "create_cron_job", "cancel_task",
+        "list_cron_jobs", "update_cron_job", "delete_cron_job",
+        "enable_cron_job", "disable_cron_job",
         "read_file", "write_file", "edit_file",
         "list_files", "search_files",
         "heartbeat_respond",
