@@ -476,6 +476,45 @@ HEARTBEAT_RESPOND_TOOL = [
 ]
 
 
+LIST_TASKS_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_tasks",
+            "description": "列出后台任务执行记录。返回任务的 ID、类型、状态、创建时间、指令摘要、结果/错误摘要等信息。可选按状态过滤。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "按状态过滤。可选: pending, running, success, failed, cancelled, timeout。不填则返回所有状态",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "返回数量上限，默认 20",
+                    },
+                },
+            },
+        },
+    },
+]
+
+
+LIST_CRON_JOBS_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_cron_jobs",
+            "description": "列出所有定时/一次性任务。返回任务的 ID、名称、调度表达式、启用状态、下次执行时间等信息。",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+]
+
+
 TASK_TOOLS = [
     {
         "type": "function",
@@ -612,17 +651,8 @@ TASK_TOOLS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_cron_jobs",
-            "description": "列出所有定时/一次性任务。返回任务的 ID、名称、调度表达式、启用状态、下次执行时间等信息。",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-    },
+    *LIST_TASKS_TOOL,
+    *LIST_CRON_JOBS_TOOL,
     {
         "type": "function",
         "function": {
@@ -755,7 +785,8 @@ def tool_names() -> set[str]:
         "search_memory", "mark_important", "search_relation",
         "rescan_skills", "view_skill", "execute_skill", "execute_command",
         "define_jargon", "report_behavior_effect",
-        "create_task", "create_cron_job", "cancel_task",
+        "create_task", "create_cron_job",         "cancel_task",
+        "list_tasks",
         "list_cron_jobs", "update_cron_job", "delete_cron_job",
         "enable_cron_job", "disable_cron_job",
         "read_file", "write_file", "edit_file",
