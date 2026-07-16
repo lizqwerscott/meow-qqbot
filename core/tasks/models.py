@@ -12,12 +12,10 @@ class SessionMode(str, Enum):
 
     对应 OpenClaw 的 --session 机制：
     - isolated:  每次执行使用全新 session（task:<uuid>）
-    - current:   在创建时绑定的会话中执行（共享对话上下文）
     - custom:    持久化命名 session（跨执行保留上下文）
     - main:      专用 cron:main 通道（系统提醒）
     """
     ISOLATED = "isolated"
-    CURRENT = "current"
     CUSTOM = "custom"
     MAIN = "main"
 
@@ -109,7 +107,7 @@ class CronJob:
     next_run_at: Optional[float] = None
     delivery_channel: Optional[str] = None  # 结果投递到的 chat_id
     is_group: bool = True  # 来源聊天是否为群聊（影响 send_emoji 等工具使用群聊还是私聊接口）
-    session_mode: str = SessionMode.ISOLATED.value  # isolated/current/custom/main
+    session_mode: str = SessionMode.ISOLATED.value  # isolated/custom/main
     custom_session_id: Optional[str] = None  # custom 模式下的命名 session ID
 
     # 载荷类型

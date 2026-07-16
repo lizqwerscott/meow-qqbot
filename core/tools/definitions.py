@@ -536,10 +536,9 @@ TASK_TOOLS = [
                     },
                     "session_mode": {
                         "type": "string",
-                        "enum": ["isolated", "current", "custom", "main"],
+                        "enum": ["isolated", "custom", "main"],
                         "description": "任务执行所在的 session 模式。默认为 isolated。\n"
                         "- isolated: 每次执行使用全新隔离 session（默认）\n"
-                        "- current: 在创建时绑定的当前对话中执行，共享聊天上下文\n"
                         "- custom: 持久化命名 session，跨多次执行保留上下文\n"
                         "- main: 专用系统提醒通道 cron:main",
                     },

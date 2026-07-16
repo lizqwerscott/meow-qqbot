@@ -39,8 +39,7 @@
                     {% endif %}
                 </td>
                 <td>
-                    {% if job.session_mode == "current" %}💬 current
-                    {% elif job.session_mode == "custom" %}📁 cron:{{ job.custom_session_id }}
+                    {% if job.session_mode == "custom" %}📁 cron:{{ job.custom_session_id }}
                     {% elif job.session_mode == "main" %}🔔 cron:main
                     {% else %}🔒 isolated{% endif %}
                 </td>

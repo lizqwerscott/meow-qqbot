@@ -884,7 +884,7 @@ class ToolExecutor:
                 ))
 
         # 校验参数
-        valid_modes = {"isolated", "current", "custom", "main"}
+        valid_modes = {"isolated", "custom", "main"}
         if session_mode not in valid_modes:
             session_mode = "isolated"
         custom_session_id = session_id if session_mode == "custom" else None
@@ -937,7 +937,6 @@ class ToolExecutor:
         # session 信息
         mode_desc = {
             "isolated": "每次执行使用全新隔离 session",
-            "current": "在当前聊天会话中执行",
             "custom": f"在命名 session cron:{custom_session_id} 中执行（跨运行保留上下文）",
             "main": "在专用通道 cron:main 中执行",
         }.get(session_mode, "")

@@ -4,7 +4,6 @@
   1. 创建合成 InputMessage（用任务 prompt 作为 content）
   2. 根据 session_mode 选择 chat_id → 复用 SessionTaskManager 的队列锁隔离
      - isolated: task:<uuid>（全新隔离上下文）
-     - current: delivery_channel（真实聊天会话，共享上下文）
      - custom: cron:<custom_id>（持久化命名 session）
      - main: cron:main（专用 cron 通道）
   3. 通过 AgentEngine._process_message 路径执行（复用 ToolLoop）
@@ -170,9 +169,10 @@ class BackgroundTaskRunner:
     def _resolve_session_id(job: CronJob, task_id: str) -> str:
         """根据 job 的 session_mode 确定执行 chat_id。"""
         mode = job.session_mode
-        if mode == SessionMode.CURRENT.value:
-            return job.delivery_channel or f"task:{task_id}"
-        elif mode == SessionMode.CUSTOM.value:
+        if mode == "current":
+            mode = SessionMode.ISOLATED.value  # backward compat
+            _log.info(f"兼容旧 job: session_mode=current -> isolated (job={job.name})")
+        if mode == SessionMode.CUSTOM.value:
             cid = job.custom_session_id
             return f"cron:{cid}" if cid else f"task:{task_id}"
         elif mode == SessionMode.MAIN.value:
@@ -293,6 +293,7 @@ class BackgroundTaskRunner:
 
         # 根据 session_mode 覆盖 session_id
         task.session_id = self._resolve_session_id(job, task.id)
+        await self._task_manager._store.update_task(task)
         _log.info(
             f"CronJob [{job.name}] payload={job.payload_type} "
             f"session={job.session_mode} session_id={task.session_id}"
