@@ -29,7 +29,7 @@ class TaskManager:
 
     # ── 创建 ──
 
-    def create_task(
+    async def create_task(
         self,
         prompt: str,
         task_type: str = "manual",
@@ -45,7 +45,7 @@ class TaskManager:
             delivery_channel=delivery_channel,
             reply_to_message_id=reply_to_message_id,
         )
-        self._store.add_task(task)
+        await self._store.add_task(task)
         _log.info(
             f"任务已创建: id={task.id[:12]}.. type={task_type} "
             f"prompt={prompt[:60]}"
@@ -54,17 +54,17 @@ class TaskManager:
 
     # ── 更新 ──
 
-    def start_task(self, task_id: str) -> Optional[TaskRecord]:
+    async def start_task(self, task_id: str) -> Optional[TaskRecord]:
         """标记任务为 running。"""
         task = self._store.get_task(task_id)
         if task is None:
             return None
         task.status = TaskStatus.RUNNING
         task.started_at = time.time()
-        self._store.update_task(task)
+        await self._store.update_task(task)
         return task
 
-    def finish_task(
+    async def finish_task(
         self,
         task_id: str,
         status: TaskStatus = TaskStatus.SUCCESS,
@@ -81,7 +81,7 @@ class TaskManager:
             task.result = result
         if error is not None:
             task.error = error
-        self._store.update_task(task)
+        await self._store.update_task(task)
         self._running_tasks.pop(task_id, None)
         _log.info(
             f"任务完成: id={task_id[:12]}.. status={status.value} "
@@ -128,14 +128,14 @@ class TaskManager:
         task.status = TaskStatus.CANCELLED
         task.finished_at = time.time()
         task.error = "用户取消"
-        self._store.update_task(task)
+        await self._store.update_task(task)
         _log.info(f"任务已取消: id={task_id[:12]}..")
         return True
 
     # ── 清理 ──
 
-    def cleanup_old_tasks(self) -> int:
-        return self._store.cleanup_old_tasks()
+    async def cleanup_old_tasks(self) -> int:
+        return await self._store.cleanup_old_tasks()
 
 
 class CronJobManager:
@@ -165,7 +165,7 @@ class CronJobManager:
             _log.error(f"定时任务 {job.name} cron 表达式解析失败: {e}")
             job.next_run_at = None
 
-    def create_job(
+    async def create_job(
         self,
         name: str,
         cron_expression: str = "",
@@ -184,25 +184,6 @@ class CronJobManager:
         model: Optional[str] = None,
         thinking: Optional[str] = None,
     ) -> CronJob:
-        """创建定时或一次性任务。
-
-        Args:
-            name: 任务名称
-            cron_expression: 周期性 cron 表达式（与 at 二选一）
-            prompt: AI 执行指令
-            at: 一次性执行 UTC 时间戳（与 cron_expression 二选一）
-            delivery_channel: 结果投递 chat_id
-            is_group: 来源聊天是否为群聊
-            catch_up: 重启时补跑（仅周期任务）
-            enabled: 是否启用
-            delete_after_run: 一次性任务执行后自动删除
-            session_mode: isolated/current/custom/main
-            custom_session_id: custom 模式的命名 session ID
-            payload_type: message/command/system_event
-            command: shell 命令（payload_type=command 时使用）
-            model: 模型覆盖
-            thinking: 思考级别
-        """
         if not cron_expression and at is None:
             raise ValueError("cron_expression 和 at 必须至少提供一个")
         if cron_expression and at is not None:
@@ -226,7 +207,7 @@ class CronJobManager:
             thinking=thinking,
         )
         self._recalculate_next_run(job)
-        self._store.add_job(job)
+        await self._store.add_job(job)
         schedule_desc = f"at={at}" if at is not None else f"cron={cron_expression}"
         _log.info(
             f"定时任务已创建: id={job.id[:12]}.. name={name} "
@@ -236,8 +217,8 @@ class CronJobManager:
         )
         return job
 
-    def update_job(self, job: CronJob) -> None:
-        self._store.update_job(job)
+    async def update_job(self, job: CronJob) -> None:
+        await self._store.update_job(job)
 
     def get_job(self, job_id: str) -> Optional[CronJob]:
         return self._store.get_job(job_id)
@@ -245,36 +226,33 @@ class CronJobManager:
     def list_jobs(self) -> List[CronJob]:
         return self._store.list_jobs()
 
-    def delete_job(self, job_id: str) -> bool:
+    async def delete_job(self, job_id: str) -> bool:
         job = self._store.get_job(job_id)
         if job is None:
             return False
-        self._store.delete_job(job_id)
+        await self._store.delete_job(job_id)
         _log.info(f"定时任务已删除: id={job_id[:12]}.. name={job.name}")
         return True
 
     def find_jobs_by_name(self, name: str) -> List[CronJob]:
-        """按名称模糊查找。"""
         name_lower = name.lower()
         return [j for j in self._store.list_jobs() if name_lower in j.name.lower()]
 
-    # ── 启用/禁用 ──
-
-    def enable_job(self, job_id: str) -> bool:
+    async def enable_job(self, job_id: str) -> bool:
         job = self._store.get_job(job_id)
         if job is None:
             return False
         job.enabled = True
         self._recalculate_next_run(job)
-        self._store.update_job(job)
+        await self._store.update_job(job)
         _log.info(f"定时任务已启用: {job.name}")
         return True
 
-    def disable_job(self, job_id: str) -> bool:
+    async def disable_job(self, job_id: str) -> bool:
         job = self._store.get_job(job_id)
         if job is None:
             return False
         job.enabled = False
-        self._store.update_job(job)
+        await self._store.update_job(job)
         _log.info(f"定时任务已禁用: {job.name}")
         return True

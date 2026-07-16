@@ -229,7 +229,7 @@ class ToolLoop:
                     content = result.content
                     if result.sent_emoji:
                         sent_emoji = True
-                except BaseException as e:
+                except Exception as e:
                     _log.error(f"工具 [{tc.function.name}] 执行异常: {e}")
                     content = json.dumps({"error": f"执行异常: {e}"}, ensure_ascii=False)
                     # 先记录 tool 响应再传播，避免历史中留下孤立 tool_calls

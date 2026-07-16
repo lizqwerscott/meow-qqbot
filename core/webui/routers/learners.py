@@ -21,7 +21,8 @@ def _get_learner_data(store: Any) -> list:
     try:
         items = store.get_all()
         return items
-    except Exception:
+    except Exception as e:
+        _log.warning(f"获取学习数据失败: {e}")
         return []
 
 

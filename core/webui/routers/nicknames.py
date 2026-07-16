@@ -19,7 +19,8 @@ def _load_json(path: str) -> dict:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
+        except Exception as e:
+            _log.warning(f"加载昵称文件失败 [{path}]: {e}")
             return {}
     return {}
 

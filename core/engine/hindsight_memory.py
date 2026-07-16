@@ -5,6 +5,7 @@
 - 用户隔离靠 tag user:{sender_id}，recall 时 tags_match=all_strict
 """
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timezone
@@ -153,7 +154,7 @@ class HindsightMemory:
 
         start = time.monotonic()
         try:
-            self._client.get_version()   # 同步 API 在独立调用中没问题（不在事件循环内）
+            await asyncio.to_thread(self._client.get_version)
             latency = (time.monotonic() - start) * 1000
             result = {"status": "ok", "latency_ms": round(latency, 1)}
         except Exception as e:

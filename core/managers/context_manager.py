@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -641,7 +642,8 @@ class ChatContextManager:
         self.hard_clear = hard_clear
         self.cache_dir = cache_dir
         self.contexts: Dict[str, ChatContext] = {}
-        self._ctx_lock = asyncio.Lock()                     # 保护 self.contexts 字典
+        self._ctx_lock = asyncio.Lock()                     # 保护 _chat_locks 字典
+        self._ctx_sync_lock = threading.Lock()               # 保护 self.contexts 字典
         self._chat_locks: Dict[str, asyncio.Lock] = {}      # 每 chat 操作锁
 
     async def _get_chat_lock(self, chat_id: str) -> asyncio.Lock:
@@ -651,21 +653,21 @@ class ChatContextManager:
             return self._chat_locks[chat_id]
 
     def get_context(self, chat_id: str) -> ChatContext:
-        if chat_id not in self.contexts:
-            ctx = ChatContext(
-                chat_id,
-                max_history=self.max_history_per_chat,
-                compact_threshold_tokens=self.compact_threshold_tokens,
-                keep_recent_tokens=self.keep_recent_tokens,
-                cache_dir=self.cache_dir,
-            )
-            ctx.load()
-            self.contexts[chat_id] = ctx
-        return self.contexts[chat_id]
+        with self._ctx_sync_lock:
+            if chat_id not in self.contexts:
+                ctx = ChatContext(
+                    chat_id,
+                    max_history=self.max_history_per_chat,
+                    compact_threshold_tokens=self.compact_threshold_tokens,
+                    keep_recent_tokens=self.keep_recent_tokens,
+                    cache_dir=self.cache_dir,
+                )
+                ctx.load()
+                self.contexts[chat_id] = ctx
+            return self.contexts[chat_id]
 
     async def get_context_async(self, chat_id: str) -> ChatContext:
-        async with self._ctx_lock:
-            return self.get_context(chat_id)
+        return self.get_context(chat_id)
 
     def add_user_message(
         self,
@@ -813,18 +815,20 @@ class ChatContextManager:
         return compacted, usage, context
 
     def remove_context(self, chat_id: str) -> None:
-        if chat_id in self.contexts:
-            del self.contexts[chat_id]
+        with self._ctx_sync_lock:
+            if chat_id in self.contexts:
+                del self.contexts[chat_id]
         self._chat_locks.pop(chat_id, None)
 
     def cleanup_inactive_contexts(self, max_inactivity: int = 7200) -> List[str]:
         removed = []
         current_time = time.time()
-        for chat_id, context in list(self.contexts.items()):
-            if context.get_inactivity_time() > max_inactivity:
-                removed.append(chat_id)
-                del self.contexts[chat_id]
-                self._chat_locks.pop(chat_id, None)
+        with self._ctx_sync_lock:
+            for chat_id, context in list(self.contexts.items()):
+                if context.get_inactivity_time() > max_inactivity:
+                    removed.append(chat_id)
+                    del self.contexts[chat_id]
+                    self._chat_locks.pop(chat_id, None)
         return removed
 
     async def cleanup_inactive_contexts_async(

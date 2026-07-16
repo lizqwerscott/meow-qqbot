@@ -1,7 +1,10 @@
+import logging
 import os
 from typing import Any, Dict, Optional
 
 import jinja2
+
+_log = logging.getLogger(__name__)
 
 
 class TemplateManager:
@@ -30,7 +33,7 @@ class TemplateManager:
                 with open(card_path, "r", encoding="utf-8") as f:
                     self.character_card = f.read().strip()
             except Exception as e:
-                print(f"读取角色卡文件失败: {e}")
+                _log.error(f"读取角色卡文件失败: {e}")
 
     def render_prompt_template(
         self, template_path: str, context: Dict[str, Any]
@@ -47,13 +50,13 @@ class TemplateManager:
         """
         try:
             if not os.path.exists(template_path):
-                print(f"提示模板文件不存在: {template_path}")
+                _log.warning(f"提示模板文件不存在: {template_path}")
                 return ""
 
             template = self.template_env.get_template(template_path)
             return template.render(**context)
         except Exception as e:
-            print(f"渲染提示模板失败: {e}")
+            _log.error(f"渲染提示模板失败: {e}")
             return ""
 
     def get_private_chat_prompt(

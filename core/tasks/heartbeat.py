@@ -209,7 +209,8 @@ class HeartbeatManager:
         try:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, self._sync_read_heartbeat_file)
-        except Exception:
+        except Exception as e:
+            _log.warning(f"异步读取 HEARTBEAT 文件失败: {e}")
             return ""
 
     def _sync_read_heartbeat_file(self) -> str:
@@ -219,7 +220,8 @@ class HeartbeatManager:
             return content.strip() if content.strip() else ""
         except FileNotFoundError:
             return ""
-        except Exception:
+        except Exception as e:
+            _log.warning(f"同步读取 HEARTBEAT 文件失败: {e}")
             return ""
 
     def _in_active_hours(self) -> bool:
@@ -237,7 +239,8 @@ class HeartbeatManager:
                 # 跨天（如 22:00 ~ 02:00）
                 return cur >= start_min or cur < end_min
             return start_min <= cur < end_min
-        except Exception:
+        except Exception as e:
+            _log.warning(f"活跃时间解析失败 [{self._active_start}-{self._active_end}]: {e}")
             return True  # 解析失败默认放行
 
     def _is_busy(self) -> bool:

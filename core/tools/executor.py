@@ -811,7 +811,7 @@ class ToolExecutor:
             ))
 
         # 在后台 fire-and-forget 执行
-        task = self._task_manager.create_task(
+        task = await self._task_manager.create_task(
             prompt=prompt,
             task_type="manual",
             delivery_channel=ctx.chat_id,
@@ -898,7 +898,7 @@ class ToolExecutor:
                 ensure_ascii=False,
             ))
 
-        job = self._cron_job_manager.create_job(
+        job = await self._cron_job_manager.create_job(
             name=name,
             cron_expression=cron_expression,
             prompt=prompt,
@@ -1024,7 +1024,7 @@ class ToolExecutor:
             ))
 
         try:
-            content = target.read_text(encoding="utf-8")
+            content = await asyncio.to_thread(target.read_text, encoding="utf-8")
         except Exception as e:
             return ToolResult(content=json.dumps(
                 {"error": f"读取失败: {e}"}, ensure_ascii=False,
@@ -1062,7 +1062,7 @@ class ToolExecutor:
 
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            target.write_text(content, encoding="utf-8")
+            await asyncio.to_thread(target.write_text, content, encoding="utf-8")
         except Exception as e:
             return ToolResult(content=json.dumps(
                 {"error": f"写入失败: {e}"}, ensure_ascii=False,
@@ -1111,7 +1111,7 @@ class ToolExecutor:
             ))
 
         try:
-            current = target.read_text(encoding="utf-8")
+            current = await asyncio.to_thread(target.read_text, encoding="utf-8")
         except Exception as e:
             return ToolResult(content=json.dumps(
                 {"error": f"读取失败: {e}"}, ensure_ascii=False,
@@ -1137,7 +1137,7 @@ class ToolExecutor:
             new_content = current.replace(old_string, new_string, 1)
 
         try:
-            target.write_text(new_content, encoding="utf-8")
+            await asyncio.to_thread(target.write_text, new_content, encoding="utf-8")
         except Exception as e:
             return ToolResult(content=json.dumps(
                 {"error": f"写入失败: {e}"}, ensure_ascii=False,

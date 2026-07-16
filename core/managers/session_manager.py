@@ -16,7 +16,7 @@ class SessionTaskManager:
     async def get_queue(self, chat_id: str) -> asyncio.Queue:
         async with self._lock:
             if chat_id not in self._queues:
-                self._queues[chat_id] = asyncio.Queue()
+                self._queues[chat_id] = asyncio.Queue(maxsize=256)
             return self._queues[chat_id]
 
     async def get_lock(self, chat_id: str) -> asyncio.Lock:

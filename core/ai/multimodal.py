@@ -190,7 +190,8 @@ class MultimodalService:
                 head = f.read(8192)
             h = hashlib.md5(head).hexdigest()
             return f"{h}:{mode}"
-        except Exception:
+        except Exception as e:
+            _log.debug(f"计算图片缓存键失败 [{image_path}]: {e}")
             return f"{image_path}:{mode}"
 
     def _set_cache(self, key: str, description: str, tags: List[str]) -> None:

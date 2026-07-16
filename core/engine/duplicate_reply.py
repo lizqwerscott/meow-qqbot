@@ -1,5 +1,6 @@
 """消息钩子：群聊自动复读检测器"""
 
+import asyncio
 import logging
 from collections import OrderedDict
 
@@ -16,6 +17,7 @@ class DuplicateReplyDetector:
     def __init__(self, context_manager):
         self._cm = context_manager
         self._replied: "OrderedDict[str, str]" = OrderedDict()
+        self._lock = asyncio.Lock()
 
     async def handle_message(self, input_message, reply_callback, get_user_nickname) -> bool:
         if not input_message.is_group:
@@ -35,8 +37,14 @@ class DuplicateReplyDetector:
             return False
         if last_content != prev_content:
             return False
-        if self._replied.get(input_message.chat_id) == last_content:
-            return False
+
+        async with self._lock:
+            if self._replied.get(input_message.chat_id) == last_content:
+                return False
+            self._replied[input_message.chat_id] = last_content
+            self._replied.move_to_end(input_message.chat_id)
+            if len(self._replied) > _MAX_CACHED_CHATS:
+                self._replied.popitem(last=False)
 
         _log.info(f"检测到重复消息 [{input_message.chat_id}]，自动复读: {last_content[:30]}")
         await reply_callback(
@@ -48,8 +56,4 @@ class DuplicateReplyDetector:
         await self._cm.add_assistant_message_async(
             input_message.chat_id, last_content, input_message.id,
         )
-        self._replied[input_message.chat_id] = last_content
-        self._replied.move_to_end(input_message.chat_id)
-        if len(self._replied) > _MAX_CACHED_CHATS:
-            self._replied.popitem(last=False)
         return True

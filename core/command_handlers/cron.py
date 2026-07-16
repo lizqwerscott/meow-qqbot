@@ -193,7 +193,7 @@ class CronCommand:
             if "thinking" in flags:
                 kwargs["thinking"] = flags["thinking"]
 
-            job = self._cron_mgr.create_job(**kwargs)
+            job = await self._cron_mgr.create_job(**kwargs)
 
             # 构建回复消息
             if at_ts is not None:
@@ -236,14 +236,14 @@ class CronCommand:
                 return make_reply(input_message, f"未找到定时任务: {target}")
             name = job.name
             mid = job.id[:12]
-            self._cron_mgr.delete_job(job.id)
+            await self._cron_mgr.delete_job(job.id)
             return make_reply(input_message, f"🗑️ 定时任务已删除: `{mid}..` **{name}**")
 
         elif subcmd == "pause":
             target = parts[1] if len(parts) > 1 else ""
             if not target:
                 return make_reply(input_message, "用法: /cron pause <id>")
-            success = self._cron_mgr.disable_job(target)
+            success = await self._cron_mgr.disable_job(target)
             if success:
                 return make_reply(input_message, f"⏸️ 定时任务 {target[:12]}.. 已暂停。")
             return make_reply(input_message, f"未找到定时任务: {target}")
@@ -252,7 +252,7 @@ class CronCommand:
             target = parts[1] if len(parts) > 1 else ""
             if not target:
                 return make_reply(input_message, "用法: /cron resume <id>")
-            success = self._cron_mgr.enable_job(target)
+            success = await self._cron_mgr.enable_job(target)
             if success:
                 return make_reply(input_message, f"▶️ 定时任务 {target[:12]}.. 已恢复。")
             return make_reply(input_message, f"未找到定时任务: {target}")
