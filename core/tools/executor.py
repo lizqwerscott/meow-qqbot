@@ -120,7 +120,7 @@ class ToolExecutor:
         self._register("create_task", self._exec_create_task, is_async=True)
         self._register("create_cron_job", self._exec_create_cron_job, is_async=True)
         self._register("cancel_task", self._exec_cancel_task, is_async=True)
-        self._register("list_tasks", self._exec_list_tasks)
+        self._register("list_tasks", self._exec_list_tasks, is_async=True)
         self._register("list_cron_jobs", self._exec_list_cron_jobs)
         self._register("update_cron_job", self._exec_update_cron_job, is_async=True)
         self._register("delete_cron_job", self._exec_delete_cron_job, is_async=True)
