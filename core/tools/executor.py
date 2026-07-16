@@ -120,6 +120,11 @@ class ToolExecutor:
         self._register("create_task", self._exec_create_task, is_async=True)
         self._register("create_cron_job", self._exec_create_cron_job, is_async=True)
         self._register("cancel_task", self._exec_cancel_task, is_async=True)
+        self._register("list_cron_jobs", self._exec_list_cron_jobs)
+        self._register("update_cron_job", self._exec_update_cron_job, is_async=True)
+        self._register("delete_cron_job", self._exec_delete_cron_job, is_async=True)
+        self._register("enable_cron_job", self._exec_enable_cron_job, is_async=True)
+        self._register("disable_cron_job", self._exec_disable_cron_job, is_async=True)
         self._register("read_file", self._exec_read_file, is_async=True)
         self._register("write_file", self._exec_write_file, is_async=True)
         self._register("edit_file", self._exec_edit_file, is_async=True)
@@ -991,6 +996,226 @@ class ToolExecutor:
             }, ensure_ascii=False))
         return ToolResult(content=json.dumps({
             "error": f"无法取消任务 {task_id[:12]}..",
+        }, ensure_ascii=False))
+
+    # ── 辅助：按 job_id 或名称查找 cron job ──
+
+    def _find_cron_job(self, job_id: str):
+        if not self._cron_job_manager:
+            return None
+        job = self._cron_job_manager.get_job(job_id)
+        if job is None:
+            matched = self._cron_job_manager.find_jobs_by_name(job_id)
+            if matched:
+                job = matched[0]
+        return job
+
+    # ════════════════════════════════════════════════════════
+    # 定时任务管理工具
+    # ════════════════════════════════════════════════════════
+
+    async def _exec_list_cron_jobs(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """列出所有定时任务。"""
+        if not self._cron_job_manager:
+            return ToolResult(content=json.dumps(
+                {"error": "定时任务系统未就绪"}, ensure_ascii=False,
+            ))
+        jobs = self._cron_job_manager.list_jobs()
+        if not jobs:
+            return ToolResult(content=json.dumps({
+                "jobs": [], "message": "暂无定时任务",
+            }, ensure_ascii=False))
+        result = []
+        for j in jobs:
+            result.append({
+                "id": j.id,
+                "name": j.name,
+                "cron_expression": j.cron_expression or "",
+                "at": j.at,
+                "enabled": j.enabled,
+                "next_run_at": j.next_run_at,
+                "is_one_shot": j.is_one_shot,
+                "session_mode": j.session_mode,
+                "custom_session_id": j.custom_session_id or "",
+                "payload_type": j.payload_type,
+                "prompt": j.prompt[:100] if j.prompt else "",
+                "command": j.command[:100] if j.command else "",
+            })
+        return ToolResult(content=json.dumps({
+            "jobs": result,
+            "total": len(result),
+        }, ensure_ascii=False))
+
+    async def _exec_update_cron_job(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """修改定时任务参数。"""
+        if not self._cron_job_manager:
+            return ToolResult(content=json.dumps(
+                {"error": "定时任务系统未就绪"}, ensure_ascii=False,
+            ))
+        job_id = (args.get("job_id") or "").strip()
+        if not job_id:
+            return ToolResult(content=json.dumps(
+                {"error": "job_id 不能为空"}, ensure_ascii=False,
+            ))
+        job = self._find_cron_job(job_id)
+        if job is None:
+            return ToolResult(content=json.dumps({
+                "error": f"未找到定时任务: {job_id}",
+            }, ensure_ascii=False))
+        old_name = job.name
+        changed = []
+
+        # 逐个字段覆盖
+        if "name" in args:
+            job.name = (args["name"] or "").strip()
+            changed.append("name")
+        if "cron_expression" in args:
+            job.cron_expression = (args["cron_expression"] or "").strip()
+            job.at = None
+            changed.append("cron_expression")
+        if "at" in args:
+            at_str = (args["at"] or "").strip()
+            if at_str:
+                at_ts = self._parse_iso_datetime(at_str)
+                if at_ts is None:
+                    return ToolResult(content=json.dumps({
+                        "error": f"时间格式无法解析: {at_str}",
+                    }, ensure_ascii=False))
+                job.at = at_ts
+                job.cron_expression = ""
+                changed.append("at")
+        if "prompt" in args:
+            job.prompt = (args["prompt"] or "").strip()
+            changed.append("prompt")
+        if "enabled" in args:
+            job.enabled = bool(args["enabled"])
+            changed.append("enabled")
+        if "session_mode" in args:
+            mode = (args["session_mode"] or "").strip()
+            valid_modes = {"isolated", "custom", "main"}
+            if mode in valid_modes:
+                job.session_mode = mode
+                changed.append("session_mode")
+        if "session_id" in args:
+            sid = (args["session_id"] or "").strip()
+            if job.session_mode == "custom":
+                job.custom_session_id = sid
+                changed.append("session_id")
+        if "payload_type" in args:
+            pt = (args["payload_type"] or "").strip()
+            valid_payloads = {"message", "command", "system_event"}
+            if pt in valid_payloads:
+                job.payload_type = pt
+                changed.append("payload_type")
+        if "command" in args:
+            job.command = (args["command"] or "").strip()
+            changed.append("command")
+        if "model" in args:
+            job.model = (args["model"] or "").strip() or None
+            changed.append("model")
+        if "thinking" in args:
+            job.thinking = (args["thinking"] or "").strip() or None
+            changed.append("thinking")
+
+        if not changed:
+            return ToolResult(content=json.dumps({
+                "error": "未提供要修改的字段",
+            }, ensure_ascii=False))
+
+        await self._cron_job_manager.update_job(job)
+        return ToolResult(content=json.dumps({
+            "success": True,
+            "job_id": job.id[:16],
+            "name": job.name,
+            "changed": changed,
+            "message": f"定时任务「{old_name}」已更新: {', '.join(changed)}",
+        }, ensure_ascii=False))
+
+    async def _exec_delete_cron_job(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """删除定时任务。"""
+        if not self._cron_job_manager:
+            return ToolResult(content=json.dumps(
+                {"error": "定时任务系统未就绪"}, ensure_ascii=False,
+            ))
+        job_id = (args.get("job_id") or "").strip()
+        if not job_id:
+            return ToolResult(content=json.dumps(
+                {"error": "job_id 不能为空"}, ensure_ascii=False,
+            ))
+        job = self._find_cron_job(job_id)
+        if job is None:
+            return ToolResult(content=json.dumps({
+                "error": f"未找到定时任务: {job_id}",
+            }, ensure_ascii=False))
+        name = job.name
+        await self._cron_job_manager.delete_job(job.id)
+        return ToolResult(content=json.dumps({
+            "success": True,
+            "job_id": job.id[:16],
+            "name": name,
+            "message": f"定时任务「{name}」已删除",
+        }, ensure_ascii=False))
+
+    async def _exec_enable_cron_job(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """启用定时任务。"""
+        if not self._cron_job_manager:
+            return ToolResult(content=json.dumps(
+                {"error": "定时任务系统未就绪"}, ensure_ascii=False,
+            ))
+        job_id = (args.get("job_id") or "").strip()
+        if not job_id:
+            return ToolResult(content=json.dumps(
+                {"error": "job_id 不能为空"}, ensure_ascii=False,
+            ))
+        job = self._find_cron_job(job_id)
+        if job is None:
+            return ToolResult(content=json.dumps({
+                "error": f"未找到定时任务: {job_id}",
+            }, ensure_ascii=False))
+        if job.enabled:
+            return ToolResult(content=json.dumps({
+                "success": True,
+                "job_id": job.id[:16],
+                "name": job.name,
+                "message": f"定时任务「{job.name}」已是启用状态",
+            }, ensure_ascii=False))
+        success = await self._cron_job_manager.enable_job(job.id)
+        return ToolResult(content=json.dumps({
+            "success": success,
+            "job_id": job.id[:16],
+            "name": job.name,
+            "message": f"定时任务「{job.name}」已启用",
+        }, ensure_ascii=False))
+
+    async def _exec_disable_cron_job(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """暂停定时任务。"""
+        if not self._cron_job_manager:
+            return ToolResult(content=json.dumps(
+                {"error": "定时任务系统未就绪"}, ensure_ascii=False,
+            ))
+        job_id = (args.get("job_id") or "").strip()
+        if not job_id:
+            return ToolResult(content=json.dumps(
+                {"error": "job_id 不能为空"}, ensure_ascii=False,
+            ))
+        job = self._find_cron_job(job_id)
+        if job is None:
+            return ToolResult(content=json.dumps({
+                "error": f"未找到定时任务: {job_id}",
+            }, ensure_ascii=False))
+        if not job.enabled:
+            return ToolResult(content=json.dumps({
+                "success": True,
+                "job_id": job.id[:16],
+                "name": job.name,
+                "message": f"定时任务「{job.name}」已是暂停状态",
+            }, ensure_ascii=False))
+        success = await self._cron_job_manager.disable_job(job.id)
+        return ToolResult(content=json.dumps({
+            "success": success,
+            "job_id": job.id[:16],
+            "name": job.name,
+            "message": f"定时任务「{job.name}」已暂停",
         }, ensure_ascii=False))
 
     # ════════════════════════════════════════════════════════
