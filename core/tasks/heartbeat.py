@@ -86,6 +86,7 @@ class HeartbeatManager:
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._heartbeat_lock = asyncio.Lock()
+        self._last_heartbeat_time: float = 0.0
 
     async def start(self):
         if not self._enabled:
@@ -114,7 +115,9 @@ class HeartbeatManager:
     async def _loop(self):
         while self._running:
             try:
-                await asyncio.sleep(self._every_minutes * 60)
+                elapsed = time.time() - self._last_heartbeat_time
+                sleep_for = max(0, self._every_minutes * 60 - elapsed)
+                await asyncio.sleep(sleep_for)
                 await self._tick()
             except asyncio.CancelledError:
                 break
@@ -122,28 +125,57 @@ class HeartbeatManager:
                 _log.error(f"心跳循环异常: {e}", exc_info=True)
 
     async def _tick(self):
-        """一次心跳周期。"""
-        # 防止重叠
+        """一次自动心跳周期。"""
         if self._heartbeat_lock.locked():
             _log.debug("心跳还在执行，跳过本次")
             return
 
         async with self._heartbeat_lock:
-            # 1. 活跃时段检查
             if not self._in_active_hours():
                 _log.debug("心跳跳过：不在活跃时段")
                 return
-
-            # 2. 忙碌检查
             if self._skip_when_busy and self._is_busy():
                 _log.debug("心跳跳过：用户活跃中")
                 return
+            await self._run_heartbeat()
 
-            # 3. 执行心跳
-            await self._do_heartbeat()
+    async def trigger_heartbeat(self, prompt: str = "") -> tuple[bool, str | None]:
+        """公开接口：手动触发心跳，带锁保护，重置计时器。
+
+        Args:
+            prompt: 自定义 prompt，为空时使用默认时间 prompt
+
+        Returns:
+            (should_notify, notification_text)
+        """
+        async with self._heartbeat_lock:
+            return await self._run_heartbeat(prompt)
+
+    async def _run_heartbeat(self, prompt: str = "") -> tuple[bool, str | None]:
+        """内部执行心跳（调用方需持有 _heartbeat_lock）。"""
+        if not self._agent_engine:
+            _log.warning("心跳跳过：AgentEngine 未就绪")
+            return False, None
+
+        if not prompt:
+            tz_name = "CST (UTC+8)"
+            now_str = datetime.now(timezone(timedelta(hours=8))).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+            prompt = f"现在时间是 {now_str}（{tz_name}）。"
+
+        should_notify, text = await self._agent_engine.execute_heartbeat(prompt)
+        self._last_heartbeat_time = time.time()
+
+        if should_notify and text:
+            await self._deliver_to_admin(text)
+            _log.info(f"心跳提醒已投递: text={text[:80]!r}")
+        else:
+            _log.debug("心跳无需投递")
+
+        return should_notify, text
 
     def _in_active_hours(self) -> bool:
-        """检查当前是否在活跃时段内。"""
         try:
             tz = timezone(timedelta(hours=8))
             now = datetime.now(tz)
@@ -170,28 +202,6 @@ class HeartbeatManager:
             return False
         elapsed = time.time() - last_time
         return elapsed < self._busy_idle_minutes * 60
-
-    async def _do_heartbeat(self):
-        """执行心跳：走 AgentEngine 工具调用循环 → 判断是否投递。"""
-        if not self._agent_engine:
-            _log.warning("心跳跳过：AgentEngine 未就绪")
-            return
-
-        tz_name = "CST (UTC+8)"
-        now_str = datetime.now(timezone(timedelta(hours=8))).strftime(
-            "%Y-%m-%d %H:%M"
-        )
-
-        prompt = (
-            f"现在时间是 {now_str}（{tz_name}）。"
-        )
-
-        should_notify, text = await self._agent_engine.execute_heartbeat(prompt)
-
-        if should_notify and text:
-            await self._deliver_to_admin(text)
-        else:
-            _log.debug("心跳无需投递")
 
     async def _deliver_to_admin(self, text: str):
         """发送心跳提醒给第一个管理员。"""
