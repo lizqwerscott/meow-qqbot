@@ -556,7 +556,7 @@ class AgentEngine:
             )
             return None, str(e)
 
-    async def execute_heartbeat(self, prompt: str) -> tuple[bool, str | None]:
+    async def execute_heartbeat(self, prompt: str, session: str = "isolated") -> tuple[bool, str | None]:
         """执行心跳检查的工具调用循环。
 
         AI 可以在循环中：读取 HEARTBEAT.md、搜索记忆、检查文件，
@@ -564,6 +564,7 @@ class AgentEngine:
 
         Args:
             prompt: 心跳检查的 prompt
+            session: 会话模式，"isolated"（隔离，无历史）或 "main"（主会话，含最近历史）
 
         Returns:
             (should_notify, notification_text)
@@ -571,7 +572,29 @@ class AgentEngine:
             - should_notify=True:  需要投递 notification_text
         """
         chat_id = "heartbeat:main"
-        _log.info(f"开始心跳检查: prompt={prompt[:80]}")
+        _log.info(f"开始心跳检查: session={session} prompt={prompt[:80]}")
+        prompt = prompt or ""
+
+        # ── main 模式：注入最近聊天历史 ──
+        if session == "main" and self._admin_id:
+            main_chat_id = self._admin_id[0]
+            try:
+                recent = await self.context_manager.get_chat_history_async(
+                    main_chat_id, max_messages=20,
+                )
+                history_lines = []
+                for msg in recent:
+                    role = msg.get("role", "unknown")
+                    content = (msg.get("content") or "")[:300]
+                    if role == "user":
+                        history_lines.append(f"用户: {content}")
+                    elif role == "assistant":
+                        history_lines.append(f"助手: {content}")
+                if history_lines:
+                    prompt += "\n\n--- 最近的聊天记录 ---\n" + "\n".join(history_lines[-15:]) + "\n---"
+                    _log.info(f"心跳主会话模式: history_lines={len(history_lines)}")
+            except Exception as e:
+                _log.warning(f"心跳读取历史失败，回退隔离模式: {e}")
 
         captured_replies: list[str] = []
 
