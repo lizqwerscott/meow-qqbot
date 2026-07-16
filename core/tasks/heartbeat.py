@@ -87,6 +87,7 @@ class HeartbeatManager:
         self._task: Optional[asyncio.Task] = None
         self._heartbeat_lock = asyncio.Lock()
         self._last_heartbeat_time: float = 0.0
+        self._session = config.get("session", "isolated")
 
     async def start(self):
         if not self._enabled:
@@ -164,7 +165,7 @@ class HeartbeatManager:
             )
             prompt = f"现在时间是 {now_str}（{tz_name}）。"
 
-        should_notify, text = await self._agent_engine.execute_heartbeat(prompt)
+        should_notify, text = await self._agent_engine.execute_heartbeat(prompt, session=self._session)
         self._last_heartbeat_time = time.time()
 
         if should_notify and text:
