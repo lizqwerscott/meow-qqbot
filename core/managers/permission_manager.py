@@ -16,7 +16,7 @@ from typing import List, Optional
 
 _log = logging.getLogger(__name__)
 
-ROLE_LEVEL = {"admin": 3, "trusted": 2, "default": 1}
+ROLE_LEVEL = {"system": 4, "admin": 3, "trusted": 2, "default": 1}
 
 
 class PermissionManager:

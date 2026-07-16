@@ -1147,8 +1147,16 @@ class ToolExecutor:
         }, ensure_ascii=False))
 
     def _is_admin_private(self, ctx: ToolContext) -> bool:
-        """私聊且发送者是管理员。"""
-        return not ctx.is_group and ctx.sender_id in self._admin_ids
+        """私聊且发送者是管理员级别以上（含 system 角色）。
+
+        通过 PermissionManager 的角色等级判断，system/admin 都能获得 workspace 根目录访问。
+        """
+        if ctx.is_group:
+            return False
+        if self._perm:
+            role = self._perm.get_user_role(ctx.sender_id)
+            return self._perm._role_level(role) >= 3  # admin=3, system=4
+        return ctx.sender_id in self._admin_ids
 
     def _sandbox_target(self, is_group: bool, chat_id: str, rel_path: str, admin_override: bool = False) -> Path:
         """解析沙箱路径，支持 '.' 表示根目录。"""
