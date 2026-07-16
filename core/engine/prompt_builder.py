@@ -58,6 +58,15 @@ HEARTBEAT_MINIMAL_SYSTEM_PROMPT = (
     "3. 只汇报真正需要关注的事项，不要过度打扰管理员"
 )
 
+HEARTBEAT_BEHAVIOR_BLOCK = (
+    "\n\n【心跳检查模式】\n"
+    "你当前处于定期心跳检查，这不是正常对话，请严格遵守以下规则：\n"
+    "- 使用 heartbeat_respond(notify=true/false, notification_text=\"...\") 工具回应，不要直接输出文本聊天\n"
+    "- 不要闲聊、不要使用猫娘语气卖萌、不要加表情符号\n"
+    "- 只汇报需要提醒管理员的事项\n"
+    "- 如果没有需要关注的事项，调用 heartbeat_respond(notify=false) 静默结束"
+)
+
 _DIRTY_PATTERNS = (
     "<available_skills", "<skill>", "<description>",
     "<name>", "【工具配合原则】", "【记忆系统】",
@@ -412,6 +421,7 @@ class PromptBuilder:
         # ── system message ──
         if system_prompt_mode == "normal":
             system_prompt = self._build_normal_heartbeat_system_prompt(chat_id)
+            system_prompt += HEARTBEAT_BEHAVIOR_BLOCK
         else:
             system_prompt = HEARTBEAT_MINIMAL_SYSTEM_PROMPT
 
