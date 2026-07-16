@@ -451,6 +451,31 @@ FILE_TOOLS = [
 ]
 
 
+HEARTBEAT_RESPOND_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "heartbeat_respond",
+            "description": "回应心跳检查。notify=false 表示本次心跳无需要关注的事项；notify=true 时附带提醒内容。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "notify": {
+                        "type": "boolean",
+                        "description": "是否发送通知。false=无需关注，true=需要提醒",
+                    },
+                    "notification_text": {
+                        "type": "string",
+                        "description": "提醒文本，不超过 300 字。仅在 notify=true 时需要",
+                    },
+                },
+                "required": ["notify"],
+            },
+        },
+    },
+]
+
+
 TASK_TOOLS = [
     {
         "type": "function",
@@ -578,4 +603,5 @@ def tool_names() -> set[str]:
         "create_task", "create_cron_job", "cancel_task",
         "read_file", "write_file", "edit_file",
         "list_files", "search_files",
+        "heartbeat_respond",
     }

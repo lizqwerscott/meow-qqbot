@@ -556,6 +556,95 @@ class AgentEngine:
             )
             return None, str(e)
 
+    async def execute_heartbeat(self, prompt: str) -> tuple[bool, str | None]:
+        """执行心跳检查的工具调用循环。
+
+        AI 可以在循环中：读取 HEARTBEAT.md、搜索记忆、检查文件，
+        最后通过 heartbeat_respond(notify, notification_text) 工具或 HEARTBEAT_OK 文本来回应。
+
+        Args:
+            prompt: 心跳检查的 prompt
+
+        Returns:
+            (should_notify, notification_text)
+            - should_notify=False: 无需通知（HEARTBEAT_OK / notify=false）
+            - should_notify=True:  需要投递 notification_text
+        """
+        chat_id = "heartbeat:main"
+        _log.info(f"开始心跳检查: prompt={prompt[:80]}")
+
+        captured_replies: list[str] = []
+
+        async def capturing_reply_callback(
+            chat_id: str,
+            content: str,
+            message_id: str,
+            is_group: bool,
+        ) -> None:
+            captured_replies.append(content)
+
+        import time
+        msg_id = f"hb_{int(time.time())}"
+
+        try:
+            messages, tools_to_use = await self.prompt_builder.build_heartbeat_messages(
+                prompt=prompt,
+            )
+
+            self.tool_executor._heartbeat_response = {}
+
+            await self.tool_loop.run(
+                messages=messages,
+                tools=tools_to_use,
+                chat_id=chat_id,
+                is_group=False,
+                reply_to=msg_id,
+                reply_callback=capturing_reply_callback,
+                sender_id="system",
+                get_user_nickname=lambda _: "系统",
+            )
+
+            # 优先检查 heartbeat_respond 工具响应
+            hb_resp = self.tool_executor.consume_heartbeat_response()
+            if hb_resp.get("notify"):
+                text = hb_resp.get("notification_text", "").strip()
+                if text:
+                    _log.info(f"心跳 heartbeat_respond: 需要通知")
+                    return True, text
+                else:
+                    _log.info("心跳 heartbeat_respond: notify=true 但内容为空，视为不通知")
+                    return False, None
+
+            if hb_resp:
+                _log.debug("心跳 heartbeat_respond: notify=false，静默")
+                return False, None
+
+            # 降级回退：解析文本 HEARTBEAT_OK
+            for reply in captured_replies:
+                stripped = reply.strip()
+                if stripped == "HEARTBEAT_OK":
+                    _log.debug("心跳 HEARTBEAT_OK（文本降级），静默")
+                    return False, None
+
+                if stripped.startswith("HEARTBEAT_OK"):
+                    stripped = stripped[len("HEARTBEAT_OK"):].strip()
+                if stripped.endswith("HEARTBEAT_OK"):
+                    stripped = stripped[:-len("HEARTBEAT_OK")].strip()
+
+                if stripped and len(stripped) >= 5:
+                    _log.info(f"心跳文本降级: 需要通知")
+                    return True, stripped
+
+            _log.debug("心跳无任何响应，静默")
+            return False, None
+
+        except asyncio.CancelledError:
+            _log.warning("心跳检查被取消")
+            return False, None
+        except Exception as e:
+            _log.error(f"心跳检查异常: {e}", exc_info=True)
+            return False, None
+
     # ── 统计 ──
 
     def get_stats(self) -> dict:
