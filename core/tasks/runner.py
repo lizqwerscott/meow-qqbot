@@ -101,7 +101,7 @@ class BackgroundTaskRunner:
             return task
 
         # 标记为 running
-        task = self._task_manager.start_task(task.id)
+        task = await self._task_manager.start_task(task.id)
         if task is None:
             return task
 
@@ -127,14 +127,14 @@ class BackgroundTaskRunner:
 
             # 更新任务记录
             if error:
-                task = self._task_manager.finish_task(
+                task = await self._task_manager.finish_task(
                     task.id,
                     status=TaskStatus.FAILED,
                     result=result,
                     error=error,
                 )
             else:
-                task = self._task_manager.finish_task(
+                task = await self._task_manager.finish_task(
                     task.id,
                     status=TaskStatus.SUCCESS,
                     result=result,
@@ -142,14 +142,14 @@ class BackgroundTaskRunner:
 
         except asyncio.TimeoutError:
             _log.warning(f"后台任务超时: id={task.id[:12]}.. timeout={timeout}s")
-            task = self._task_manager.finish_task(
+            task = await self._task_manager.finish_task(
                 task.id,
                 status=TaskStatus.TIMEOUT,
                 error=f"执行超时 ({timeout}s)",
             )
         except asyncio.CancelledError:
             _log.warning(f"后台任务被取消: id={task.id[:12]}..")
-            task = self._task_manager.finish_task(
+            task = await self._task_manager.finish_task(
                 task.id,
                 status=TaskStatus.CANCELLED,
                 error="任务被取消",
@@ -158,7 +158,7 @@ class BackgroundTaskRunner:
             _log.error(
                 f"后台任务异常: id={task.id[:12]}.. error={e}", exc_info=True
             )
-            task = self._task_manager.finish_task(
+            task = await self._task_manager.finish_task(
                 task.id,
                 status=TaskStatus.FAILED,
                 error=str(e),
@@ -202,7 +202,7 @@ class BackgroundTaskRunner:
     ) -> TaskRecord:
         """执行 command 载荷（shell 命令），捕获 stdout/stderr。"""
         if not job.command:
-            return self._task_manager.finish_task(
+            return await self._task_manager.finish_task(
                 task.id, TaskStatus.FAILED, error="command 为空",
             )
 
@@ -210,11 +210,11 @@ class BackgroundTaskRunner:
         reason = self._check_command_safe(job.command)
         if reason:
             _log.warning(f"命令被拒绝 [{job.name}]: {reason}")
-            return self._task_manager.finish_task(
+            return await self._task_manager.finish_task(
                 task.id, TaskStatus.FAILED, error=f"命令被拒绝: {reason}",
             )
 
-        self._task_manager.start_task(task.id)
+        await self._task_manager.start_task(task.id)
         effective_timeout = min(timeout, 120.0)
         _log.info(f"执行命令 [{job.name}]: {job.command[:100]}")
 
@@ -235,7 +235,7 @@ class BackgroundTaskRunner:
 
             if proc.returncode == 0:
                 result = stdout if stdout else "命令执行成功（无输出）"
-                return self._task_manager.finish_task(
+                return await self._task_manager.finish_task(
                     task.id, TaskStatus.SUCCESS, result=result,
                 )
             else:
@@ -244,15 +244,15 @@ class BackgroundTaskRunner:
                     error_msg += f"\nstderr: {stderr}"
                 if stdout:
                     error_msg += f"\nstdout: {stdout}"
-                return self._task_manager.finish_task(
+                return await self._task_manager.finish_task(
                     task.id, TaskStatus.FAILED, error=error_msg,
                 )
         except asyncio.TimeoutError:
-            return self._task_manager.finish_task(
+            return await self._task_manager.finish_task(
                 task.id, TaskStatus.TIMEOUT, error=f"命令超时 ({effective_timeout}s)",
             )
         except Exception as e:
-            return self._task_manager.finish_task(
+            return await self._task_manager.finish_task(
                 task.id, TaskStatus.FAILED, error=f"命令执行异常: {e}",
             )
 
@@ -262,9 +262,9 @@ class BackgroundTaskRunner:
         task: TaskRecord,
     ) -> TaskRecord:
         """执行 system_event 载荷：记录日志，不执行具体操作。"""
-        self._task_manager.start_task(task.id)
+        await self._task_manager.start_task(task.id)
         _log.info(f"系统事件 [{job.name}]: {job.prompt[:100]}")
-        return self._task_manager.finish_task(
+        return await self._task_manager.finish_task(
             task.id, TaskStatus.SUCCESS,
             result=f"[系统事件] {job.prompt}",
         )
@@ -284,7 +284,7 @@ class BackgroundTaskRunner:
         if self._task_manager is None:
             _log.error("TaskManager 未注入")
             return None
-        task = self._task_manager.create_task(
+        task = await self._task_manager.create_task(
             prompt=job.prompt or job.command or job.name,
             task_type="cron",
             job_id=job.id,
@@ -336,7 +336,7 @@ class BackgroundTaskRunner:
         """执行一个手动后台任务。"""
         if self._task_manager is None:
             raise RuntimeError("TaskManager 未注入")
-        task = self._task_manager.create_task(
+        task = await self._task_manager.create_task(
             prompt=prompt,
             task_type="manual",
             delivery_channel=delivery_channel,

@@ -122,8 +122,8 @@ class EmojiStorage:
                     import shutil
                     shutil.copy2(self._path, backup)
                     _log.info(f"已备份损坏文件到: {backup}")
-            except Exception:
-                pass
+            except Exception as e:
+                _log.warning(f"备份损坏文件失败 [{self._path}]: {e}")
             return {"version": 1, "emojis": {}}
 
     def _flush_sync(self) -> None:

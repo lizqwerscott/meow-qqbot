@@ -390,11 +390,11 @@ async def main() -> None:
             while True:
                 await asyncio.sleep(3600)
                 try:
-                    cleaned = task_manager.cleanup_old_tasks()
+                    cleaned = await task_manager.cleanup_old_tasks()
                     if cleaned:
                         _log.info(f"定时清理了 {cleaned} 条过期任务")
-                except Exception:
-                    pass
+                except Exception as e:
+                    _log.warning(f"定时清理任务异常: {e}")
         task_cleanup_task = asyncio.create_task(_periodic_task_cleanup())
 
     try:

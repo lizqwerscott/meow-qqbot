@@ -136,6 +136,7 @@ class AgentEngine:
         # ── 消息去重 ──
         self._processed_ids: OrderedDict[str, bool] = OrderedDict()
         self._max_processed_ids = 1000
+        self._dedup_lock = asyncio.Lock()
 
         # ── 消费者管理 ──
         self._consumer_tasks: Set[asyncio.Task] = set()
@@ -211,13 +212,14 @@ class AgentEngine:
         reply_callback: Callable,
         get_user_nickname: Callable[[str], str],
     ) -> None:
-        if input_message.id in self._processed_ids:
-            _log.debug(f"跳过重复消息: {input_message.id}")
-            return
-        self._processed_ids[input_message.id] = True
-        self._processed_ids.move_to_end(input_message.id)
-        if len(self._processed_ids) > self._max_processed_ids:
-            self._processed_ids.popitem(last=False)
+        async with self._dedup_lock:
+            if input_message.id in self._processed_ids:
+                _log.debug(f"跳过重复消息: {input_message.id}")
+                return
+            self._processed_ids[input_message.id] = True
+            self._processed_ids.move_to_end(input_message.id)
+            if len(self._processed_ids) > self._max_processed_ids:
+                self._processed_ids.popitem(last=False)
 
         chat_id = input_message.chat_id
 
@@ -351,7 +353,15 @@ class AgentEngine:
 
         if needs_ai:
             queue = await self.session_manager.get_queue(chat_id)
-            await queue.put(input_message)
+            try:
+                queue.put_nowait(input_message)
+            except asyncio.QueueFull:
+                _log.warning(f"会话 {chat_id[:12]}.. 队列已满，丢弃最早消息")
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                queue.put_nowait(input_message)
             should_start = await self.session_manager.try_start_consumer(chat_id)
             if should_start:
                 task = asyncio.create_task(
@@ -414,8 +424,8 @@ class AgentEngine:
                             message_id=input_message.id,
                             is_group=input_message.is_group,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _log.warning(f"向用户发送错误回复失败 [{chat_id}]: {e}")
 
         await self.session_manager.mark_consumer_done(chat_id)
 

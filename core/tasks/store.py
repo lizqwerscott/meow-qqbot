@@ -5,10 +5,10 @@
   - cron_jobs: 定时任务定义（CRUD）
 """
 
+import asyncio
 import json
 import logging
 import os
-import threading
 import time
 from typing import Dict, List, Optional
 
@@ -35,7 +35,7 @@ class TaskStore:
         self._data_dir = data_dir
         self._max_tasks = max_tasks
         self._task_ttl_days = task_ttl_days
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
 
         os.makedirs(self._data_dir, exist_ok=True)
 
@@ -92,37 +92,32 @@ class TaskStore:
             f"TaskStore 已加载: {len(self._tasks)} 条任务, {len(self._jobs)} 个定时任务"
         )
 
-    def save_tasks(self) -> None:
+    async def save_tasks(self) -> None:
         """将内存中的 tasks 写回 JSON 文件。"""
-        with self._lock:
+        async with self._lock:
             tasks = sorted(self._tasks.values(), key=lambda t: t.created_at, reverse=True)
-            # 限制数量
             if len(tasks) > self._max_tasks:
                 tasks = tasks[: self._max_tasks]
-            self._save_json(
-                self._tasks_path,
-                [t.to_dict() for t in tasks],
-            )
+            data = [t.to_dict() for t in tasks]
+        await asyncio.to_thread(self._save_json, self._tasks_path, data)
 
-    def save_jobs(self) -> None:
+    async def save_jobs(self) -> None:
         """将内存中的 cron_jobs 写回 JSON 文件。"""
-        with self._lock:
-            self._save_json(
-                self._jobs_path,
-                [j.to_dict() for j in self._jobs.values()],
-            )
+        async with self._lock:
+            data = [j.to_dict() for j in self._jobs.values()]
+        await asyncio.to_thread(self._save_json, self._jobs_path, data)
 
     # ── Task CRUD ──
 
-    def add_task(self, task: TaskRecord) -> None:
-        with self._lock:
+    async def add_task(self, task: TaskRecord) -> None:
+        async with self._lock:
             self._tasks[task.id] = task
-        self.save_tasks()
+        await self.save_tasks()
 
-    def update_task(self, task: TaskRecord) -> None:
-        with self._lock:
+    async def update_task(self, task: TaskRecord) -> None:
+        async with self._lock:
             self._tasks[task.id] = task
-        self.save_tasks()
+        await self.save_tasks()
 
     def get_task(self, task_id: str) -> Optional[TaskRecord]:
         return self._tasks.get(task_id)
@@ -141,17 +136,17 @@ class TaskStore:
         results.sort(key=lambda t: t.created_at, reverse=True)
         return results[:limit]
 
-    def delete_task(self, task_id: str) -> bool:
+    async def delete_task(self, task_id: str) -> bool:
         found = False
-        with self._lock:
+        async with self._lock:
             if task_id in self._tasks:
                 del self._tasks[task_id]
                 found = True
         if found:
-            self.save_tasks()
+            await self.save_tasks()
         return found
 
-    def cleanup_old_tasks(self) -> int:
+    async def cleanup_old_tasks(self) -> int:
         """清理超过 TTL 的终态任务。返回清理数量。"""
         now = time.time()
         cutoff = now - self._task_ttl_days * 86400
@@ -161,25 +156,25 @@ class TaskStore:
             if t.status in TaskStatus.terminal()
             and (t.finished_at or t.created_at) < cutoff
         ]
-        with self._lock:
+        async with self._lock:
             for tid in to_delete:
                 self._tasks.pop(tid, None)
         if to_delete:
-            self.save_tasks()
+            await self.save_tasks()
             _log.info(f"清理了 {len(to_delete)} 条过期任务记录")
         return len(to_delete)
 
     # ── CronJob CRUD ──
 
-    def add_job(self, job: CronJob) -> None:
-        with self._lock:
+    async def add_job(self, job: CronJob) -> None:
+        async with self._lock:
             self._jobs[job.id] = job
-        self.save_jobs()
+        await self.save_jobs()
 
-    def update_job(self, job: CronJob) -> None:
-        with self._lock:
+    async def update_job(self, job: CronJob) -> None:
+        async with self._lock:
             self._jobs[job.id] = job
-        self.save_jobs()
+        await self.save_jobs()
 
     def get_job(self, job_id: str) -> Optional[CronJob]:
         return self._jobs.get(job_id)
@@ -187,14 +182,14 @@ class TaskStore:
     def list_jobs(self) -> List[CronJob]:
         return list(self._jobs.values())
 
-    def delete_job(self, job_id: str) -> bool:
+    async def delete_job(self, job_id: str) -> bool:
         found = False
-        with self._lock:
+        async with self._lock:
             if job_id in self._jobs:
                 del self._jobs[job_id]
                 found = True
         if found:
-            self.save_jobs()
+            await self.save_jobs()
         return found
 
     # ── 统计 ──
@@ -217,7 +212,7 @@ class TaskStore:
 
     # ── 生命周期 ──
 
-    def close(self) -> None:
-        self.save_tasks()
-        self.save_jobs()
+    async def close(self) -> None:
+        await self.save_tasks()
+        await self.save_jobs()
         _log.info("TaskStore 已关闭")

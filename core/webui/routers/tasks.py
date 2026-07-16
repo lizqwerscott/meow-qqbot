@@ -60,7 +60,7 @@ async def task_detail(request: Request, task_id: str):
 async def cron_delete(request: Request, job_id: str):
     _, cron_mgr = _get_mgrs(request)
     if cron_mgr:
-        cron_mgr.delete_job(job_id)
+        await cron_mgr.delete_job(job_id)
     return RedirectResponse(url="/tasks", status_code=303)
 
 
@@ -68,7 +68,7 @@ async def cron_delete(request: Request, job_id: str):
 async def cron_pause(request: Request, job_id: str):
     _, cron_mgr = _get_mgrs(request)
     if cron_mgr:
-        cron_mgr.disable_job(job_id)
+        await cron_mgr.disable_job(job_id)
     return RedirectResponse(url="/tasks", status_code=303)
 
 
@@ -76,7 +76,7 @@ async def cron_pause(request: Request, job_id: str):
 async def cron_resume(request: Request, job_id: str):
     _, cron_mgr = _get_mgrs(request)
     if cron_mgr:
-        cron_mgr.enable_job(job_id)
+        await cron_mgr.enable_job(job_id)
     return RedirectResponse(url="/tasks", status_code=303)
 
 
@@ -95,5 +95,5 @@ async def task_cancel(request: Request, task_id: str):
 async def task_delete(request: Request, task_id: str):
     task_manager, _ = _get_mgrs(request)
     if task_manager:
-        task_manager._store.delete_task(task_id)
+        await task_manager._store.delete_task(task_id)
     return RedirectResponse(url="/tasks", status_code=303)

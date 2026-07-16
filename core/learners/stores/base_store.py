@@ -98,8 +98,8 @@ class JsonStore:
                     import shutil
                     shutil.copy2(self._path, backup)
                     _log.info(f"已备份到: {backup}")
-            except Exception:
-                pass
+            except Exception as e:
+                _log.warning(f"备份损坏文件失败 [{self._path}]: {e}")
             data = dict(self._default)
             data.setdefault("items", {})
             return data
