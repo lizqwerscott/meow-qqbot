@@ -46,7 +46,13 @@
                 </td>
                 <td>{% if job.enabled %}✅ 启用{% else %}⛔ 暂停{% endif %}</td>
                 <td>{% if job.next_run_at and job.enabled %}{{ job.next_run_at|format_timestamp }}{% else %}—{% endif %}</td>
-                <td>{{ job.prompt[:50] }}{% if job.prompt|length > 50 %}...{% endif %}</td>
+                <td>
+                    {% if job.payload_type == "command" and job.command %}
+                    🖥️ {{ job.command[:50] }}{% if job.command|length > 50 %}...{% endif %}
+                    {% else %}
+                    {{ job.prompt[:50] }}{% if job.prompt|length > 50 %}...{% endif %}
+                    {% endif %}
+                </td>
                 <td class="actions">
                     {% if job.enabled %}
                     <form method="post" action="/tasks/cron/{{ job.id }}/pause" style="display:inline">
