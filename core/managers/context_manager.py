@@ -109,6 +109,7 @@ class ChatContext:
         self.lock = asyncio.Lock()
         self._cache_dir: Optional[str] = cache_dir
         self._save_task: Optional[asyncio.Task] = None
+        self._flushed_count: int = 0
 
     def add_message(
         self,
@@ -200,6 +201,10 @@ class ChatContext:
 
     def clear_history(self) -> None:
         self.history.clear()
+        self._flushed_count = 0
+        path = self._get_cache_path()
+        if path:
+            path.unlink(missing_ok=True)
 
     def get_history_count(self) -> int:
         return len(self.history)
@@ -252,12 +257,18 @@ class ChatContext:
 
         if removed > 0:
             self.history = deque(result, maxlen=self.max_history)
+            self._flushed_count = 0
 
         return removed
 
     # ── 本地缓存持久化 ──
 
     def _get_cache_path(self) -> Optional[Path]:
+        if not self._cache_dir:
+            return None
+        return Path(self._cache_dir) / f"{self.chat_id}.jsonl"
+
+    def _get_old_cache_path(self) -> Optional[Path]:
         if not self._cache_dir:
             return None
         return Path(self._cache_dir) / f"{self.chat_id}.json"
@@ -268,45 +279,93 @@ class ChatContext:
         latest = self.history[-1].timestamp
         return (time.time() - latest) > max_age
 
-    def _serialize(self) -> list:
-        return [msg.to_dict() for msg in self.history]
-
-    def _deserialize(self, data: list) -> None:
-        for item in data:
-            self.history.append(ChatMessage.from_dict(item))
-
     def save(self) -> None:
         path = self._get_cache_path()
         if not path:
             return
         try:
+            flushed_before = self._flushed_count
+            history_list = list(self.history)
+            new_msgs = history_list[flushed_before:]
+            if not new_msgs:
+                return
             path.parent.mkdir(parents=True, exist_ok=True)
-            data = self._serialize()
-            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            lines = [
+                json.dumps(msg.to_dict(), ensure_ascii=False) + "\n"
+                for msg in new_msgs
+            ]
+            with open(path, "w" if flushed_before == 0 else "a", encoding="utf-8") as f:
+                f.writelines(lines)
+            self._flushed_count = flushed_before + len(new_msgs)
         except Exception as e:
             _log.warning("保存会话缓存失败 [%s..]: %s", self.chat_id[:12], e)
 
+    def _load_jsonl(self, path: Path) -> list:
+        data = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                    data.append(item)
+                except json.JSONDecodeError:
+                    _log.warning(
+                        "跳过损坏的 JSONL 行 [%s..]: %s",
+                        self.chat_id[:12], line[:80]
+                    )
+        return data
+
     def load(self) -> bool:
-        """从本地缓存加载历史。如果已过期则删除缓存文件并返回 False。"""
+        """从本地缓存加载历史。优先 .jsonl，fallback .json（自动迁移）。如果已过期则删除缓存文件并返回 False。"""
         path = self._get_cache_path()
-        if not path or not path.exists():
-            return False
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if not data:
+        old_path = self._get_old_cache_path()
+
+        if path and path.exists():
+            try:
+                data = self._load_jsonl(path)
+            except Exception as e:
+                _log.warning("加载 JSONL 缓存失败 [%s..]: %s", self.chat_id[:12], e)
                 return False
-            self._deserialize(data)
-            if self._is_expired():
-                _log.info("会话缓存已过期，遗忘 [%s..]", self.chat_id[:12])
-                self.history.clear()
-                path.unlink(missing_ok=True)
-                return False
-            self.last_activity = time.time()
-            _log.info("从本地缓存恢复会话 [%s..] (%d 条)", self.chat_id[:12], len(self.history))
-            return True
-        except Exception as e:
-            _log.warning("加载会话缓存失败 [%s..]: %s", self.chat_id[:12], e)
+        elif old_path and old_path.exists():
+            try:
+                data = json.loads(old_path.read_text(encoding="utf-8"))
+                if data:
+                    for item in data:
+                        self.history.append(ChatMessage.from_dict(item))
+                    self._flushed_count = 0
+                    self.save()
+                    old_path.unlink(missing_ok=True)
+                    _log.info(
+                        "已迁移旧 JSON 缓存 → JSONL [%s..] (%d 条)",
+                        self.chat_id[:12], len(self.history)
+                    )
+                    self.last_activity = time.time()
+                    return True
+            except Exception as e:
+                _log.warning("加载/迁移旧 JSON 缓存失败 [%s..]: %s", self.chat_id[:12], e)
             return False
+        else:
+            return False
+
+        if not data:
+            return False
+
+        for item in data:
+            self.history.append(ChatMessage.from_dict(item))
+
+        self._flushed_count = len(self.history)
+
+        if self._is_expired():
+            _log.info("会话缓存已过期，遗忘 [%s..]", self.chat_id[:12])
+            self.history.clear()
+            self._flushed_count = 0
+            path.unlink(missing_ok=True)
+            return False
+        self.last_activity = time.time()
+        _log.info("从本地缓存恢复会话 [%s..] (%d 条)", self.chat_id[:12], len(self.history))
+        return True
 
     async def _schedule_save(self) -> None:
         if self._save_task and not self._save_task.done():
@@ -611,6 +670,7 @@ class ChatContext:
         for m in recent_msgs:
             new_history.append(m)
         self.history = new_history
+        self._flushed_count = 0
         return True, usage
 
 
@@ -848,6 +908,8 @@ class ChatContextManager:
         if self.cache_dir:
             cache_path = Path(self.cache_dir)
             if cache_path.is_dir():
+                for f in cache_path.glob("*.jsonl"):
+                    disk_ids.add(f.stem)
                 for f in cache_path.glob("*.json"):
                     disk_ids.add(f.stem)
         memory_ids = set(self.contexts.keys())
