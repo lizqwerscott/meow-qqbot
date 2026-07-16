@@ -898,6 +898,13 @@ class ToolExecutor:
                 ensure_ascii=False,
             ))
 
+        if payload_type == "message":
+            payload_command = ""
+        elif payload_type == "command":
+            prompt = ""
+        elif payload_type == "system_event":
+            payload_command = ""
+
         job = await self._cron_job_manager.create_job(
             name=name,
             cron_expression=cron_expression,

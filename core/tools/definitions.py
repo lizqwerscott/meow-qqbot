@@ -532,7 +532,7 @@ TASK_TOOLS = [
                     },
                     "prompt": {
                         "type": "string",
-                        "description": "执行时 AI 要执行的指令。payload_type=message 时必填。例如：'对大家说早上好，今天的天气是...'。payload_type=command 或 system_event 时可选。",
+                        "description": "AI 要执行的指令。仅在 payload_type=message 时有效且必填。与 command 互斥，请根据 payload_type 只传其一。例如：'对大家说早上好，今天的天气是...'",
                     },
                     "session_mode": {
                         "type": "string",
@@ -557,7 +557,7 @@ TASK_TOOLS = [
                     },
                     "command": {
                         "type": "string",
-                        "description": "shell 命令，仅在 payload_type=command 时有效且必填。受安全黑名单限制（禁止 rm/sudo/systemctl 等危险命令）。",
+                        "description": "shell 命令。仅在 payload_type=command 时有效且必填。与 prompt 互斥，请根据 payload_type 只传其一。受安全黑名单限制（禁止 rm/sudo/systemctl 等危险命令）。",
                     },
                     "model": {
                         "type": "string",
@@ -569,9 +569,28 @@ TASK_TOOLS = [
                         "description": "AI 思考级别覆盖，仅对 message 载荷有效。不设置则使用系统默认。",
                     },
                 },
-                "oneOf": [
-                    {"required": ["cron_expression"]},
-                    {"required": ["at"]},
+                "allOf": [
+                    {
+                        "oneOf": [
+                            {"required": ["cron_expression"]},
+                            {"required": ["at"]},
+                        ],
+                    },
+                    {
+                        "oneOf": [
+                            {
+                                "properties": {"payload_type": {"const": "message"}},
+                                "required": ["prompt"],
+                            },
+                            {
+                                "properties": {"payload_type": {"const": "command"}},
+                                "required": ["command"],
+                            },
+                            {
+                                "properties": {"payload_type": {"const": "system_event"}},
+                            },
+                        ],
+                    },
                 ],
                 "required": ["name"],
             },
