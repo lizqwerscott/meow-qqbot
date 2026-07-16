@@ -16,9 +16,9 @@ from typing import Any, Optional
 _log = logging.getLogger(__name__)
 
 HEARTBEAT_DEFAULT_PROMPT = (
-    "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. "
-    "Do not infer or repeat old tasks from past chats. "
-    "If nothing needs attention, reply HEARTBEAT_OK."
+    "请进行心跳检查。检查记忆和任务系统中是否有待办事项、提醒或需要关注的事情。"
+    "如果没有需要关注的事项，调用 heartbeat_respond(notify=false) 静默结束。"
+    "不需要汇报正常状态，只需要在确实需要提醒时才通知管理员。"
 )
 
 
