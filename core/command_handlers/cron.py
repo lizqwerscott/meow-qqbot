@@ -62,22 +62,25 @@ class CronCommand:
                     schedule_str = f"🕐 {time.strftime('%m-%d %H:%M', time.localtime(j.at))}"
                 else:
                     schedule_str = f"`{j.cron_expression}`"
-                # 载荷标识
-                payload_icons = {"command": "🖥️", "system_event": "🔔", "message": ""}
-                payload_tag = f" {payload_icons.get(j.session_mode, '')}"
+                payload_icons = {"command": "🖥️ ", "system_event": "🔔 ", "message": ""}
+                payload_tag = payload_icons.get(j.payload_type, "")
                 session_tag = ""
                 if j.session_mode != "isolated":
                     if j.session_mode == "custom":
                         session_tag = f" [session:cron:{j.custom_session_id}]"
                     else:
                         session_tag = f" [session:{j.session_mode}]"
+                type_tag = ""
                 if j.payload_type != "message":
-                    session_tag += f" [{j.payload_type}]"
+                    type_tag = f" [{j.payload_type}]"
                 lines.append(
                     f"{enabled_icon} `{j.id[:10]}..` **{j.name}** "
-                    f"{schedule_str}{next_str}{session_tag}"
+                    f"{payload_tag}{schedule_str}{next_str}{type_tag}{session_tag}"
                 )
-                lines.append(f"   └─ {j.prompt[:60]}...")
+                if j.payload_type == "command" and j.command:
+                    lines.append(f"   └─ {j.command[:60]}...")
+                else:
+                    lines.append(f"   └─ {j.prompt[:60]}...")
             return make_reply(input_message, "\n".join(lines))
 
         elif subcmd == "create":
