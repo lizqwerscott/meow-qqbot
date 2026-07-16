@@ -104,7 +104,7 @@ class CronCommand:
                     "例: /cron create 备份 \"0 3 * * *\" --command scripts/backup.sh\n"
                     "例: /cron create 提醒 at:2027-01-01T08:00:00Z 新年快乐\n"
                     "例: /cron create 健康检查 \"*/5 * * * *\" --event 检查服务状态\n"
-                    "session 模式: isolated(默认) / current / custom:<id> / main\n"
+                    "session 模式: isolated(默认) / custom:<id> / main\n"
                     "载荷类型: message(默认) / command(--command) / system_event(--event)"
                 )
             try:
@@ -123,7 +123,7 @@ class CronCommand:
             custom_session_id = None
             if "session" in flags:
                 raw = flags["session"]
-                if raw in ("isolated", "current", "main"):
+                if raw in ("isolated", "main"):
                     session_mode = raw
                 elif raw.startswith("custom:"):
                     session_mode = "custom"
@@ -137,7 +137,7 @@ class CronCommand:
                 else:
                     raw_mode = session_part[0]
                     prompt = ""
-                if raw_mode in ("isolated", "current", "main"):
+                if raw_mode in ("isolated", "main"):
                     session_mode = raw_mode
                 elif raw_mode.startswith("custom:"):
                     session_mode = "custom"
@@ -320,9 +320,7 @@ class CronCommand:
                 lines.append(f"- 思考: `{job.thinking}`")
 
             # session 信息
-            if job.session_mode == "current":
-                lines.append(f"- Session: 当前会话 (current)")
-            elif job.session_mode == "custom":
+            if job.session_mode == "custom":
                 lines.append(f"- Session: 命名会话 cron:{job.custom_session_id} (custom)")
             elif job.session_mode == "main":
                 lines.append(f"- Session: 系统通道 cron:main (main)")
