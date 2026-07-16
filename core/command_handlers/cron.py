@@ -19,6 +19,28 @@ class CronCommand:
         self._task_mgr = task_manager
         self._agent_engine = agent_engine
 
+    @staticmethod
+    def _parse_flags(tokens: list[str]) -> tuple[dict[str, str], list[str]]:
+        """从 token 列表中提取 --flag value 对。
+
+        Returns:
+            (flags_dict, remaining_tokens)
+        """
+        flags = {}
+        remaining = []
+        i = 0
+        while i < len(tokens):
+            t = tokens[i]
+            if t.startswith("--") and t[2:] in ("command", "event", "session", "model", "thinking"):
+                flag_name = t[2:]
+                if i + 1 < len(tokens):
+                    flags[flag_name] = tokens[i + 1]
+                    i += 2
+                    continue
+            remaining.append(t)
+            i += 1
+        return flags, remaining
+
     async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
         if self._cron_mgr is None:
             return make_reply(input_message, "定时任务系统未就绪。")
@@ -63,31 +85,49 @@ class CronCommand:
             if not rest:
                 return make_reply(input_message,
                     "用法:\n"
-                    "  /cron create <name> <cron_expr> <prompt>                   # 周期性 AI 消息\n"
-                    "  /cron create <name> at:<ISO8601> <prompt>                  # 一次性 AI 消息\n"
-                    "  /cron create <name> command:<shell> <prompt>               # 定时 shell 命令\n"
-                    "  /cron create <name> event:<text>                           # 定时系统事件\n"
-                    "  /cron create <name> <arg> session:<mode> <prompt>          # 指定 session\n"
+                    "  /cron create <name> <cron_expr> <prompt>                         # AI 消息（默认）\n"
+                    "  /cron create <name> at:<ISO8601> <prompt>                        # 一次性 AI 消息\n"
+                    "  /cron create <name> <cron_expr> --command <shell>                # 定时 shell 命令\n"
+                    "  /cron create <name> <cron_expr> --event <text>                   # 定时系统事件\n"
+                    "  /cron create <name> at:<ISO8601> --command <shell>               # 一次性命令\n"
+                    "  /cron create <name> at:<ISO8601> --event <text>                  # 一次性事件\n"
+                    "  /cron create <name> <cron_expr> <prompt> --session <mode>        # 指定 session\n"
+                    "  /cron create <name> <cron_expr> <prompt> --model <m> --thinking <t>  # AI 参数\n\n"
+                    "兼容旧语法:\n"
+                    "  /cron create <name> command:<shell> <prompt>                     # (无 cron 表达式)\n"
+                    "  /cron create <name> event:<text>                                 # (无 cron 表达式)\n"
+                    "  /cron create <name> <arg> session:<mode> <prompt>                # (旧 session 语法)\n\n"
                     "例: /cron create 早安 \"0 8 * * *\" 说早安\n"
+                    "例: /cron create 备份 \"0 3 * * *\" --command scripts/backup.sh\n"
                     "例: /cron create 提醒 at:2027-01-01T08:00:00Z 新年快乐\n"
-                    "例: /cron create 备份 \"0 3 * * *\" command:scripts/backup.sh 执行备份\n"
-                    "例: /cron create 健康检查 \"*/5 * * * *\" event:检查服务状态\n"
+                    "例: /cron create 健康检查 \"*/5 * * * *\" --event 检查服务状态\n"
                     "session 模式: isolated(默认) / current / custom:<id> / main\n"
-                    "载荷类型: message(默认) / command (command:) / system_event (event:)"
+                    "载荷类型: message(默认) / command(--command) / system_event(--event)"
                 )
             try:
                 tokens = shlex.split(rest)
             except ValueError:
                 return make_reply(input_message, "参数解析失败：请检查引号是否配对")
-            if len(tokens) < 3:
+            if len(tokens) < 2:
                 return make_reply(input_message, "用法见 /cron create 的提示")
-            name, second, *rest_tokens = tokens
-            prompt = " ".join(rest_tokens)
 
-            # 解析 session 模式（如果 prompt 以 session: 开头）
+            name, second, *rest_tokens = tokens
+            flags, prompt_parts = self._parse_flags(rest_tokens)
+            prompt = " ".join(prompt_parts)
+
+            # 解析 session 模式（--session 标志优先，向后兼容 prompt 中 session: 前缀）
             session_mode = "isolated"
             custom_session_id = None
-            if prompt.startswith("session:"):
+            if "session" in flags:
+                raw = flags["session"]
+                if raw in ("isolated", "current", "main"):
+                    session_mode = raw
+                elif raw.startswith("custom:"):
+                    session_mode = "custom"
+                    custom_session_id = raw[len("custom:"):]
+                else:
+                    session_mode = raw
+            elif prompt.startswith("session:"):
                 session_part = prompt[len("session:"):].split(maxsplit=1)
                 if len(session_part) == 2:
                     raw_mode, prompt = session_part
@@ -100,8 +140,11 @@ class CronCommand:
                     session_mode = "custom"
                     custom_session_id = raw_mode[len("custom:"):]
                 else:
-                    session_mode = raw_mode  # 原样传，由 manager 校验
+                    session_mode = raw_mode
 
+            # 解析调度方式和载荷类型
+            cron_expr = ""
+            at_ts = None
             if second.startswith("at:"):
                 at_str = second[3:]
                 import time as _time
@@ -110,45 +153,71 @@ class CronCommand:
                     at_ts = _dt.fromisoformat(at_str.replace("Z", "+00:00")).timestamp()
                 except ValueError:
                     return make_reply(input_message, f"时间格式无效: {at_str}")
-                job = self._cron_mgr.create_job(
-                    name=name, cron_expression="", prompt=prompt,
-                    at=at_ts, delivery_channel=input_message.chat_id,
-                    session_mode=session_mode, custom_session_id=custom_session_id,
-                )
-                base = f"🕐 一次性提醒已创建: `{job.id[:12]}..` **{name}** (将在 {_time.strftime('%Y-%m-%d %H:%M:%S', _time.localtime(at_ts))} 执行)"
-                return make_reply(input_message, base + (f" session={session_mode}" if session_mode != "isolated" else ""))
-
             elif second.startswith("command:"):
-                payload_cmd = second[len("command:"):]
-                job = self._cron_mgr.create_job(
-                    name=name, cron_expression="", prompt=prompt,
-                    delivery_channel=input_message.chat_id,
-                    session_mode=session_mode, custom_session_id=custom_session_id,
-                    payload_type="command", command=payload_cmd,
-                )
-                base = f"🖥️ 定时命令已创建: `{job.id[:12]}..` **{name}**\n命令: `{payload_cmd[:80]}`"
-                return make_reply(input_message, base + (f"\nsession={session_mode}" if session_mode != "isolated" else ""))
-
+                if "command" not in flags:
+                    flags["command"] = second[len("command:"):]
             elif second.startswith("event:"):
-                event_text = prompt if prompt else second[len("event:"):]
-                job = self._cron_mgr.create_job(
-                    name=name, cron_expression="", prompt=event_text,
-                    delivery_channel=input_message.chat_id,
-                    session_mode=session_mode, custom_session_id=custom_session_id,
-                    payload_type="system_event",
-                )
-                base = f"🔔 定时系统事件已创建: `{job.id[:12]}..` **{name}**\n事件: {event_text[:80]}"
-                return make_reply(input_message, base + (f"\nsession={session_mode}" if session_mode != "isolated" else ""))
-
+                if "event" not in flags:
+                    flags["event"] = second[len("event:"):]
             else:
-                # 周期性 AI 消息模式（默认）
-                job = self._cron_mgr.create_job(
-                    name=name, cron_expression=second, prompt=prompt,
-                    delivery_channel=input_message.chat_id,
-                    session_mode=session_mode, custom_session_id=custom_session_id,
-                )
-                base = f"✅ 定时任务已创建: `{job.id[:12]}..` **{name}** (`{second}`)"
-                return make_reply(input_message, base + (f" session={session_mode}" if session_mode != "isolated" else ""))
+                cron_expr = second
+
+            # 确定载荷类型
+            if "command" in flags:
+                payload_type = "command"
+            elif "event" in flags:
+                payload_type = "system_event"
+            else:
+                payload_type = "message"
+
+            # 构建创建参数
+            kwargs = {
+                "name": name,
+                "cron_expression": cron_expr,
+                "prompt": prompt,
+                "delivery_channel": input_message.chat_id,
+                "session_mode": session_mode,
+                "custom_session_id": custom_session_id,
+            }
+            if at_ts is not None:
+                kwargs["at"] = at_ts
+            if payload_type != "message":
+                kwargs["payload_type"] = payload_type
+            if payload_type == "command":
+                kwargs["command"] = flags.get("command", "")
+            if "model" in flags:
+                kwargs["model"] = flags["model"]
+            if "thinking" in flags:
+                kwargs["thinking"] = flags["thinking"]
+
+            job = self._cron_mgr.create_job(**kwargs)
+
+            # 构建回复消息
+            if at_ts is not None:
+                time_str = _time.strftime('%Y-%m-%d %H:%M:%S', _time.localtime(at_ts))
+                if payload_type == "command":
+                    base = f"🖥️ 一次性命令已创建: `{job.id[:12]}..` **{name}** (将在 {time_str} 执行)\n命令: `{kwargs['command'][:80]}`"
+                elif payload_type == "system_event":
+                    base = f"🔔 一次性事件已创建: `{job.id[:12]}..` **{name}** (将在 {time_str} 执行)\n事件: {prompt[:80]}"
+                else:
+                    base = f"🕐 一次性提醒已创建: `{job.id[:12]}..` **{name}** (将在 {time_str} 执行)"
+            elif payload_type == "command":
+                base = f"🖥️ 定时命令已创建: `{job.id[:12]}..` **{name}**\n命令: `{kwargs['command'][:80]}`"
+            elif payload_type == "system_event":
+                event_text = flags.get("event", prompt)
+                base = f"🔔 定时系统事件已创建: `{job.id[:12]}..` **{name}**\n事件: {event_text[:80]}"
+            else:
+                base = f"✅ 定时任务已创建: `{job.id[:12]}..` **{name}** (`{cron_expr}`)"
+
+            if session_mode != "isolated":
+                base += f"\nsession={session_mode}"
+            if custom_session_id:
+                base += f" ({custom_session_id})"
+            if "model" in flags:
+                base += f" model={flags['model']}"
+            if "thinking" in flags:
+                base += f" thinking={flags['thinking']}"
+            return make_reply(input_message, base)
 
         elif subcmd == "delete":
             target = parts[1] if len(parts) > 1 else ""

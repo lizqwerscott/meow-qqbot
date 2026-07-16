@@ -504,6 +504,10 @@ TASK_TOOLS = [
             "name": "create_cron_job",
             "description": (
                 "创建一个定时任务或一次性提醒任务。"
+                "三种载荷类型（通过 payload_type 指定）：\n"
+                "- message（默认）: AI 智能体执行 prompt\n"
+                "- command: 在服务器上执行 shell 命令（须提供 command 参数，prompt 可选）\n"
+                "- system_event: 系统事件通知（仅记录日志投递，prompt 可选）\n"
                 "所有时间均为北京时间 (CST/UTC+8)。\n"
                 "两种模式二选一：\n"
                 "1. 周期性任务：设置 cron_expression（标准 5 字段 cron 表达式：分 时 日 月 周，"
@@ -528,7 +532,7 @@ TASK_TOOLS = [
                     },
                     "prompt": {
                         "type": "string",
-                        "description": "执行时 AI 要执行的指令。例如：'对大家说早上好，今天的天气是...'",
+                        "description": "执行时 AI 要执行的指令。payload_type=message 时必填。例如：'对大家说早上好，今天的天气是...'。payload_type=command 或 system_event 时可选。",
                     },
                     "session_mode": {
                         "type": "string",
@@ -553,7 +557,7 @@ TASK_TOOLS = [
                     },
                     "command": {
                         "type": "string",
-                        "description": "shell 命令，仅在 payload_type=command 时有效。受安全黑名单限制（禁止 rm/sudo/systemctl 等危险命令）。",
+                        "description": "shell 命令，仅在 payload_type=command 时有效且必填。受安全黑名单限制（禁止 rm/sudo/systemctl 等危险命令）。",
                     },
                     "model": {
                         "type": "string",
@@ -569,7 +573,7 @@ TASK_TOOLS = [
                     {"required": ["cron_expression"]},
                     {"required": ["at"]},
                 ],
-                "required": ["name", "prompt"],
+                "required": ["name"],
             },
         },
     },
