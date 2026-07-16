@@ -9,15 +9,10 @@ wheels/
 # Virtual environments
 .venv
 
-# 附件 & 表情缓存
+# 运行时数据（全部忽略，运行时自动生成）
 cache/*
-data/attachments/*
-data/emojis/*
-!data/attachments/.gitkeep
-!data/emojis/.gitkeep
-
-# 会话历史缓存
-data/sessions/*
+data/*
+!data/.gitkeep
 
 # 工作区（运行时沙箱文件，不进入版本控制）
 workspaces/*
@@ -25,4 +20,11 @@ workspaces/*
 # 插件（独立 git 仓库，不作为项目一部分）
 plugins/*
 !plugins/__init__.py
+
+# 配置文件（含 API 密钥，勿提交）
+config.toml
+config.yaml
+
+# 自动生成的锁文件
+skills-lock.json
 
