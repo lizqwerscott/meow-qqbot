@@ -31,7 +31,7 @@ class CronCommand:
         i = 0
         while i < len(tokens):
             t = tokens[i]
-            if t.startswith("--") and t[2:] in ("command", "event", "session", "model", "thinking"):
+            if t.startswith("--") and t[2:] in ("command", "event", "session", "model", "thinking", "notify"):
                 flag_name = t[2:]
                 if i + 1 < len(tokens):
                     flags[flag_name] = tokens[i + 1]
@@ -95,7 +95,8 @@ class CronCommand:
                     "  /cron create <name> at:<ISO8601> --command <shell>               # 一次性命令\n"
                     "  /cron create <name> at:<ISO8601> --event <text>                  # 一次性事件\n"
                     "  /cron create <name> <cron_expr> <prompt> --session <mode>        # 指定 session\n"
-                    "  /cron create <name> <cron_expr> <prompt> --model <m> --thinking <t>  # AI 参数\n\n"
+                    "  /cron create <name> <cron_expr> <prompt> --model <m> --thinking <t>  # AI 参数\n"
+                    "  /cron create <name> <cron_expr> <prompt> --notify off              # 静默执行不投递\n\n"
                     "兼容旧语法:\n"
                     "  /cron create <name> command:<shell> <prompt>                     # (无 cron 表达式)\n"
                     "  /cron create <name> event:<text>                                 # (无 cron 表达式)\n"
@@ -192,6 +193,12 @@ class CronCommand:
                 kwargs["model"] = flags["model"]
             if "thinking" in flags:
                 kwargs["thinking"] = flags["thinking"]
+            if "notify" in flags:
+                notify_val = flags["notify"].lower()
+                if notify_val in ("off", "false", "no", "0"):
+                    kwargs["enable_notify"] = False
+                elif notify_val in ("on", "true", "yes", "1"):
+                    kwargs["enable_notify"] = True
 
             job = await self._cron_mgr.create_job(**kwargs)
 

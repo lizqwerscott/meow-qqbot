@@ -12,12 +12,9 @@
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone, timedelta
 from typing import Callable, Optional
 
-from croniter import croniter
-
-from .models import CronJob, TaskRecord, TaskStatus
+from .models import CronJob, TaskRecord, TaskStatus, recalculate_next_run
 
 _log = logging.getLogger(__name__)
 
@@ -43,10 +40,10 @@ class CronJobScheduler:
         self._semaphore = asyncio.Semaphore(max_concurrent)
 
         # 需要外部注入的回调
-        self._on_trigger: Optional[Callable] = None  # async (job: CronJob) -> None
-        self._get_jobs: Optional[Callable] = None     # () -> list[CronJob]
-        self._update_job: Optional[Callable] = None   # (job: CronJob) -> None
-        self._delete_job: Optional[Callable] = None   # (job_id: str) -> bool
+        self._on_trigger: Optional[Callable] = None       # async (job: CronJob) -> None
+        self._get_jobs: Optional[Callable] = None          # () -> list[CronJob]
+        self._update_job: Optional[Callable] = None        # async (job: CronJob) -> None
+        self._delete_job: Optional[Callable] = None        # async (job_id: str) -> bool
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -62,7 +59,8 @@ class CronJobScheduler:
 
         on_trigger: async (job: CronJob) -> None — 执行任务
         get_jobs: () -> list[CronJob] — 获取所有 job
-        update_job: (job: CronJob) -> None — 更新 job（同步）
+        update_job: async (job: CronJob) -> None — 更新 job
+        delete_job: async (job_id: str) -> bool — 删除 job
         """
         self._on_trigger = on_trigger
         self._get_jobs = get_jobs
@@ -96,25 +94,27 @@ class CronJobScheduler:
 
     # ── 内部 ──
 
-    def _recalculate_next_run(self, job: CronJob) -> None:
-        """计算 next_run_at。
-        - 一次性任务（at 有值）：直接用 at
-        - 周期性任务（cron）：用 croniter 从当前时间计算
-        """
-        if job.at is not None:
-            job.next_run_at = job.at
-            return
-        # 使用 CST (UTC+8) 以匹配 AI prompt 注入的时间
-        _tz = timezone(timedelta(hours=8))
-        now = datetime.now(_tz)
-        try:
-            cron = croniter(job.cron_expression, now)
-            job.next_run_at = cron.get_next(float)
-        except (ValueError, KeyError) as e:
-            _log.error(f"定时任务 {job.name} cron 表达式解析失败: {e}")
-            job.next_run_at = None
+    async def _trigger_job(self, job: CronJob) -> None:
+        """带并发控制的触发执行。"""
+        async with self._semaphore:
+            if self._on_trigger:
+                await self._on_trigger(job)
 
-    def _recover_missed_jobs(self) -> list[CronJob]:
+    def _schedule_trigger(self, job: CronJob) -> None:
+        """创建后台触发任务并附加异常日志处理。"""
+        task = asyncio.create_task(self._trigger_job(job))
+
+        def _on_done(t):
+            try:
+                t.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                _log.error(f"定时任务触发异常 [{job.name}]: {e}", exc_info=True)
+
+        task.add_done_callback(_on_done)
+
+    async def _recover_missed_jobs(self) -> list[CronJob]:
         """检查是否有需要补跑的 job。返回需要立即触发的 job 列表。"""
         now = time.time()
         to_trigger = []
@@ -140,9 +140,9 @@ class CronJobScheduler:
                         f"定时任务 {job.name} 错过超过补跑窗口 ({delta:.0f}s)，跳过"
                     )
                     # 跳过，重新计算下一次
-                    self._recalculate_next_run(job)
+                    recalculate_next_run(job)
                     if self._update_job:
-                        self._update_job(job)
+                        await self._update_job(job)
 
         return to_trigger
 
@@ -151,15 +151,14 @@ class CronJobScheduler:
         # 启动时：重新计算所有 job 的 next_run_at
         if self._get_jobs:
             for job in self._get_jobs():
-                self._recalculate_next_run(job)
+                recalculate_next_run(job)
                 if self._update_job:
-                    self._update_job(job)
+                    await self._update_job(job)
 
         # 启动时补跑（fire-and-forget）
-        missed = self._recover_missed_jobs()
+        missed = await self._recover_missed_jobs()
         for job in missed:
-            if self._on_trigger:
-                asyncio.create_task(self._on_trigger(job))
+            self._schedule_trigger(job)
 
         # 轮询循环
         while self._running:
@@ -191,12 +190,12 @@ class CronJobScheduler:
                 if job.is_one_shot:
                     # 一次性任务：删除后执行（防止后续重复触发）
                     if job.delete_after_run and self._delete_job:
-                        self._delete_job(job.id)
+                        await self._delete_job(job.id)
                 else:
                     # 周期任务：计算下一次，先更新再执行，防止重复触发
-                    self._recalculate_next_run(job)
+                    recalculate_next_run(job)
                     if self._update_job:
-                        self._update_job(job)
+                        await self._update_job(job)
 
                 # 非阻塞触发（fire-and-forget，不阻塞轮询）
-                asyncio.create_task(self._on_trigger(job))
+                self._schedule_trigger(job)

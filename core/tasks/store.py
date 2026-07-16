@@ -99,13 +99,13 @@ class TaskStore:
             if len(tasks) > self._max_tasks:
                 tasks = tasks[: self._max_tasks]
             data = [t.to_dict() for t in tasks]
-        await asyncio.to_thread(self._save_json, self._tasks_path, data)
+            await asyncio.to_thread(self._save_json, self._tasks_path, data)
 
     async def save_jobs(self) -> None:
         """将内存中的 cron_jobs 写回 JSON 文件。"""
         async with self._lock:
             data = [j.to_dict() for j in self._jobs.values()]
-        await asyncio.to_thread(self._save_json, self._jobs_path, data)
+            await asyncio.to_thread(self._save_json, self._jobs_path, data)
 
     # ── Task CRUD ──
 

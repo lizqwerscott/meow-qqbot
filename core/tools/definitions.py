@@ -606,6 +606,10 @@ TASK_TOOLS = [
                         "enum": ["off", "low", "medium", "high"],
                         "description": "AI 思考级别覆盖，仅对 message 载荷有效。不设置则使用系统默认。",
                     },
+                    "enable_notify": {
+                        "type": "boolean",
+                        "description": "是否投递执行结果到频道。默认为 true，设为 false 则静默执行不通知。",
+                    },
                 },
                 "allOf": [
                     {
@@ -718,6 +722,10 @@ TASK_TOOLS = [
                         "type": "string",
                         "enum": ["off", "low", "medium", "high"],
                         "description": "新的 AI 思考级别",
+                    },
+                    "enable_notify": {
+                        "type": "boolean",
+                        "description": "是否投递执行结果到频道。true 表示投递，false 表示静默执行。",
                     },
                 },
                 "required": ["job_id"],
