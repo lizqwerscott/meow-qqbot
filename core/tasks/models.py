@@ -1,10 +1,15 @@
 """后台任务数据模型。"""
 
+import logging
 import uuid
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Optional
+
+from croniter import croniter
+
+_log = logging.getLogger(__name__)
 
 
 class SessionMode(str, Enum):
@@ -107,6 +112,7 @@ class CronJob:
     next_run_at: Optional[float] = None
     delivery_channel: Optional[str] = None  # 结果投递到的 chat_id
     is_group: bool = True  # 来源聊天是否为群聊（影响 send_emoji 等工具使用群聊还是私聊接口）
+    enable_notify: bool = True  # 是否投递执行结果到频道
     session_mode: str = SessionMode.ISOLATED.value  # isolated/custom/main
     custom_session_id: Optional[str] = None  # custom 模式下的命名 session ID
 
@@ -130,3 +136,22 @@ class CronJob:
     @classmethod
     def from_dict(cls, d: dict) -> "CronJob":
         return cls(**d)
+
+
+def recalculate_next_run(job: CronJob) -> None:
+    """计算 CronJob 的 next_run_at。
+
+    - 一次性任务（at 有值）：直接用 at 作为 next_run_at
+    - 周期性任务（cron）：用 croniter 从当前北京时间计算
+    """
+    if job.at is not None:
+        job.next_run_at = job.at
+        return
+    tz = timezone(timedelta(hours=8))
+    now = datetime.now(tz)
+    try:
+        cron = croniter(job.cron_expression, now)
+        job.next_run_at = cron.get_next(float)
+    except (ValueError, KeyError) as e:
+        _log.error(f"定时任务 {job.name} cron 表达式解析失败: {e}")
+        job.next_run_at = None

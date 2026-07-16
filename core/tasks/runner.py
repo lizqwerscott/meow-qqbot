@@ -293,7 +293,7 @@ class BackgroundTaskRunner:
 
         # 根据 session_mode 覆盖 session_id
         task.session_id = self._resolve_session_id(job, task.id)
-        await self._task_manager._store.update_task(task)
+        await self._task_manager.update_task_record(task)
         _log.info(
             f"CronJob [{job.name}] payload={job.payload_type} "
             f"session={job.session_mode} session_id={task.session_id}"
@@ -308,7 +308,7 @@ class BackgroundTaskRunner:
             task = await self.run_task(task, timeout=timeout, is_group=job.is_group)
 
         # 投递结果
-        if job.delivery_channel and task and self._delivery_cb:
+        if job.enable_notify and job.delivery_channel and task and self._delivery_cb:
             content = task.result or task.error or ""
             if content:
                 prefix = {

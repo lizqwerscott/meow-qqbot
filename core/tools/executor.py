@@ -832,7 +832,6 @@ class ToolExecutor:
         }, ensure_ascii=False))
 
     @staticmethod
-    @staticmethod
     def _parse_iso_datetime(s: str) -> Optional[float]:
         """将 ISO 8601 时间字符串解析为 Unix 时间戳。
         
@@ -864,6 +863,10 @@ class ToolExecutor:
         payload_command = (args.get("command") or "").strip()
         payload_model = (args.get("model") or "").strip() or None
         payload_thinking = (args.get("thinking") or "").strip() or None
+        if "enable_notify" in args:
+            enable_notify = bool(args["enable_notify"])
+        else:
+            enable_notify = True
 
         if not name:
             return ToolResult(content=json.dumps(
@@ -924,6 +927,7 @@ class ToolExecutor:
             command=payload_command,
             model=payload_model,
             thinking=payload_thinking,
+            enable_notify=enable_notify,
         )
 
         # 构建描述
@@ -1162,6 +1166,9 @@ class ToolExecutor:
         if "thinking" in args:
             job.thinking = (args["thinking"] or "").strip() or None
             changed.append("thinking")
+        if "enable_notify" in args:
+            job.enable_notify = bool(args["enable_notify"])
+            changed.append("enable_notify")
 
         if not changed:
             return ToolResult(content=json.dumps({

@@ -8,12 +8,9 @@
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone, timedelta
 from typing import Callable, List, Optional
 
-from croniter import croniter
-
-from .models import CronJob, TaskRecord, TaskStatus
+from .models import CronJob, TaskRecord, TaskStatus, recalculate_next_run
 from .store import TaskStore
 
 _log = logging.getLogger(__name__)
@@ -63,6 +60,10 @@ class TaskManager:
         task.started_at = time.time()
         await self._store.update_task(task)
         return task
+
+    async def update_task_record(self, task: TaskRecord) -> None:
+        """更新任务记录到持久化存储（不改变状态）。"""
+        await self._store.update_task(task)
 
     async def finish_task(
         self,
@@ -146,25 +147,6 @@ class CronJobManager:
 
     # ── CRUD ──
 
-    @staticmethod
-    def _recalculate_next_run(job: CronJob) -> None:
-        """计算 next_run_at。
-        - 一次性任务（at 有值）：直接用 at 作为 next_run_at
-        - 周期性任务（cron）：用 croniter 计算
-        """
-        if job.at is not None:
-            job.next_run_at = job.at
-            return
-        try:
-            # 使用 CST (UTC+8) 以匹配 AI prompt 注入的时间
-            _tz = timezone(timedelta(hours=8))
-            now = datetime.now(_tz)
-            cron = croniter(job.cron_expression, now)
-            job.next_run_at = cron.get_next(float)
-        except (ValueError, KeyError) as e:
-            _log.error(f"定时任务 {job.name} cron 表达式解析失败: {e}")
-            job.next_run_at = None
-
     async def create_job(
         self,
         name: str,
@@ -174,6 +156,7 @@ class CronJobManager:
         at: Optional[float] = None,
         delivery_channel: Optional[str] = None,
         is_group: bool = True,
+        enable_notify: bool = True,
         catch_up: bool = True,
         enabled: bool = True,
         delete_after_run: bool = True,
@@ -206,6 +189,7 @@ class CronJobManager:
             delete_after_run=delete_after_run,
             delivery_channel=delivery_channel,
             is_group=is_group,
+            enable_notify=enable_notify,
             session_mode=session_mode,
             custom_session_id=custom_session_id,
             payload_type=payload_type,
@@ -213,7 +197,7 @@ class CronJobManager:
             model=model,
             thinking=thinking,
         )
-        self._recalculate_next_run(job)
+        recalculate_next_run(job)
         await self._store.add_job(job)
         schedule_desc = f"at={at}" if at is not None else f"cron={cron_expression}"
         _log.info(
@@ -250,7 +234,7 @@ class CronJobManager:
         if job is None:
             return False
         job.enabled = True
-        self._recalculate_next_run(job)
+        recalculate_next_run(job)
         await self._store.update_job(job)
         _log.info(f"定时任务已启用: {job.name}")
         return True
