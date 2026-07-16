@@ -331,6 +331,7 @@ async def main() -> None:
         task_manager=task_manager,
         cron_job_manager=cron_job_manager,
         background_task_runner=background_task_runner,
+        heartbeat_manager=heartbeat_manager,
     )
 
     # ── 4. 加载插件 ──
