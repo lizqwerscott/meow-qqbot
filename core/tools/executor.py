@@ -120,6 +120,7 @@ class ToolExecutor:
         self._register("create_task", self._exec_create_task, is_async=True)
         self._register("create_cron_job", self._exec_create_cron_job, is_async=True)
         self._register("cancel_task", self._exec_cancel_task, is_async=True)
+        self._register("list_tasks", self._exec_list_tasks)
         self._register("list_cron_jobs", self._exec_list_cron_jobs)
         self._register("update_cron_job", self._exec_update_cron_job, is_async=True)
         self._register("delete_cron_job", self._exec_delete_cron_job, is_async=True)
@@ -996,6 +997,51 @@ class ToolExecutor:
             }, ensure_ascii=False))
         return ToolResult(content=json.dumps({
             "error": f"无法取消任务 {task_id[:12]}..",
+        }, ensure_ascii=False))
+
+    async def _exec_list_tasks(self, args: dict, ctx: ToolContext) -> ToolResult:
+        if not self._task_manager:
+            return ToolResult(content=json.dumps(
+                {"error": "任务系统未就绪"}, ensure_ascii=False,
+            ))
+
+        status_str = (args.get("status") or "").strip().lower()
+        limit = args.get("limit") or 20
+        if not isinstance(limit, int) or limit < 1:
+            limit = 20
+        limit = min(limit, 50)
+
+        status_filter = None
+        if status_str:
+            from core.tasks.models import TaskStatus as TS
+            try:
+                status_filter = TS(status_str)
+            except ValueError:
+                pass
+
+        tasks = self._task_manager.list_tasks(limit=limit, status=status_filter)
+        if not tasks:
+            return ToolResult(content=json.dumps({
+                "tasks": [], "message": "暂无任务记录",
+            }, ensure_ascii=False))
+
+        result = []
+        for t in tasks:
+            result.append({
+                "id": t.id,
+                "type": t.type,
+                "status": t.status.value,
+                "created_at": t.created_at,
+                "started_at": t.started_at,
+                "finished_at": t.finished_at,
+                "job_id": t.job_id,
+                "prompt": t.prompt[:100] if t.prompt else "",
+                "result": t.result[:200] if t.result else None,
+                "error": t.error[:200] if t.error else None,
+            })
+        return ToolResult(content=json.dumps({
+            "tasks": result,
+            "total": len(result),
         }, ensure_ascii=False))
 
     # ── 辅助：按 job_id 或名称查找 cron job ──

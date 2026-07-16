@@ -24,6 +24,8 @@ from core.tools.definitions import (
     TASK_TOOLS,
     FILE_TOOLS,
     HEARTBEAT_RESPOND_TOOL,
+    LIST_TASKS_TOOL,
+    LIST_CRON_JOBS_TOOL,
 )
 
 _log = logging.getLogger(__name__)
@@ -412,6 +414,11 @@ class PromptBuilder:
 
         # 命令工具（管理员才有权限，让 AI 尝试，权限系统会拦截）
         tools_to_use.extend(EXECUTE_COMMAND_TOOL)
+
+        # 任务查看工具（只读：查看任务执行记录和定时任务定义）
+        if self._has_tasks:
+            tools_to_use.extend(LIST_TASKS_TOOL)
+            tools_to_use.extend(LIST_CRON_JOBS_TOOL)
 
         # 心跳响应工具
         tools_to_use.extend(HEARTBEAT_RESPOND_TOOL)
