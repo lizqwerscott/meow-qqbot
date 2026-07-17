@@ -59,6 +59,7 @@ class AgentEngine:
         model_registry: Optional[Any] = None,
         permission_manager=None,
         archive_manager=None,
+        system_events=None,
         workspace_manager=None,
     ):
         self.ai_service = ai_service
@@ -83,6 +84,7 @@ class AgentEngine:
         self._task_manager = task_manager
         self._cron_job_manager = cron_job_manager
         self._archive_manager = archive_manager
+        self._system_events = system_events
 
         self.tool_executor = ToolExecutor(
             emoji_manager=emoji_manager,
@@ -93,6 +95,7 @@ class AgentEngine:
             learning_orchestrator=learning_orchestrator,
             admin_ids=admin_id,
             permission_manager=permission_manager,
+            system_events=system_events,
         )
 
         # ── 工作区 ──
@@ -119,6 +122,7 @@ class AgentEngine:
             permission_manager=permission_manager,
             workspace_manager=workspace_manager,
             archive_manager=archive_manager,
+            system_events=system_events,
         )
 
         self.tool_loop = ToolLoop(

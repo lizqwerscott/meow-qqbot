@@ -54,6 +54,11 @@ class BackgroundTaskRunner:
         # async (task_chat_id, prompt, sender_id) -> (result_text, error_text)
         self._delivery_cb: Optional[Callable] = None
         # async (chat_id, content, message_id, is_group) -> None
+        self._system_events: Optional[Any] = None
+
+    def set_system_events(self, system_events: Any) -> None:
+        """注入系统事件队列。"""
+        self._system_events = system_events
 
     def set_execute_callback(self, cb: Callable) -> None:
         """注入任务执行回调。
@@ -163,6 +168,23 @@ class BackgroundTaskRunner:
                 error=str(e),
             )
 
+        # ── 手动后台任务完成后：入队 system event ──
+        # cron 类型由 run_cron_job 的 _enqueue_events 处理，不重复
+        if task and task.status in (TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.TIMEOUT) \
+           and self._system_events \
+           and task.type == "manual":
+            status_text = {
+                TaskStatus.SUCCESS: "已完成",
+                TaskStatus.FAILED: "执行失败",
+                TaskStatus.TIMEOUT: "执行超时",
+            }.get(task.status, "已完成")
+            target = task.delivery_channel or f"task:{task.id}"
+            self._system_events.enqueue(
+                session_key=target,
+                text=f"后台任务{status_text}",
+                context_key=f"task:{task.id}",
+            )
+
         return task
 
     @staticmethod
@@ -256,17 +278,69 @@ class BackgroundTaskRunner:
                 task.id, TaskStatus.FAILED, error=f"命令执行异常: {e}",
             )
 
+    @staticmethod
+    def _resolve_event_target(job: CronJob, task_id: str) -> str:
+        """确定系统事件投递的目标 session。
+
+        delivery_channel 优先（由 /cron create 保证设置），
+        降级到该 cron 的 AI 执行 session。
+        """
+        return job.delivery_channel or BackgroundTaskRunner._resolve_session_id(job, task_id)
+
+    async def _enqueue_events(
+        self,
+        job: CronJob,
+        task_id: str,
+        text: str,
+        context_key: str,
+        *,
+        replace: bool = False,
+    ) -> None:
+        """向目标 session 入队系统事件。如果 session_mode=main 同时投递心跳。
+
+        Args:
+            job: cron job 定义
+            task_id: 当前任务 ID，用于降级路由
+            text: 事件文本
+            context_key: 去重/replace 键
+            replace: replace=True 时同 context_key 覆盖旧事件
+        """
+        if not self._system_events:
+            return
+        target = self._resolve_event_target(job, task_id)
+        self._system_events.enqueue(
+            session_key=target,
+            text=text,
+            context_key=context_key,
+            replace=replace,
+        )
+        _log.info("系统事件入队 [%s] → %s: %s", job.name, target[:24], text[:60])
+        # main 模式额外投递心跳 session，让 HeartbeatManager 也能消费
+        if job.session_mode == "main":
+            self._system_events.enqueue(
+                session_key="heartbeat:main",
+                text=text,
+                context_key=context_key,
+                replace=replace,
+            )
+            _log.debug("系统事件额外入队 → heartbeat:main [%s]: %s", job.name, text[:60])
+
     async def _execute_system_event_payload(
         self,
         job: CronJob,
         task: TaskRecord,
     ) -> TaskRecord:
-        """执行 system_event 载荷：记录日志，不执行具体操作。"""
+        """执行 system_event 载荷：推入对应 session 的系统事件队列。"""
         await self._task_manager.start_task(task.id)
-        _log.info(f"系统事件 [{job.name}]: {job.prompt[:100]}")
+        text = job.prompt or f"定时任务 [{job.name}] 触发"
+        await self._enqueue_events(
+            job, task.id, text,
+            context_key=f"cron:{job.id}",
+            replace=True,
+        )
         return await self._task_manager.finish_task(
             task.id, TaskStatus.SUCCESS,
-            result=f"[系统事件] {job.prompt}",
+            result=f"[系统事件] {text}",
         )
 
     async def run_cron_job(
@@ -325,6 +399,22 @@ class BackgroundTaskRunner:
                     )
                 except Exception as e:
                     _log.error(f"投递任务结果失败: {e}")
+
+        # 系统事件：message/command 任务完成后通知目标 session
+        # system_event 类型由 _execute_system_event_payload 自行入队，不重复
+        if task and task.status in (TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.TIMEOUT) \
+           and self._system_events \
+           and job.payload_type != "system_event":
+            status_text = {
+                TaskStatus.SUCCESS: "已完成",
+                TaskStatus.FAILED: "执行失败",
+                TaskStatus.TIMEOUT: "执行超时",
+            }.get(task.status, "已完成")
+            await self._enqueue_events(
+                job, task.id,
+                text=f"任务 '{job.name}'{status_text}",
+                context_key=f"task:{task.id}",
+            )
 
         return task
 

@@ -8,6 +8,7 @@
 
 import json
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, List, Optional, Tuple
 
@@ -104,6 +105,7 @@ class PromptBuilder:
         permission_manager=None,
         workspace_manager=None,
         archive_manager=None,
+        system_events=None,
     ):
         self.template_manager = template_manager
         self.context_manager = context_manager
@@ -120,6 +122,7 @@ class PromptBuilder:
         self._perm = permission_manager
         self._workspace_manager = workspace_manager
         self._archive_manager = archive_manager
+        self._system_events = system_events
 
     async def build(
         self,
@@ -228,6 +231,16 @@ class PromptBuilder:
 
         # ── 5. 动态上下文（末尾单独一个 system 消息） ──
         dynamic_parts: List[str] = []
+
+        # 系统事件（会话外部感知上下文，最优先显示）
+        if self._system_events:
+            events = self._system_events.drain(chat_id)
+            if events:
+                lines = []
+                for e in events:
+                    ts = time.strftime("%H:%M:%S", time.localtime(e.ts))
+                    lines.append(f"System: [{ts}] {e.text}")
+                dynamic_parts.append("【系统事件】\n" + "\n".join(lines))
 
         # 技能条目列表
         if self._skill_managers and self._skill_managers.has_skills:
@@ -448,6 +461,19 @@ class PromptBuilder:
             system_prompt = HEARTBEAT_MINIMAL_SYSTEM_PROMPT
 
         messages: List[dict] = [{"role": "system", "content": system_prompt}]
+
+        # ── 系统事件（心跳触发时注入） ──
+        if self._system_events:
+            events = self._system_events.drain(chat_id)
+            if events:
+                lines = []
+                for e in events:
+                    ts = time.strftime("%H:%M:%S", time.localtime(e.ts))
+                    lines.append(f"System: [{ts}] {e.text}")
+                messages.insert(1, {
+                    "role": "system",
+                    "content": "【系统事件（本次心跳触发）】\n" + "\n".join(lines),
+                })
 
         # ── 聊天历史（作为独立消息对，仅 session=main） ──
         if session_mode == "main" and admin_chat_id:
