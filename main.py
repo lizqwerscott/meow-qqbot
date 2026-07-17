@@ -9,6 +9,7 @@ from core.ai.service import AIService
 from core.engine.agent_engine import AgentEngine
 from core.engine.client import BotEngine
 from core.managers.context_manager import ChatContextManager
+from core.managers.archive_manager import ArchiveManager
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager
 from core.ai.multimodal import MultimodalService
@@ -116,6 +117,27 @@ async def main() -> None:
         hard_clear=ctx_mgmt.get("hard_clear", 180000),
         cache_dir=(cache_cfg.get("dir") or "data/sessions/") if cache_cfg.get("enabled", True) else None,
     )
+
+    # ── ArchiveManager（会话归档 + 自动摘要） ──
+    archive_config = config.get("archive", {})
+    archive_manager = None
+    if archive_config.get("enabled", True):
+        archive_manager = ArchiveManager(
+            context_manager=context_manager,
+            cache_dir=cache_cfg.get("dir", "data/sessions/"),
+            memory_dir=archive_config.get("memory_dir", "data/archives/memory/"),
+            archive_hour=archive_config.get("archive_hour", 4),
+            replay_count=archive_config.get("replay_count", 6),
+            summary_count=archive_config.get("summary_count", 15),
+            summary_days=archive_config.get("summary_days", 2),
+            retention_days=archive_config.get("retention_days", 30),
+        )
+        _log.info(
+            "归档系统已启用 (每日 %d:00 检查, 摘要 %d 条, 回放 %d 条)",
+            archive_config.get("archive_hour", 4),
+            archive_config.get("summary_count", 15),
+            archive_config.get("replay_count", 6),
+        )
 
     # ── CostTracker（AI 消耗追踪） ──
     cost_tracking_config = config.get("cost_tracking", {})
@@ -248,6 +270,7 @@ async def main() -> None:
         model_registry=model_registry,
         permission_manager=permission_manager,
         workspace_manager=workspace_manager,
+        archive_manager=archive_manager,
     )
 
     # ── 将后台任务执行器注入 ToolExecutor（供 AI 工具调用） ──
@@ -333,6 +356,7 @@ async def main() -> None:
         cron_job_manager=cron_job_manager,
         background_task_runner=background_task_runner,
         heartbeat_manager=heartbeat_manager,
+        archive_manager=archive_manager,
     )
 
     # ── 4. 加载插件 ──

@@ -1,0 +1,106 @@
+import logging
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from core.command_handlers.base import command, make_reply
+from core.managers.archive_manager import ArchiveManager
+from core.message import InputMessage
+
+_log = logging.getLogger(__name__)
+
+
+@command(name="归档", aliases=["archive"], permission="admin", description="会话归档管理")
+class ArchiveCommand:
+    def __init__(self, archive_manager: Optional[ArchiveManager] = None):
+        self.archive_manager = archive_manager
+
+    async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
+        if not self.archive_manager:
+            return make_reply(input_message, "归档系统未启用。")
+
+        parts = args.strip().split(maxsplit=1) if args.strip() else []
+        subcmd = parts[0] if parts else ""
+        subargs = parts[1] if len(parts) > 1 else ""
+
+        if not subcmd or subcmd in ("当前", "this", "."):
+            return await self._show_status(input_message)
+        if subcmd in ("查看", "list", "ls"):
+            return await self._list_archives(input_message, subargs)
+        if subcmd in ("执行", "run", "do"):
+            return await self._run_archive(input_message, subargs)
+        if subcmd in ("摘要", "summary"):
+            return await self._show_summary(input_message, subargs)
+        if subcmd in ("清理", "clean"):
+            return await self._clean_archives(input_message)
+        return make_reply(
+            input_message,
+            "未知子命令。可用: 当前, 查看, 执行, 摘要, 清理",
+        )
+
+    async def _show_status(self, input_message: InputMessage) -> List[Dict[str, Any]]:
+        chat_id = input_message.chat_id
+        ctx = self.archive_manager._cm.get_context(chat_id)
+        count = ctx.get_history_count()
+        last_act = time.strftime("%H:%M", time.localtime(ctx.last_activity))
+        mem_dir = Path(self.archive_manager._memory_dir) / chat_id
+        archive_count = 0
+        if mem_dir.is_dir():
+            archive_count = len(list(mem_dir.glob("*.md")))
+        return make_reply(
+            input_message,
+            f"会话: {chat_id[:24]}…\n"
+            f"当前消息: {count} 条\n"
+            f"最后活跃: {last_act}\n"
+            f"归档摘要: {archive_count} 个\n"
+            f"归档时间: 每日 {self.archive_manager._archive_hour}:00\n"
+            f"回放: {self.archive_manager._replay_count} 条\n"
+            f"摘要: {self.archive_manager._summary_count} 条",
+        )
+
+    async def _list_archives(self, input_message: InputMessage, chat_id: str) -> List[Dict[str, Any]]:
+        target = chat_id or input_message.chat_id
+        mem_dir = Path(self.archive_manager._memory_dir) / target
+        if not mem_dir.is_dir():
+            return make_reply(input_message, f"会话 {target[:24]}… 没有归档记录。")
+        files = sorted(mem_dir.glob("*.md"), reverse=True)
+        if not files:
+            return make_reply(input_message, f"会话 {target[:24]}… 没有归档记录。")
+        lines = [f"{f.stem} ({f.stat().st_size} 字节)" for f in files[:20]]
+        reply = f"归档摘要 ({len(files)} 个):\n" + "\n".join(lines)
+        if len(files) > 20:
+            reply += f"\n... (还有 {len(files) - 20} 个)"
+        return make_reply(input_message, reply)
+
+    async def _show_summary(self, input_message: InputMessage, chat_id: str) -> List[Dict[str, Any]]:
+        target = chat_id or input_message.chat_id
+        text = self.archive_manager.load_recent_summaries(target)
+        if not text:
+            return make_reply(input_message, f"会话 {target[:24]}… 没有可用的归档摘要。")
+        preview = text[:1500]
+        if len(text) > 1500:
+            preview += "\n…(过长已截断)"
+        return make_reply(input_message, f"最近摘要:\n{preview}")
+
+    async def _run_archive(self, input_message: InputMessage, chat_id: str) -> List[Dict[str, Any]]:
+        target = chat_id or input_message.chat_id
+        try:
+            result = await self.archive_manager.archive_manual(
+                target, input_message.is_group
+            )
+            return make_reply(
+                input_message,
+                f"会话 {target[:24]}… 归档完成。\n"
+                f"回放: {result.replay_count} 条\n"
+                f"摘要: {'已生成' if result.summary_path else '无'}\n"
+                f"归档: {'已重命名' if result.archive_path else '无文件'}",
+            )
+        except Exception as e:
+            return make_reply(input_message, f"归档失败: {e}")
+
+    async def _clean_archives(self, input_message: InputMessage) -> List[Dict[str, Any]]:
+        try:
+            removed = self.archive_manager.cleanup_old_archives()
+            return make_reply(input_message, f"归档清理完成，移除了 {removed} 个文件。")
+        except Exception as e:
+            return make_reply(input_message, f"清理失败: {e}")

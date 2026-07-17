@@ -358,10 +358,10 @@ class ChatContext:
         self._flushed_count = len(self.history)
 
         if self._is_expired():
-            _log.info("会话缓存已过期，遗忘 [%s..]", self.chat_id[:12])
-            self.history.clear()
-            self._flushed_count = 0
-            path.unlink(missing_ok=True)
+            _log.info("会话缓存已过期 [%s..]，交由 ArchiveManager 处理", self.chat_id[:12])
+            # 不清除数据，让 ArchiveManager.archive_if_stale 在 dispatch 时处理归档。
+            # 将 last_activity 设为最后消息的时间戳，确保 archive_if_stale 能检测到过期。
+            self.last_activity = self.history[-1].timestamp
             return False
         self.last_activity = time.time()
         _log.info("从本地缓存恢复会话 [%s..] (%d 条)", self.chat_id[:12], len(self.history))
@@ -861,6 +861,12 @@ class ChatContextManager:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             self.clear_chat_history(chat_id)
+
+    async def with_chat_lock(self, chat_id: str, func):
+        """在 per-chat 锁保护下执行异步函数，供 ArchiveManager 等外部使用。"""
+        lock = await self._get_chat_lock(chat_id)
+        async with lock:
+            return await func()
 
     async def compact_history_if_needed(
         self, chat_id: str, ai_service, force: bool = False

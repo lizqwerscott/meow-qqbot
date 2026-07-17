@@ -15,5 +15,6 @@ import core.command_handlers.jargon
 import core.command_handlers.tasks
 import core.command_handlers.cron
 import core.command_handlers.heartbeat
+import core.command_handlers.archive
 
 __all__ = ["command", "register_all_commands", "_HANDLER_REGISTRY"]

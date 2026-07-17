@@ -103,6 +103,7 @@ class PromptBuilder:
         has_tasks: bool = False,
         permission_manager=None,
         workspace_manager=None,
+        archive_manager=None,
     ):
         self.template_manager = template_manager
         self.context_manager = context_manager
@@ -118,6 +119,7 @@ class PromptBuilder:
         self._has_tasks = has_tasks
         self._perm = permission_manager
         self._workspace_manager = workspace_manager
+        self._archive_manager = archive_manager
 
     async def build(
         self,
@@ -250,6 +252,19 @@ class PromptBuilder:
             )
             if learning_ctx:
                 dynamic_parts.append(learning_ctx)
+
+        # 归档摘要注入（归档后首次 build 时仅注入一次）
+        if self._archive_manager:
+            summary_text = self._archive_manager.consume_summary(chat_id)
+            if summary_text:
+                _log.info(
+                    "注入归档摘要 [%s..] (%d 字符)",
+                    chat_id[:12], len(summary_text),
+                )
+                dynamic_parts.append(
+                    "以下内容来自过去几天的对话记录，"
+                    "帮助你了解之前聊过什么：\n" + summary_text
+                )
 
         # 当前时间
         _tz = timezone(timedelta(hours=8))

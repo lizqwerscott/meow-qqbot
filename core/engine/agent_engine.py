@@ -58,6 +58,7 @@ class AgentEngine:
         rule_router: Optional[Any] = None,
         model_registry: Optional[Any] = None,
         permission_manager=None,
+        archive_manager=None,
         workspace_manager=None,
     ):
         self.ai_service = ai_service
@@ -81,6 +82,7 @@ class AgentEngine:
         self.cost_tracker = cost_tracker or CostTracker()
         self._task_manager = task_manager
         self._cron_job_manager = cron_job_manager
+        self._archive_manager = archive_manager
 
         self.tool_executor = ToolExecutor(
             emoji_manager=emoji_manager,
@@ -116,6 +118,7 @@ class AgentEngine:
             has_tasks=self._task_manager is not None,
             permission_manager=permission_manager,
             workspace_manager=workspace_manager,
+            archive_manager=archive_manager,
         )
 
         self.tool_loop = ToolLoop(
@@ -232,6 +235,22 @@ class AgentEngine:
         self.last_active_time = time.time()
 
         user_nickname = get_user_nickname(input_message.sender_id)
+
+        # ── 日期边界检查：跨天后归档旧会话（仅文本消息触发） ──
+        if self._archive_manager and input_message.msg_type == MessageType.TEXT:
+            try:
+                result = await self._archive_manager.archive_if_stale(
+                    chat_id, input_message.is_group
+                )
+                if result:
+                    _log.info(
+                        "已归档会话 [%s..]: 摘要=%s 回放=%d条",
+                        chat_id[:12],
+                        result.summary_path or "无",
+                        result.replay_count,
+                    )
+            except Exception as e:
+                _log.warning("归档失败 [%s..]: %s", chat_id[:12], e)
 
         content_with_context = input_message.content
         if input_message.replied_content:
