@@ -23,6 +23,7 @@ def _tasks_summary(tasks: list) -> str:
             "failed": "❌",
             "cancelled": "🚫",
             "timeout": "⏰",
+            "lost": "💤",
         }.get(t.status.value, "❓")
         time_str = time.strftime(
             "%m-%d %H:%M", time.localtime(t.created_at)

@@ -21,6 +21,7 @@
                 {% elif task.status.value == "failed" %}❌ 失败
                 {% elif task.status.value == "cancelled" %}🚫 已取消
                 {% elif task.status.value == "timeout" %}⏰ 超时
+                {% elif task.status.value == "lost" %}💤 已丢失
                 {% else %}❓ {{ task.status.value }}{% endif %}
             </td>
         </tr>
