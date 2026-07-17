@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 from core.managers.nickname_manager import NicknameManager
 from core.managers.workspace_manager import WorkspaceManager
+from core.tools.patch_parser import parse_patch_text, apply_update_hunks, ActionType, DiffError
 
 _log = logging.getLogger(__name__)
 
@@ -131,6 +132,7 @@ class ToolExecutor:
         self._register("edit_file", self._exec_edit_file, is_async=True)
         self._register("list_files", self._exec_list_files, is_async=True)
         self._register("search_files", self._exec_search_files, is_async=True)
+        self._register("apply_patch", self._exec_apply_patch, is_async=True)
         self._register("heartbeat_respond", self._exec_heartbeat_respond)
 
     # ── 懒注入（AgentEngine 在运行时更新引用）──
@@ -1274,6 +1276,134 @@ class ToolExecutor:
     # ════════════════════════════════════════════════════════
     # 文件工具
     # ════════════════════════════════════════════════════════
+
+    # ════════════════════════════════════════════════════════
+    # Apply Patch 工具
+    # ════════════════════════════════════════════════════════
+
+    async def _exec_apply_patch(self, args: dict, ctx: ToolContext) -> ToolResult:
+        if not self._workspace_manager:
+            return ToolResult(content=json.dumps(
+                {"error": "工作区未就绪"}, ensure_ascii=False,
+            ))
+
+        raw_input = (args.get("input") or "").strip()
+        if not raw_input:
+            return ToolResult(content=json.dumps(
+                {"error": "请提供 patch 输入"}, ensure_ascii=False,
+            ))
+
+        try:
+            actions = parse_patch_text(raw_input)
+        except DiffError as e:
+            return ToolResult(content=json.dumps(
+                {"error": f"Patch 格式错误: {e}"}, ensure_ascii=False,
+            ))
+
+        if not actions:
+            return ToolResult(content=json.dumps(
+                {"error": "Patch 中没有有效的操作"}, ensure_ascii=False,
+            ))
+
+        admin_override = self._is_admin_private(ctx)
+        summary: dict[str, list[str]] = {
+            "added": [],
+            "modified": [],
+            "deleted": [],
+            "moved": [],
+        }
+
+        for path, action in actions.items():
+            try:
+                target = self._workspace_manager.resolve_safe_path(
+                    ctx.is_group, ctx.chat_id, path, admin_override=admin_override,
+                )
+            except ValueError as e:
+                return ToolResult(content=json.dumps(
+                    {"error": f"路径非法 ({path}): {e}"}, ensure_ascii=False,
+                ))
+
+            if action.type == ActionType.ADD:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                await asyncio.to_thread(target.write_text, action.content, encoding="utf-8")
+                summary["added"].append(path)
+
+            elif action.type == ActionType.DELETE:
+                if not target.exists():
+                    summary["deleted"].append(f"{path} (不存在，跳过)")
+                    continue
+                if not target.is_file():
+                    return ToolResult(content=json.dumps(
+                        {"error": f"不是文件，无法删除: {path}"}, ensure_ascii=False,
+                    ))
+                await asyncio.to_thread(target.unlink)
+                summary["deleted"].append(path)
+
+            elif action.type == ActionType.UPDATE:
+                if not target.exists():
+                    return ToolResult(content=json.dumps(
+                        {"error": f"文件不存在: {path}"}, ensure_ascii=False,
+                    ))
+                if not target.is_file():
+                    return ToolResult(content=json.dumps(
+                        {"error": f"路径不是文件: {path}"}, ensure_ascii=False,
+                    ))
+
+                try:
+                    current = await asyncio.to_thread(target.read_text, encoding="utf-8")
+                except Exception as e:
+                    return ToolResult(content=json.dumps(
+                        {"error": f"读取失败 ({path}): {e}"}, ensure_ascii=False,
+                    ))
+
+                if not action.hunks:
+                    continue
+
+                try:
+                    new_content = apply_update_hunks(current, action.hunks)
+                except DiffError as e:
+                    return ToolResult(content=json.dumps(
+                        {"error": f"Patch 应用失败 ({path}): {e}"}, ensure_ascii=False,
+                    ))
+
+                if new_content == current:
+                    continue  # no-op
+
+                dest = target
+                if action.move_path:
+                    try:
+                        dest = self._workspace_manager.resolve_safe_path(
+                            ctx.is_group, ctx.chat_id, action.move_path,
+                            admin_override=admin_override,
+                        )
+                    except ValueError as e:
+                        return ToolResult(content=json.dumps(
+                            {"error": f"移动路径非法 ({action.move_path}): {e}"},
+                            ensure_ascii=False,
+                        ))
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    summary["moved"].append(f"{path} → {action.move_path}")
+
+                await asyncio.to_thread(dest.write_text, new_content, encoding="utf-8")
+                if dest != target:
+                    await asyncio.to_thread(target.unlink)
+                summary["modified"].append(path)
+
+        lines = ["Patch 应用成功。更新了以下文件："]
+        for f in summary["added"]:
+            lines.append(f"A {f}")
+        for f in summary["modified"]:
+            lines.append(f"M {f}")
+        for f in summary["deleted"]:
+            lines.append(f"D {f}")
+        for m in summary["moved"]:
+            lines.append(f"MV {m}")
+
+        return ToolResult(content=json.dumps({
+            "success": True,
+            "summary": summary,
+            "message": "\n".join(lines),
+        }, ensure_ascii=False))
 
     async def _exec_read_file(self, args: dict, ctx: ToolContext) -> ToolResult:
         """执行 read_file — 读取工作区文件。"""

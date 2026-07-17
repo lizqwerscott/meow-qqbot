@@ -7,13 +7,16 @@ from core.tools.definitions import (
     SEARCH_MEMORY_TOOL,
     SEARCH_RELATION_TOOL,
     MARK_IMPORTANT_TOOL,
+    APPLY_PATCH_TOOL,
     RESCAN_SKILLS_TOOL,
     VIEW_SKILL_TOOL,
     EXECUTE_SKILL_TOOL,
     EXECUTE_COMMAND_TOOL,
     SKILL_TOOLS,
+    FILE_TOOLS,
     tool_names,
 )
+from core.tools.patch_parser import parse_patch_text, apply_update_hunks, DiffError
 
 __all__ = [
     "ToolExecutor",
@@ -24,10 +27,12 @@ __all__ = [
     "SEARCH_MEMORY_TOOL",
     "SEARCH_RELATION_TOOL",
     "MARK_IMPORTANT_TOOL",
+    "APPLY_PATCH_TOOL",
     "RESCAN_SKILLS_TOOL",
     "VIEW_SKILL_TOOL",
     "EXECUTE_SKILL_TOOL",
     "EXECUTE_COMMAND_TOOL",
     "SKILL_TOOLS",
+    "FILE_TOOLS",
     "tool_names",
 ]

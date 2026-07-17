@@ -335,7 +335,37 @@ SKILL_TOOLS = [
 ]
 
 
+APPLY_PATCH_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_patch",
+            "description": (
+                "批量修改工作区文件。一个 patch 可以同时新建、删除、更新、移动多个文件。"
+                "输入格式使用 *** Begin Patch 和 *** End Patch 包裹：\n\n"
+                "支持的操作：\n"
+                "- *** Add File: {path}\\n+文件内容行（每行以 + 开头）\n"
+                "- *** Delete File: {path}\n"
+                "- *** Update File: {path}\\n@@ 上下文行（可选）\\n-删除行\\n+新增行\\n 不变行\\n*** End of File\n"
+                "- *** Move to: {newPath}（紧跟在 Update File 行之后）"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "input": {
+                        "type": "string",
+                        "description": "patch 完整内容，包含 *** Begin Patch 和 *** End Patch 包围",
+                    },
+                },
+                "required": ["input"],
+            },
+        },
+    },
+]
+
+
 FILE_TOOLS = [
+    *APPLY_PATCH_TOOL,
     {
         "type": "function",
         "function": {
@@ -799,5 +829,6 @@ def tool_names() -> set[str]:
         "enable_cron_job", "disable_cron_job",
         "read_file", "write_file", "edit_file",
         "list_files", "search_files",
+        "apply_patch",
         "heartbeat_respond",
     }
