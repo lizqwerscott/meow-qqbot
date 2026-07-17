@@ -14,6 +14,8 @@ async def status_page(request: Request):
     templates = request.app.state.templates
 
     agent_engine = managers.get("agent_engine")
+    if agent_engine and agent_engine.hindsight:
+        await agent_engine.hindsight.health()
     stats = agent_engine.get_stats() if agent_engine else {}
 
     # Add queue details
