@@ -552,8 +552,8 @@ TASK_TOOLS = [
             "name": "create_task",
             "description": (
                 "创建一个一次性后台任务。AI 可以在后台独立执行较长时间的工作"
-                "（如生成报告、批量查询、执行脚本等），执行期间不阻塞当前对话，"
-                "完成后可以通过 /tasks show 查看结果。"
+                "（如生成报告、批量查询、执行脚本等），执行期间不阻塞当前对话。"
+                "任务完成后你会通过系统事件收到通知，也可以通过 /tasks show 查看结果。"
             ),
             "parameters": {
                 "type": "object",
@@ -576,7 +576,7 @@ TASK_TOOLS = [
                 "三种载荷类型（通过 payload_type 指定）：\n"
                 "- message（默认）: AI 智能体执行 prompt\n"
                 "- command: 在服务器上执行 shell 命令（须提供 command 参数，prompt 可选）\n"
-                "- system_event: 系统事件通知（仅记录日志投递，prompt 可选）\n"
+                "- system_event: 系统事件通知（文本将被注入 AI 上下文，prompt 可选）\n"
                 "所有时间均为北京时间 (CST/UTC+8)。\n"
                 "两种模式二选一：\n"
                 "1. 周期性任务：设置 cron_expression（标准 5 字段 cron 表达式：分 时 日 月 周，"
@@ -621,7 +621,7 @@ TASK_TOOLS = [
                         "description": "任务载荷类型。默认为 message。\n"
                         "- message: AI 智能体轮次（默认），执行 prompt\n"
                         "- command: 在服务器上执行 shell 命令，使用 command 参数\n"
-                        "- system_event: 系统事件通知，仅记录日志并投递通知",
+                        "- system_event: 系统事件通知，文本将被注入 AI 上下文",
                     },
                     "command": {
                         "type": "string",

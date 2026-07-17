@@ -79,6 +79,7 @@ class ToolExecutor:
         learning_orchestrator=None,
         admin_ids: Optional[list] = None,
         permission_manager=None,
+        system_events=None,
     ):
         self._emoji_manager = emoji_manager
         self._media_uploader = media_uploader
@@ -90,6 +91,7 @@ class ToolExecutor:
         self._learners = learning_orchestrator
         self._admin_ids = admin_ids or []
         self._perm = permission_manager
+        self._system_events = system_events
         self._bot_engine = None
         self._task_manager = None
         self._cron_job_manager = None
@@ -996,6 +998,12 @@ class ToolExecutor:
 
         success = await self._task_manager.cancel_task(task_id)
         if success:
+            if self._system_events:
+                self._system_events.enqueue(
+                    session_key=ctx.chat_id,
+                    text="任务已取消",
+                    context_key=f"task:{task_id}",
+                )
             return ToolResult(content=json.dumps({
                 "success": True,
                 "task_id": task_id[:16],

@@ -27,6 +27,7 @@ from core.rule_router import RuleRouter
 from core.ai.model_registry import ModelRegistry
 from core.managers.permission_manager import PermissionManager
 from core.managers.workspace_manager import WorkspaceManager
+from core.engine.system_events import SystemEventQueue
 
 from core.webui import create_app, start_webui
 
@@ -249,6 +250,10 @@ async def main() -> None:
         rule_router = RuleRouter()
         _log.info("ClawRouter 规则路由已初始化")
 
+    # ── 系统事件队列（轻量级内存事件，prompt 构建前消费） ──
+    system_events = SystemEventQueue()
+    _log.info("SystemEventQueue 已初始化")
+
     # ── 2. 创建 AgentEngine（全局单例） ──
     agent_engine = AgentEngine(
         ai_service=ai_service,
@@ -272,6 +277,7 @@ async def main() -> None:
         permission_manager=permission_manager,
         workspace_manager=workspace_manager,
         archive_manager=archive_manager,
+        system_events=system_events,
     )
 
     # ── 将后台任务执行器注入 ToolExecutor（供 AI 工具调用） ──
@@ -282,6 +288,10 @@ async def main() -> None:
             background_task_runner=background_task_runner,
         )
         _log.info("任务管理器已注入 ToolExecutor")
+
+    # ── 注入系统事件队列到后台任务执行器 ──
+    if background_task_runner:
+        background_task_runner.set_system_events(system_events)
 
     # ── 连接后台任务执行器与 AgentEngine ──
     if background_task_runner and task_manager:
