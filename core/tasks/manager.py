@@ -52,13 +52,16 @@ class TaskManager:
     # ── 更新 ──
 
     async def start_task(self, task_id: str) -> Optional[TaskRecord]:
-        """标记任务为 running。"""
+        """标记任务为 running，并注册当前 asyncio.Task 用于取消和 LOST 检测。"""
         task = self._store.get_task(task_id)
         if task is None:
             return None
         task.status = TaskStatus.RUNNING
         task.started_at = time.time()
         await self._store.update_task(task)
+        current = asyncio.current_task()
+        if current is not None:
+            self._running_tasks[task_id] = current
         return task
 
     async def update_task_record(self, task: TaskRecord) -> None:
@@ -133,10 +136,57 @@ class TaskManager:
         _log.info(f"任务已取消: id={task_id[:12]}..")
         return True
 
+    # ── LOST 检测 ──
+
+    async def detect_lost_tasks(self, lost_detection_minutes: int = 30) -> int:
+        """检测并标记丢失的任务。
+
+        将满足以下条件的活跃任务标记为 LOST：
+        - RUNNING：started_at + lost_detection_minutes 无更新
+        - PENDING：created_at + lost_detection_minutes 未被调度
+
+        跳过当前仍在 _running_tasks 中运行的 asyncio.Task。
+        """
+        now = time.time()
+        cutoff = now - lost_detection_minutes * 60
+        count = 0
+
+        for tid, t in self._store.all_tasks().items():
+            if t.status not in TaskStatus.active():
+                continue
+
+            # 跳过仍在本进程运行的任务
+            runner = self._running_tasks.get(tid)
+            if runner is not None and not runner.done():
+                continue
+
+            # RUNNING：用 started_at，PENDING：用 created_at
+            ts = t.started_at if t.status == TaskStatus.RUNNING else t.created_at
+            if ts is None or ts > cutoff:
+                continue
+
+            old_status = t.status.value
+            t.status = TaskStatus.LOST
+            t.finished_at = now
+            t.error = "任务丢失（进程崩溃或重启导致）"
+            await self._store.update_task(t)
+            count += 1
+            _log.warning(
+                f"任务标记为丢失: id={tid[:12]}.. "
+                f"之前状态={old_status} 检测阈值={lost_detection_minutes}分钟"
+            )
+
+        if count:
+            _log.info(f"本次检测到 {count} 个丢失任务")
+        return count
+
     # ── 清理 ──
 
     async def cleanup_old_tasks(self) -> int:
         return await self._store.cleanup_old_tasks()
+
+    async def enforce_per_job_terminal_limit(self, max_per_job: int = 2000) -> int:
+        return await self._store.enforce_per_job_terminal_limit(max_per_job)
 
 
 class CronJobManager:

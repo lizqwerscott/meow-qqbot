@@ -33,16 +33,22 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     TIMEOUT = "timeout"
+    LOST = "lost"
 
     @classmethod
     def terminal(cls) -> set:
-        """返回所有终态。"""
+        """返回所有终态（不含丢失）。"""
         return {cls.SUCCESS, cls.FAILED, cls.CANCELLED, cls.TIMEOUT}
 
     @classmethod
     def active(cls) -> set:
         """返回所有活跃态。"""
         return {cls.PENDING, cls.RUNNING}
+
+    @classmethod
+    def lost(cls) -> set:
+        """返回丢失态。"""
+        return {cls.LOST}
 
 
 def _now() -> float:

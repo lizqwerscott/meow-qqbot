@@ -101,6 +101,7 @@
                     {% elif t.status.value == "failed" %}❌ 失败
                     {% elif t.status.value == "cancelled" %}🚫 已取消
                     {% elif t.status.value == "timeout" %}⏰ 超时
+                    {% elif t.status.value == "lost" %}💤 已丢失
                     {% else %}❓ {{ t.status.value }}{% endif %}
                 </td>
                 <td>{{ t.type }}</td>
@@ -113,7 +114,7 @@
                         <button type="submit" class="btn btn-sm">🚫 取消</button>
                     </form>
                     {% endif %}
-                    {% if t.status.value in ("success", "failed", "cancelled", "timeout") %}
+                    {% if t.status.value in ("success", "failed", "cancelled", "timeout", "lost") %}
                     <form method="post" action="/tasks/task/{{ t.id }}/delete" style="display:inline" onsubmit="return confirm('确定删除此任务记录？')">
                         <button type="submit" class="btn btn-sm btn-danger">🗑️ 删除</button>
                     </form>

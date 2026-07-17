@@ -183,8 +183,9 @@ async def main() -> None:
         scheduler_cfg = tasks_config.get("scheduler", {})
         task_store = TaskStore(
             data_dir=tasks_config.get("data_dir", "data/tasks/"),
-            max_tasks=tasks_config.get("max_tasks", 1000),
-            task_ttl_days=tasks_config.get("task_ttl_days", 30),
+            max_tasks=tasks_config.get("max_tasks", 10000),
+            terminal_ttl_hours=tasks_config.get("terminal_ttl_hours", 168),
+            lost_ttl_hours=tasks_config.get("lost_ttl_hours", 24),
         )
         task_manager = TaskManager(store=task_store)
         cron_job_manager = CronJobManager(store=task_store)
@@ -409,14 +410,28 @@ async def main() -> None:
 
     task_cleanup_task = None
     if task_manager:
-        # 定期清理过期任务记录（每 1 小时）
+        lost_detection_minutes = tasks_config.get("lost_detection_minutes", 30)
+        max_terminal_per_job = tasks_config.get("max_terminal_per_job", 2000)
+
+        async def _run_cleanup_cycle():
+            lost = await task_manager.detect_lost_tasks(lost_detection_minutes)
+            cleaned = await task_manager.cleanup_old_tasks()
+            capped = await task_manager.enforce_per_job_terminal_limit(max_terminal_per_job)
+            if lost or cleaned or capped:
+                _log.info(
+                    f"任务清理周期: {lost} 丢失标记, "
+                    f"{cleaned} TTL 清理, {capped} job 上限裁剪"
+                )
+
         async def _periodic_task_cleanup():
+            try:
+                await _run_cleanup_cycle()
+            except Exception as e:
+                _log.warning(f"定时清理任务异常(首次): {e}")
             while True:
                 await asyncio.sleep(3600)
                 try:
-                    cleaned = await task_manager.cleanup_old_tasks()
-                    if cleaned:
-                        _log.info(f"定时清理了 {cleaned} 条过期任务")
+                    await _run_cleanup_cycle()
                 except Exception as e:
                     _log.warning(f"定时清理任务异常: {e}")
         task_cleanup_task = asyncio.create_task(_periodic_task_cleanup())

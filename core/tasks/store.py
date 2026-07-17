@@ -29,12 +29,14 @@ class TaskStore:
     def __init__(
         self,
         data_dir: str = "data/tasks/",
-        max_tasks: int = 1000,
-        task_ttl_days: int = 30,
+        max_tasks: int = 10000,
+        terminal_ttl_hours: int = 168,
+        lost_ttl_hours: int = 24,
     ):
         self._data_dir = data_dir
         self._max_tasks = max_tasks
-        self._task_ttl_days = task_ttl_days
+        self._terminal_ttl_hours = terminal_ttl_hours
+        self._lost_ttl_hours = lost_ttl_hours
         self._lock = asyncio.Lock()
 
         os.makedirs(self._data_dir, exist_ok=True)
@@ -109,6 +111,10 @@ class TaskStore:
 
     # ── Task CRUD ──
 
+    def all_tasks(self) -> Dict[str, TaskRecord]:
+        """返回所有任务记录的内部副本（用于遍历，修改后需调用 update_task）。"""
+        return dict(self._tasks)
+
     async def add_task(self, task: TaskRecord) -> None:
         async with self._lock:
             self._tasks[task.id] = task
@@ -147,21 +153,58 @@ class TaskStore:
         return found
 
     async def cleanup_old_tasks(self) -> int:
-        """清理超过 TTL 的终态任务。返回清理数量。"""
+        """按差异 TTL 清理过期任务记录。返回清理数量。
+
+        保留策略：
+        - 终态（SUCCESS/FAILED/CANCELLED/TIMEOUT）：保留 terminal_ttl_hours
+        - 丢失（LOST）：保留 lost_ttl_hours
+        """
         now = time.time()
-        cutoff = now - self._task_ttl_days * 86400
-        to_delete = [
-            tid
-            for tid, t in self._tasks.items()
-            if t.status in TaskStatus.terminal()
-            and (t.finished_at or t.created_at) < cutoff
-        ]
+        term_cutoff = now - self._terminal_ttl_hours * 3600
+        lost_cutoff = now - self._lost_ttl_hours * 3600
+
+        to_delete = []
+        for tid, t in self._tasks.items():
+            ts = t.finished_at or t.created_at
+            if t.status in TaskStatus.terminal() and ts < term_cutoff:
+                to_delete.append(tid)
+            elif t.status in TaskStatus.lost() and ts < lost_cutoff:
+                to_delete.append(tid)
+
         async with self._lock:
             for tid in to_delete:
                 self._tasks.pop(tid, None)
         if to_delete:
             await self.save_tasks()
             _log.info(f"清理了 {len(to_delete)} 条过期任务记录")
+        return len(to_delete)
+
+    async def enforce_per_job_terminal_limit(self, max_per_job: int = 2000) -> int:
+        """裁剪每个 cron job 的终态记录，最多保留最近 max_per_job 条。返回裁剪数量。"""
+        by_job: dict[str, list[str]] = {}
+        for tid, t in self._tasks.items():
+            if t.status not in TaskStatus.terminal():
+                continue
+            key = t.job_id or "__manual__"
+            by_job.setdefault(key, []).append(tid)
+
+        to_delete: list[str] = []
+        for key, tids in by_job.items():
+            if len(tids) <= max_per_job:
+                continue
+            sorted_tasks = sorted(
+                tids, key=lambda tid: self._tasks[tid].created_at, reverse=True
+            )
+            to_delete.extend(sorted_tasks[max_per_job:])
+
+        if not to_delete:
+            return 0
+
+        async with self._lock:
+            for tid in to_delete:
+                self._tasks.pop(tid, None)
+        await self.save_tasks()
+        _log.info(f"按 job 限制裁剪了 {len(to_delete)} 条终端记录")
         return len(to_delete)
 
     # ── CronJob CRUD ──
