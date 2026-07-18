@@ -115,7 +115,7 @@ class NicknameManager:
     # ── 内部文件操作 ──
 
     def _load_nicknames(self) -> Dict[str, str]:
-        nicknames_file = "nicknames.json"
+        nicknames_file = "config/nicknames.json"
         if os.path.exists(nicknames_file):
             try:
                 with open(nicknames_file, "r", encoding="utf-8") as f:

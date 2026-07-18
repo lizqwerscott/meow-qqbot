@@ -5,8 +5,7 @@
 - analyze_image(image_path) → 图片内容描述
 - analyze_emoji(image_path) → (内容描述, 情绪标签列表)
 
-复用与主 AI 服务相同的 OpenAI 兼容客户端配置（api_key, base_url, model）。
-支持 DeepSeek V4 等兼容 OpenAI Vision API 的模型。
+支持多模型 fallback：传入 AIService 列表，按顺序调用直到成功。
 """
 
 import base64
@@ -16,7 +15,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from openai import AsyncOpenAI
+from core.ai.service import AIService
 
 _log = logging.getLogger(__name__)
 
@@ -26,27 +25,27 @@ class MultimodalService:
     多模态（视觉）模型服务。
 
     使用 OpenAI 兼容的 Vision API 分析图片内容。
-    与 AIService 共享相同的 API 密钥和基础 URL，但独立控制参数。
+    支持多 AIService fallback：列表中的模型按顺序调用，失败自动切换。
 
     使用方式：
-        service = MultimodalService(api_key="...", base_url="...", model="deepseek-v4-flash")
+        service = MultimodalService([ai_svc_1, ai_svc_2])
         description = await service.analyze_image("/path/to/image.jpg")
         desc, tags = await service.analyze_emoji("/path/to/emoji.png")
     """
 
-    def __init__(
-        self,
-        api_key: str,
-        base_url: Optional[str] = None,
-        model: str = "deepseek-v4-flash",
-    ):
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-        self.model = model
+    def __init__(self, ai_services: List[AIService]):
+        if not ai_services:
+            raise ValueError("至少需要一个 AIService")
+        self._services = ai_services
+        self.model = ai_services[0].model
 
         self._cache: OrderedDict = OrderedDict()
         self._cache_max = 200
 
-        _log.info(f"多模态服务已启动，模型: {self.model}")
+        _log.info(
+            f"多模态服务已启动: {len(ai_services)} 个模型, "
+            f"主模型: {self.model}"
+        )
 
     async def analyze_image(self, image_path: str) -> str:
         cache_key = self._get_cache_key(image_path, "image")
@@ -125,30 +124,41 @@ class MultimodalService:
         return f"data:{mime};base64,{b64}"
 
     async def _call_vlm(self, base64_image: str, prompt: str) -> Optional[str]:
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": base64_image},
-                            },
-                            {"type": "text", "text": prompt},
-                        ],
-                    }
-                ],
-                max_tokens=300,
-                temperature=0.3,
-            )
-            if response.choices and response.choices[0].message.content:
-                return response.choices[0].message.content
-            return None
-        except Exception as e:
-            _log.error(f"调用视觉模型失败: {e}")
-            raise
+        for idx, svc in enumerate(self._services):
+            try:
+                response = await svc.client.chat.completions.create(
+                    model=svc.model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": base64_image},
+                                },
+                                {"type": "text", "text": prompt},
+                            ],
+                        }
+                    ],
+                    max_tokens=300,
+                    temperature=0.3,
+                )
+                if response.choices and response.choices[0].message.content:
+                    _log.debug(
+                        f"VLM 调用成功 (模型 [{svc.model}])"
+                    )
+                    return response.choices[0].message.content
+                _log.warning(
+                    f"VLM 返回空结果 (模型 [{svc.model}])"
+                )
+            except Exception as e:
+                _log.warning(
+                    f"VLM 调用失败 (模型 [{svc.model}], "
+                    f"第 {idx + 1}/{len(self._services)} 个): {e}"
+                )
+
+        _log.error("所有 VLM 模型均失败")
+        return None
 
     @staticmethod
     def _parse_emoji_result(result: str) -> Tuple[str, List[str]]:

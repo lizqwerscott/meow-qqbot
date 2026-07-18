@@ -10,7 +10,7 @@ _log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["nicknames"])
 
-MANUAL_PATH = "nicknames.json"
+MANUAL_PATH = "config/nicknames.json"
 AUTO_PATH = "data/nicknames.json"
 
 

@@ -22,8 +22,7 @@ plugins/*
 !plugins/__init__.py
 
 # 配置文件（含 API 密钥，勿提交）
-config.toml
-config.yaml
+config/
 
 # 自动生成的锁文件
 skills-lock.json

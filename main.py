@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 import tomllib
 import logging
 import httpx
@@ -57,7 +58,7 @@ async def main() -> None:
 
     _log = logging.getLogger(__name__)
 
-    with open("config.toml", "rb") as f:
+    with open("config/config.toml", "rb") as f:
         config = tomllib.load(f)
 
     # ── 1. 初始化全局单例服务 ──
@@ -67,32 +68,42 @@ async def main() -> None:
     # 模板管理器
     template_manager = TemplateManager(config)
 
-    # 默认 AI 服务（从 models 注册表中取 primary 作为默认）
-    models_config = config.get("models", {})
-    default_model_config = models_config.get("primary", next(iter(models_config.values()), {}))
-    ai_service = AIService(
-        api_key=default_model_config.get("api_key"),
-        base_url=default_model_config.get("base_url"),
-        model=default_model_config.get("model", "gpt-3.5-turbo"),
-        timeout=default_model_config.get("timeout", 30),
-        max_retries=default_model_config.get("max_retries", 3),
-        temperature=default_model_config.get("temperature", 0.7),
-        max_tokens=default_model_config.get("max_tokens", 8192),
-        reasoning_effort=default_model_config.get("reasoning_effort"),
-    )
+    # 模型 Provider + Group 配置
+    providers_config = config.get("providers", {})
+    groups_config = config.get("groups", {})
+
+    # ── 模型注册表（始终创建，供 heartbeat / fallback / multimodal 使用） ──
+    model_registry = None
+    if providers_config and groups_config:
+        n_models = sum(len(p.get("models", [])) for p in providers_config.values())
+        model_registry = ModelRegistry(providers_config, groups_config)
+        _log.info(
+            f"模型注册表已初始化: {n_models} 个模型, "
+            f"{len(groups_config)} 个组"
+        )
+
+    # 默认 AI 服务
+    if not model_registry or not model_registry.default_service:
+        _log.critical("未配置模型注册表（缺少 [providers] 或 [groups]），无法启动")
+        sys.exit(1)
+    ai_service = model_registry.default_service
 
     # 多模态配置
     multimodal_config = config.get("multimodal", {})
 
-    # 多模态服务（如果启用）
+    # 多模态服务（如果启用，从注册表获取模型配置）
     multimodal_service = None
     if multimodal_config.get("enabled", False):
-        multimodal_service = MultimodalService(
-            api_key=multimodal_config.get("api_key", ""),
-            base_url=multimodal_config.get("base_url"),
-            model=multimodal_config.get("model", "deepseek-v4-flash"),
-        )
-        _log.info(f"多模态服务已启用，模型: {multimodal_config.get('model')}")
+        multimodal_group = multimodal_config.get("group", "multimodal")
+        chain = model_registry.get_chain(multimodal_group) if model_registry else []
+        raw = [model_registry.get(n) for n in chain] if model_registry else []
+        services: list = [s for s in raw if s is not None]
+        if services:
+            multimodal_service = MultimodalService(services)
+            names = [s.model for s in services]
+            _log.info(f"多模态服务已启用 (组 [{multimodal_group}]): {names}")
+        else:
+            _log.warning(f"多模态服务未启用: 组 [{multimodal_group}] 找不到对应模型")
     else:
         _log.info("多模态服务未启用（enabled=false），跳过 VLM 图片分析")
 
@@ -203,7 +214,7 @@ async def main() -> None:
     bot_id = config.get("bot_id", "")
 
     # ── Permissions（权限管理器，全局单例） ──
-    permission_manager = PermissionManager("allowlist.toml")
+    permission_manager = PermissionManager("config/allowlist.toml")
     admin_ids = permission_manager.get_role_ids("admin")
 
     # ── WorkspaceManager（工作区路径管理与沙箱） ──
@@ -221,6 +232,15 @@ async def main() -> None:
         permission_manager=permission_manager,
     )
 
+    # ── 规则路由（ClawRouter 风格，可选） ──
+    rule_router = None
+    routing_enabled = config.get("routing", {}).get("enabled", False)
+    if routing_enabled and model_registry:
+        tier_config = config.get("routing", {}).get("tiers", {})
+        model_registry.configure_tiers(tier_config)
+        rule_router = RuleRouter()
+        _log.info("ClawRouter 规则路由已初始化")
+
     # ── LearningOrchestrator（学习系统） ──
     learners_config = config.get("learners", {})
     learning_orchestrator = None
@@ -235,21 +255,6 @@ async def main() -> None:
     else:
         _log.info("学习系统未启用")
 
-    # ── 模型注册表（始终创建，供 heartbeat / fallback 使用） ──
-    model_registry = None
-    if models_config:
-        model_registry = ModelRegistry(models_config)
-        _log.info(f"模型注册表已初始化: {len(models_config)} 个模型")
-
-    # ── 规则路由（ClawRouter 风格，可选） ──
-    rule_router = None
-    routing_enabled = config.get("routing", {}).get("enabled", False)
-    if routing_enabled and model_registry:
-        tier_config = config.get("routing", {}).get("tiers", {})
-        model_registry.configure_tiers(tier_config)
-        rule_router = RuleRouter()
-        _log.info("ClawRouter 规则路由已初始化")
-
     # ── 系统事件队列（轻量级内存事件，prompt 构建前消费） ──
     system_events = SystemEventQueue()
     _log.info("SystemEventQueue 已初始化")
@@ -261,7 +266,7 @@ async def main() -> None:
         context_manager=context_manager,
         bot_id=bot_id,
         admin_id=admin_ids,
-        openai_config=default_model_config,
+        openai_config={},
         nickname_manager=nickname_manager,
         emoji_manager=emoji_manager,
         hindsight_memory=hindsight_memory,
