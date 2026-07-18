@@ -36,6 +36,7 @@ from core.tasks import (
 )
 from core.tasks.heartbeat import HeartbeatManager
 from core.tools.skill_managers import SkillManagers
+from core.tools.sub_agent_manager import SubAgentManager
 from core.webui import create_app, start_webui
 
 
@@ -270,6 +271,25 @@ async def main() -> None:
     system_events = SystemEventQueue()
     _log.info("SystemEventQueue 已初始化")
 
+    # ── 子智能体系统 ──
+    sub_agent_config = config.get("sub_agents", {})
+    sub_agent_manager = None
+    if sub_agent_config.get("enabled", True):
+        sub_agent_manager = SubAgentManager(
+            max_concurrent=sub_agent_config.get("max_concurrent", 4),
+            max_children=sub_agent_config.get("max_children", 5),
+            run_timeout=sub_agent_config.get("run_timeout", 900),
+            system_events=system_events,
+        )
+        _log.info(
+            "子智能体系统已启用 (max_concurrent=%d, max_children=%d, run_timeout=%ds)",
+            sub_agent_config.get("max_concurrent", 4),
+            sub_agent_config.get("max_children", 5),
+            sub_agent_config.get("run_timeout", 900),
+        )
+    else:
+        _log.info("子智能体系统未启用")
+
     # ── 2. 创建 AgentEngine（全局单例） ──
     agent_engine = AgentEngine(
         ai_service=ai_service,
@@ -294,6 +314,7 @@ async def main() -> None:
         workspace_manager=workspace_manager,
         archive_manager=archive_manager,
         system_events=system_events,
+        sub_agent_manager=sub_agent_manager,
     )
 
     # ── 将后台任务执行器注入 ToolExecutor（供 AI 工具调用） ──

@@ -22,7 +22,7 @@ from core.managers.emoji_manager import EmojiManager
 from core.message import InputMessage, MessageType
 from core.managers.nickname_manager import NicknameManager
 from core.managers.template_manager import TemplateManager
-from core.tools import ToolExecutor
+from core.tools import ToolExecutor, SubAgentManager
 from core.learners.base import sanitize_for_learners
 from core.learners.orchestrator import LearningOrchestrator
 
@@ -57,6 +57,7 @@ class AgentEngine:
         cron_job_manager: Optional[Any] = None,
         rule_router: Optional[Any] = None,
         model_registry: Optional[Any] = None,
+        sub_agent_manager=None,
         permission_manager=None,
         archive_manager=None,
         system_events=None,
@@ -119,6 +120,7 @@ class AgentEngine:
             admin_ids=admin_id,
             learning_orchestrator=self.learners,
             has_tasks=self._task_manager is not None,
+            has_sub_agents=sub_agent_manager is not None,
             permission_manager=permission_manager,
             workspace_manager=workspace_manager,
             archive_manager=archive_manager,
@@ -136,6 +138,12 @@ class AgentEngine:
             max_rounds=max_tool_rounds,
             model_registry=model_registry,
         )
+
+        # ── 子智能体管理器 ──
+        self._sub_agent_manager = sub_agent_manager
+        if sub_agent_manager:
+            sub_agent_manager.set_execute_callback(self.execute_background_task)
+            self.tool_executor.set_sub_agent_manager(sub_agent_manager)
 
         # ── 消息钩子 ──
         self._message_hooks: list = []
@@ -506,7 +514,7 @@ class AgentEngine:
         但回复被捕获而非实际发送。
 
         Args:
-            chat_id: 任务会话 ID（如 task:<uuid>）
+            chat_id: 子智能体会话 ID（如 subagent:<uuid>）
             prompt: AI 执行指令
             sender_id: 发送者（如 "system"）
             is_group: 来源聊天是否为群聊（影响工具如 send_emoji 的接口选择）

@@ -99,30 +99,5 @@ class TasksCommand:
                 return make_reply(input_message, f"✅ 任务 {task_id[:12]}.. 已取消。")
             return make_reply(input_message, f"❌ 无法取消任务 {task_id[:12]}..，可能已完成或不存在。")
 
-        elif subcmd == "run":
-            # 手动运行一个后台任务
-            prompt = parts[1] if len(parts) > 1 else ""
-            if not prompt:
-                return make_reply(input_message, "请指定任务指令。用法: /tasks run <prompt>")
-            if self._runner is None:
-                return make_reply(input_message, "任务执行器未就绪。")
-
-            task = await self._runner.run_manual_task(
-                prompt=prompt,
-                timeout=300,
-                delivery_channel=input_message.chat_id,
-            )
-            status = task.status.value
-            lines = [
-                f"**手动任务已执行**",
-                f"- ID: `{task.id[:12]}..`",
-                f"- 状态: `{status}`",
-            ]
-            if task.result:
-                lines.append(f"- 结果: {task.result[:200]}")
-            if task.error:
-                lines.append(f"- 错误: `{task.error}`")
-            return make_reply(input_message, "\n".join(lines))
-
         else:
-            return make_reply(input_message, "未知子命令。可用: list, show <id>, cancel <id>, run <prompt>")
+            return make_reply(input_message, "未知子命令。可用: list, show <id>, cancel <id>")

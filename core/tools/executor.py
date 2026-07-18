@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 from core.managers.nickname_manager import NicknameManager
 from core.managers.workspace_manager import WorkspaceManager
+from core.tools.sub_agent_manager import SubAgentManager
 from core.tools.patch_parser import parse_patch_text, apply_update_hunks, ActionType, DiffError
 
 _log = logging.getLogger(__name__)
@@ -98,6 +99,7 @@ class ToolExecutor:
         self._background_task_runner = None
         self._workspace_manager = None
         self._heartbeat_response: dict = {}
+        self._sub_agent_manager: Optional[SubAgentManager] = None
 
         self._registry: Dict[str, tuple[Callable, bool]] = {}
         self._register_all()
@@ -120,7 +122,6 @@ class ToolExecutor:
         self._register("execute_command", self._exec_execute_command, is_async=True)
         self._register("define_jargon", self._exec_define_jargon, is_async=True)
         self._register("report_behavior_effect", self._exec_report_behavior_effect, is_async=True)
-        self._register("create_task", self._exec_create_task, is_async=True)
         self._register("create_cron_job", self._exec_create_cron_job, is_async=True)
         self._register("cancel_task", self._exec_cancel_task, is_async=True)
         self._register("list_tasks", self._exec_list_tasks, is_async=True)
@@ -136,6 +137,9 @@ class ToolExecutor:
         self._register("search_files", self._exec_search_files, is_async=True)
         self._register("apply_patch", self._exec_apply_patch, is_async=True)
         self._register("heartbeat_respond", self._exec_heartbeat_respond)
+        self._register("spawn_subagent", self._exec_spawn_subagent, is_async=True)
+        self._register("subagents", self._exec_subagents, is_async=True)
+        self._register("announce", self._exec_announce, is_async=True)
 
     # ── 懒注入（AgentEngine 在运行时更新引用）──
 
@@ -159,6 +163,10 @@ class ToolExecutor:
         self._task_manager = task_manager
         self._cron_job_manager = cron_job_manager
         self._background_task_runner = background_task_runner
+
+    def set_sub_agent_manager(self, mgr: SubAgentManager):
+        """注入子智能体管理器。"""
+        self._sub_agent_manager = mgr
 
     # ── 统一入口 ──
 
@@ -806,34 +814,6 @@ class ToolExecutor:
     # ════════════════════════════════════════════════════════
     # 后台任务工具
     # ════════════════════════════════════════════════════════
-
-    async def _exec_create_task(self, args: dict, ctx: ToolContext) -> ToolResult:
-        """创建一个一次性后台任务。"""
-        if not self._task_manager or not self._background_task_runner:
-            return ToolResult(content=json.dumps(
-                {"error": "任务系统未就绪"}, ensure_ascii=False,
-            ))
-
-        prompt = (args.get("prompt") or "").strip()
-        if not prompt:
-            return ToolResult(content=json.dumps(
-                {"error": "任务指令不能为空"}, ensure_ascii=False,
-            ))
-
-        # 在后台 fire-and-forget 执行
-        task = await self._task_manager.create_task(
-            prompt=prompt,
-            task_type="manual",
-            delivery_channel=ctx.chat_id,
-            reply_to_message_id=ctx.reply_to,
-        )
-        asyncio.create_task(self._background_task_runner.run_task(task))
-
-        return ToolResult(content=json.dumps({
-            "success": True,
-            "task_id": task.id[:16],
-            "message": f"后台任务已创建！ID: {task.id[:16]}.. 执行完成后可使用 /tasks show {task.id[:12]} 查看结果",
-        }, ensure_ascii=False))
 
     @staticmethod
     def _parse_iso_datetime(s: str) -> Optional[float]:
@@ -1776,3 +1756,105 @@ class ToolExecutor:
         resp = self._heartbeat_response
         self._heartbeat_response = {}
         return resp
+
+    # ════════════════════════════════════════════════════════
+    # 子智能体工具
+    # ════════════════════════════════════════════════════════
+
+    async def _exec_spawn_subagent(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """创建一个子智能体在后台执行任务。"""
+        if not self._sub_agent_manager:
+            return ToolResult(content=json.dumps(
+                {"error": "子智能体系统未就绪"}, ensure_ascii=False,
+            ))
+
+        task = (args.get("task") or "").strip()
+        if not task:
+            return ToolResult(content=json.dumps(
+                {"error": "任务指令不能为空"}, ensure_ascii=False,
+            ))
+
+        context = args.get("context", "isolated")
+        if context not in ("isolated",):
+            context = "isolated"
+
+        result = await self._sub_agent_manager.spawn(
+            parent_chat_id=ctx.chat_id,
+            task=task,
+            context=context,
+        )
+
+        return ToolResult(content=json.dumps(result, ensure_ascii=False))
+
+    async def _exec_subagents(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """列出或取消子智能体。"""
+        if not self._sub_agent_manager:
+            return ToolResult(content=json.dumps(
+                {"error": "子智能体系统未就绪"}, ensure_ascii=False,
+            ))
+
+        action = (args.get("action") or "list").strip()
+
+        if action == "cancel":
+            subagent_id = (args.get("subagent_id") or "").strip()
+            if not subagent_id:
+                return ToolResult(content=json.dumps(
+                    {"error": "subagent_id 不能为空"}, ensure_ascii=False,
+                ))
+            result = await self._sub_agent_manager.cancel(subagent_id)
+            return ToolResult(content=json.dumps(result, ensure_ascii=False))
+
+        # action == "list" (default)
+        status = (args.get("status") or "").strip() or None
+        records = await self._sub_agent_manager.get_records(
+            parent_chat_id=ctx.chat_id,
+            status=status,
+        )
+
+        return ToolResult(content=json.dumps({
+            "action": "list",
+            "subagents": records,
+            "total": len(records),
+        }, ensure_ascii=False))
+
+    async def _exec_announce(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """子智能体向父会话报告进度。"""
+        if not self._sub_agent_manager or not self._system_events:
+            return ToolResult(content=json.dumps(
+                {"error": "通知系统未就绪"}, ensure_ascii=False,
+            ))
+
+        if not ctx.chat_id.startswith("subagent:"):
+            return ToolResult(content=json.dumps(
+                {"error": "只有子智能体可以使用此工具"}, ensure_ascii=False,
+            ))
+
+        message = (args.get("message") or "").strip()
+        if not message:
+            return ToolResult(content=json.dumps(
+                {"error": "消息不能为空"}, ensure_ascii=False,
+            ))
+
+        sub_id = ctx.chat_id.split("subagent:", 1)[1]
+        record = await self._sub_agent_manager.get_record_by_id(sub_id)
+        if not record:
+            return ToolResult(content=json.dumps(
+                {"error": "未找到子智能体记录"}, ensure_ascii=False,
+            ))
+
+        parent_chat_id = record.get("parent_chat_id")
+        if not parent_chat_id:
+            return ToolResult(content=json.dumps(
+                {"error": "未找到父会话"}, ensure_ascii=False,
+            ))
+
+        self._system_events.enqueue(
+            session_key=parent_chat_id,
+            text=f"子智能体 [{sub_id[:8]}..] 进度: {message}",
+            context_key=f"subagent_announce:{sub_id}",
+            replace=True,
+        )
+
+        return ToolResult(content=json.dumps({
+            "success": True,
+        }, ensure_ascii=False))

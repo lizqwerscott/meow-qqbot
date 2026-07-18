@@ -27,6 +27,7 @@ from core.tools.definitions import (
     HEARTBEAT_RESPOND_TOOL,
     LIST_TASKS_TOOL,
     LIST_CRON_JOBS_TOOL,
+    SUB_AGENT_TOOLS,
 )
 
 _log = logging.getLogger(__name__)
@@ -102,6 +103,7 @@ class PromptBuilder:
         admin_ids: Optional[List[str]] = None,
         learning_orchestrator: Any = None,
         has_tasks: bool = False,
+        has_sub_agents: bool = False,
         permission_manager=None,
         workspace_manager=None,
         archive_manager=None,
@@ -119,6 +121,7 @@ class PromptBuilder:
         self._search_top_k = search_top_k
         self._admin_ids = admin_ids or []
         self._has_tasks = has_tasks
+        self._has_sub_agents = has_sub_agents
         self._perm = permission_manager
         self._workspace_manager = workspace_manager
         self._archive_manager = archive_manager
@@ -181,6 +184,8 @@ class PromptBuilder:
             tools_to_use.extend(LEARNER_TOOLS)
         if self._has_tasks:
             tools_to_use.extend(TASK_TOOLS)
+        if self._has_sub_agents:
+            tools_to_use.extend(SUB_AGENT_TOOLS)
         if self._workspace_manager:
             tools_to_use.extend(FILE_TOOLS)
         tools_to_use = tools_to_use or None
@@ -365,31 +370,26 @@ class PromptBuilder:
     ) -> Tuple[List[dict], Optional[List[dict]]]:
         """组装后台任务的 messages 列表（使用 task_chat.j2 模板）。
 
-        工具集与主对话一致（排除表情工具和递归任务工具）。
+        子智能体专用工具集：只保留搜索用户、记忆读写和文件操作。
         Returns:
             (messages, tools_to_use)
         """
         tools_to_use: List[dict] = []
         from core.tools.definitions import (
-            EMOJI_TOOLS,
+            SEARCH_USER_TOOL,
             SEARCH_MEMORY_TOOL,
             SEARCH_RELATION_TOOL,
             MARK_IMPORTANT_TOOL,
-            EXECUTE_COMMAND_TOOL,
-            EXECUTE_SKILL_TOOL,
-            VIEW_SKILL_TOOL,
+            FILE_TOOLS,
+            ANNOUNCE_TOOL,
         )
 
-        if self.emoji_manager and self.emoji_manager.count_emojis() > 0:
-            tools_to_use.extend(EMOJI_TOOLS)
+        tools_to_use.extend(ANNOUNCE_TOOL)
+        tools_to_use.extend(SEARCH_USER_TOOL)
         if self.hindsight:
             tools_to_use.extend(SEARCH_MEMORY_TOOL)
             tools_to_use.extend(SEARCH_RELATION_TOOL)
             tools_to_use.extend(MARK_IMPORTANT_TOOL)
-        if self._skill_managers and self._skill_managers.has_skills:
-            tools_to_use.extend(EXECUTE_COMMAND_TOOL)
-            tools_to_use.extend(EXECUTE_SKILL_TOOL)
-            tools_to_use.extend(VIEW_SKILL_TOOL)
         if self._workspace_manager:
             tools_to_use.extend(FILE_TOOLS)
         tools_to_use = tools_to_use or None
