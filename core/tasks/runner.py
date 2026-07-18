@@ -418,18 +418,4 @@ class BackgroundTaskRunner:
 
         return task
 
-    async def run_manual_task(
-        self,
-        prompt: str,
-        timeout: float = 300.0,
-        delivery_channel: Optional[str] = None,
-    ) -> TaskRecord:
-        """执行一个手动后台任务。"""
-        if self._task_manager is None:
-            raise RuntimeError("TaskManager 未注入")
-        task = await self._task_manager.create_task(
-            prompt=prompt,
-            task_type="manual",
-            delivery_channel=delivery_channel,
-        )
-        return await self.run_task(task, timeout=timeout)
+

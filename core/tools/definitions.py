@@ -505,6 +505,26 @@ HEARTBEAT_RESPOND_TOOL = [
     },
 ]
 
+ANNOUNCE_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "announce",
+            "description": "向父会话报告当前子智能体的进度或中间结果。父 AI 在下一轮对话时会看到这条消息。适合汇报阶段性进展、发现的异常或请求帮助。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "要报告给父会话的消息内容，建议简洁明了",
+                    },
+                },
+                "required": ["message"],
+            },
+        },
+    },
+]
+
 
 LIST_TASKS_TOOL = [
     {
@@ -546,27 +566,6 @@ LIST_CRON_JOBS_TOOL = [
 
 
 TASK_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "create_task",
-            "description": (
-                "创建一个一次性后台任务。AI 可以在后台独立执行较长时间的工作"
-                "（如生成报告、批量查询、执行脚本等），执行期间不阻塞当前对话。"
-                "任务完成后你会通过系统事件收到通知，也可以通过 /tasks show 查看结果。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "后台任务要执行的指令或工作描述。越详细越好，AI 会根据这个指令独立完成任务。",
-                    },
-                },
-                "required": ["prompt"],
-            },
-        },
-    },
     {
         "type": "function",
         "function": {
@@ -816,6 +815,62 @@ TASK_TOOLS = [
 ]
 
 
+SUB_AGENT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "spawn_subagent",
+            "description": (
+                "创建一个子智能体在后台独立执行任务，不阻塞当前对话。"
+                "子智能体有独立的会话和工具，执行完成后结果会通过系统事件通知你。"
+                "适合执行耗时的研究、批量查询、文件处理等任务。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "子智能体要执行的详细任务指令。越详细越好，AI 会根据指令独立完成任务。",
+                    },
+                    "context": {
+                        "type": "string",
+                        "enum": ["isolated"],
+                        "description": "上下文模式。isolated（默认）使用全新隔离上下文。",
+                    },
+                },
+                "required": ["task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "subagents",
+            "description": "列出或取消子智能体。action=list（默认）列出当前会话的所有子智能体状态；action=cancel 按 subagent_id 取消指定的子智能体。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "cancel"],
+                        "description": "操作类型。list（默认）列出子智能体，cancel 取消子智能体。",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["running", "completed", "failed", "timeout", "cancelled"],
+                        "description": "仅 action=list 时有效。按状态过滤（可选）。不传则返回全部。",
+                    },
+                    "subagent_id": {
+                        "type": "string",
+                        "description": "仅 action=cancel 时必填。要取消的子智能体 ID。",
+                    },
+                },
+            },
+        },
+    },
+]
+
+
 def tool_names() -> set[str]:
     """返回所有已注册工具的名称集合。"""
     return {
@@ -823,7 +878,7 @@ def tool_names() -> set[str]:
         "search_memory", "mark_important", "search_relation",
         "rescan_skills", "view_skill", "execute_skill", "execute_command",
         "define_jargon", "report_behavior_effect",
-        "create_task", "create_cron_job",         "cancel_task",
+        "create_cron_job", "cancel_task",
         "list_tasks",
         "list_cron_jobs", "update_cron_job", "delete_cron_job",
         "enable_cron_job", "disable_cron_job",
@@ -831,4 +886,6 @@ def tool_names() -> set[str]:
         "list_files", "search_files",
         "apply_patch",
         "heartbeat_respond",
+        "announce",
+        "spawn_subagent", "subagents",
     }
