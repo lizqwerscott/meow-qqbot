@@ -7,6 +7,8 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+<div id="menu-overlay"></div>
+<button id="menu-btn">☰</button>
 <div class="layout">
     <aside class="sidebar">
         <h1><a href="/">🐱 猫猫管理</a></h1>
@@ -15,6 +17,7 @@
             <a href="/emojis" class="{% if nav_active == 'emojis' %}active{% endif %}">😊 表情管理</a>
             <a href="/nicknames" class="{% if nav_active == 'nicknames' %}active{% endif %}">🏷️ 昵称管理</a>
             <a href="/sessions" class="{% if nav_active == 'sessions' %}active{% endif %}">💬 会话历史</a>
+            <a href="/sessions/archived" class="{% if nav_active == 'sessions' %}active{% endif %}" style="padding-left:32px;font-size:13px">📦 归档会话</a>
             <a href="/learners/jargons" class="{% if nav_active == 'learners' %}active{% endif %}">🧠 学习数据</a>
             <a href="/tasks" class="{% if nav_active == 'tasks' %}active{% endif %}">⚙️ 后台任务</a>
         </nav>
@@ -26,5 +29,6 @@
         {% block content %}{% endblock %}
     </main>
 </div>
+<script src="/static/app.js"></script>
 </body>
 </html>

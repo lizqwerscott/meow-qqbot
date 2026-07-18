@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}归档会话 - 猫猫管理{% endblock %}
+{% set nav_active = "sessions" %}
+
+{% block content %}
+<h2 style="margin-bottom:20px">📦 归档会话</h2>
+
+<div class="search-bar">
+    <form method="get" action="/sessions/archived" style="display:flex;gap:8px;width:100%">
+        <input type="text" name="q" placeholder="搜索会话 ID" value="{{ query or '' }}">
+        <button type="submit" class="btn btn-primary">搜索</button>
+        {% if query %}
+        <a href="/sessions/archived" class="btn">清除</a>
+        {% endif %}
+    </form>
+</div>
+
+<div style="margin-bottom:16px">
+    <a href="/sessions" class="btn">← 返回活跃会话</a>
+</div>
+
+<div class="table-wrap">
+<table>
+    <thead>
+        <tr>
+            <th>会话 ID</th>
+            <th>归档次数</th>
+            <th>最新归档</th>
+            <th>总大小</th>
+            <th>操作</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for s in sessions %}
+        <tr>
+            <td><code>{{ s.chat_id[:12] }}..</code></td>
+            <td>{{ s.archive_count }}</td>
+            <td>{{ s.latest_archive }}</td>
+            <td>{{ "{:.1f}".format(s.total_size / 1024) }} KB</td>
+            <td>
+                <a href="/sessions/archived/{{ s.chat_id }}" class="btn btn-sm">查看</a>
+                <a href="/sessions/{{ s.chat_id }}" class="btn btn-sm">活跃会话</a>
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" style="text-align:center;color:var(--text-secondary)">暂无归档会话</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% endblock %}

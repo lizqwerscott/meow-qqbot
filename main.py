@@ -1,35 +1,41 @@
 import asyncio
+import logging
 import os
 import sys
 import tomllib
-import logging
+
 import httpx
 from colorlog import ColoredFormatter
 
+from core.ai.model_registry import ModelRegistry
+from core.ai.multimodal import MultimodalService
 from core.ai.service import AIService
+from core.command_handlers import register_all_commands
 from core.engine.agent_engine import AgentEngine
 from core.engine.client import BotEngine
-from core.managers.context_manager import ChatContextManager
+from core.engine.hindsight_memory import HindsightMemory
+from core.engine.router import Router
+from core.engine.system_events import SystemEventQueue
+from core.learners.orchestrator import LearningOrchestrator
 from core.managers.archive_manager import ArchiveManager
+from core.managers.context_manager import ChatContextManager
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager
-from core.ai.multimodal import MultimodalService
 from core.managers.nickname_manager import NicknameManager
-from core.engine.router import Router
-from core.managers.template_manager import TemplateManager
-from core.engine.hindsight_memory import HindsightMemory
-from core.command_handlers import register_all_commands
-from core.tools.skill_managers import SkillManagers
-from core.plugins.manager import PluginManager
-from core.learners.orchestrator import LearningOrchestrator
-from core.tasks import TaskStore, TaskManager, CronJobManager, BackgroundTaskRunner, CronJobScheduler
-from core.tasks.heartbeat import HeartbeatManager
-from core.rule_router import RuleRouter
-from core.ai.model_registry import ModelRegistry
 from core.managers.permission_manager import PermissionManager
+from core.managers.template_manager import TemplateManager
 from core.managers.workspace_manager import WorkspaceManager
-from core.engine.system_events import SystemEventQueue
-
+from core.plugins.manager import PluginManager
+from core.rule_router import RuleRouter
+from core.tasks import (
+    BackgroundTaskRunner,
+    CronJobManager,
+    CronJobScheduler,
+    TaskManager,
+    TaskStore,
+)
+from core.tasks.heartbeat import HeartbeatManager
+from core.tools.skill_managers import SkillManagers
 from core.webui import create_app, start_webui
 
 
@@ -38,11 +44,11 @@ async def main() -> None:
 
     # --- 彩色日志配置 ---
     _colors = {
-        'DEBUG':    'cyan',
-        'INFO':     'green',
-        'WARNING':  'yellow',
-        'ERROR':    'red',
-        'CRITICAL': 'red,bg_white',
+        "DEBUG": "cyan",
+        "INFO": "green",
+        "WARNING": "yellow",
+        "ERROR": "red",
+        "CRITICAL": "red,bg_white",
     }
 
     _formatter = ColoredFormatter(
@@ -78,8 +84,7 @@ async def main() -> None:
         n_models = sum(len(p.get("models", [])) for p in providers_config.values())
         model_registry = ModelRegistry(providers_config, groups_config)
         _log.info(
-            f"模型注册表已初始化: {n_models} 个模型, "
-            f"{len(groups_config)} 个组"
+            f"模型注册表已初始化: {n_models} 个模型, " f"{len(groups_config)} 个组"
         )
 
     # 默认 AI 服务
@@ -127,7 +132,11 @@ async def main() -> None:
         keep_last_assistants=ctx_mgmt.get("keep_last_assistants", 3),
         soft_trim=ctx_mgmt.get("soft_trim", 20000),
         hard_clear=ctx_mgmt.get("hard_clear", 180000),
-        cache_dir=(cache_cfg.get("dir") or "data/sessions/") if cache_cfg.get("enabled", True) else None,
+        cache_dir=(
+            (cache_cfg.get("dir") or "data/sessions/")
+            if cache_cfg.get("enabled", True)
+            else None
+        ),
     )
 
     # ── ArchiveManager（会话归档 + 自动摘要） ──
@@ -153,9 +162,13 @@ async def main() -> None:
 
     # ── CostTracker（AI 消耗追踪） ──
     cost_tracking_config = config.get("cost_tracking", {})
-    cost_tracker = CostTracker(
-        pricing=cost_tracking_config.get("pricing"),
-    ) if cost_tracking_config.get("enabled", True) else CostTracker()
+    cost_tracker = (
+        CostTracker(
+            pricing=cost_tracking_config.get("pricing"),
+        )
+        if cost_tracking_config.get("enabled", True)
+        else CostTracker()
+    )
 
     # ── Hindsight 长期记忆系统 ──
     hindsight_config = config.get("hindsight", {})
@@ -175,9 +188,7 @@ async def main() -> None:
     if hindsight_memory:
         health_result = await hindsight_memory.health()
         if health_result.get("status") == "ok":
-            _log.info(
-                f"Hindsight 健康检查通过 ({health_result.get('latency_ms')}ms)"
-            )
+            _log.info(f"Hindsight 健康检查通过 ({health_result.get('latency_ms')}ms)")
         else:
             _log.warning(
                 f"Hindsight 健康检查失败: {health_result.get('error')}"
@@ -303,12 +314,14 @@ async def main() -> None:
         background_task_runner.set_execute_callback(
             agent_engine.execute_background_task
         )
+
         # 投递回调（将任务执行结果发回 QQ 聊天）
         async def _deliver(chat_id, content, message_id, is_group):
             try:
                 await engine.send_proactive(chat_id, content, is_group=is_group)
             except Exception as e:
                 _log.error(f"投递任务结果失败: {e}")
+
         background_task_runner.set_delivery_callback(_deliver)
 
     # ── 连接 Cron 调度器 ──
@@ -316,7 +329,9 @@ async def main() -> None:
         cron_scheduler.set_callbacks(
             on_trigger=lambda job: background_task_runner.run_cron_job(
                 job=job,
-                timeout=config.get("tasks", {}).get("scheduler", {}).get("task_timeout", 300),
+                timeout=config.get("tasks", {})
+                .get("scheduler", {})
+                .get("task_timeout", 300),
             ),
             get_jobs=cron_job_manager.list_jobs,
             update_job=cron_job_manager.update_job,
@@ -398,6 +413,7 @@ async def main() -> None:
                 "cost_tracker": cost_tracker,
                 "agent_engine": agent_engine,
                 "learning_orchestrator": learning_orchestrator,
+                "archive_manager": archive_manager,
             },
             webui_config=webui_config,
         )
@@ -431,7 +447,9 @@ async def main() -> None:
         async def _run_cleanup_cycle():
             lost = await task_manager.detect_lost_tasks(lost_detection_minutes)
             cleaned = await task_manager.cleanup_old_tasks()
-            capped = await task_manager.enforce_per_job_terminal_limit(max_terminal_per_job)
+            capped = await task_manager.enforce_per_job_terminal_limit(
+                max_terminal_per_job
+            )
             if lost or cleaned or capped:
                 _log.info(
                     f"任务清理周期: {lost} 丢失标记, "
@@ -449,6 +467,7 @@ async def main() -> None:
                     await _run_cleanup_cycle()
                 except Exception as e:
                     _log.warning(f"定时清理任务异常: {e}")
+
         task_cleanup_task = asyncio.create_task(_periodic_task_cleanup())
 
     try:

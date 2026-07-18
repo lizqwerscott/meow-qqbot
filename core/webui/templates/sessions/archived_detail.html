@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}归档详情 - 猫猫管理{% endblock %}
+{% set nav_active = "sessions" %}
+
+{% block content %}
+<h2 style="margin-bottom:20px">📦 归档 <code>{{ chat_id[:16] }}..</code></h2>
+
+<div style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
+    <a href="/sessions/archived" class="btn">← 返回归档列表</a>
+    <a href="/sessions/{{ chat_id }}" class="btn">活跃会话</a>
+</div>
+
+{% if not archived_files and not summaries %}
+<p style="color:var(--text-secondary)">此会话暂无归档数据</p>
+{% endif %}
+
+{% if archived_files %}
+<div class="card">
+    <h2 style="display:flex;align-items:center;gap:8px">
+        📄 归档文件
+        <span style="font-weight:400;font-size:12px;color:var(--text-secondary)">(JSONL)</span>
+    </h2>
+    <div class="table-wrap">
+    <table>
+        <thead>
+            <tr><th>时间戳</th><th>大小</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+            {% for f in archived_files %}
+            <tr>
+                <td><code>{{ f.timestamp_str }}</code></td>
+                <td>{{ "{:.1f}".format(f.size / 1024) }} KB</td>
+                <td style="display:flex;gap:4px;flex-wrap:wrap">
+                    <a href="/sessions/archived/{{ chat_id }}/messages/{{ f.timestamp_str }}" class="btn btn-sm">查看消息</a>
+                    <form method="post" action="/sessions/archived/{{ chat_id }}/delete/{{ f.timestamp_str }}" style="display:inline" onsubmit="return confirm('确定删除此归档？')">
+                        <button type="submit" class="btn btn-sm btn-danger">删除</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+{% endif %}
+
+{% if summaries %}
+<div class="card">
+    <h2>📝 摘要文件</h2>
+    <div class="table-wrap">
+    <table>
+        <thead>
+            <tr><th>日期</th><th>大小</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+            {% for s in summaries %}
+            <tr>
+                <td>{{ s.date }}</td>
+                <td>{{ s.size }} B</td>
+                <td>
+                    <a href="/sessions/archived/{{ chat_id }}/summary/{{ s.date }}" class="btn btn-sm">查看摘要</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+{% endif %}
+
+{% if tab == "messages" and messages_by_file %}
+{% for ts, msgs in messages_by_file.items() %}
+<div class="card">
+    <h3 style="margin-bottom:12px">归档: <code>{{ ts }}</code> ({{ msgs|length }} 条)</h3>
+    {% for msg in msgs %}
+    {% set role = msg.get("role", "user") %}
+    <div class="chat-message {{ role }}">
+        <div class="msg-meta">
+            {% if role == "user" %}
+            👤 {{ msg.get("name") or msg.get("sender_id") or '用户' }}
+            {% elif role == "assistant" %}
+            🤖 助手
+            {% elif role == "tool" %}
+            🔧 工具: {{ msg.get("tool_name") or '未知' }}
+            {% endif %}
+            {% if msg.get("timestamp") %}
+            · {{ msg.timestamp | format_timestamp }}
+            {% endif %}
+        </div>
+        <div class="msg-content">{{ msg.get("content") or '(空)' }}</div>
+    </div>
+    {% endfor %}
+    <div style="margin-top:8px">
+        <a href="/sessions/archived/{{ chat_id }}/messages/{{ ts }}" class="btn btn-sm">查看全部消息</a>
+    </div>
+</div>
+{% endfor %}
+{% endif %}
+{% endblock %}

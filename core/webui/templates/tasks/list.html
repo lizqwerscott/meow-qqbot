@@ -9,6 +9,7 @@
 <section class="card">
     <h3>📋 定时任务（Cron Jobs）</h3>
     {% if cron_jobs %}
+    <div class="table-wrap">
     <table>
         <thead>
             <tr>
@@ -70,6 +71,7 @@
             {% endfor %}
         </tbody>
     </table>
+    </div>
     {% else %}
     <p class="empty">暂无定时任务。可在群聊中使用 <code>/cron create</code> 命令创建。</p>
     {% endif %}
@@ -79,6 +81,7 @@
     <h3>📋 后台任务记录</h3>
     <p class="meta">活跃: {{ active_tasks|length }} 个 | 共 {{ tasks|length }} 条</p>
     {% if tasks %}
+    <div class="table-wrap">
     <table>
         <thead>
             <tr>
@@ -124,6 +127,7 @@
             {% endfor %}
         </tbody>
     </table>
+    </div>
     {% else %}
     <p class="empty">暂无任务记录。</p>
     {% endif %}

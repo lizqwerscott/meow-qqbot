@@ -43,9 +43,7 @@ class ChatMessage:
                 "content": self.content,
             }
 
-        time_str = time.strftime(
-            "%Y-%m-%d %H:%M:%S", time.localtime(self.timestamp)
-        )
+        time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.timestamp))
 
         content = self.content
         if self.role == "user":
@@ -156,8 +154,11 @@ class ChatContext:
         reasoning_content: Optional[str] = None,
     ) -> None:
         self.add_message(
-            "assistant", content, message_id,
-            tool_calls=tool_calls, reasoning_content=reasoning_content,
+            "assistant",
+            content,
+            message_id,
+            tool_calls=tool_calls,
+            reasoning_content=reasoning_content,
         )
 
     def add_tool_result(
@@ -166,7 +167,9 @@ class ChatContext:
         content: str,
         tool_call_id: str,
     ) -> None:
-        self.add_message("tool", content, tool_call_id=tool_call_id, tool_name=tool_name)
+        self.add_message(
+            "tool", content, tool_call_id=tool_call_id, tool_name=tool_name
+        )
 
     def get_history(self, max_messages: Optional[int] = None) -> List[ChatMessage]:
         if max_messages is None:
@@ -291,8 +294,7 @@ class ChatContext:
                 return
             path.parent.mkdir(parents=True, exist_ok=True)
             lines = [
-                json.dumps(msg.to_dict(), ensure_ascii=False) + "\n"
-                for msg in new_msgs
+                json.dumps(msg.to_dict(), ensure_ascii=False) + "\n" for msg in new_msgs
             ]
             with open(path, "w" if flushed_before == 0 else "a", encoding="utf-8") as f:
                 f.writelines(lines)
@@ -312,8 +314,7 @@ class ChatContext:
                     data.append(item)
                 except json.JSONDecodeError:
                     _log.warning(
-                        "跳过损坏的 JSONL 行 [%s..]: %s",
-                        self.chat_id[:12], line[:80]
+                        "跳过损坏的 JSONL 行 [%s..]: %s", self.chat_id[:12], line[:80]
                     )
         return data
 
@@ -339,12 +340,15 @@ class ChatContext:
                     old_path.unlink(missing_ok=True)
                     _log.info(
                         "已迁移旧 JSON 缓存 → JSONL [%s..] (%d 条)",
-                        self.chat_id[:12], len(self.history)
+                        self.chat_id[:12],
+                        len(self.history),
                     )
                     self.last_activity = time.time()
                     return True
             except Exception as e:
-                _log.warning("加载/迁移旧 JSON 缓存失败 [%s..]: %s", self.chat_id[:12], e)
+                _log.warning(
+                    "加载/迁移旧 JSON 缓存失败 [%s..]: %s", self.chat_id[:12], e
+                )
             return False
         else:
             return False
@@ -358,13 +362,17 @@ class ChatContext:
         self._flushed_count = len(self.history)
 
         if self._is_expired():
-            _log.info("会话缓存已过期 [%s..]，交由 ArchiveManager 处理", self.chat_id[:12])
+            _log.info(
+                "会话缓存已过期 [%s..]，交由 ArchiveManager 处理", self.chat_id[:12]
+            )
             # 不清除数据，让 ArchiveManager.archive_if_stale 在 dispatch 时处理归档。
             # 将 last_activity 设为最后消息的时间戳，确保 archive_if_stale 能检测到过期。
             self.last_activity = self.history[-1].timestamp
             return False
         self.last_activity = time.time()
-        _log.info("从本地缓存恢复会话 [%s..] (%d 条)", self.chat_id[:12], len(self.history))
+        _log.info(
+            "从本地缓存恢复会话 [%s..] (%d 条)", self.chat_id[:12], len(self.history)
+        )
         return True
 
     async def _schedule_save(self) -> None:
@@ -395,9 +403,13 @@ class ChatContext:
     ) -> None:
         async with self.lock:
             self.add_message(
-                role, content, message_id,
-                sender_id=sender_id, name=name,
-                tool_call_id=tool_call_id, tool_name=tool_name,
+                role,
+                content,
+                message_id,
+                sender_id=sender_id,
+                name=name,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
                 tool_calls=tool_calls,
                 reasoning_content=reasoning_content,
             )
@@ -411,7 +423,8 @@ class ChatContext:
     ) -> None:
         async with self.lock:
             self.add_assistant_message(
-                content, message_id,
+                content,
+                message_id,
                 tool_calls=tool_calls,
                 reasoning_content=reasoning_content,
             )
@@ -474,14 +487,10 @@ class ChatContext:
             else:
                 content = msg.content
                 if len(content) > hard_clear:
-                    d["content"] = (
-                        f"[工具 {msg.tool_name or '未知'} 的调用结果已裁剪]"
-                    )
+                    d["content"] = f"[工具 {msg.tool_name or '未知'} 的调用结果已裁剪]"
                 elif len(content) > soft_trim:
                     d["content"] = (
-                        content[:1500]
-                        + "\n\n…[中间内容已裁剪]…\n\n"
-                        + content[-1500:]
+                        content[:1500] + "\n\n…[中间内容已裁剪]…\n\n" + content[-1500:]
                     )
                 result.append(d)
 
@@ -543,7 +552,11 @@ class ChatContext:
                 # 两种都要确保配对完整性。
 
                 # case 1: 当前 msg 是 tool 响应且其 call_id 在 recent 的 assistant 中
-                if msg.role == "tool" and msg.tool_call_id and msg.tool_call_id in recent_tool_ids:
+                if (
+                    msg.role == "tool"
+                    and msg.tool_call_id
+                    and msg.tool_call_id in recent_tool_ids
+                ):
                     # tool 响应不能没有前面的 assistant → 加入 recent
                     recent.insert(0, msg)
                     total += tokens
@@ -571,7 +584,11 @@ class ChatContext:
             if msg.role == "tool" and msg.tool_call_id:
                 recent_tool_ids.add(msg.tool_call_id)
 
-        old = messages[: -len(recent)] if recent else messages[:-1] if len(messages) > 1 else []
+        old = (
+            messages[: -len(recent)]
+            if recent
+            else messages[:-1] if len(messages) > 1 else []
+        )
         return old, recent
 
     # ── 压缩 (Compaction) — 调用 AI 总结旧对话 ──
@@ -580,28 +597,20 @@ class ChatContext:
         """将消息列表格式化为纯文本供 AI 总结"""
         lines = []
         for m in messages:
-            time_str = time.strftime(
-                "%m-%d %H:%M", time.localtime(m.timestamp)
-            )
+            time_str = time.strftime("%m-%d %H:%M", time.localtime(m.timestamp))
             if m.role == "user":
                 display_name = m.name or m.sender_id or "用户"
                 lines.append(f"[{time_str}] {display_name}: {m.content}")
             elif m.role == "assistant":
                 if m.tool_calls:
-                    tools = ", ".join(
-                        tc["function"]["name"] for tc in m.tool_calls
-                    )
-                    lines.append(
-                        f"[{time_str}] 助手(调用工具: {tools}): {m.content}"
-                    )
+                    tools = ", ".join(tc["function"]["name"] for tc in m.tool_calls)
+                    lines.append(f"[{time_str}] 助手(调用工具: {tools}): {m.content}")
                 else:
                     lines.append(f"[{time_str}] 助手: {m.content}")
             elif m.role == "tool":
                 tname = m.tool_name or "工具"
                 content_preview = m.content[:100].replace("\n", " ")
-                lines.append(
-                    f"[{time_str}] {tname} 返回: {content_preview}..."
-                )
+                lines.append(f"[{time_str}] {tname} 返回: {content_preview}...")
         return "\n".join(lines)
 
     async def compact_history_if_needed(
@@ -661,12 +670,14 @@ class ChatContext:
 
         timestamp = old_msgs[0].timestamp
         new_history = deque(maxlen=self.max_history)
-        new_history.append(ChatMessage(
-            role="assistant",
-            content=f"【历史对话摘要】\n{summary}",
-            timestamp=timestamp,
-            name="系统",
-        ))
+        new_history.append(
+            ChatMessage(
+                role="assistant",
+                content=f"【历史对话摘要】\n{summary}",
+                timestamp=timestamp,
+                name="系统",
+            )
+        )
         for m in recent_msgs:
             new_history.append(m)
         self.history = new_history
@@ -702,9 +713,9 @@ class ChatContextManager:
         self.hard_clear = hard_clear
         self.cache_dir = cache_dir
         self.contexts: Dict[str, ChatContext] = {}
-        self._ctx_lock = asyncio.Lock()                     # 保护 _chat_locks 字典
-        self._ctx_sync_lock = threading.Lock()               # 保护 self.contexts 字典
-        self._chat_locks: Dict[str, asyncio.Lock] = {}      # 每 chat 操作锁
+        self._ctx_lock = asyncio.Lock()  # 保护 _chat_locks 字典
+        self._ctx_sync_lock = threading.Lock()  # 保护 self.contexts 字典
+        self._chat_locks: Dict[str, asyncio.Lock] = {}  # 每 chat 操作锁
 
     async def _get_chat_lock(self, chat_id: str) -> asyncio.Lock:
         async with self._ctx_lock:
@@ -750,7 +761,8 @@ class ChatContextManager:
     ) -> None:
         context = self.get_context(chat_id)
         context.add_assistant_message(
-            content, message_id,
+            content,
+            message_id,
             tool_calls=tool_calls,
             reasoning_content=reasoning_content,
         )
@@ -790,7 +802,9 @@ class ChatContextManager:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             self.add_assistant_message(
-                chat_id, content, message_id,
+                chat_id,
+                content,
+                message_id,
                 tool_calls=tool_calls,
                 reasoning_content=reasoning_content,
             )
@@ -932,3 +946,54 @@ class ChatContextManager:
         for context in self.contexts.values():
             total += len(context.history)
         return total
+
+    def get_archived_sessions_summary(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        if self.cache_dir:
+            cache_path = Path(self.cache_dir)
+            if cache_path.is_dir():
+                for f in cache_path.iterdir():
+                    if ".archived." in f.name:
+                        chat_id = f.name.split(".jsonl.archived.")[0]
+                        counts[chat_id] = counts.get(chat_id, 0) + 1
+        return counts
+
+    def get_archived_files(self, chat_id: str) -> List[dict]:
+        files = []
+        if self.cache_dir:
+            cache_path = Path(self.cache_dir)
+            if cache_path.is_dir():
+                pattern = f"{chat_id}.jsonl.archived.*"
+                for f in cache_path.glob(pattern):
+                    ts_str = f.name.split(".jsonl.archived.")[-1]
+                    files.append(
+                        {
+                            "path": str(f),
+                            "timestamp_str": ts_str,
+                            "size": f.stat().st_size,
+                            "mtime": f.stat().st_mtime,
+                        }
+                    )
+        files.sort(key=lambda x: x["mtime"], reverse=True)
+        return files
+
+    def read_archived_messages(
+        self, file_path: str, max_messages: int = 200
+    ) -> List[Dict]:
+        path = Path(file_path)
+        if not path.exists():
+            return []
+        data = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                    data.append(item)
+                except json.JSONDecodeError:
+                    pass
+        if max_messages and len(data) > max_messages:
+            data = data[-max_messages:]
+        return data

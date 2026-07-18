@@ -139,6 +139,11 @@ a:hover {
 
 /* ── Tables ── */
 
+.table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
 table {
     width: 100%;
     border-collapse: collapse;
@@ -446,29 +451,118 @@ tr:hover td {
     color: #856404;
 }
 
+/* ── Hamburger menu ── */
+
+#menu-btn {
+    display: none;
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    z-index: 1001;
+    width: 36px;
+    height: 36px;
+    border: none;
+    border-radius: 6px;
+    background: var(--sidebar-bg);
+    color: #fff;
+    font-size: 20px;
+    cursor: pointer;
+    line-height: 36px;
+    text-align: center;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+#menu-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 998;
+    background: rgba(0, 0, 0, 0.4);
+}
+
+#menu-overlay.show {
+    display: block;
+}
+
 /* ── Responsive ── */
 
 @media (max-width: 768px) {
+    #menu-btn {
+        display: block;
+    }
+
     .sidebar {
-        width: 60px;
+        position: fixed;
+        top: 0;
+        left: -260px;
+        z-index: 999;
+        width: 220px;
+        height: 100vh;
+        transition: left 0.25s ease;
+        box-shadow: 2px 0 12px rgba(0, 0, 0, 0.2);
     }
-    .sidebar h1 {
-        font-size: 0;
-        padding: 12px;
+
+    .sidebar.open {
+        left: 0;
     }
-    .sidebar h1::after {
-        content: "🐱";
-        font-size: 24px;
+
+    .layout {
+        display: block;
     }
-    .sidebar nav a {
-        padding: 10px;
-        text-align: center;
-        font-size: 0;
+
+    .main {
+        max-width: 100%;
+        padding: 56px 12px 12px;
     }
-    .sidebar nav a::before {
+
+    .stats-grid {
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    }
+
+    .stat-card .stat-value {
+        font-size: 22px;
+    }
+
+    .search-bar {
+        flex-wrap: wrap;
+    }
+
+    .search-bar form {
+        flex-wrap: wrap;
+    }
+
+    .login-card {
+        width: 90%;
+        max-width: 360px;
+    }
+
+    .chat-message {
+        font-size: 12px;
+    }
+
+    .chat-message .msg-content {
+        font-size: 12px;
+    }
+
+    .form-actions {
+        flex-direction: column;
+    }
+}
+
+@media (max-width: 480px) {
+    .stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .stat-card .stat-value {
         font-size: 18px;
     }
+
     .main {
-        padding: 16px;
+        padding: 48px 8px 8px;
+    }
+
+    h2 {
+        font-size: 16px;
     }
 }

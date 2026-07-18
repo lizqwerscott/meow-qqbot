@@ -13,6 +13,7 @@
         <button type="submit" class="btn btn-primary">添加/更新</button>
     </form>
     {% if manual_nicknames %}
+    <div class="table-wrap">
     <table>
         <thead>
             <tr><th>用户 ID</th><th>昵称</th><th>操作</th></tr>
@@ -31,6 +32,7 @@
             {% endfor %}
         </tbody>
     </table>
+    </div>
     {% else %}
     <p style="color:var(--text-secondary)">暂无手动昵称</p>
     {% endif %}
@@ -39,6 +41,7 @@
 <div class="card">
     <h2>🤖 自动收集昵称</h2>
     {% if auto_nicknames %}
+    <div class="table-wrap">
     <table>
         <thead>
             <tr><th>用户 ID</th><th>昵称</th><th>操作</th></tr>
@@ -68,6 +71,7 @@
             {% endfor %}
         </tbody>
     </table>
+    </div>
     {% else %}
     <p style="color:var(--text-secondary)">暂无自动收集的昵称</p>
     {% endif %}

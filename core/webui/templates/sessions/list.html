@@ -5,23 +5,30 @@
 {% block content %}
 <h2 style="margin-bottom:20px">💬 会话列表</h2>
 
-<div class="search-bar">
-    <form method="get" action="/sessions" style="display:flex;gap:8px;width:100%">
-        <input type="text" name="q" placeholder="搜索会话 ID" value="{{ query or '' }}">
-        <button type="submit" class="btn btn-primary">搜索</button>
-        {% if query %}
-        <a href="/sessions" class="btn">清除</a>
-        {% endif %}
-    </form>
+<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
+    <div class="search-bar" style="flex:1;margin-bottom:0">
+        <form method="get" action="/sessions" style="display:flex;gap:8px;width:100%">
+            <input type="text" name="q" placeholder="搜索会话 ID" value="{{ query or '' }}">
+            <button type="submit" class="btn btn-primary">搜索</button>
+            {% if query %}
+            <a href="/sessions" class="btn">清除</a>
+            {% endif %}
+        </form>
+    </div>
+    <a href="/sessions/archived" class="btn" style="white-space:nowrap">
+        📦 归档 {% if total_archived > 0 %}({{ total_archived }}){% endif %}
+    </a>
 </div>
 
+<div class="table-wrap">
 <table>
     <thead>
         <tr>
             <th>会话 ID</th>
             <th>消息数</th>
             <th>最后活动</th>
-            <th>Tokens 估算</th>
+            <th>Tokens</th>
+            <th>归档</th>
             <th>操作</th>
         </tr>
     </thead>
@@ -33,6 +40,13 @@
             <td>{{ s.last_activity }}</td>
             <td>{{ s.estimated_tokens }}</td>
             <td>
+                {% if s.archived_count > 0 %}
+                <a href="/sessions/archived/{{ s.chat_id }}" class="badge">{{ s.archived_count }} 次</a>
+                {% else %}
+                <span class="text-muted">-</span>
+                {% endif %}
+            </td>
+            <td>
                 <a href="/sessions/{{ s.chat_id }}" class="btn btn-sm">查看</a>
                 <form method="post" action="/sessions/{{ s.chat_id }}/clear" style="display:inline" onsubmit="return confirm('确定清空此会话？')">
                     <button type="submit" class="btn btn-sm btn-danger">清空</button>
@@ -40,8 +54,9 @@
             </td>
         </tr>
         {% else %}
-        <tr><td colspan="5" style="text-align:center;color:var(--text-secondary)">无活跃会话</td></tr>
+        <tr><td colspan="6" style="text-align:center;color:var(--text-secondary)">无活跃会话</td></tr>
         {% endfor %}
     </tbody>
 </table>
+</div>
 {% endblock %}

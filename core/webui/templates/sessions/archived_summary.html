@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}归档摘要 - 猫猫管理{% endblock %}
+{% set nav_active = "sessions" %}
+
+{% block content %}
+<h2 style="margin-bottom:20px">📝 归档摘要</h2>
+
+<div style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
+    <a href="/sessions/archived/{{ chat_id }}" class="btn">← 返回归档详情</a>
+    <code style="align-self:center;font-size:12px;color:var(--text-secondary)">{{ chat_id[:16] }}.. / {{ date }}</code>
+</div>
+
+{% if content %}
+<div class="card">
+    <pre style="white-space:pre-wrap;font-size:13px;line-height:1.6;font-family:inherit">{{ content }}</pre>
+</div>
+{% else %}
+<p style="color:var(--text-secondary)">未找到该日期的摘要文件</p>
+{% endif %}
+{% endblock %}

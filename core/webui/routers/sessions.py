@@ -1,5 +1,6 @@
 import logging
 import time
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Query, Request
@@ -13,7 +14,10 @@ router = APIRouter(tags=["sessions"])
 
 def _make_flash_redirect(url: str, category: str, message: str):
     separator = "&" if "?" in url else "?"
-    return RedirectResponse(url=f"{url}{separator}flash_{category}={message}", status_code=HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        url=f"{url}{separator}flash_{category}={message}",
+        status_code=HTTP_303_SEE_OTHER,
+    )
 
 
 @router.get("/sessions", response_class=HTMLResponse)
@@ -29,23 +33,225 @@ async def session_list(
     if q:
         all_chat_ids = [cid for cid in all_chat_ids if q.lower() in cid.lower()]
 
+    archived_counts = context_manager.get_archived_sessions_summary()
+
     sessions = []
     for cid in all_chat_ids:
         ctx = context_manager.get_context(cid)
-        sessions.append({
-            "chat_id": cid,
-            "message_count": ctx.get_history_count(),
-            "last_activity": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ctx.last_activity)),
-            "estimated_tokens": ctx.estimate_tokens_for_history(),
-        })
+        sessions.append(
+            {
+                "chat_id": cid,
+                "message_count": ctx.get_history_count(),
+                "last_activity": time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(ctx.last_activity)
+                ),
+                "estimated_tokens": ctx.estimate_tokens_for_history(),
+                "archived_count": archived_counts.get(cid, 0),
+            }
+        )
 
     sessions.sort(key=lambda s: s["last_activity"], reverse=True)
 
-    return templates.TemplateResponse(request, "sessions/list.html", {
-        "request": request,
-        "sessions": sessions,
-        "query": q or "",
-    })
+    return templates.TemplateResponse(
+        request,
+        "sessions/list.html",
+        {
+            "request": request,
+            "sessions": sessions,
+            "query": q or "",
+            "total_archived": len(archived_counts),
+        },
+    )
+
+
+@router.get("/sessions/archived", response_class=HTMLResponse)
+async def archived_list(
+    request: Request,
+    q: Optional[str] = Query(None),
+):
+    managers = request.app.state.managers
+    templates = request.app.state.templates
+    context_manager = managers.get("context_manager")
+
+    archived_counts = context_manager.get_archived_sessions_summary()
+    all_archived_ids = sorted(archived_counts.keys())
+    if q:
+        all_archived_ids = [cid for cid in all_archived_ids if q.lower() in cid.lower()]
+
+    sessions = []
+    for cid in all_archived_ids:
+        files = context_manager.get_archived_files(cid)
+        sessions.append(
+            {
+                "chat_id": cid,
+                "archive_count": len(files),
+                "latest_archive": (
+                    time.strftime(
+                        "%Y-%m-%d %H:%M:%S", time.localtime(files[0]["mtime"])
+                    )
+                    if files
+                    else "-"
+                ),
+                "total_size": sum(f["size"] for f in files),
+            }
+        )
+
+    return templates.TemplateResponse(
+        request,
+        "sessions/archived_list.html",
+        {
+            "request": request,
+            "sessions": sessions,
+            "query": q or "",
+        },
+    )
+
+
+@router.get("/sessions/archived/{chat_id}", response_class=HTMLResponse)
+async def archived_detail(
+    request: Request,
+    chat_id: str,
+    tab: str = "messages",
+):
+    managers = request.app.state.managers
+    templates = request.app.state.templates
+    context_manager = managers.get("context_manager")
+    archive_manager = managers.get("archive_manager")
+
+    files = context_manager.get_archived_files(chat_id)
+    memory_dir = (
+        Path(getattr(archive_manager, "_memory_dir", "data/archives/memory"))
+        if archive_manager
+        else Path("data/archives/memory")
+    )
+    summaries = []
+    mem_path = memory_dir / chat_id
+    if mem_path.is_dir():
+        for f in sorted(mem_path.glob("*.md"), reverse=True):
+            summaries.append(
+                {
+                    "date": f.stem,
+                    "path": str(f),
+                    "size": f.stat().st_size,
+                }
+            )
+
+    messages_by_file = {}
+    if tab == "messages":
+        for f in files[:3]:
+            msgs = context_manager.read_archived_messages(f["path"], max_messages=100)
+            messages_by_file[f["timestamp_str"]] = msgs
+
+    return templates.TemplateResponse(
+        request,
+        "sessions/archived_detail.html",
+        {
+            "request": request,
+            "chat_id": chat_id,
+            "archived_files": files,
+            "summaries": summaries,
+            "messages_by_file": messages_by_file,
+            "tab": tab,
+        },
+    )
+
+
+@router.get(
+    "/sessions/archived/{chat_id}/messages/{timestamp}", response_class=HTMLResponse
+)
+async def archived_messages_full(request: Request, chat_id: str, timestamp: str):
+    managers = request.app.state.managers
+    templates = request.app.state.templates
+    context_manager = managers.get("context_manager")
+
+    files = context_manager.get_archived_files(chat_id)
+    target = None
+    for f in files:
+        if f["timestamp_str"] == timestamp:
+            target = f
+            break
+
+    if not target:
+        return _make_flash_redirect(
+            f"/sessions/archived/{chat_id}", "error", "未找到该归档文件"
+        )
+
+    messages = context_manager.read_archived_messages(target["path"], max_messages=500)
+
+    return templates.TemplateResponse(
+        request,
+        "sessions/archived_messages.html",
+        {
+            "request": request,
+            "chat_id": chat_id,
+            "timestamp": timestamp,
+            "messages": messages,
+        },
+    )
+
+
+@router.get("/sessions/archived/{chat_id}/summary/{date}", response_class=HTMLResponse)
+async def archived_summary_view(request: Request, chat_id: str, date: str):
+    managers = request.app.state.managers
+    templates = request.app.state.templates
+    archive_manager = managers.get("archive_manager")
+
+    memory_dir = (
+        Path(getattr(archive_manager, "_memory_dir", "data/archives/memory"))
+        if archive_manager
+        else Path("data/archives/memory")
+    )
+    summary_path = memory_dir / chat_id / f"{date}.md"
+    content = ""
+    if summary_path.exists():
+        content = summary_path.read_text(encoding="utf-8")
+
+    return templates.TemplateResponse(
+        request,
+        "sessions/archived_summary.html",
+        {
+            "request": request,
+            "chat_id": chat_id,
+            "date": date,
+            "content": content,
+        },
+    )
+
+
+@router.post("/sessions/archived/{chat_id}/delete/{timestamp}")
+async def archived_delete(request: Request, chat_id: str, timestamp: str):
+    managers = request.app.state.managers
+    context_manager = managers.get("context_manager")
+    archive_manager = managers.get("archive_manager")
+
+    files = context_manager.get_archived_files(chat_id)
+    target = None
+    for f in files:
+        if f["timestamp_str"] == timestamp:
+            target = f
+            break
+
+    if not target:
+        return _make_flash_redirect(
+            f"/sessions/archived/{chat_id}", "error", "未找到该归档文件"
+        )
+
+    try:
+        Path(target["path"]).unlink(missing_ok=True)
+        date_str = timestamp[:10]
+        if archive_manager:
+            memory_dir = Path(
+                getattr(archive_manager, "_memory_dir", "data/archives/memory")
+            )
+            summary_path = memory_dir / chat_id / f"{date_str}.md"
+            summary_path.unlink(missing_ok=True)
+        return _make_flash_redirect(
+            f"/sessions/archived/{chat_id}", "success", f"已删除归档 {timestamp}"
+        )
+    except Exception as e:
+        return _make_flash_redirect(
+            f"/sessions/archived/{chat_id}", "error", f"删除失败: {e}"
+        )
 
 
 @router.get("/sessions/{chat_id}", response_class=HTMLResponse)
@@ -58,11 +264,18 @@ async def session_detail(request: Request, chat_id: str):
     history = ctx.get_history_as_dicts(max_messages=200)
     history.reverse()
 
-    return templates.TemplateResponse(request, "sessions/detail.html", {
-        "request": request,
-        "chat_id": chat_id,
-        "messages": history,
-    })
+    archived_files = context_manager.get_archived_files(chat_id)
+
+    return templates.TemplateResponse(
+        request,
+        "sessions/detail.html",
+        {
+            "request": request,
+            "chat_id": chat_id,
+            "messages": history,
+            "archived_count": len(archived_files),
+        },
+    )
 
 
 @router.post("/sessions/{chat_id}/clear")
@@ -71,4 +284,4 @@ async def session_clear(request: Request, chat_id: str):
     context_manager = managers.get("context_manager")
 
     await context_manager.clear_chat_history_async(chat_id)
-    return _make_flash_redirect("/sessions", "success", f"会话已清空")
+    return _make_flash_redirect("/sessions", "success", "会话已清空")
