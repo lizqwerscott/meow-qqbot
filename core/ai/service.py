@@ -34,6 +34,7 @@ class AIService:
             )
 
         self.model = model
+        self.base_url = base_url
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
