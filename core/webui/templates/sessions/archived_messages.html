@@ -1,44 +1,39 @@
 {% extends "base.html" %}
-{% block title %}会话详情 - 猫猫管理{% endblock %}
+{% block title %}归档消息 - 猫猫管理{% endblock %}
 {% set nav_active = "sessions" %}
 
 {% block content %}
-<h2 style="margin-bottom:20px">💬 会话 <code>{{ chat_id[:16] }}..</code></h2>
+<h2 style="margin-bottom:20px">📄 归档消息 <code>{{ chat_id[:16] }}..</code></h2>
 
 <div style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
-    <a href="/sessions" class="btn">← 返回列表</a>
-    {% if archived_count > 0 %}
-    <a href="/sessions/archived/{{ chat_id }}" class="btn">📦 归档 ({{ archived_count }})</a>
-    {% endif %}
-    <form method="post" action="/sessions/{{ chat_id }}/clear" style="display:inline" onsubmit="return confirm('确定清空此会话？')">
-        <button type="submit" class="btn btn-danger">清空会话</button>
-    </form>
+    <a href="/sessions/archived/{{ chat_id }}" class="btn">← 返回归档详情</a>
+    <code style="align-self:center;font-size:12px;color:var(--text-secondary)">{{ timestamp }}</code>
 </div>
 
 {% if not messages %}
-<p style="color:var(--text-secondary)">此会话暂无消息</p>
+<p style="color:var(--text-secondary)">此归档文件无消息</p>
 {% endif %}
 
 {% for msg in messages %}
-{% set role = msg.role %}
+{% set role = msg.get("role", "user") %}
 <div class="chat-message {{ role }}">
     <div class="msg-meta">
         {% if role == "user" %}
-        👤 {{ msg.name or msg.sender_id or '用户' }}
+        👤 {{ msg.get("name") or msg.get("sender_id") or '用户' }}
         {% elif role == "assistant" %}
         🤖 助手
         {% elif role == "tool" %}
-        🔧 工具: {{ msg.tool_name or '未知' }}
+        🔧 工具: {{ msg.get("tool_name") or '未知' }}
         {% endif %}
-        {% if msg.timestamp %}
+        {% if msg.get("timestamp") %}
         · {{ msg.timestamp | format_timestamp }}
         {% endif %}
-        {% if msg.message_id %}
+        {% if msg.get("message_id") %}
         · <code>{{ msg.message_id[:12] }}..</code>
         {% endif %}
     </div>
-    <div class="msg-content">{{ msg.content or '(空)' }}</div>
-    {% if msg.tool_calls %}
+    <div class="msg-content">{{ msg.get("content") or '(空)' }}</div>
+    {% if msg.get("tool_calls") %}
     <div class="tool-details">
         <strong>工具调用:</strong>
         {% for tc in msg.tool_calls %}
@@ -48,12 +43,7 @@
         {% endfor %}
     </div>
     {% endif %}
-    {% if msg.tool_call_id %}
-    <div class="tool-details">
-        <strong>Call ID:</strong> {{ msg.tool_call_id[:16] }}..
-    </div>
-    {% endif %}
-    {% if msg.reasoning_content %}
+    {% if msg.get("reasoning_content") %}
     <div class="tool-details">
         <strong>推理过程:</strong>
         <pre style="white-space:pre-wrap;font-size:12px;margin-top:4px">{{ msg.reasoning_content[:300] }}{% if msg.reasoning_content|length > 300 %}…{% endif %}</pre>

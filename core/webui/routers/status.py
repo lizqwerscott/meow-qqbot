@@ -18,12 +18,21 @@ async def status_page(request: Request):
         await agent_engine.hindsight.health()
     stats = agent_engine.get_stats() if agent_engine else {}
 
-    # Add queue details
+    context_manager = managers.get("context_manager")
+    archived_counts = (
+        context_manager.get_archived_sessions_summary() if context_manager else {}
+    )
+
     queue_details = list(stats.get("queue_sizes", {}).items())
     stats["queue_details"] = queue_details
     stats["queue_total"] = sum(q for _, q in queue_details)
+    stats["archived_count"] = len(archived_counts)
 
-    return templates.TemplateResponse(request, "status/index.html", {
-        "request": request,
-        "stats": stats,
-    })
+    return templates.TemplateResponse(
+        request,
+        "status/index.html",
+        {
+            "request": request,
+            "stats": stats,
+        },
+    )

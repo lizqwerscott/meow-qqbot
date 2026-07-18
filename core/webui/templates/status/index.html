@@ -15,6 +15,10 @@
         <div class="stat-label">总消息数</div>
     </div>
     <div class="stat-card">
+        <div class="stat-value">{{ stats.archived_count }}</div>
+        <div class="stat-label">归档会话</div>
+    </div>
+    <div class="stat-card">
         <div class="stat-value">{{ stats.queue_total }}</div>
         <div class="stat-label">排队消息</div>
     </div>
@@ -55,6 +59,7 @@
 <div class="card">
     <h2>📋 活跃队列</h2>
     {% if stats.queue_details %}
+    <div class="table-wrap">
     <table>
         <thead>
             <tr><th>会话 ID</th><th>排队消息数</th></tr>
@@ -68,6 +73,7 @@
             {% endfor %}
         </tbody>
     </table>
+    </div>
     {% else %}
     <p style="color:var(--text-secondary)">无排队消息</p>
     {% endif %}
@@ -76,6 +82,7 @@
 {% if stats.learners %}
 <div class="card">
     <h2>🧠 学习系统</h2>
+    <div class="table-wrap">
     <table>
         <thead>
             <tr><th>模块</th><th>数据量</th></tr>
@@ -89,6 +96,7 @@
             {% endfor %}
         </tbody>
     </table>
+    </div>
 </div>
 {% endif %}
 {% endblock %}
