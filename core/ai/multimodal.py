@@ -144,7 +144,7 @@ class MultimodalService:
                     temperature=0.3,
                 )
                 if response.choices and response.choices[0].message.content:
-                    _log.debug(
+                    _log.info(
                         f"VLM 调用成功 (模型 [{svc.model}])"
                     )
                     return response.choices[0].message.content
@@ -154,10 +154,12 @@ class MultimodalService:
             except Exception as e:
                 _log.warning(
                     f"VLM 调用失败 (模型 [{svc.model}], "
-                    f"第 {idx + 1}/{len(self._services)} 个): {e}"
+                    f"第 {idx + 1}/{len(self._services)} 个)",
+                    exc_info=True,
                 )
 
-        _log.error("所有 VLM 模型均失败")
+        models_tried = ", ".join(svc.model for svc in self._services)
+        _log.error(f"所有 VLM 模型均失败: [{models_tried}]")
         return None
 
     @staticmethod
@@ -191,7 +193,10 @@ class MultimodalService:
                 emotions = []
             return desc, emotions
         except (json.JSONDecodeError, TypeError):
-            _log.warning(f"解析表情 JSON 失败，原始返回: {result[:200]}")
+            _log.warning(
+                f"解析表情 JSON 失败，原始返回: {result[:200]}",
+                exc_info=True,
+            )
             return result.strip(), []
 
     def _get_cache_key(self, image_path: str, mode: str) -> str:

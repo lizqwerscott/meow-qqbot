@@ -206,8 +206,11 @@ class EmojiManager:
                     f"VLM 表情分析完成 [{emoji_hash[:12]}..]: "
                     f"desc={auto_desc}, tags={auto_tags}"
                 )
-            except Exception as e:
-                _log.warning(f"VLM 分析表情失败 [{emoji_hash[:12]}..]: {e}")
+            except Exception:
+                _log.warning(
+                    f"VLM 分析表情失败 [{emoji_hash[:12]}..]",
+                    exc_info=True,
+                )
 
         record = {
             "hash": emoji_hash,
@@ -321,8 +324,11 @@ class EmojiManager:
             )
             _log.info(f"表情重新分析完成 [{emoji_hash[:12]}..]: desc={auto_desc}, tags={auto_tags}")
             return True
-        except Exception as e:
-            _log.warning(f"表情重新分析失败 [{emoji_hash[:12]}..]: {e}")
+        except Exception:
+            _log.warning(
+                f"表情重新分析失败 [{emoji_hash[:12]}..]",
+                exc_info=True,
+            )
             return False
 
     def count_emojis(self) -> int:
