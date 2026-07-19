@@ -162,6 +162,7 @@ class PromptBuilder:
             self.emoji_manager is not None
             and self.emoji_manager.count_emojis() > 0
         )
+        has_tts = bool(self._tts_service)
         if is_group and self._nm:
             has_users = any(
                 k != self._bot_id for k in self._nm.nicknames
@@ -205,6 +206,7 @@ class PromptBuilder:
         if is_group:
             static_prompt = self.template_manager.get_group_chat_prompt(
                 has_emojis=has_emojis,
+                has_tts=has_tts,
                 has_users=has_users,
                 memory_system_desc=memory_desc,
                 skill_system_intro=skill_intro,
@@ -213,6 +215,7 @@ class PromptBuilder:
             static_prompt = self.template_manager.get_private_chat_prompt(
                 user_nickname,
                 has_emojis=has_emojis,
+                has_tts=has_tts,
                 has_users=has_users,
                 memory_system_desc=memory_desc,
                 skill_system_intro=skill_intro,
