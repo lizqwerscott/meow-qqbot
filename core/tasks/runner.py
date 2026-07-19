@@ -318,12 +318,12 @@ class BackgroundTaskRunner:
         # main 模式额外投递心跳 session，让 HeartbeatManager 也能消费
         if job.session_mode == "main":
             self._system_events.enqueue(
-                session_key="heartbeat:main",
+                session_key="heartbeat:events",
                 text=text,
                 context_key=context_key,
                 replace=replace,
             )
-            _log.debug("系统事件额外入队 → heartbeat:main [%s]: %s", job.name, text[:60])
+            _log.debug("系统事件额外入队 → heartbeat:events [%s]: %s", job.name, text[:60])
 
     async def _execute_system_event_payload(
         self,

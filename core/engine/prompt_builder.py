@@ -415,7 +415,8 @@ class PromptBuilder:
         system_prompt_mode: str = "minimal",
         session_mode: str = "isolated",
         admin_chat_id: str = "",
-        chat_id: str = "heartbeat:main",
+        chat_id: str = "heartbeat:events",
+        system_event_key: str = "heartbeat:events",
     ) -> Tuple[List[dict], Optional[List[dict]]]:
         """组装心跳检查的 messages 列表。
 
@@ -424,6 +425,8 @@ class PromptBuilder:
           - "normal": 复用正常聊天的角色卡 SP（角色卡 + 技能介绍 + 记忆系统描述 + 动态上下文）
           - "minimal": 极简 heartbeat 专用 SP
         session_mode="main": 从管理员真实 chat_id 读取历史，作为独立消息对注入。
+        chat_id: 心跳上下文的存储 key（用于构建 system prompt 中的工作区信息）。
+        system_event_key: 系统事件队列的 drain key，与上下文存储解耦。
 
         Returns:
             (messages, tools_to_use)
@@ -464,7 +467,7 @@ class PromptBuilder:
 
         # ── 系统事件（心跳触发时注入） ──
         if self._system_events:
-            events = self._system_events.drain(chat_id)
+            events = self._system_events.drain(system_event_key)
             if events:
                 lines = []
                 for e in events:
