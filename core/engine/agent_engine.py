@@ -602,6 +602,7 @@ class AgentEngine:
         prompt: str,
         session: str = "isolated",
         system_prompt_mode: str = "minimal",
+        model_chain: Optional[List[str]] = None,
     ) -> tuple[bool, str | None]:
         """执行心跳检查的工具调用循环。
 
@@ -614,6 +615,7 @@ class AgentEngine:
             prompt: 完整的 user message（HEARTBEAT.md 内容 + 时间）
             session: "isolated"（无历史）或 "main"（含最近历史）
             system_prompt_mode: "normal"（复用完整角色卡 SP）或 "minimal"（极简 SP）
+            model_chain: 模型链（如 ["modelscope/ds-flash", ...]），启用 fallback
 
         Returns:
             (should_notify, notification_text)
@@ -654,6 +656,7 @@ class AgentEngine:
                 reply_callback=capturing_reply_callback,
                 sender_id="system",
                 get_user_nickname=lambda _: "系统",
+                model_chain=model_chain,
             )
 
             # 优先检查 heartbeat_respond 工具响应

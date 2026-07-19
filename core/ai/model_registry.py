@@ -150,7 +150,7 @@ class ModelRegistry:
             (ChatCompletionMessage | None, usage_dict | None, model_name_used | None)
         """
         # 预检并记录所有模型的额度状态
-        _log.info(f"[fallback] 模型链额度状态: chain={model_chain}")
+        _log.warning(f"[fallback] 模型链额度状态: chain={model_chain}")
         for qualified_name in model_chain:
             svc = self._services.get(qualified_name)
             if svc is None:
@@ -163,13 +163,13 @@ class ModelRegistry:
                         reasons.append("用户额度耗尽")
                     if qi["model_remaining"] <= 0:
                         reasons.append("模型额度耗尽")
-                    _log.info(
+                    _log.warning(
                         f"  [{qualified_name}]: {' + '.join(reasons)} "
                         f"(用户{qi['user_remaining']}/{qi['user_limit']}, "
                         f"模型{qi['model_remaining']}/{qi['model_limit']})"
                     )
                 else:
-                    _log.info(
+                    _log.warning(
                         f"  [{qualified_name}]: 正常 "
                         f"(用户剩余{qi['user_remaining']}/{qi['user_limit']}, "
                         f"模型剩余{qi['model_remaining']}/{qi['model_limit']})"
