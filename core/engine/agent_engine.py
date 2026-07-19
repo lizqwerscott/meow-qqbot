@@ -561,6 +561,12 @@ class AgentEngine:
                 sender_id=sender_id, name="system",
             )
 
+            # 规则路由分级（同 _process_message 风格）
+            model_chain = None
+            if self.rule_router and self.model_registry:
+                tier = self.rule_router.classify(prompt)
+                model_chain = self.model_registry.get_chain(tier) or None
+
             # 构建 task 专用 messages（system + user）
             messages, tools_to_use = await self.prompt_builder.build_task_messages(
                 chat_id=chat_id,
@@ -578,6 +584,7 @@ class AgentEngine:
                 sender_id=sender_id,
                 delivery_channel=delivery_channel,
                 reply_to_message_id=reply_to_message_id,
+                model_chain=model_chain,
             )
 
             result = "\n".join(captured_replies) if captured_replies else None
