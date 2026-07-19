@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
+from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE, MEDIA_TYPE_VOICE
 
 from datetime import datetime, timedelta, timezone
 
@@ -100,6 +100,7 @@ class ToolExecutor:
         self._workspace_manager = None
         self._heartbeat_response: dict = {}
         self._sub_agent_manager: Optional[SubAgentManager] = None
+        self._tts_service = None
 
         self._registry: Dict[str, tuple[Callable, bool]] = {}
         self._register_all()
@@ -140,6 +141,7 @@ class ToolExecutor:
         self._register("spawn_subagent", self._exec_spawn_subagent, is_async=True)
         self._register("subagents", self._exec_subagents, is_async=True)
         self._register("announce", self._exec_announce, is_async=True)
+        self._register("synthesize_speech", self._exec_synthesize_speech, is_async=True)
 
     # ── 懒注入（AgentEngine 在运行时更新引用）──
 
@@ -167,6 +169,10 @@ class ToolExecutor:
     def set_sub_agent_manager(self, mgr: SubAgentManager):
         """注入子智能体管理器。"""
         self._sub_agent_manager = mgr
+
+    def set_tts_service(self, svc):
+        """注入 TTS 语音合成服务。"""
+        self._tts_service = svc
 
     # ── 统一入口 ──
 
@@ -344,6 +350,76 @@ class ToolExecutor:
         except Exception as e:
             _log.error(f"发送表情图片失败 [{full_hash[:12]}..]: {e}")
             return False, desc, file_name, str(e)
+
+    # ════════════════════════════════════════════════════════
+    # TTS 语音合成工具
+    # ════════════════════════════════════════════════════════
+
+    async def _exec_synthesize_speech(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """执行 synthesize_speech — 合成语音并发送到聊天。"""
+        if not self._tts_service or not self._media_uploader or not self._bot_engine:
+            return ToolResult(content=json.dumps(
+                {"error": "TTS 语音服务或媒体上传器未就绪"},
+                ensure_ascii=False,
+            ))
+
+        text = (args.get("text") or "").strip()
+        if not text:
+            return ToolResult(content=json.dumps(
+                {"error": "未提供要合成的文字"},
+                ensure_ascii=False,
+            ))
+
+        instructions = (args.get("instructions") or "").strip() or None
+
+        audio_bytes = await self._tts_service.synthesize(text, instructions=instructions)
+        if not audio_bytes:
+            return ToolResult(content=json.dumps(
+                {"error": "语音合成失败，请稍后重试"},
+                ensure_ascii=False,
+            ))
+
+        temp_path = self._tts_service.save_temp_audio(audio_bytes)
+
+        effective_chat_id = ctx.delivery_channel or ctx.chat_id
+        is_background = bool(ctx.delivery_channel)
+        effective_reply_to = None if is_background else ctx.reply_to
+        chat_type = "group" if ctx.is_group else "c2c"
+
+        try:
+            file_info = await self._media_uploader.upload(
+                chat_type=chat_type,
+                chat_id=effective_chat_id,
+                source=temp_path,
+                file_type=MEDIA_TYPE_VOICE,
+                file_name="tts.wav",
+            )
+
+            if effective_reply_to:
+                await self._bot_engine.send_reply(
+                    chat_id=effective_chat_id,
+                    is_group=ctx.is_group,
+                    message_id=effective_reply_to,
+                    media_file_info=file_info,
+                )
+            else:
+                await self._bot_engine.send_proactive(
+                    chat_id=effective_chat_id,
+                    is_group=ctx.is_group,
+                    media_file_info=file_info,
+                )
+
+            _log.info("TTS 语音已发送: text=%s instructions=%s", text[:50], instructions)
+            return ToolResult(content=json.dumps({
+                "success": True,
+                "message": f"语音已发送到聊天",
+            }, ensure_ascii=False))
+
+        except Exception as e:
+            _log.error("TTS 语音发送失败: %s", e, exc_info=True)
+            return ToolResult(content=json.dumps({
+                "error": f"语音发送失败: {e}",
+            }, ensure_ascii=False))
 
     # ════════════════════════════════════════════════════════
     # 用户搜索工具
