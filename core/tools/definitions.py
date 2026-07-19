@@ -871,6 +871,40 @@ SUB_AGENT_TOOLS = [
 ]
 
 
+TTS_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "synthesize_speech",
+            "description": (
+                "将文字转换为语音并发送到聊天中。"
+                "你可以通过 instructions 参数控制说话的风格和语气，"
+                "例如：'热情地说话'、'温柔地慢慢说'、'用调皮可爱的语气'、'像播报新闻一样'。"
+                "如果不指定风格则会使用默认语气。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "要转为语音的文字内容",
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": (
+                            "说话风格或语气描述（可选）。"
+                            "例如：'热情地欢呼'、'用温柔的语气慢慢说'、"
+                            "'像小女孩一样调皮'、'严肃地宣布'、'用悄悄话的方式说'"
+                        ),
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
+]
+
+
 def tool_names() -> set[str]:
     """返回所有已注册工具的名称集合。"""
     return {
@@ -888,4 +922,5 @@ def tool_names() -> set[str]:
         "heartbeat_respond",
         "announce",
         "spawn_subagent", "subagents",
+        "synthesize_speech",
     }

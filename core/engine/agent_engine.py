@@ -76,6 +76,7 @@ class AgentEngine:
         self.emoji_manager = emoji_manager
         self.media_uploader = None
         self.multimodal_service = None
+        self._tts_service = None
         self._api_client = None
 
         self.hindsight = hindsight_memory
@@ -183,6 +184,11 @@ class AgentEngine:
 
     def set_multimodal_service(self, multimodal_service: Any):
         self.multimodal_service = multimodal_service
+
+    def set_tts_service(self, tts_service: Any):
+        self._tts_service = tts_service
+        self.prompt_builder._tts_service = tts_service
+        self.tool_executor.set_tts_service(tts_service)
 
     def set_emoji_manager(self, emoji_manager: EmojiManager):
         self.emoji_manager = emoji_manager

@@ -28,6 +28,7 @@ from core.tools.definitions import (
     LIST_TASKS_TOOL,
     LIST_CRON_JOBS_TOOL,
     SUB_AGENT_TOOLS,
+    TTS_TOOLS,
 )
 
 _log = logging.getLogger(__name__)
@@ -126,6 +127,7 @@ class PromptBuilder:
         self._workspace_manager = workspace_manager
         self._archive_manager = archive_manager
         self._system_events = system_events
+        self._tts_service = None
 
     async def build(
         self,
@@ -188,6 +190,8 @@ class PromptBuilder:
             tools_to_use.extend(SUB_AGENT_TOOLS)
         if self._workspace_manager:
             tools_to_use.extend(FILE_TOOLS)
+        if self._tts_service:
+            tools_to_use.extend(TTS_TOOLS)
         tools_to_use = tools_to_use or None
 
         # ── 3. 静态 system prompt ──

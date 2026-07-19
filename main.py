@@ -10,6 +10,7 @@ from colorlog import ColoredFormatter
 from core.ai.model_registry import ModelRegistry
 from core.ai.multimodal import MultimodalService
 from core.ai.service import AIService
+from core.ai.tts_service import TtsService
 from core.command_handlers import register_all_commands
 from core.engine.agent_engine import AgentEngine
 from core.engine.client import BotEngine
@@ -290,6 +291,26 @@ async def main() -> None:
     else:
         _log.info("子智能体系统未启用")
 
+    # ── TTS 语音合成服务 ──
+    tts_config = config.get("tts", {})
+    tts_service = None
+    if tts_config.get("enabled", False):
+        tts_service = TtsService(
+            base_url=tts_config.get("base_url", "http://localhost:8091"),
+            http_client=http_client,
+            voices_file=tts_config.get("voices_file", "data/tts_voices.json"),
+            temp_dir=tts_config.get("temp_dir", "data/tts_temp/"),
+        )
+        tts_service.configure(
+            voice=tts_config.get("voice"),
+            ref_audio=tts_config.get("ref_audio"),
+            ref_text=tts_config.get("ref_text"),
+        )
+        _log.info(
+            "TTS 语音服务已初始化 (base_url=%s)",
+            tts_config.get("base_url", "http://localhost:8091"),
+        )
+
     # ── 2. 创建 AgentEngine（全局单例） ──
     agent_engine = AgentEngine(
         ai_service=ai_service,
@@ -316,6 +337,16 @@ async def main() -> None:
         system_events=system_events,
         sub_agent_manager=sub_agent_manager,
     )
+
+    # ── 注入 TTS 服务 ──
+    if tts_service:
+        agent_engine.set_tts_service(tts_service)
+        try:
+            voice_name = await tts_service.initialize()
+            if voice_name:
+                _log.info("TTS 音色初始化完成: %s", voice_name)
+        except Exception as e:
+            _log.warning("TTS 音色初始化失败: %s", e)
 
     # ── 将后台任务执行器注入 ToolExecutor（供 AI 工具调用） ──
     if task_manager or cron_job_manager or background_task_runner:
@@ -409,6 +440,7 @@ async def main() -> None:
         background_task_runner=background_task_runner,
         heartbeat_manager=heartbeat_manager,
         archive_manager=archive_manager,
+        tts_service=tts_service,
     )
 
     # ── 4. 加载插件 ──
@@ -500,6 +532,8 @@ async def main() -> None:
             await heartbeat_manager.stop()
         if task_cleanup_task:
             task_cleanup_task.cancel()
+        if tts_service:
+            await tts_service.close()
         await engine.stop()
 
 
