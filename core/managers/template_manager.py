@@ -64,6 +64,7 @@ class TemplateManager:
         user_name: str,
         *,
         has_emojis: bool = False,
+        has_tts: bool = False,
         has_users: bool = False,
         memory_system_desc: str = "",
         skill_system_intro: str = "",
@@ -74,6 +75,7 @@ class TemplateManager:
         Args:
             user_name: 用户昵称
             has_emojis: 是否有表情
+            has_tts: 是否有语音合成能力
             has_users: 是否有群友（私聊永远 False）
             memory_system_desc: 记忆系统说明
             skill_system_intro: 技能系统原则介绍
@@ -86,6 +88,7 @@ class TemplateManager:
             "user_name": user_name,
             "character_card": self.character_card,
             "has_emojis": has_emojis,
+            "has_tts": has_tts,
             "has_users": has_users,
             "memory_system_desc": memory_system_desc,
             "skill_system_intro": skill_system_intro,
@@ -102,6 +105,7 @@ class TemplateManager:
         group_name: Optional[str] = None,
         *,
         has_emojis: bool = False,
+        has_tts: bool = False,
         has_users: bool = False,
         memory_system_desc: str = "",
         skill_system_intro: str = "",
@@ -112,6 +116,7 @@ class TemplateManager:
         Args:
             group_name: 群组名称（可选）
             has_emojis: 是否有表情
+            has_tts: 是否有语音合成能力
             has_users: 是否有群友
             memory_system_desc: 记忆系统说明
             skill_system_intro: 技能系统原则介绍
@@ -124,6 +129,7 @@ class TemplateManager:
             "group_name": group_name or "当前群组",
             "character_card": self.character_card,
             "has_emojis": has_emojis,
+            "has_tts": has_tts,
             "has_users": has_users,
             "memory_system_desc": memory_system_desc,
             "skill_system_intro": skill_system_intro,
