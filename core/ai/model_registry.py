@@ -149,6 +149,32 @@ class ModelRegistry:
         Returns:
             (ChatCompletionMessage | None, usage_dict | None, model_name_used | None)
         """
+        # 预检并记录所有模型的额度状态
+        _log.info(f"[fallback] 模型链额度状态: chain={model_chain}")
+        for qualified_name in model_chain:
+            svc = self._services.get(qualified_name)
+            if svc is None:
+                continue
+            if hasattr(svc, "quota_info"):
+                qi = svc.quota_info
+                if qi["exhausted"]:
+                    reasons = []
+                    if qi["user_remaining"] <= 0:
+                        reasons.append("用户额度耗尽")
+                    if qi["model_remaining"] <= 0:
+                        reasons.append("模型额度耗尽")
+                    _log.info(
+                        f"  [{qualified_name}]: {' + '.join(reasons)} "
+                        f"(用户{qi['user_remaining']}/{qi['user_limit']}, "
+                        f"模型{qi['model_remaining']}/{qi['model_limit']})"
+                    )
+                else:
+                    _log.info(
+                        f"  [{qualified_name}]: 正常 "
+                        f"(用户剩余{qi['user_remaining']}/{qi['user_limit']}, "
+                        f"模型剩余{qi['model_remaining']}/{qi['model_limit']})"
+                    )
+
         last_error = None
         for qualified_name in model_chain:
             svc = self._services.get(qualified_name)
@@ -166,6 +192,14 @@ class ModelRegistry:
                     _log.debug(f"模型 [{qualified_name}] 调用成功")
                     return result, usage, qualified_name
                 last_error = "返回空结果"
+                if hasattr(svc, "quota_info") and svc.quota_info["exhausted"]:
+                    _log.warning(
+                        f"模型 [{qualified_name}] 额度已耗尽，尝试 fallback..."
+                    )
+                else:
+                    _log.warning(
+                        f"模型 [{qualified_name}] 返回空结果，尝试 fallback..."
+                    )
             except Exception as e:
                 last_error = str(e)
                 _log.warning(
