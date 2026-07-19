@@ -171,10 +171,22 @@ class HeartbeatManager:
         )
         user_prompt = f"{hb_content}\n\n当前时间：{now_str}（{tz_name}）。"
 
+        # 解析模型链（支持组名如 "cheap" 转完整 fallback 链）
+        model_chain = None
+        if self._model_registry and self._model_names:
+            all_models = []
+            for name in self._model_names:
+                chain = self._model_registry.get_chain(name)
+                if chain:
+                    all_models.extend(chain)
+            if all_models:
+                model_chain = all_models
+
         should_notify, text = await self._agent_engine.execute_heartbeat(
             prompt=user_prompt,
             session=self._session,
             system_prompt_mode=self._system_prompt_mode,
+            model_chain=model_chain,
         )
         self._last_heartbeat_time = time.time()
 
