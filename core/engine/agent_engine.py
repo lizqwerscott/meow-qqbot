@@ -610,6 +610,8 @@ class AgentEngine:
         session: str = "isolated",
         system_prompt_mode: str = "minimal",
         model_chain: Optional[List[str]] = None,
+        chat_id: Optional[str] = None,
+        system_event_key: str = "heartbeat:events",
     ) -> tuple[bool, str | None]:
         """执行心跳检查的工具调用循环。
 
@@ -623,12 +625,15 @@ class AgentEngine:
             session: "isolated"（无历史）或 "main"（含最近历史）
             system_prompt_mode: "normal"（复用完整角色卡 SP）或 "minimal"（极简 SP）
             model_chain: 模型链（如 ["modelscope/ds-flash", ...]），启用 fallback
+            chat_id: 心跳使用的 chat_id。为 None 时自动生成 f"heartbeat:<timestamp>"
+            system_event_key: 系统事件队列的 drain key，默认 "heartbeat:events"
 
         Returns:
             (should_notify, notification_text)
         """
-        chat_id = "heartbeat:main"
-        _log.info(f"开始心跳检查: session={session} mode={system_prompt_mode} prompt={prompt[:80]}")
+        if chat_id is None:
+            chat_id = f"heartbeat:{int(time.time())}"
+        _log.info(f"开始心跳检查: chat_id={chat_id} session={session} mode={system_prompt_mode} prompt={prompt[:80]}")
         prompt = prompt or ""
 
         captured_replies: list[str] = []
@@ -641,7 +646,6 @@ class AgentEngine:
         ) -> None:
             captured_replies.append(content)
 
-        import time
         msg_id = f"hb_{int(time.time())}"
 
         try:
@@ -650,6 +654,8 @@ class AgentEngine:
                 system_prompt_mode=system_prompt_mode,
                 session_mode=session,
                 admin_chat_id=self._admin_id[0] if self._admin_id else "",
+                chat_id=chat_id,
+                system_event_key=system_event_key,
             )
 
             self.tool_executor._heartbeat_response = {}

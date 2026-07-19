@@ -9,6 +9,7 @@ HEARTBEAT.md 由框架预读后直接注入 user message（AI 不需要 tool cal
 
 import asyncio
 import logging
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
@@ -171,6 +172,9 @@ class HeartbeatManager:
         )
         user_prompt = f"{hb_content}\n\n当前时间：{now_str}（{tz_name}）。"
 
+        # 为本次心跳生成唯一 chat_id，与上下文存储解耦
+        chat_id = f"heartbeat:{int(time.time())}"
+
         # 解析模型链（支持组名如 "cheap" 转完整 fallback 链）
         model_chain = None
         if self._model_registry and self._model_names:
@@ -182,21 +186,26 @@ class HeartbeatManager:
             if all_models:
                 model_chain = all_models
 
-        should_notify, text = await self._agent_engine.execute_heartbeat(
-            prompt=user_prompt,
-            session=self._session,
-            system_prompt_mode=self._system_prompt_mode,
-            model_chain=model_chain,
-        )
-        self._last_heartbeat_time = time.time()
+        try:
+            should_notify, text = await self._agent_engine.execute_heartbeat(
+                prompt=user_prompt,
+                session=self._session,
+                system_prompt_mode=self._system_prompt_mode,
+                model_chain=model_chain,
+                chat_id=chat_id,
+            )
+            self._last_heartbeat_time = time.time()
 
-        if should_notify and text:
-            await self._deliver_to_admin(text)
-            _log.info(f"心跳提醒已投递: text={text[:80]!r}")
-        else:
-            _log.debug("心跳无需投递")
+            if should_notify and text:
+                await self._deliver_to_admin(text)
+                _log.info(f"心跳提醒已投递: text={text[:80]!r}")
+            else:
+                _log.debug("心跳无需投递")
 
-        return should_notify, text
+            return should_notify, text
+        finally:
+            # 清理旧心跳上下文，防止 context_manager 膨胀
+            await self._cleanup_old_heartbeat_contexts(keep_last=3)
 
     async def _load_heartbeat_content(self, manual_prompt: str = "") -> str:
         """加载心跳指令内容。
@@ -287,3 +296,28 @@ class HeartbeatManager:
                 )
         except Exception as e:
             _log.error(f"心跳投递失败: {e}")
+
+    async def _cleanup_old_heartbeat_contexts(self, keep_last: int = 3):
+        """清理旧的心跳上下文，只保留最近 keep_last 次。
+
+        匹配 pattern heartbeat:\\d+ 的 chat_id，按时间戳排序，
+        移除超出 keep_last 的上下文。
+        同时删除磁盘上的 .jsonl 缓存文件。
+        """
+        if not self._context_manager:
+            return
+        pattern = re.compile(r"^heartbeat:\d+$")
+        heartbeat_ids = [
+            cid for cid in self._context_manager.get_all_chat_ids()
+            if pattern.match(cid)
+        ]
+        if len(heartbeat_ids) <= keep_last:
+            return
+        heartbeat_ids.sort(key=lambda x: int(x.split(":")[1]))
+        for cid in heartbeat_ids[:-keep_last]:
+            try:
+                await self._context_manager.clear_chat_history_async(cid)
+                self._context_manager.remove_context(cid)
+                _log.debug("已清理旧心跳上下文: %s", cid)
+            except Exception as e:
+                _log.warning("清理心跳上下文失败 [%s]: %s", cid, e)

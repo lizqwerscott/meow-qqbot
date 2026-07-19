@@ -31,7 +31,17 @@ class HeartbeatCommand:
         if self._heartbeat_manager:
             should_notify, text = await self._heartbeat_manager.trigger_heartbeat(prompt)
         else:
-            should_notify, text = await self._agent_engine.execute_heartbeat(prompt)
+            import time
+            chat_id = f"heartbeat:{int(time.time())}"
+            try:
+                should_notify, text = await self._agent_engine.execute_heartbeat(
+                    prompt, chat_id=chat_id
+                )
+            finally:
+                cm = getattr(self._agent_engine, "context_manager", None)
+                if cm:
+                    await cm.clear_chat_history_async(chat_id)
+                    cm.remove_context(chat_id)
 
         if should_notify and text:
             return make_reply(input_message, f"[❤️ 心跳提醒]\n{text}")
