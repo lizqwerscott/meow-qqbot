@@ -372,7 +372,15 @@ class ToolExecutor:
 
         instructions = (args.get("instructions") or "").strip() or None
 
-        audio_bytes = await self._tts_service.synthesize(text, instructions=instructions)
+        voice_mode = (args.get("voice_mode") or "preset").strip().lower()
+        if voice_mode not in ("preset", "creative"):
+            voice_mode = "preset"
+
+        audio_bytes = await self._tts_service.synthesize(
+            text,
+            instructions=instructions,
+            voice_mode=voice_mode,
+        )
         if not audio_bytes:
             return ToolResult(content=json.dumps(
                 {"error": "语音合成失败，请稍后重试"},
@@ -409,7 +417,7 @@ class ToolExecutor:
                     media_file_info=file_info,
                 )
 
-            _log.info("TTS 语音已发送: text=%s instructions=%s", text[:50], instructions)
+            _log.info("TTS 语音已发送: text=%s instructions=%s voice_mode=%s", text[:50], instructions, voice_mode)
             return ToolResult(content=json.dumps({
                 "success": True,
                 "message": f"语音已发送到聊天",
