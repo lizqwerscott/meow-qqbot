@@ -28,6 +28,11 @@ class TtsService:
         http_client: httpx.AsyncClient,
         voices_file: str = "data/tts_voices.json",
         temp_dir: str = "data/tts_temp/",
+        normalize: Optional[bool] = None,
+        cfg_value: Optional[float] = None,
+        inference_timesteps: Optional[int] = None,
+        temperature: Optional[float] = None,
+        seed: Optional[int] = None,
     ):
         self._base_url = base_url.rstrip("/")
         self._http = http_client
@@ -37,6 +42,12 @@ class TtsService:
         self._voice_name: Optional[str] = None
         self._ref_audio: Optional[str] = None
         self._ref_text: Optional[str] = None
+
+        self._normalize = normalize
+        self._cfg_value = cfg_value
+        self._inference_timesteps = inference_timesteps
+        self._temperature = temperature
+        self._seed = seed
 
         self._temp_dir.mkdir(parents=True, exist_ok=True)
         self._voices_file.parent.mkdir(parents=True, exist_ok=True)
@@ -119,6 +130,16 @@ class TtsService:
         }
         if instructions:
             payload["instructions"] = instructions
+        if self._normalize is not None:
+            payload["normalize"] = self._normalize
+        if self._cfg_value is not None:
+            payload["cfg_value"] = self._cfg_value
+        if self._inference_timesteps is not None:
+            payload["inference_timesteps"] = self._inference_timesteps
+        if self._temperature is not None:
+            payload["temperature"] = self._temperature
+        if self._seed is not None:
+            payload["seed"] = self._seed
 
         try:
             resp = await self._http.post(
