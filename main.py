@@ -300,6 +300,11 @@ async def main() -> None:
             http_client=http_client,
             voices_file=tts_config.get("voices_file", "data/tts_voices.json"),
             temp_dir=tts_config.get("temp_dir", "data/tts_temp/"),
+            normalize=tts_config.get("normalize"),
+            cfg_value=tts_config.get("cfg_value"),
+            inference_timesteps=tts_config.get("inference_timesteps"),
+            temperature=tts_config.get("temperature"),
+            seed=tts_config.get("seed"),
         )
         tts_service.configure(
             voice=tts_config.get("voice"),
