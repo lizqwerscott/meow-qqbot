@@ -143,6 +143,16 @@ class PermissionManager:
         cmd_name = os.path.basename(parts[0])
         return cmd_name in allowed
 
+    # ── 执行超时 ──
+
+    def get_default_timeout(self) -> int:
+        """返回命令/脚本执行的默认超时秒数。"""
+        return self._get_config("security.default_timeout", 60)
+
+    def get_max_timeout(self) -> int:
+        """返回命令/脚本执行的最大超时秒数。"""
+        return self._get_config("security.max_timeout", 300)
+
     def _get_config(self, key_path: str, default=None):
         """从嵌套 dict 中按点号路径取值。"""
         keys = key_path.split(".")

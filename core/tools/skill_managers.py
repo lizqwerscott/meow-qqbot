@@ -138,13 +138,21 @@ class SkillManagers:
             _log.warning(f"加载技能详情失败 [{skill_name}]: {e}")
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 
+    def _default_timeout(self) -> int:
+        return self._perm.get_default_timeout() if self._perm else 60
+
+    def _max_timeout(self) -> int:
+        return self._perm.get_max_timeout() if self._perm else 300
+
     def execute_skill_script(
         self,
         skill_name: str,
         script_name: str,
         arguments: Optional[Dict[str, Any]] = None,
-        timeout: int = 30,
+        timeout: Optional[int] = None,
     ) -> Dict[str, Any]:
+        if timeout is None:
+            timeout = self._default_timeout()
         try:
             result = self._manager.execute_skill_script(
                 skill_name=skill_name,
@@ -168,10 +176,12 @@ class SkillManagers:
     def execute_command(
         self,
         command: str,
-        timeout: int = 30,
+        timeout: Optional[int] = None,
         workdir: Optional[str] = None,
         user_role: str = "admin",
     ) -> Dict[str, Any]:
+        if timeout is None:
+            timeout = self._default_timeout()
         command = command.strip()
         if not command:
             return {"success": False, "error": "命令为空"}
@@ -198,7 +208,7 @@ class SkillManagers:
                 _log.warning(f"execute_command 白名单拒绝: {reason}")
                 return {"success": False, "error": reason}
 
-        effective_timeout = min(timeout, 120)
+        effective_timeout = min(timeout, self._max_timeout())
         cwd = workdir or "."
 
         try:
