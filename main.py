@@ -80,11 +80,17 @@ async def main() -> None:
     providers_config = config.get("providers", {})
     groups_config = config.get("groups", {})
 
+    # ── 模型冷却配置 ──
+    cooldown_config = config.get("cooldown", {})
+
     # ── 模型注册表（始终创建，供 heartbeat / fallback / multimodal 使用） ──
     model_registry = None
     if providers_config and groups_config:
         n_models = sum(len(p.get("models", [])) for p in providers_config.values())
-        model_registry = ModelRegistry(providers_config, groups_config)
+        model_registry = ModelRegistry(
+            providers_config, groups_config,
+            cooldown_config=cooldown_config,
+        )
         _log.info(
             f"模型注册表已初始化: {n_models} 个模型, " f"{len(groups_config)} 个组"
         )
@@ -104,11 +110,19 @@ async def main() -> None:
         multimodal_group = multimodal_config.get("group", "multimodal")
         chain = model_registry.get_chain(multimodal_group) if model_registry else []
         raw = [model_registry.get(n) for n in chain] if model_registry else []
-        services: list = [s for s in raw if s is not None]
-        if services:
-            multimodal_service = MultimodalService(services)
-            names = [s.model for s in services]
-            _log.info(f"多模态服务已启用 (组 [{multimodal_group}]): {names}")
+        pairs = [(s, n) for s, n in zip(raw, chain) if s is not None]
+        if pairs:
+            services, model_names = zip(*pairs)
+            cooldown_mgr = model_registry.cooldown_manager if model_registry else None
+            multimodal_service = MultimodalService(
+                list(services),
+                model_names=list(model_names),
+                cooldown_manager=cooldown_mgr,
+            )
+            _log.info(
+                f"多模态服务已启用 (组 [{multimodal_group}]): "
+                f"{list(model_names)}"
+            )
         else:
             _log.warning(f"多模态服务未启用: 组 [{multimodal_group}] 找不到对应模型")
     else:
