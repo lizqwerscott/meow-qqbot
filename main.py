@@ -305,29 +305,27 @@ async def main() -> None:
     else:
         _log.info("子智能体系统未启用")
 
-    # ── TTS 语音合成服务 ──
+    # ── TTS 语音合成服务 (VoxCPM2) ──
     tts_config = config.get("tts", {})
     tts_service = None
     if tts_config.get("enabled", False):
         tts_service = TtsService(
-            base_url=tts_config.get("base_url", "http://localhost:8091"),
+            base_url=tts_config.get("base_url", "http://localhost:8080"),
             http_client=http_client,
-            voices_file=tts_config.get("voices_file", "data/tts_voices.json"),
+            model=tts_config.get("model", "voxcpm"),
             temp_dir=tts_config.get("temp_dir", "data/tts_temp/"),
-            normalize=tts_config.get("normalize"),
+            ref_audio=tts_config.get("ref_audio"),
+            ref_text=tts_config.get("ref_text"),
             cfg_value=tts_config.get("cfg_value"),
             inference_timesteps=tts_config.get("inference_timesteps"),
             temperature=tts_config.get("temperature"),
             seed=tts_config.get("seed"),
-        )
-        tts_service.configure(
-            voice=tts_config.get("voice"),
-            ref_audio=tts_config.get("ref_audio"),
-            ref_text=tts_config.get("ref_text"),
+            max_steps=tts_config.get("max_steps"),
         )
         _log.info(
-            "TTS 语音服务已初始化 (base_url=%s)",
-            tts_config.get("base_url", "http://localhost:8091"),
+            "TTS 语音服务已初始化 (base_url=%s, model=%s)",
+            tts_config.get("base_url", "http://localhost:8080"),
+            tts_config.get("model", "voxcpm"),
         )
 
     # ── 2. 创建 AgentEngine（全局单例） ──
@@ -360,12 +358,6 @@ async def main() -> None:
     # ── 注入 TTS 服务 ──
     if tts_service:
         agent_engine.set_tts_service(tts_service)
-        try:
-            voice_name = await tts_service.initialize()
-            if voice_name:
-                _log.info("TTS 音色初始化完成: %s", voice_name)
-        except Exception as e:
-            _log.warning("TTS 音色初始化失败: %s", e)
 
     # ── 将后台任务执行器注入 ToolExecutor（供 AI 工具调用） ──
     if task_manager or cron_job_manager or background_task_runner:
