@@ -20,43 +20,58 @@ _log = logging.getLogger(__name__)
 
 
 def ensure_messages_consistent(messages: List[dict]) -> None:
-    """清理 messages 中孤立的 tool_calls。
+    """清理 messages 中孤立的 tool_calls 并修复 tool 响应顺序。
 
     场景：某轮 AI 返回了 tool_calls，但后续处理异常导致
     对应的 tool 响应消息未追加完整。下次请求时 API 会 400。
     修复：删除最后一个没有对应 tool 响应的 assistant 消息。
+
+    此外，因竞态条件可能在 assistant(tool_calls) 和 tool 响应之间
+    插入了用户消息，导致 API 400。修复：将 tool 响应紧跟在对应的
+    tool_calls 之后，被插入的消息移到 tool 响应后面。
     """
-    for i in range(len(messages) - 1, -1, -1):
+    result = []
+    i = 0
+    while i < len(messages):
         msg = messages[i]
-        if msg.get("role") != "assistant":
-            continue
-        tool_calls = msg.get("tool_calls")
-        if not tool_calls:
-            continue
-
-        # 检查此 assistant 之后是否有足够的 tool 响应
-        expected_ids = {
-            tc["id"] for tc in tool_calls
-            if isinstance(tc, dict) and tc.get("id")
-        }
-        if not expected_ids:
-            # tool_calls 没有 ID，可能格式异常，移除
-            _log.warning(f"移除无 ID 的 tool_calls 消息: count={len(tool_calls)}")
-            messages.pop(i)
-            continue
-
-        # 统计之后 tool 消息中出现的 tool_call_id
-        found_ids: set = set()
-        for j in range(i + 1, len(messages)):
-            if messages[j].get("role") == "tool":
-                tid = messages[j].get("tool_call_id")
-                if tid:
-                    found_ids.add(tid)
-
-        if not expected_ids.issubset(found_ids):
-            missing = expected_ids - found_ids
-            _log.warning(f"tool_calls 缺少响应: missing_ids={missing}, 移除第 {i} 条 assistant")
-            messages.pop(i)
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            tc_ids = {
+                tc["id"] for tc in msg["tool_calls"]
+                if isinstance(tc, dict) and tc.get("id")
+            }
+            if not tc_ids:
+                _log.warning(f"移除无 ID 的 tool_calls 消息: count={len(msg['tool_calls'])}")
+                i += 1
+                continue
+            result.append(msg)
+            i += 1
+            tools = []
+            interleaved = []
+            while i < len(messages) and tc_ids:
+                m = messages[i]
+                if m.get("role") == "tool" and m.get("tool_call_id") in tc_ids:
+                    tools.append(m)
+                    tc_ids.discard(m["tool_call_id"])
+                    i += 1
+                elif not tc_ids:
+                    break
+                else:
+                    interleaved.append(m)
+                    i += 1
+            if tc_ids:
+                _log.warning(
+                    f"tool_calls 缺少响应: missing_ids={tc_ids}, "
+                    f"移除第 {len(result) - 1} 条 assistant"
+                )
+                result.pop()
+                result.extend(interleaved)
+            else:
+                result.extend(tools)
+                result.extend(interleaved)
+        else:
+            result.append(messages[i])
+            i += 1
+    messages[:] = result
 
 
 class ToolLoop:
