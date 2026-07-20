@@ -725,7 +725,8 @@ class ToolExecutor:
                 {"error": "请提供技能名称和脚本名称"}, ensure_ascii=False,
             ))
         arguments = args.get("arguments") or {}
-        timeout = args.get("timeout", 30)
+        default_timeout = self._perm.get_default_timeout() if self._perm else 60
+        timeout = args.get("timeout", default_timeout)
 
         result = self._skill_managers.execute_skill_script(
             skill_name=skill_name,
@@ -748,7 +749,8 @@ class ToolExecutor:
                 {"error": "请提供要执行的命令"}, ensure_ascii=False,
             ))
 
-        timeout = args.get("timeout", 30)
+        default_timeout = self._perm.get_default_timeout() if self._perm else 60
+        timeout = args.get("timeout", default_timeout)
         workdir = args.get("workdir")
 
         role = self._perm.get_user_role(ctx.sender_id) if self._perm else "admin"
