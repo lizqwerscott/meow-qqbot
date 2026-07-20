@@ -3,8 +3,9 @@
 封装 llama-tts-server (VoxCPM/VoxCPM2) 的 OpenAI 兼容接口。
 流程：
 1. 配置 base_url + 可选 ref_audio（参考音频，启动时自动 base64 编码）
-2. synthesize(text, instructions) 合成语音
+2. synthesize(text, instructions, voice_mode) 合成语音
    - instructions 会自动预置到文本前作为 (instructions) 语音设计前缀
+   - voice_mode=preset 使用克隆音色，voice_mode=creative 自由创造
 """
 
 import base64
@@ -69,16 +70,23 @@ class TtsService:
         self,
         text: str,
         instructions: Optional[str] = None,
+        voice_mode: str = "preset",
     ) -> Optional[bytes]:
         """合成语音
 
         Args:
             text: 要朗读的文字
             instructions: 说话风格/语气描述（可选），会自动预置到文本前
+            voice_mode: "preset" 使用预设克隆音色，"creative" 自由创造音色
 
         Returns:
             WAV 音频字节，失败返回 None
         """
+        # 短文本保护：少于 5 个字时自动补自然填充避免生成断裂
+        text = text.strip()
+        if len(text) < 5:
+            text = text + "……  "
+
         # 将 instructions 预置为语音设计前缀
         input_text = text
         if instructions:
@@ -90,7 +98,8 @@ class TtsService:
             "voice": "default",
             "response_format": "wav",
         }
-        if self._ref_audio_b64:
+        # preset 模式且配置了参考音频时才传 reference_audio
+        if voice_mode == "preset" and self._ref_audio_b64:
             payload["reference_audio"] = self._ref_audio_b64
         if self._cfg_value is not None:
             payload["cfg_value"] = self._cfg_value
