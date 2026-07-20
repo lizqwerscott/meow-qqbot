@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from openai.types.chat import ChatCompletionMessageParam
 
+from core.ai.cooldown import ModelCooldownManager
 from core.ai.service import AIService
 
 _log = logging.getLogger(__name__)
@@ -24,11 +25,17 @@ class ModelRegistry:
         )
     """
 
-    def __init__(self, providers_config: dict, groups_config: dict):
+    def __init__(
+        self,
+        providers_config: dict,
+        groups_config: dict,
+        cooldown_config: Optional[Dict] = None,
+    ):
         self._services: Dict[str, AIService] = {}
         self._groups: Dict[str, List[str]] = {}
         self._tier_map: Dict[str, str] = {}
         self._default_service: Optional[AIService] = None
+        self._cooldown = ModelCooldownManager(cooldown_config or {})
 
         for provider_name, pcfg in providers_config.items():
             provider_type = pcfg.get("type", "openai")
@@ -177,6 +184,13 @@ class ModelRegistry:
 
         last_error = None
         for qualified_name in model_chain:
+            # 冷却检查：跳过正在冷却的模型
+            if self._cooldown.is_cooled_down(qualified_name):
+                _log.info(
+                    f"模型 [{qualified_name}] 处于冷却期，跳过"
+                )
+                continue
+
             svc = self._services.get(qualified_name)
             if svc is None:
                 _log.warning(f"模型 [{qualified_name}] 未注册，跳过")
@@ -189,9 +203,12 @@ class ModelRegistry:
                     max_tokens=max_tokens,
                 )
                 if result is not None:
+                    self._cooldown.record_success(qualified_name)
                     _log.debug(f"模型 [{qualified_name}] 调用成功")
                     return result, usage, qualified_name
+
                 last_error = "返回空结果"
+                self._cooldown.record_failure(qualified_name)
                 if hasattr(svc, "quota_info") and svc.quota_info["exhausted"]:
                     _log.warning(
                         f"模型 [{qualified_name}] 额度已耗尽，尝试 fallback..."
@@ -202,6 +219,7 @@ class ModelRegistry:
                     )
             except Exception as e:
                 last_error = str(e)
+                self._cooldown.record_failure(qualified_name)
                 _log.warning(
                     f"模型 [{qualified_name}] 调用失败: {e}，尝试 fallback..."
                 )
@@ -210,6 +228,15 @@ class ModelRegistry:
             f"所有模型 fallback 失败: chain={model_chain} last_error={last_error}"
         )
         return None, None, None
+
+    @property
+    def cooldown_manager(self):
+        """暴露冷却管理器，供 MultimodalService 等外部使用。"""
+        return self._cooldown
+
+    def get_cooldown_states(self) -> dict:
+        """获取所有模型的冷却状态。"""
+        return self._cooldown.get_all_states()
 
     async def simple_chat(
         self,
@@ -220,23 +247,38 @@ class ModelRegistry:
         """不带工具的单轮对话（给心跳和简单任务用）。
 
         model_name 可以是全限定名 (deepseek/primary) 或组名。
+        如果模型在冷却期，直接返回 None 让调用方走 fallback。
         """
-        svc = self._services.get(model_name)
+        # 解析为全限定名
+        qualified_name = model_name
+        svc = self._services.get(qualified_name)
         if svc is None:
             chain = self._groups.get(model_name)
             if chain:
-                svc = self._services.get(chain[0])
+                qualified_name = chain[0]
+                svc = self._services.get(qualified_name)
         if svc is None:
             _log.warning(f"模型 [{model_name}] 未注册")
             return None
+
+        # 冷却检查
+        if self._cooldown.is_cooled_down(qualified_name):
+            _log.info(f"模型 [{qualified_name}] 处于冷却期，simple_chat 跳过")
+            return None
+
         try:
             result, _ = await svc.chat_completion(
                 messages=messages,
                 max_tokens=max_tokens,
             )
+            if result is not None:
+                self._cooldown.record_success(qualified_name)
+            else:
+                self._cooldown.record_failure(qualified_name)
             return result
         except Exception as e:
-            _log.warning(f"模型 [{model_name}] simple_chat 失败: {e}")
+            self._cooldown.record_failure(qualified_name)
+            _log.warning(f"模型 [{qualified_name}] simple_chat 失败: {e}")
             return None
 
     async def close(self):

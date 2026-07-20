@@ -13,8 +13,9 @@ import hashlib
 import logging
 from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+from core.ai.cooldown import ModelCooldownManager
 from core.ai.service import AIService
 
 _log = logging.getLogger(__name__)
@@ -28,15 +29,22 @@ class MultimodalService:
     支持多 AIService fallback：列表中的模型按顺序调用，失败自动切换。
 
     使用方式：
-        service = MultimodalService([ai_svc_1, ai_svc_2])
+        service = MultimodalService([ai_svc_1, ai_svc_2], ["deepseek/vlm", "modelscope/vlm"])
         description = await service.analyze_image("/path/to/image.jpg")
         desc, tags = await service.analyze_emoji("/path/to/emoji.png")
     """
 
-    def __init__(self, ai_services: List[AIService]):
+    def __init__(
+        self,
+        ai_services: List[AIService],
+        model_names: Optional[List[str]] = None,
+        cooldown_manager: Optional[ModelCooldownManager] = None,
+    ):
         if not ai_services:
             raise ValueError("至少需要一个 AIService")
         self._services = ai_services
+        self._model_names = model_names or [""] * len(ai_services)
+        self._cooldown = cooldown_manager
         self.model = ai_services[0].model
 
         self._cache: OrderedDict = OrderedDict()
@@ -125,6 +133,15 @@ class MultimodalService:
 
     async def _call_vlm(self, base64_image: str, prompt: str) -> Optional[str]:
         for idx, svc in enumerate(self._services):
+            qualified_name = self._model_names[idx] if idx < len(self._model_names) else ""
+
+            # 冷却检查
+            if self._cooldown and self._cooldown.is_cooled_down(qualified_name):
+                _log.info(
+                    f"VLM 模型 [{qualified_name}] 处于冷却期，跳过"
+                )
+                continue
+
             try:
                 response = await svc.client.chat.completions.create(
                     model=svc.model,
@@ -144,21 +161,30 @@ class MultimodalService:
                     temperature=0.3,
                 )
                 if response.choices and response.choices[0].message.content:
+                    if self._cooldown and qualified_name:
+                        self._cooldown.record_success(qualified_name)
                     _log.info(
-                        f"VLM 调用成功 (模型 [{svc.model}])"
+                        f"VLM 调用成功 (模型 [{qualified_name or svc.model}])"
                     )
                     return response.choices[0].message.content
+                if self._cooldown and qualified_name:
+                    self._cooldown.record_failure(qualified_name)
                 _log.warning(
-                    f"VLM 返回空结果 (模型 [{svc.model}])"
+                    f"VLM 返回空结果 (模型 [{qualified_name or svc.model}])"
                 )
             except Exception as e:
+                if self._cooldown and qualified_name:
+                    self._cooldown.record_failure(qualified_name)
                 _log.warning(
-                    f"VLM 调用失败 (模型 [{svc.model}], "
+                    f"VLM 调用失败 (模型 [{qualified_name or svc.model}], "
                     f"第 {idx + 1}/{len(self._services)} 个)",
                     exc_info=True,
                 )
 
-        models_tried = ", ".join(svc.model for svc in self._services)
+        models_tried = ", ".join(
+            self._model_names[i] or self._services[i].model
+            for i in range(len(self._services))
+        )
         _log.error(f"所有 VLM 模型均失败: [{models_tried}]")
         return None
 
