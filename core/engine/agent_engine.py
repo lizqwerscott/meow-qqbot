@@ -22,7 +22,8 @@ from core.managers.emoji_manager import EmojiManager
 from core.message import InputMessage, MessageType
 from core.managers.nickname_manager import NicknameManager
 from core.managers.template_manager import TemplateManager
-from core.tools import ToolExecutor, SubAgentManager
+from core.tools import SubAgentManager
+from core.tools.impl import inject_deps, consume_heartbeat_response, _HEARTBEAT_RESPONSE
 from core.learners.base import sanitize_for_learners
 from core.learners.orchestrator import LearningOrchestrator
 
@@ -88,22 +89,30 @@ class AgentEngine:
         self._archive_manager = archive_manager
         self._system_events = system_events
 
-        self.tool_executor = ToolExecutor(
+        inject_deps(
             emoji_manager=emoji_manager,
+            media_uploader=None,
+            api_client=None,
             hindsight=hindsight_memory,
-            bot_id=bot_id,
             nickname_manager=nickname_manager,
+            bot_id=bot_id,
             skill_managers=skill_managers,
             learning_orchestrator=learning_orchestrator,
             admin_ids=admin_id,
             permission_manager=permission_manager,
             system_events=system_events,
+            search_top_k=search_top_k,
+            workspace_manager=workspace_manager,
+            tts_service=None,
+            task_manager=task_manager,
+            cron_job_manager=cron_job_manager,
+            background_task_runner=None,
+            sub_agent_manager=sub_agent_manager,
+            bot_engine=None,
         )
 
         # ── 工作区 ──
         self._workspace_manager = workspace_manager
-        if workspace_manager:
-            self.tool_executor.set_workspace_manager(workspace_manager)
 
         # ── 子模块 ──
         self.session_manager = SessionTaskManager()
@@ -130,7 +139,7 @@ class AgentEngine:
 
         self.tool_loop = ToolLoop(
             ai_service=ai_service,
-            tool_executor=self.tool_executor,
+            permission_manager=permission_manager,
             cost_tracker=self.cost_tracker,
             context_manager=context_manager,
             session_manager=self.session_manager,
@@ -144,7 +153,6 @@ class AgentEngine:
         self._sub_agent_manager = sub_agent_manager
         if sub_agent_manager:
             sub_agent_manager.set_execute_callback(self.execute_background_task)
-            self.tool_executor.set_sub_agent_manager(sub_agent_manager)
 
         # ── 消息钩子 ──
         self._message_hooks: list = []
@@ -170,7 +178,7 @@ class AgentEngine:
 
     def set_media_uploader(self, media_uploader: Any):
         self.media_uploader = media_uploader
-        self.tool_executor.set_media_uploader(media_uploader)
+        inject_deps(media_uploader=media_uploader)
         _log.info("AgentEngine: MediaUploader 已注入")
 
     def set_router_model(self, router_model: Any):
@@ -179,7 +187,7 @@ class AgentEngine:
 
     def set_api_client(self, api_client: Any):
         self._api_client = api_client
-        self.tool_executor.set_api_client(api_client)
+        inject_deps(api_client=api_client)
         _log.info("AgentEngine: QQApiClient 已注入")
 
     def set_multimodal_service(self, multimodal_service: Any):
@@ -188,7 +196,7 @@ class AgentEngine:
     def set_tts_service(self, tts_service: Any):
         self._tts_service = tts_service
         self.prompt_builder._tts_service = tts_service
-        self.tool_executor.set_tts_service(tts_service)
+        inject_deps(tts_service=tts_service)
 
     def set_emoji_manager(self, emoji_manager: EmojiManager):
         self.emoji_manager = emoji_manager
@@ -196,7 +204,7 @@ class AgentEngine:
 
     def set_nickname_manager(self, nm: NicknameManager):
         self._nm = nm
-        self.tool_executor.set_nickname_manager(nm)
+        inject_deps(nickname_manager=nm)
         self.prompt_builder._nm = nm
 
     # ── 消息钩子系统 ──
@@ -665,7 +673,7 @@ class AgentEngine:
                 system_event_key=system_event_key,
             )
 
-            self.tool_executor._heartbeat_response = {}
+            _HEARTBEAT_RESPONSE.clear()
 
             await self.tool_loop.run(
                 messages=messages,
@@ -680,7 +688,7 @@ class AgentEngine:
             )
 
             # 优先检查 heartbeat_respond 工具响应
-            hb_resp = self.tool_executor.consume_heartbeat_response()
+            hb_resp = consume_heartbeat_response()
             if hb_resp.get("notify"):
                 text = hb_resp.get("notification_text", "").strip()
                 if text:

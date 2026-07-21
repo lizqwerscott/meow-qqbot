@@ -2,7 +2,7 @@
 
 从 allowlist.toml 加载配置，提供：
 - 用户角色解析（admin / trusted / default）
-- 工具权限校验
+- 工具权限校验（支持 group:* 组级别权限）
 - 命令白名单 + 安全策略校验（管道、串联、重定向、长度）
 """
 
@@ -13,6 +13,8 @@ import shlex
 import tomllib
 from pathlib import Path
 from typing import List, Optional
+
+from core.tools.catalog import SECTIONS
 
 _log = logging.getLogger(__name__)
 
@@ -64,9 +66,27 @@ class PermissionManager:
         return self._role_level(user_role) >= self._role_level(required)
 
     def _require_level(self, tool_name: str) -> str:
-        """返回工具所需的最低角色。"""
+        """返回工具所需的最低角色。
+
+        查找顺序：
+        1. 精确工具名匹配（如 memory = "all"）
+        2. 所属 group 匹配（如 group:memory = "all"），取最宽松的权限
+        3. 默认 "admin"
+        """
         tools = self._data.get("tools", {})
-        return tools.get(tool_name, "admin")
+        if tool_name in tools:
+            return tools[tool_name]
+        best = "admin"
+        best_level = ROLE_LEVEL.get(best, 3)
+        for key, level in tools.items():
+            if key.startswith("group:"):
+                section = key[6:]
+                if tool_name in SECTIONS.get(section, set()):
+                    cur = ROLE_LEVEL.get(level, 1)
+                    if cur < best_level:
+                        best_level = cur
+                        best = level
+        return best
 
     # ── 命令白名单 + 安全策略 ──
 
