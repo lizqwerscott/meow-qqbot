@@ -549,14 +549,22 @@ def _register_all(register):
     register(ToolEntry(
         name="cron",
         section="cron",
-        description="定时/一次性任务管理：创建、修改、删除、启用、暂停、列出、查看单个定时任务。所有时间均为北京时间 (CST/UTC+8)。",
+        description=(
+            "定时/一次性任务管理（单工具，使用 action 选择操作）。\n"
+            "action=add 创建 | update 修改 | remove 删除 | enable 启用 | "
+            "disable 暂停 | list 列出所有 | get 查看单个。\n"
+            "所有时间均为北京时间 (CST/UTC+8)。"
+        ),
         parameters=CRON_PARAMS,
         handler=_cron,
     ))
     register(ToolEntry(
         name="task",
         section="task",
-        description="后台任务管理：列出后台任务执行记录、取消正在运行或等待中的任务。",
+        description=(
+            "后台任务执行记录管理（单工具，使用 action 选择操作）。\n"
+            "action=list 列出执行记录 | action=cancel 取消运行中的任务。"
+        ),
         parameters=TASK_PARAMS,
         handler=_task,
     ))
