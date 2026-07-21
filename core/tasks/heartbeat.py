@@ -14,6 +14,15 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
+from core.tasks.heartbeat_wake import (
+    HeartbeatWakeScheduler,
+    HeartbeatWakeRequest,
+    WakeSource,
+    WakeIntent,
+)
+from core.tasks.heartbeat_cooldown import HeartbeatCooldown
+from core.tasks.heartbeat_events import HeartbeatEvent, HeartbeatEvents
+
 _log = logging.getLogger(__name__)
 
 HEARTBEAT_DEFAULT_PROMPT = (
@@ -95,6 +104,14 @@ class HeartbeatManager:
         self._last_notification_text: str = ""
         self._last_notification_sent_at: float = 0.0
         self._notification_cooldown_hours: float = config.get("notification_cooldown_hours", 12.0)
+        self._heartbeat_timeout = config.get("timeout_seconds", 120)
+
+        self._wake = HeartbeatWakeScheduler(coalesce_ms=100)
+        self._wake.set_handler(self._on_wake)
+        # min-spacing = 心跳周期的一半，使 scheduled intent 的门控实际生效
+        min_spacing = max(30.0, self._every_minutes * 60 * 0.5)
+        self._cooldown = HeartbeatCooldown(min_spacing_seconds=min_spacing)
+        self.events = HeartbeatEvents()
 
     async def start(self):
         if not self._enabled:
@@ -112,6 +129,13 @@ class HeartbeatManager:
 
     async def stop(self):
         self._running = False
+        self._wake.cancel_pending()
+        # 等正在执行的心跳完成（带超时）
+        try:
+            await asyncio.wait_for(self._heartbeat_lock.acquire(), timeout=10.0)
+            self._heartbeat_lock.release()
+        except asyncio.TimeoutError:
+            _log.warning("等待心跳执行超时（10s），强制停止")
         if self._task and not self._task.done():
             self._task.cancel()
             try:
@@ -126,29 +150,57 @@ class HeartbeatManager:
                 elapsed = time.time() - self._last_heartbeat_time
                 sleep_for = max(0, self._every_minutes * 60 - elapsed)
                 await asyncio.sleep(sleep_for)
-                await self._tick()
+                self._wake.request(HeartbeatWakeRequest(
+                    source=WakeSource.INTERVAL,
+                    intent=WakeIntent.SCHEDULED,
+                    reason="定时心跳",
+                ))
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 _log.error(f"心跳循环异常: {e}", exc_info=True)
 
-    async def _tick(self):
-        """一次自动心跳周期。"""
-        if self._heartbeat_lock.locked():
-            _log.debug("心跳还在执行，跳过本次")
-            return
-
+    async def _on_wake(self, req: HeartbeatWakeRequest):
+        """Wake handler：串行执行心跳，经过冷却门控和活跃时段检查。"""
         async with self._heartbeat_lock:
+            # 先检查活跃时段（不重试，静默跳过）
             if not self._in_active_hours():
+                self.events.emit(HeartbeatEvent(
+                    status="deferred",
+                    source=req.source.value,
+                    reason="outside-active-hours",
+                ))
                 _log.debug("心跳跳过：不在活跃时段")
                 return
-            if self._skip_when_busy and self._is_busy():
-                _log.debug("心跳跳过：用户活跃中")
+
+            # 再检查冷却状态（忙态/flood 等会重试）
+            dec = self._cooldown.should_defer(
+                intent=req.intent,
+                is_busy=self._is_busy() if self._skip_when_busy else False,
+            )
+            if dec.defer:
+                _log.debug(f"心跳 defer: {dec.reason} (retry={dec.retry_after_ms}ms)")
+                self.events.emit(HeartbeatEvent(
+                    status="deferred",
+                    source=req.source.value,
+                    reason=dec.reason,
+                ))
+                if dec.retry_after_ms > 0:
+                    self._wake.retry(dec.retry_after_ms)
                 return
-            await self._run_heartbeat()
+
+            self._cooldown.record_run_start()
+            self.events.emit(HeartbeatEvent(
+                status="running",
+                source=req.source.value,
+            ))
+            await self._run_heartbeat(req.extra_prompt)
 
     async def trigger_heartbeat(self, prompt: str = "") -> tuple[bool, str | None]:
         """公开接口：手动触发心跳，带锁保护，重置计时器。
+
+        不走 wake 调度器，直接执行（manual 意图），同时更新冷却门控。
+        如果锁被其他心跳占用，最多等 LOCK_TIMEOUT 秒后放弃。
 
         Args:
             prompt: 自定义 prompt，为空时使用默认时间 prompt
@@ -156,8 +208,17 @@ class HeartbeatManager:
         Returns:
             (should_notify, notification_text)
         """
-        async with self._heartbeat_lock:
+        LOCK_TIMEOUT = 10.0
+        try:
+            await asyncio.wait_for(self._heartbeat_lock.acquire(), timeout=LOCK_TIMEOUT)
+        except asyncio.TimeoutError:
+            _log.warning("心跳锁获取超时，心跳正在执行中")
+            return True, "⚠️ 心跳正在执行中，请稍后再试"
+        try:
+            self._cooldown.record_run_start()
             return await self._run_heartbeat(prompt)
+        finally:
+            self._heartbeat_lock.release()
 
     async def _run_heartbeat(self, manual_prompt: str = "") -> tuple[bool, str | None]:
         """内部执行心跳（调用方需持有 _heartbeat_lock）。
@@ -179,10 +240,10 @@ class HeartbeatManager:
                 return False, None
 
         hb_content = await self._load_heartbeat_content(manual_prompt)
-        tz_name = "CST (UTC+8)"
-        now_str = datetime.now(timezone(timedelta(hours=8))).strftime(
-            "%Y-%m-%d %H:%M"
-        )
+        tz = self._resolve_timezone()
+        now = datetime.now(tz)
+        now_str = now.strftime("%Y-%m-%d %H:%M")
+        tz_name = self._timezone_str
         user_prompt = f"{hb_content}\n\n当前时间：{now_str}（{tz_name}）。"
 
         # 为本次心跳生成唯一 chat_id，与上下文存储解耦
@@ -199,6 +260,7 @@ class HeartbeatManager:
             if all_models:
                 model_chain = all_models
 
+        start_time = time.time()
         try:
             should_notify, text = await self._agent_engine.execute_heartbeat(
                 prompt=user_prompt,
@@ -206,8 +268,21 @@ class HeartbeatManager:
                 system_prompt_mode=self._system_prompt_mode,
                 model_chain=model_chain,
                 chat_id=chat_id,
+                timeout=self._heartbeat_timeout,
             )
+
+            if not self._running:
+                _log.debug("心跳结果丢弃：系统已停止")
+                return False, None
+
             self._last_heartbeat_time = time.time()
+
+            self.events.emit(HeartbeatEvent(
+                status="completed",
+                duration_ms=(time.time() - start_time) * 1000,
+                result_text=text[:200] if text else None,
+                source="heartbeat",
+            ))
 
             if should_notify and text:
                 if self._should_suppress(text):
@@ -221,6 +296,12 @@ class HeartbeatManager:
                 _log.debug("心跳无需投递")
 
             return should_notify, text
+        except Exception:
+            self.events.emit(HeartbeatEvent(
+                status="error",
+                source="heartbeat",
+            ))
+            raise
         finally:
             # 清理旧心跳上下文，防止 context_manager 膨胀
             await self._cleanup_old_heartbeat_contexts(keep_last=3)
@@ -263,9 +344,34 @@ class HeartbeatManager:
             _log.warning(f"同步读取 HEARTBEAT 文件失败: {e}")
             return ""
 
+    def _resolve_timezone(self):
+        """将 self._timezone_str 解析为 timezone 对象。
+
+        优先使用 zoneinfo（Python 3.9+），
+        兜底解析 ±HH:MM 格式，
+        都不行则回退 UTC+8 并记 warning。
+        """
+        try:
+            import zoneinfo
+            return zoneinfo.ZoneInfo(self._timezone_str)
+        except ImportError:
+            pass
+        except (KeyError, TypeError):
+            pass
+        cleaned = self._timezone_str.replace("UTC", "").replace("GMT", "").strip()
+        m = re.match(r"^[+-]?(\d{1,2})(?::(\d{2}))?$", cleaned)
+        if m:
+            h, mi = m.groups()
+            return timezone(timedelta(hours=int(h), minutes=int(mi or 0)))
+        _log.warning(
+            "无法解析时区 '%s'（zoneinfo 不可用），回退到 UTC+8",
+            self._timezone_str,
+        )
+        return timezone(timedelta(hours=8))
+
     def _in_active_hours(self) -> bool:
         try:
-            tz = timezone(timedelta(hours=8))
+            tz = self._resolve_timezone()
             now = datetime.now(tz)
             cur = now.hour * 60 + now.minute
 
@@ -275,12 +381,11 @@ class HeartbeatManager:
             end_min = int(end_parts[0]) * 60 + int(end_parts[1])
 
             if end_min <= start_min:
-                # 跨天（如 22:00 ~ 02:00）
                 return cur >= start_min or cur < end_min
             return start_min <= cur < end_min
         except Exception as e:
             _log.warning(f"活跃时间解析失败 [{self._active_start}-{self._active_end}]: {e}")
-            return True  # 解析失败默认放行
+            return True
 
     def _is_busy(self) -> bool:
         """检查是否有用户最近活跃。"""
@@ -310,6 +415,8 @@ class HeartbeatManager:
     def _should_suppress(self, text: str) -> bool:
         """检查是否应抑制本次通知（同文本 + 冷却期）。
 
+        比较前对文本做归一化（去除多余空白），避免微小格式差异导致重复通知。
+
         Args:
             text: 本次要通知的文本（来自 heartbeat_respond 的原始文本）
 
@@ -318,15 +425,20 @@ class HeartbeatManager:
         """
         if not self._last_notification_text or self._last_notification_sent_at <= 0:
             return False
-        if text != self._last_notification_text:
-            return False
         if self._notification_cooldown_hours <= 0:
+            return False
+        normalized_prev = re.sub(r"\s+", " ", self._last_notification_text).strip()
+        normalized_cur = re.sub(r"\s+", " ", text).strip()
+        if normalized_cur != normalized_prev:
             return False
         elapsed = time.time() - self._last_notification_sent_at
         return elapsed < self._notification_cooldown_hours * 3600
 
     async def _deliver_to_admin(self, text: str):
         """发送心跳提醒给第一个管理员，同时写入 context_manager 保证反馈链路。"""
+        if not self._running:
+            _log.debug("投递跳过：系统已停止")
+            return
         if not self._admin_ids:
             _log.warning("心跳无法投递：未配置管理员 ID")
             return

@@ -86,6 +86,8 @@ class BotEngine:
         self._bot_name: str = "机器人"
         self._deps_injected = False
         self.pending_approvals: Dict[str, tuple] = {}
+        self._session_id: Optional[str] = None
+        self._last_seq: Optional[int] = None
 
         _log.info("BotEngine 已初始化")
 
@@ -101,9 +103,10 @@ class BotEngine:
             on_connected=lambda: _log.info("WebSocket 已连接"),
             on_disconnected=lambda: _log.info("WebSocket 已断开"),
             on_fatal_error=lambda code, msg: _log.error(f"致命错误 [{code}]: {msg}"),
-            get_session=lambda: (None, None),
-            set_session=lambda sid, seq: None,
-            set_heartbeat_interval=lambda interval: _log.info(f"心跳间隔: {interval}s"),
+            get_session=lambda: (self._session_id, self._last_seq),
+            set_session=lambda sid, seq: setattr(self, "_session_id", sid) or setattr(self, "_last_seq", seq),
+            set_heartbeat_interval=lambda interval: _log.info(f"WS 心跳间隔: {interval}s"),
+            on_heartbeat_ack=lambda: _log.debug("WS 心跳 ACK 已确认"),
             clear_token=lambda: self.api.clear_token(),
             fail_pending=lambda reason: _log.warning(f"挂起请求失败: {reason}"),
             on_ready=self._on_ready,
