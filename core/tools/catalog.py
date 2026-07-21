@@ -4,7 +4,8 @@ SECTIONS: dict[str, set[str]] = {
     "emoji":     {"search_emoji", "send_emoji"},
     "memory":    {"memory", "mark_important"},
     "user":      {"search_user"},
-    "skill":     {"view_skill", "execute_skill", "rescan_skills", "execute_command"},
+    "skill":     {"view_skill", "execute_skill", "rescan_skills"},
+    "exec":      {"exec", "process"},
     "file":      {"read_file", "write_file", "edit_file", "apply_patch"},
     "cron":      {"cron"},
     "task":      {"task"},
@@ -26,7 +27,7 @@ PROFILES: dict[str, set[str]] = {
     "heartbeat": {
         "heartbeat_respond",
         "memory", "mark_important",
-        "execute_command",
+        "exec", "process",
         "read_file", "write_file", "edit_file", "apply_patch",
         "task",
     },
@@ -34,7 +35,7 @@ PROFILES: dict[str, set[str]] = {
         "announce", "search_user",
         "memory", "mark_important",
         "read_file", "write_file", "edit_file", "apply_patch",
-        "execute_command",
+        "exec", "process",
         "view_skill", "execute_skill", "rescan_skills",
     },
 }
@@ -54,6 +55,6 @@ CRON_ALLOWED: set[str] = {
     "announce", "search_user",
     "memory", "mark_important",
     "read_file", "write_file", "edit_file", "apply_patch",
-    "execute_command",
+    "exec", "process",
     "view_skill", "execute_skill", "rescan_skills",
 }

@@ -280,7 +280,7 @@ def _register_all(register):
     register(ToolEntry(
         name="read_file",
         section="file",
-        description="读取工作区文件内容或列出目录。File 路径为目录时返回文件列表；路径为文件时返回文件内容。不支持路径穿越(..)。搜索文件内容请使用 execute_command + rg。",
+        description="读取工作区文件内容或列出目录。File 路径为目录时返回文件列表；路径为文件时返回文件内容。不支持路径穿越(..)。搜索文件内容请使用 exec + rg。",
         parameters=FILE_READ_PARAMS,
         handler=_read_file,
     ))

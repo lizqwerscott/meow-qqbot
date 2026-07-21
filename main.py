@@ -17,6 +17,8 @@ from core.engine.client import BotEngine
 from core.engine.hindsight_memory import HindsightMemory
 from core.engine.router import Router
 from core.engine.system_events import SystemEventQueue
+from core.engine.wake_manager import WakeManager
+from core.tools.process_registry import ProcessRegistry
 from core.learners.orchestrator import LearningOrchestrator
 from core.managers.archive_manager import ArchiveManager
 from core.managers.context_manager import ChatContextManager
@@ -286,6 +288,10 @@ async def main() -> None:
     system_events = SystemEventQueue()
     _log.info("SystemEventQueue 已初始化")
 
+    # ── 后台进程注册表（exec background 会话管理） ──
+    process_registry = ProcessRegistry()
+    _log.info("ProcessRegistry 已初始化")
+
     # ── 子智能体系统 ──
     sub_agent_config = config.get("sub_agents", {})
     sub_agent_manager = None
@@ -359,19 +365,31 @@ async def main() -> None:
     if tts_service:
         agent_engine.set_tts_service(tts_service)
 
-    # ── 将后台任务执行器注入工具系统 ──
+    # ── WakeManager（通用事件唤醒调度器，在工具注入前创建） ──
+    wake_manager = WakeManager(
+        system_events=system_events,
+        agent_engine=agent_engine,
+    )
+    _log.info("WakeManager 已初始化")
+
+    # ── 将后台任务执行器 + 进程注册表注入工具系统 ──
     if task_manager or cron_job_manager or background_task_runner:
         from core.tools.impl import inject_deps
         inject_deps(
             task_manager=task_manager,
             cron_job_manager=cron_job_manager,
             background_task_runner=background_task_runner,
+            process_registry=process_registry,
         )
-        _log.info("任务管理器已注入工具系统")
+        _log.info("任务管理器 + 进程注册表已注入工具系统")
+    else:
+        from core.tools.impl import inject_deps
+        inject_deps(process_registry=process_registry)
 
     # ── 注入系统事件队列到后台任务执行器 ──
     if background_task_runner:
         background_task_runner.set_system_events(system_events)
+        background_task_runner.set_wake_manager(wake_manager)
 
     # ── 连接后台任务执行器与 AgentEngine ──
     if background_task_runner and task_manager:
@@ -418,9 +436,26 @@ async def main() -> None:
         multimodal_service=multimodal_service,
     )
 
-    # ── 将 BotEngine 注入工具系统（供 AI 工具统一发消息） ──
+    # ── 注入 AgentEngine 的回复回调 ──
+    agent_engine.set_reply_callback(engine.send_proactive)
+
+    # ── 将 BotEngine 注入工具系统 ──
     from core.tools.impl import inject_deps
     inject_deps(bot_engine=engine)
+
+    # ── 注册 exec 进程退出回调 → WakeManager ──
+    async def _on_exec_exit(session):
+        chat_id = session.delivery_channel or session.chat_id
+        summary = session.command[:80]
+        status = f"exit {session.exit_code}" if session.exit_code is not None else "terminated"
+        await wake_manager.notify(
+            session_key=chat_id,
+            text=f"后台进程完成: {summary} ({status})",
+            context_key=f"exec:{session.id}",
+            source="exec:exit",
+            trigger_ai=bool(session.delivery_channel),
+        )
+    process_registry.on_exit(_on_exec_exit)
 
     # ── 心跳系统 ──
     heartbeat_manager = None
@@ -499,6 +534,9 @@ async def main() -> None:
     engine.start(gateway_url, loop)
     print(f"机器人已启动，WebSocket 网关: {gateway_url}")
 
+    # 启动后台进程注册表
+    await process_registry.start()
+
     # 启动 Cron 调度器（在 WS 就绪后）
     if cron_scheduler:
         cron_scheduler.start()
@@ -541,6 +579,7 @@ async def main() -> None:
     try:
         await asyncio.Event().wait()
     finally:
+        await process_registry.stop()
         if cron_scheduler:
             await cron_scheduler.stop()
         if heartbeat_manager:

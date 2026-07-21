@@ -58,29 +58,6 @@ async def _execute_skill(args: dict, ctx: ToolContext) -> ToolResult:
     return ToolResult(content=json.dumps(result, ensure_ascii=False))
 
 
-async def _execute_command(args: dict, ctx: ToolContext) -> ToolResult:
-    skill_managers = _DEPS.get("skill_managers")
-    if not skill_managers:
-        return ToolResult(content=json.dumps(
-            {"error": "技能系统未就绪"}, ensure_ascii=False,
-        ))
-    command = (args.get("command") or "").strip()
-    if not command:
-        return ToolResult(content=json.dumps(
-            {"error": "请提供要执行的命令"}, ensure_ascii=False,
-        ))
-    perm = _DEPS.get("permission_manager")
-    default_timeout = perm.get_default_timeout() if perm else 60
-    timeout = args.get("timeout", default_timeout)
-    workdir = args.get("workdir")
-    role = perm.get_user_role(ctx.sender_id) if perm else "admin"
-
-    result = skill_managers.execute_command(
-        command=command, timeout=timeout, workdir=workdir, user_role=role,
-    )
-    return ToolResult(content=json.dumps(result, ensure_ascii=False))
-
-
 RESCAN_SKILLS_PARAMS = {
     "type": "object",
     "properties": {},
@@ -121,26 +98,6 @@ EXECUTE_SKILL_PARAMS = {
     "required": ["skill_name", "script_name"],
 }
 
-EXECUTE_COMMAND_PARAMS = {
-    "type": "object",
-    "properties": {
-        "command": {
-            "type": "string",
-            "description": "要执行的 bash 命令",
-        },
-        "timeout": {
-            "type": "integer",
-            "description": "执行超时时间（秒），默认 30，最大 120",
-        },
-        "workdir": {
-            "type": "string",
-            "description": "工作目录（可选，默认项目根目录）",
-        },
-    },
-    "required": ["command"],
-}
-
-
 def _register_all(register):
     register(ToolEntry(
         name="rescan_skills",
@@ -163,10 +120,4 @@ def _register_all(register):
         parameters=EXECUTE_SKILL_PARAMS,
         handler=_execute_skill,
     ))
-    register(ToolEntry(
-        name="execute_command",
-        section="skill",
-        description="执行任意 bash 命令（受黑名单限制）。可用于运行 git 操作、python 脚本、文件查看等。",
-        parameters=EXECUTE_COMMAND_PARAMS,
-        handler=_execute_command,
-    ))
+
