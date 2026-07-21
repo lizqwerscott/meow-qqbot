@@ -147,18 +147,21 @@ class TemplateManager:
         self,
         *,
         current_time: str = "",
+        tool_descriptions: str = "",
     ) -> str:
         """
         获取后台任务系统提示（使用 task_chat.j2 模板）
 
         Args:
             current_time: 当前时间字符串
+            tool_descriptions: 可用工具的描述文本（默认使用原版硬编码描述）
 
         Returns:
             后台任务系统提示文本
         """
         context = {
             "current_time": current_time,
+            "tool_descriptions": tool_descriptions,
         }
         prompt = self.render_prompt_template(self._TASK_CHAT_TEMPLATE, context)
         if not prompt:

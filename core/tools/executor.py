@@ -21,6 +21,7 @@ from core.managers.nickname_manager import NicknameManager
 from core.managers.workspace_manager import WorkspaceManager
 from core.tools.sub_agent_manager import SubAgentManager
 from core.tools.patch_parser import parse_patch_text, apply_update_hunks, ActionType, DiffError
+from core.tools.definitions import CRON_ALLOWED_TOOL_NAMES
 
 _log = logging.getLogger(__name__)
 
@@ -938,6 +939,29 @@ class ToolExecutor:
         else:
             enable_notify = True
 
+        # 解析 tools_allow
+        tools_allow = args.get("tools_allow")
+        if tools_allow is not None:
+            if not isinstance(tools_allow, list):
+                return ToolResult(content=json.dumps(
+                    {"error": "tools_allow 必须是字符串数组"}, ensure_ascii=False,
+                ))
+            invalid_names = [
+                n for n in tools_allow
+                if n not in CRON_ALLOWED_TOOL_NAMES and n != "*"
+            ]
+            if invalid_names:
+                return ToolResult(content=json.dumps({
+                    "error": (
+                        f"以下工具不允许用于定时任务: {', '.join(invalid_names)}。"
+                        f"可用工具: {', '.join(sorted(CRON_ALLOWED_TOOL_NAMES))}"
+                    ),
+                }, ensure_ascii=False))
+            if "*" in tools_allow:
+                tools_allow = ["*"]
+            else:
+                tools_allow = [n for n in tools_allow if n != "*"]
+
         if not name:
             return ToolResult(content=json.dumps(
                 {"error": "name 不能为空"}, ensure_ascii=False,
@@ -998,6 +1022,7 @@ class ToolExecutor:
             model=payload_model,
             thinking=payload_thinking,
             enable_notify=enable_notify,
+            tools_allow=tools_allow,
         )
 
         # 构建描述
@@ -1013,6 +1038,11 @@ class ToolExecutor:
 
         if payload_type == "command":
             desc += f"\n命令: `{payload_command[:80]}`"
+        if tools_allow is not None and payload_type == "message":
+            if tools_allow == ["*"]:
+                desc += "\n工具权限: 所有 cron 允许的工具"
+            else:
+                desc += f"\n工具权限: {', '.join(tools_allow)}"
 
         # session 信息
         mode_desc = {
@@ -1035,6 +1065,7 @@ class ToolExecutor:
             "command": payload_command or "",
             "model": payload_model or "",
             "thinking": payload_thinking or "",
+            "tools_allow": tools_allow,
             "message": desc,
         }, ensure_ascii=False))
 
@@ -1166,6 +1197,7 @@ class ToolExecutor:
                 "payload_type": j.payload_type,
                 "prompt": j.prompt[:100] if j.prompt else "",
                 "command": j.command[:100] if j.command else "",
+                "tools_allow": j.tools_allow,
             })
         return ToolResult(content=json.dumps({
             "jobs": result,
@@ -1245,6 +1277,32 @@ class ToolExecutor:
         if "enable_notify" in args:
             job.enable_notify = bool(args["enable_notify"])
             changed.append("enable_notify")
+        if "tools_allow" in args:
+            raw = args["tools_allow"]
+            if raw is None:
+                job.tools_allow = None
+                changed.append("tools_allow")
+            elif isinstance(raw, list):
+                invalid_names = [
+                    n for n in raw
+                    if n not in CRON_ALLOWED_TOOL_NAMES and n != "*"
+                ]
+                if invalid_names:
+                    return ToolResult(content=json.dumps({
+                        "error": (
+                            f"以下工具不允许用于定时任务: {', '.join(invalid_names)}"
+                        ),
+                    }, ensure_ascii=False))
+                if "*" in raw:
+                    job.tools_allow = ["*"]
+                else:
+                    job.tools_allow = [n for n in raw if n != "*"]
+                changed.append("tools_allow")
+            else:
+                return ToolResult(content=json.dumps(
+                    {"error": "tools_allow 必须是字符串数组或 null"},
+                    ensure_ascii=False,
+                ))
 
         if not changed:
             return ToolResult(content=json.dumps({
@@ -1257,6 +1315,7 @@ class ToolExecutor:
             "job_id": job.id[:16],
             "name": job.name,
             "changed": changed,
+            "tools_allow": job.tools_allow,
             "message": f"定时任务「{old_name}」已更新: {', '.join(changed)}",
         }, ensure_ascii=False))
 

@@ -639,6 +639,24 @@ TASK_TOOLS = [
                         "type": "boolean",
                         "description": "是否投递执行结果到频道。默认为 true，设为 false 则静默执行不通知。",
                     },
+                    "tools_allow": {
+                        "type": ["array", "null"],
+                        "items": {"type": "string"},
+                        "description": (
+                            "（可选）指定该定时任务可用的工具列表。仅在 payload_type=message 时有效。"
+                            "不设置则使用默认工具集（search_user + 记忆读写 + 文件操作）。"
+                            "设置为 ['*'] 可使用全部 cron 允许的工具。传入 null 则恢复默认工具集。\n\n"
+                            "可用工具包括：\n"
+                            "execute_command — 执行 bash 命令（受安全黑名单限制）\n"
+                            "view_skill — 查看技能说明文档\n"
+                            "execute_skill — 执行技能脚本\n"
+                            "rescan_skills — 重新扫描技能列表\n"
+                            "以及默认工具集内的所有工具。\n\n"
+                            "不在此范围内的工具（如 emoji、TTS、子智能体、心跳回应、"
+                            "学习工具、任务管理工具）不可用于定时任务，传入会被拒绝。\n\n"
+                            "示例：['execute_command', 'search_memory', 'read_file']"
+                        ),
+                    },
                 },
                 "allOf": [
                     {
@@ -755,6 +773,16 @@ TASK_TOOLS = [
                     "enable_notify": {
                         "type": "boolean",
                         "description": "是否投递执行结果到频道。true 表示投递，false 表示静默执行。",
+                    },
+                    "tools_allow": {
+                        "type": ["array", "null"],
+                        "items": {"type": "string"},
+                        "description": (
+                            "新的工具权限配置。不传则不修改。"
+                            "传入 null 可重置为默认工具集。"
+                            "可用值参考 create_cron_job 的 tools_allow 说明。"
+                            "传入 ['*'] 可使用全部 cron 允许的工具。"
+                        ),
                     },
                 },
                 "required": ["job_id"],
@@ -972,3 +1000,82 @@ def tool_names() -> set[str]:
         "spawn_subagent", "subagents",
         "synthesize_speech",
     }
+
+
+# ── 工具名称 → 定义列表映射（用于后台任务动态工具解析） ──
+# ⚠️ 警告：以下引用组合列表（FILE_TOOLS、TASK_TOOLS、LEARNER_TOOLS、EMOJI_TOOLS、SUB_AGENT_TOOLS）
+# 时使用了硬编码索引。如果上述列表的结构或顺序发生变化，以下索引必须同步更新。
+# FILE_TOOLS 布局: [0]=apply_patch, [1]=read_file, [2]=write_file, [3]=edit_file, [4]=list_files, [5]=search_files
+# TASK_TOOLS 布局: [0]=create_cron_job, [1]=cancel_task, [2]=list_tasks, [3]=list_cron_jobs, [4]=update_cron_job,
+#                   [5]=delete_cron_job, [6]=enable_cron_job, [7]=disable_cron_job
+# LEARNER_TOOLS 布局: [0]=define_jargon, [1]=report_behavior_effect
+# EMOJI_TOOLS 布局: [0]=search_emoji, [1]=send_emoji
+# SUB_AGENT_TOOLS 布局: [0]=spawn_subagent, [1]=subagents
+
+TOOL_DEFINITION_MAP: dict[str, list[dict]] = {
+    "search_emoji": [EMOJI_TOOLS[0]],
+    "send_emoji": [EMOJI_TOOLS[1]],
+    "search_user": SEARCH_USER_TOOL,
+    "search_memory": SEARCH_MEMORY_TOOL,
+    "search_relation": SEARCH_RELATION_TOOL,
+    "mark_important": MARK_IMPORTANT_TOOL,
+    "define_jargon": [LEARNER_TOOLS[0]],
+    "report_behavior_effect": [LEARNER_TOOLS[1]],
+    "rescan_skills": RESCAN_SKILLS_TOOL,
+    "view_skill": VIEW_SKILL_TOOL,
+    "execute_skill": EXECUTE_SKILL_TOOL,
+    "execute_command": EXECUTE_COMMAND_TOOL,
+    "apply_patch": APPLY_PATCH_TOOL,
+    "read_file": [FILE_TOOLS[1]],
+    "write_file": [FILE_TOOLS[2]],
+    "edit_file": [FILE_TOOLS[3]],
+    "list_files": [FILE_TOOLS[4]],
+    "search_files": [FILE_TOOLS[5]],
+    "heartbeat_respond": HEARTBEAT_RESPOND_TOOL,
+    "announce": ANNOUNCE_TOOL,
+    "list_tasks": LIST_TASKS_TOOL,
+    "list_cron_jobs": LIST_CRON_JOBS_TOOL,
+    "create_cron_job": [TASK_TOOLS[0]],
+    "cancel_task": [TASK_TOOLS[1]],
+    "update_cron_job": [TASK_TOOLS[4]],
+    "delete_cron_job": [TASK_TOOLS[5]],
+    "enable_cron_job": [TASK_TOOLS[6]],
+    "disable_cron_job": [TASK_TOOLS[7]],
+    "spawn_subagent": [SUB_AGENT_TOOLS[0]],
+    "subagents": [SUB_AGENT_TOOLS[1]],
+    "synthesize_speech": TTS_TOOLS,
+}
+
+TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
+    "announce": "向父会话报告进度或中间结果",
+    "search_user": "按昵称模糊搜索群用户信息",
+    "search_memory": "搜索长期记忆（可查群友画像、经历、事实）",
+    "search_relation": "搜索两人之间的关系记忆",
+    "mark_important": "记录重要信息至长期记忆",
+    "read_file": "读取工作区文件",
+    "write_file": "写入文件到工作区（新建或覆盖）",
+    "edit_file": "编辑工作区文件（精确字符串替换）",
+    "list_files": "列出工作区文件和目录",
+    "search_files": "在工作区中搜索文件内容（正则表达式）",
+    "apply_patch": "批量新建/更新/删除/移动文件",
+    "execute_command": "执行 bash 命令（受安全黑名单限制）",
+    "view_skill": "查看并加载完整的技能说明文档",
+    "execute_skill": "执行技能附带的脚本（如自动化分析、代码生成）",
+    "rescan_skills": "重新扫描刷新可用技能列表",
+}
+
+# Cron 定时任务可用的工具白名单
+# 不在列表中的工具（emoji、TTS、心跳、子智能体、学习工具、任务管理等）不可用于定时任务
+CRON_ALLOWED_TOOL_NAMES: frozenset = frozenset({
+    # 核心
+    "announce", "search_user",
+    # 记忆
+    "search_memory", "search_relation", "mark_important",
+    # 文件
+    "read_file", "write_file", "edit_file",
+    "list_files", "search_files", "apply_patch",
+    # 命令
+    "execute_command",
+    # 技能
+    "view_skill", "execute_skill", "rescan_skills",
+})
