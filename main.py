@@ -435,6 +435,8 @@ async def main() -> None:
             agent_engine=agent_engine,
             context_manager=context_manager,
             heartbeat_path=str(workspace_manager.heartbeat_path()),
+            system_events=system_events,
+            task_manager=task_manager,
         )
 
     # 注册命令处理器（从 core/command_handlers/ 自动发现）
