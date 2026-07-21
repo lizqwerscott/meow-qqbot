@@ -437,7 +437,7 @@ async def main() -> None:
     )
 
     # ── 注入 AgentEngine 的回复回调 ──
-    agent_engine.set_reply_callback(engine.send_proactive)
+    agent_engine.set_reply_callback(engine._send_reply)
 
     # ── 将 BotEngine 注入工具系统 ──
     from core.tools.impl import inject_deps
