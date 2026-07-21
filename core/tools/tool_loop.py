@@ -436,7 +436,6 @@ class ToolLoop:
                 await self.hindsight.add_message(
                     session_id=chat_id,
                     sender_id=msg.sender_id,
-                    sender_name=nick,
                     content=content,
                     context=self.hindsight.msg_type_to_context(msg.msg_type),
                     timestamp=msg.timestamp,
