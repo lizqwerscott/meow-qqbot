@@ -144,6 +144,25 @@ class ModelRegistry:
                 return [name]
         return []
 
+    async def resolve_model_chain(
+        self, model_chain: List[str]
+    ) -> Optional[tuple[str, Any]]:
+        """从模型链中解析第一个可用模型（不做 API 调用）。
+
+        只做冷却检查和服务存在性检查。
+        返回 (qualified_name, AIService) 或 None。
+        """
+        for qualified_name in model_chain:
+            if self._cooldown.is_cooled_down(qualified_name):
+                _log.info(f"模型链解析: [{qualified_name}] 冷却中，跳过")
+                continue
+            svc = self._services.get(qualified_name)
+            if svc is not None:
+                _log.info(f"模型链解析: [{qualified_name}] 可用")
+                return qualified_name, svc
+        _log.warning(f"模型链中无可用模型: {model_chain}")
+        return None
+
     async def chat_with_fallback(
         self,
         model_chain: List[str],

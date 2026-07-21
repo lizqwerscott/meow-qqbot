@@ -138,20 +138,83 @@ class ToolLoop:
         else:
             _rounds = range(self._max_tool_rounds)
 
+        # ── 预解析模型链：循环前一次性找出可用模型 ──
+        resolved_model_name: Optional[str] = None
+        resolved_service: Any = None
+        if model_chain and self._model_registry:
+            resolved = await self._model_registry.resolve_model_chain(model_chain)
+            if resolved:
+                resolved_model_name, resolved_service = resolved
+                _log.info(f"工具循环预解析模型: [{resolved_model_name}]")
+            else:
+                _log.warning(f"模型链全部冷却/无效: {model_chain}")
+                await reply_callback(chat_id, "所有模型均不可用，请稍后重试", reply_to, is_group)
+                return False
+
         for round_idx in _rounds:
             # ── 防御：清理 messages 中孤立的 tool_calls ──
             ensure_messages_consistent(messages)
 
-            if model_chain and self._model_registry:
-                message, usage, current_model_name = await self._model_registry.chat_with_fallback(
-                    model_chain, messages, tools,
+            # ── AI 调用（使用预解析模型，失败则重新解析） ──
+            message = None
+            usage = None
+            failed_models: set = set()
+            while True:
+                svc = resolved_service or self.ai_service
+                current_model_name = resolved_model_name or None
+
+                try:
+                    message, usage = await svc.chat_completion_with_tools(
+                        messages=messages, tools=tools,
+                    )
+                except Exception as e:
+                    _log.warning(f"模型 [{current_model_name}] 调用异常: {e}")
+                    message, usage = None, None
+
+                if message is not None:
+                    if resolved_model_name and self._model_registry:
+                        self._model_registry.cooldown_manager.record_success(
+                            resolved_model_name
+                        )
+                    break
+
+                # ── 失败 → 累积 + 记录冷却 ──
+                if resolved_model_name:
+                    failed_models.add(resolved_model_name)
+                    if self._model_registry:
+                        self._model_registry.cooldown_manager.record_failure(
+                            resolved_model_name
+                        )
+
+                if not model_chain or not self._model_registry:
+                    break
+
+                remaining = [m for m in model_chain if m not in failed_models]
+
+                if not remaining:
+                    # 链中所有模型都已尝试并失败
+                    await reply_callback(
+                        chat_id, "所有模型均不可用", reply_to, is_group,
+                    )
+                    return False
+
+                _log.warning(
+                    f"模型 [{resolved_model_name}] 失败，从剩余链重新解析: {remaining}"
                 )
-            else:
-                current_model_name = None
-                message, usage = await self.ai_service.chat_completion_with_tools(
-                    messages=messages,
-                    tools=tools,
+                new_resolved = await self._model_registry.resolve_model_chain(remaining)
+                if new_resolved:
+                    resolved_model_name, resolved_service = new_resolved
+                    continue
+
+                # 剩余链全在冷却：走完整 fallback 链做最后一次兜底
+                message, usage, fb_name = await self._model_registry.chat_with_fallback(
+                    remaining, messages, tools,
                 )
+                if fb_name:
+                    resolved_model_name = fb_name
+                    resolved_service = self._model_registry.get(fb_name)
+                current_model_name = fb_name
+                break
 
             model_for_cost = current_model_name or self.ai_service.model
             if usage and self.cost_tracker:
