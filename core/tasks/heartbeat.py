@@ -50,6 +50,8 @@ class HeartbeatManager:
         agent_engine: Any = None,
         heartbeat_path: str = "",
         context_manager: Any = None,
+        system_events: Any = None,
+        task_manager: Any = None,
     ):
         self._enabled = config.get("enabled", False)
         self._every_minutes = config.get("every", 30)
@@ -80,6 +82,8 @@ class HeartbeatManager:
         self._api = api_client
         self._agent_engine = agent_engine
         self._context_manager = context_manager
+        self._system_events = system_events
+        self._task_manager = task_manager
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -167,6 +171,12 @@ class HeartbeatManager:
         if not self._agent_engine:
             _log.warning("心跳跳过：AgentEngine 未就绪")
             return False, None
+
+        # 自动心跳：无待办事项则跳过
+        if not manual_prompt:
+            if not self._has_pending_events() and not self._has_pending_tasks():
+                _log.debug("心跳跳过：无待办事项")
+                return False, None
 
         hb_content = await self._load_heartbeat_content(manual_prompt)
         tz_name = "CST (UTC+8)"
@@ -281,6 +291,21 @@ class HeartbeatManager:
             return False
         elapsed = time.time() - last_time
         return elapsed < self._busy_idle_minutes * 60
+
+    def _has_pending_events(self) -> bool:
+        return bool(self._system_events and self._system_events.has_events("heartbeat:events"))
+
+    def _has_pending_tasks(self) -> bool:
+        if not self._task_manager:
+            return False
+        from core.tasks.models import TaskStatus
+        failed = self._task_manager.list_tasks(limit=1, status=TaskStatus.FAILED)
+        if failed:
+            return True
+        running = self._task_manager.list_tasks(limit=1, status=TaskStatus.RUNNING)
+        if running:
+            return True
+        return False
 
     def _should_suppress(self, text: str) -> bool:
         """检查是否应抑制本次通知（同文本 + 冷却期）。
