@@ -36,7 +36,6 @@ def _bootstrap():
 # ── 兼容层：旧代码通过 from core.tools.impl import _DEPS, _TOOL_MAP 引用 ──
 _DEPS = registry._deps
 _TOOL_MAP = registry._tools
-_HEARTBEAT_RESPONSE: dict = {}
 
 
 def inject_deps(**deps):
@@ -62,12 +61,6 @@ def specs_by_names(names: set[str]) -> list[dict]:
 
 def get_entry(name: str) -> ToolEntry | None:
     return registry.get(name)
-
-
-def consume_heartbeat_response() -> dict:
-    resp = dict(_HEARTBEAT_RESPONSE)
-    _HEARTBEAT_RESPONSE.clear()
-    return resp
 
 
 _bootstrap()

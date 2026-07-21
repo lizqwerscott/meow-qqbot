@@ -11,6 +11,7 @@
 
 import asyncio
 import logging
+import re as _re
 import time
 from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -23,7 +24,7 @@ from core.message import InputMessage, MessageType
 from core.managers.nickname_manager import NicknameManager
 from core.managers.template_manager import TemplateManager
 from core.tools import SubAgentManager
-from core.tools.impl import inject_deps, consume_heartbeat_response, _HEARTBEAT_RESPONSE
+from core.tools.impl import inject_deps, get_dep
 from core.learners.base import sanitize_for_learners
 from core.learners.orchestrator import LearningOrchestrator
 
@@ -678,6 +679,7 @@ class AgentEngine:
         model_chain: Optional[List[str]] = None,
         chat_id: Optional[str] = None,
         system_event_key: str = "heartbeat:events",
+        timeout: int = 120,
     ) -> tuple[bool, str | None]:
         """执行心跳检查的工具调用循环。
 
@@ -714,6 +716,9 @@ class AgentEngine:
 
         msg_id = f"hb_{int(time.time())}"
 
+        hb_resp: dict = {}
+        inject_deps(_heartbeat_response=hb_resp)
+
         try:
             messages, tools_to_use = await self.prompt_builder.build_heartbeat_messages(
                 prompt=prompt,
@@ -724,30 +729,29 @@ class AgentEngine:
                 system_event_key=system_event_key,
             )
 
-            _HEARTBEAT_RESPONSE.clear()
-
-            await self.tool_loop.run(
-                messages=messages,
-                tools=tools_to_use,
-                chat_id=chat_id,
-                is_group=False,
-                reply_to=msg_id,
-                reply_callback=capturing_reply_callback,
-                sender_id="system",
-                get_user_nickname=lambda _: "系统",
-                model_chain=model_chain,
+            await asyncio.wait_for(
+                self.tool_loop.run(
+                    messages=messages,
+                    tools=tools_to_use,
+                    chat_id=chat_id,
+                    is_group=False,
+                    reply_to=msg_id,
+                    reply_callback=capturing_reply_callback,
+                    sender_id="system",
+                    get_user_nickname=lambda _: "系统",
+                    model_chain=model_chain,
+                ),
+                timeout=timeout,
             )
 
             # 优先检查 heartbeat_respond 工具响应
-            hb_resp = consume_heartbeat_response()
             if hb_resp.get("notify"):
                 text = hb_resp.get("notification_text", "").strip()
                 if text:
                     _log.info(f"心跳 heartbeat_respond: 需要通知")
                     return True, text
-                else:
-                    _log.info("心跳 heartbeat_respond: notify=true 但内容为空，视为不通知")
-                    return False, None
+                _log.info("心跳 heartbeat_respond: notify=true 但内容为空，视为不通知")
+                return False, None
 
             if hb_resp:
                 _log.debug("心跳 heartbeat_respond: notify=false，静默")
@@ -756,18 +760,18 @@ class AgentEngine:
             # 降级回退：解析文本 HEARTBEAT_OK
             ack_max_chars = 60
             for reply in captured_replies:
-                stripped = reply.strip()
-                if stripped.startswith("HEARTBEAT_OK"):
-                    stripped = stripped[len("HEARTBEAT_OK"):].strip()
-                elif stripped.endswith("HEARTBEAT_OK"):
-                    stripped = stripped[:-len("HEARTBEAT_OK")].strip()
-
-                if not stripped or len(stripped) <= ack_max_chars:
+                # 去空白后检查 HEARTBEAT_OK（出现在任意位置都算 ack）
+                compact = _re.sub(r"\s+", "", reply)
+                ok_pos = compact.find("HEARTBEAT_OK")
+                if ok_pos >= 0:
+                    remaining = compact[:ok_pos] + compact[ok_pos + len("HEARTBEAT_OK"):]
+                else:
+                    remaining = compact
+                if not remaining or len(remaining) <= ack_max_chars:
                     _log.debug("心跳 ack（文本 <= %d 字），静默", ack_max_chars)
                     return False, None
-
                 _log.info(f"心跳文本降级: 需要通知")
-                return True, stripped
+                return True, reply.strip()
 
             _log.debug("心跳无任何响应，静默")
             return False, None
@@ -775,9 +779,14 @@ class AgentEngine:
         except asyncio.CancelledError:
             _log.warning("心跳检查被取消")
             return False, None
+        except asyncio.TimeoutError:
+            _log.warning(f"心跳检查超时 ({timeout}s)")
+            return True, f"心跳检查超时（{timeout}秒），请检查 AI 服务状态。"
         except Exception as e:
             _log.error(f"心跳检查异常: {e}", exc_info=True)
             return False, None
+        finally:
+            inject_deps(_heartbeat_response=None)
 
     # ── 统计 ──
 

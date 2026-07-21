@@ -2,19 +2,25 @@ import json
 import logging
 
 from core.tools._types import ToolEntry, ToolResult, ToolContext
-from core.tools.impl import _HEARTBEAT_RESPONSE
+from core.tools.impl import get_dep
 
 _log = logging.getLogger(__name__)
 
 
 async def _heartbeat_respond(args: dict, ctx: ToolContext) -> ToolResult:
-    _HEARTBEAT_RESPONSE.update({
-        "notify": bool(args.get("notify", False)),
-        "notification_text": (args.get("notification_text") or "").strip(),
-    })
+    hb_resp = get_dep("_heartbeat_response")
+    if hb_resp is not None:
+        hb_resp["notify"] = bool(args.get("notify", False))
+        hb_resp["notification_text"] = (args.get("notification_text") or "").strip()
+    else:
+        _log.warning(
+            "heartbeat_respond 在非心跳上下文中被调用，响应将被丢弃: "
+            f"notify={bool(args.get('notify', False))} "
+            f"text={(args.get('notification_text') or '')[:80]!r}"
+        )
     _log.info(
-        f"心跳响应: notify={_HEARTBEAT_RESPONSE['notify']} "
-        f"text={_HEARTBEAT_RESPONSE['notification_text'][:80]!r}"
+        f"心跳响应: notify={bool(args.get('notify', False))} "
+        f"text={(args.get('notification_text') or '')[:80]!r}"
     )
     return ToolResult(content=json.dumps({
         "success": True,
