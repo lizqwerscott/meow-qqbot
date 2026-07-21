@@ -400,6 +400,9 @@ async def main() -> None:
         # 投递回调（将任务执行结果发回 QQ 聊天）
         async def _deliver(chat_id, content, message_id, is_group):
             try:
+                actual = context_manager.get_chat_type(chat_id)
+                if actual is not None:
+                    is_group = actual
                 await engine.send_proactive(chat_id, content, is_group=is_group)
             except Exception as e:
                 _log.error(f"投递任务结果失败: {e}")

@@ -492,6 +492,8 @@ class AgentEngine:
         is_group = input_message.is_group
         user_nickname = get_user_nickname(input_message.sender_id)
 
+        await self.context_manager.record_chat_type(chat_id, is_group)
+
         # 1-5. Prompt 组装（含 compaction + 工具确定 + 记忆注入）
         messages, tools_to_use = await self.prompt_builder.build(
             chat_id=chat_id,
@@ -637,6 +639,8 @@ class AgentEngine:
             _log.warning("reply_callback 未注入，无法投递 AI 回应")
             return
 
+        is_group = self.context_manager.get_chat_type(chat_id) or False
+
         import time as _time
 
         msg = InputMessage(
@@ -644,14 +648,14 @@ class AgentEngine:
             sender_id="system",
             chat_id=chat_id,
             content="[系统事件]",
-            is_group=False,
+            is_group=is_group,
             is_at_mention=False,
         )
 
         try:
             messages, tools_to_use = await self.prompt_builder.build(
                 chat_id=chat_id,
-                is_group=True,
+                is_group=is_group,
                 user_nickname="系统",
                 sender_id="system",
                 input_message=msg,
@@ -667,7 +671,7 @@ class AgentEngine:
                 messages=messages,
                 tools=tools_to_use or [],
                 chat_id=chat_id,
-                is_group=False,
+                is_group=is_group,
                 reply_to="",
                 reply_callback=self._reply_callback,
                 sender_id="system",

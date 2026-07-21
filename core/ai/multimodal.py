@@ -8,6 +8,7 @@
 支持多模型 fallback：传入 AIService 列表，按顺序调用直到成功。
 """
 
+import asyncio
 import base64
 import hashlib
 import logging
@@ -136,7 +137,7 @@ class MultimodalService:
             qualified_name = self._model_names[idx] if idx < len(self._model_names) else ""
 
             # 冷却检查
-            if self._cooldown and self._cooldown.is_cooled_down(qualified_name):
+            if self._cooldown and await self._cooldown.is_cooled_down(qualified_name):
                 _log.info(
                     f"VLM 模型 [{qualified_name}] 处于冷却期，跳过"
                 )
@@ -162,19 +163,20 @@ class MultimodalService:
                 )
                 if response.choices and response.choices[0].message.content:
                     if self._cooldown and qualified_name:
-                        self._cooldown.record_success(qualified_name)
+                        await self._cooldown.record_success(qualified_name)
                     _log.info(
                         f"VLM 调用成功 (模型 [{qualified_name or svc.model}])"
                     )
                     return response.choices[0].message.content
-                if self._cooldown and qualified_name:
-                    self._cooldown.record_failure(qualified_name)
+                # 空结果不写入全局冷却
                 _log.warning(
                     f"VLM 返回空结果 (模型 [{qualified_name or svc.model}])"
                 )
             except Exception as e:
+                if isinstance(e, asyncio.CancelledError):
+                    raise
                 if self._cooldown and qualified_name:
-                    self._cooldown.record_failure(qualified_name)
+                    await self._cooldown.record_failure(qualified_name)
                 _log.warning(
                     f"VLM 调用失败 (模型 [{qualified_name or svc.model}], "
                     f"第 {idx + 1}/{len(self._services)} 个)",

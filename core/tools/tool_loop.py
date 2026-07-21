@@ -182,26 +182,31 @@ class ToolLoop:
                 svc = resolved_service or self.ai_service
                 current_model_name = resolved_model_name or None
 
+                was_exception = False
                 try:
                     message, usage = await svc.chat_completion_with_tools(
                         messages=messages, tools=tools,
                     )
                 except Exception as e:
+                    if isinstance(e, asyncio.CancelledError):
+                        raise
+                    was_exception = True
                     _log.warning(f"模型 [{current_model_name}] 调用异常: {e}")
                     message, usage = None, None
 
                 if message is not None:
                     if resolved_model_name and self._model_registry:
-                        self._model_registry.cooldown_manager.record_success(
+                        await self._model_registry.cooldown_manager.record_success(
                             resolved_model_name
                         )
                     break
 
-                # ── 失败 → 累积 + 记录冷却 ──
+                # ── 失败 → 累积 ──
                 if resolved_model_name:
                     failed_models.add(resolved_model_name)
-                    if self._model_registry:
-                        self._model_registry.cooldown_manager.record_failure(
+                    # 只有服务端异常才写入全局冷却（空结果不污染其他会话）
+                    if was_exception and self._model_registry:
+                        await self._model_registry.cooldown_manager.record_failure(
                             resolved_model_name
                         )
 
@@ -381,6 +386,8 @@ class ToolLoop:
                     messages=messages,
                     get_user_nickname=get_user_nickname,
                 )
+                if steer_msgs:
+                    suppress_reply = False  # 新用户消息注入后，重置静默标志
                 messages.extend(steer_msgs)
 
         return sent_emoji
