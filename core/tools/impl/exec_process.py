@@ -9,7 +9,7 @@ import logging
 
 from core.tools._types import ToolEntry, ToolResult, ToolContext
 from core.tools.impl import _DEPS
-from core.tools.security import parse_command_safe, check_command_denied
+from core.tools.security import parse_command_safe, check_command_denied, sanitize_env
 
 _log = logging.getLogger(__name__)
 
@@ -84,17 +84,19 @@ async def _exec(args: dict, ctx: ToolContext) -> ToolResult:
 
     effective_timeout = min(timeout or 60, 120)
     try:
+        env = sanitize_env()
         result = await asyncio.wait_for(
-            asyncio.to_thread(
-                subprocess.run,
-                parts,
-                shell=False,
-                capture_output=True,
-                text=True,
-                timeout=effective_timeout,
-            ),
-            timeout=effective_timeout + 5,
-        )
+                asyncio.to_thread(
+                    subprocess.run,
+                    parts,
+                    shell=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=effective_timeout,
+                    env=env,
+                ),
+                timeout=effective_timeout + 5,
+            )
         stdout = result.stdout[-100000:] if len(result.stdout) > 100000 else result.stdout
         stderr = result.stderr[-100000:] if len(result.stderr) > 100000 else result.stderr
         return ToolResult(content=json.dumps({
