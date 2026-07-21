@@ -88,7 +88,6 @@ async def _mark_important(args: dict, ctx: ToolContext) -> ToolResult:
                     session_id=ctx.chat_id,
                     sender_id=ctx.sender_id,
                     content=profile_msg,
-                    role="user",
                     context="用户自我描述",
                     timestamp=None,
                 )
@@ -101,7 +100,6 @@ async def _mark_important(args: dict, ctx: ToolContext) -> ToolResult:
             session_id=ctx.chat_id,
             sender_id=ctx.sender_id,
             content=f"[重要事件] {summary}",
-            role="user",
             context="重要事件记录",
             timestamp=None,
         )
