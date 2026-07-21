@@ -716,6 +716,18 @@ class ChatContextManager:
         self._ctx_lock = asyncio.Lock()  # 保护 _chat_locks 字典
         self._ctx_sync_lock = threading.Lock()  # 保护 self.contexts 字典
         self._chat_locks: Dict[str, asyncio.Lock] = {}  # 每 chat 操作锁
+        self._chat_types_path: Optional[Path] = None
+        if cache_dir:
+            self._chat_types_path = Path(cache_dir).parent / "chat_types.json"
+        self._chat_types: Dict[str, bool] = {}
+        self._chat_types_lock = asyncio.Lock()
+        if self._chat_types_path and self._chat_types_path.exists():
+            try:
+                data = json.loads(self._chat_types_path.read_text())
+                self._chat_types = {k: bool(v) for k, v in data.items()}
+                _log.info(f"已加载 {len(self._chat_types)} 个聊天类型记录")
+            except Exception:
+                _log.warning("chat_types.json 加载失败，使用空映射")
 
     async def _get_chat_lock(self, chat_id: str) -> asyncio.Lock:
         async with self._ctx_lock:
@@ -739,6 +751,27 @@ class ChatContextManager:
 
     async def get_context_async(self, chat_id: str) -> ChatContext:
         return self.get_context(chat_id)
+
+    # ── 聊天类型识别（持久化） ──
+
+    async def record_chat_type(self, chat_id: str, is_group: bool) -> None:
+        """记录 chat_id 对应的聊天类型（群聊/私聊），持久化到 chat_types.json。"""
+        async with self._chat_types_lock:
+            if self._chat_types.get(chat_id) == is_group:
+                return
+            self._chat_types[chat_id] = is_group
+            await self._save_chat_types()
+
+    def get_chat_type(self, chat_id: str) -> Optional[bool]:
+        """返回 chat_id 对应的聊天类型，None 表示未知。"""
+        return self._chat_types.get(chat_id)
+
+    async def _save_chat_types(self) -> None:
+        if not self._chat_types_path:
+            return
+        self._chat_types_path.parent.mkdir(parents=True, exist_ok=True)
+        data = json.dumps(self._chat_types, ensure_ascii=False)
+        await asyncio.to_thread(self._chat_types_path.write_text, data)
 
     def add_user_message(
         self,

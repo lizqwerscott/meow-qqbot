@@ -4,6 +4,7 @@
 支持按组名或全限定模型名查找，失败自动 fallback。
 """
 
+import asyncio
 import logging
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -153,7 +154,7 @@ class ModelRegistry:
         返回 (qualified_name, AIService) 或 None。
         """
         for qualified_name in model_chain:
-            if self._cooldown.is_cooled_down(qualified_name):
+            if await self._cooldown.is_cooled_down(qualified_name):
                 _log.info(f"模型链解析: [{qualified_name}] 冷却中，跳过")
                 continue
             svc = self._services.get(qualified_name)
@@ -204,7 +205,7 @@ class ModelRegistry:
         last_error = None
         for qualified_name in model_chain:
             # 冷却检查：跳过正在冷却的模型
-            if self._cooldown.is_cooled_down(qualified_name):
+            if await self._cooldown.is_cooled_down(qualified_name):
                 _log.info(
                     f"模型 [{qualified_name}] 处于冷却期，跳过"
                 )
@@ -222,12 +223,12 @@ class ModelRegistry:
                     max_tokens=max_tokens,
                 )
                 if result is not None:
-                    self._cooldown.record_success(qualified_name)
+                    await self._cooldown.record_success(qualified_name)
                     _log.debug(f"模型 [{qualified_name}] 调用成功")
                     return result, usage, qualified_name
 
                 last_error = "返回空结果"
-                self._cooldown.record_failure(qualified_name)
+                # 空结果不写入全局冷却（由会话局部追踪）
                 if hasattr(svc, "quota_info") and svc.quota_info["exhausted"]:
                     _log.warning(
                         f"模型 [{qualified_name}] 额度已耗尽，尝试 fallback..."
@@ -237,8 +238,11 @@ class ModelRegistry:
                         f"模型 [{qualified_name}] 返回空结果，尝试 fallback..."
                     )
             except Exception as e:
+                if isinstance(e, asyncio.CancelledError):
+                    raise
                 last_error = str(e)
-                self._cooldown.record_failure(qualified_name)
+                # 服务端异常写入全局冷却
+                await self._cooldown.record_failure(qualified_name)
                 _log.warning(
                     f"模型 [{qualified_name}] 调用失败: {e}，尝试 fallback..."
                 )
@@ -253,9 +257,9 @@ class ModelRegistry:
         """暴露冷却管理器，供 MultimodalService 等外部使用。"""
         return self._cooldown
 
-    def get_cooldown_states(self) -> dict:
+    async def get_cooldown_states(self) -> dict:
         """获取所有模型的冷却状态。"""
-        return self._cooldown.get_all_states()
+        return await self._cooldown.get_all_states()
 
     async def simple_chat(
         self,
@@ -281,7 +285,7 @@ class ModelRegistry:
             return None
 
         # 冷却检查
-        if self._cooldown.is_cooled_down(qualified_name):
+        if await self._cooldown.is_cooled_down(qualified_name):
             _log.info(f"模型 [{qualified_name}] 处于冷却期，simple_chat 跳过")
             return None
 
@@ -291,12 +295,14 @@ class ModelRegistry:
                 max_tokens=max_tokens,
             )
             if result is not None:
-                self._cooldown.record_success(qualified_name)
+                await self._cooldown.record_success(qualified_name)
             else:
-                self._cooldown.record_failure(qualified_name)
+                pass  # 空结果不写入全局冷却
             return result
         except Exception as e:
-            self._cooldown.record_failure(qualified_name)
+            if isinstance(e, asyncio.CancelledError):
+                raise
+            await self._cooldown.record_failure(qualified_name)
             _log.warning(f"模型 [{qualified_name}] simple_chat 失败: {e}")
             return None
 

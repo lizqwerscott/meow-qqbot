@@ -180,6 +180,7 @@ class CronCommand:
                 "cron_expression": cron_expr,
                 "prompt": prompt,
                 "delivery_channel": input_message.chat_id,
+                "is_group": input_message.is_group,
                 "session_mode": session_mode,
                 "custom_session_id": custom_session_id,
             }
