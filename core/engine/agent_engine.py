@@ -703,20 +703,20 @@ class AgentEngine:
                 return False, None
 
             # 降级回退：解析文本 HEARTBEAT_OK
+            ack_max_chars = 60
             for reply in captured_replies:
                 stripped = reply.strip()
-                if stripped == "HEARTBEAT_OK":
-                    _log.debug("心跳 HEARTBEAT_OK（文本降级），静默")
-                    return False, None
-
                 if stripped.startswith("HEARTBEAT_OK"):
                     stripped = stripped[len("HEARTBEAT_OK"):].strip()
-                if stripped.endswith("HEARTBEAT_OK"):
+                elif stripped.endswith("HEARTBEAT_OK"):
                     stripped = stripped[:-len("HEARTBEAT_OK")].strip()
 
-                if stripped and len(stripped) >= 5:
-                    _log.info(f"心跳文本降级: 需要通知")
-                    return True, stripped
+                if not stripped or len(stripped) <= ack_max_chars:
+                    _log.debug("心跳 ack（文本 <= %d 字），静默", ack_max_chars)
+                    return False, None
+
+                _log.info(f"心跳文本降级: 需要通知")
+                return True, stripped
 
             _log.debug("心跳无任何响应，静默")
             return False, None

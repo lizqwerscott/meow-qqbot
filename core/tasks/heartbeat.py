@@ -88,6 +88,9 @@ class HeartbeatManager:
         self._session = config.get("session", "isolated")
         self._system_prompt_mode = config.get("system_prompt", "minimal")
         self._config_prompt = config.get("prompt", "")
+        self._last_notification_text: str = ""
+        self._last_notification_sent_at: float = 0.0
+        self._notification_cooldown_hours: float = config.get("notification_cooldown_hours", 12.0)
 
     async def start(self):
         if not self._enabled:
@@ -197,8 +200,13 @@ class HeartbeatManager:
             self._last_heartbeat_time = time.time()
 
             if should_notify and text:
-                await self._deliver_to_admin(text)
-                _log.info(f"心跳提醒已投递: text={text[:80]!r}")
+                if self._should_suppress(text):
+                    _log.info("心跳抑制：与上次通知相同（冷却期内）")
+                else:
+                    await self._deliver_to_admin(text)
+                    self._last_notification_text = text
+                    self._last_notification_sent_at = time.time()
+                    _log.info(f"心跳提醒已投递: text={text[:80]!r}")
             else:
                 _log.debug("心跳无需投递")
 
@@ -273,6 +281,24 @@ class HeartbeatManager:
             return False
         elapsed = time.time() - last_time
         return elapsed < self._busy_idle_minutes * 60
+
+    def _should_suppress(self, text: str) -> bool:
+        """检查是否应抑制本次通知（同文本 + 冷却期）。
+
+        Args:
+            text: 本次要通知的文本（来自 heartbeat_respond 的原始文本）
+
+        Returns:
+            True 表示抑制，不投递
+        """
+        if not self._last_notification_text or self._last_notification_sent_at <= 0:
+            return False
+        if text != self._last_notification_text:
+            return False
+        if self._notification_cooldown_hours <= 0:
+            return False
+        elapsed = time.time() - self._last_notification_sent_at
+        return elapsed < self._notification_cooldown_hours * 3600
 
     async def _deliver_to_admin(self, text: str):
         """发送心跳提醒给第一个管理员，同时写入 context_manager 保证反馈链路。"""
