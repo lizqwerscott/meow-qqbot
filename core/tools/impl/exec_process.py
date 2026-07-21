@@ -42,20 +42,43 @@ async def _exec(args: dict, ctx: ToolContext) -> ToolResult:
             ensure_ascii=False,
         ))
 
-    reason = check_command_denied(parts)
-    if reason:
-        _log.warning("exec 被拒绝: %s", reason)
-        return ToolResult(content=json.dumps(
-            {"error": reason}, ensure_ascii=False,
-        ))
+    approval_mgr = _DEPS.get("approval_manager")
 
-    if role != "admin" and perm:
-        reason = perm.check_command_allowed(command, parts, role)
+    # 检查审批白名单（管理员私聊 + 始终允许的跳过安全检查）
+    if approval_mgr and approval_mgr.check_whitelist("exec", command):
+        _log.info("exec 命令命中审批白名单: %s", command[:80])
+    else:
+        reason = check_command_denied(parts)
         if reason:
-            _log.warning("exec 白名单拒绝: %s", reason)
-            return ToolResult(content=json.dumps(
-                {"error": reason}, ensure_ascii=False,
-            ))
+            _log.warning("exec 被拒绝: %s", reason)
+            # 管理员私聊 → 弹出审批
+            if approval_mgr and role == "admin" and not ctx.is_group:
+                result = await approval_mgr.request_approval(
+                    chat_id=ctx.chat_id,
+                    tool_name="exec",
+                    reason=reason,
+                    details=command,
+                )
+                if result == "deny":
+                    return ToolResult(content=json.dumps(
+                        {"error": f"审批已拒绝: {reason}"}, ensure_ascii=False,
+                    ))
+                if result == "timeout":
+                    return ToolResult(content=json.dumps(
+                        {"error": f"审批超时: {reason}"}, ensure_ascii=False,
+                    ))
+            else:
+                return ToolResult(content=json.dumps(
+                    {"error": reason}, ensure_ascii=False,
+                ))
+
+        if role != "admin" and perm:
+            reason = perm.check_command_allowed(command, parts, role)
+            if reason:
+                _log.warning("exec 白名单拒绝: %s", reason)
+                return ToolResult(content=json.dumps(
+                    {"error": reason}, ensure_ascii=False,
+                ))
 
     if background:
         try:

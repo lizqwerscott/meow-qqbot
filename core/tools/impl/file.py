@@ -22,6 +22,24 @@ def _is_admin_private(ctx: ToolContext) -> bool:
     return ctx.sender_id in admin_ids
 
 
+async def _approve_path_access(ctx: ToolContext, file_path: str, tool_name: str, reason: str):
+    """If admin private chat, try whitelist then approval for out-of-sandbox path.
+    Returns resolved Path if allowed, None if denied.
+    """
+    if not _is_admin_private(ctx):
+        return None
+    mgr = _DEPS.get("approval_manager")
+    if not mgr:
+        return None
+    resolved = Path(file_path).resolve()
+    if mgr.check_whitelist(tool_name, str(resolved)):
+        return resolved
+    result = await mgr.request_approval(ctx.chat_id, tool_name, reason, str(resolved))
+    if result in ("allow-once", "allow-always"):
+        return resolved
+    return None
+
+
 def _sandbox_target(is_group: bool, chat_id: str, rel_path: str, admin_override: bool = False) -> Path:
     wm = _DEPS.get("workspace_manager")
     if not wm:
@@ -50,7 +68,11 @@ async def _apply_patch(args: dict, ctx: ToolContext) -> ToolResult:
         try:
             target = wm.resolve_safe_path(ctx.is_group, ctx.chat_id, path, admin_override=admin_override)
         except ValueError as e:
-            return ToolResult(content=json.dumps({"error": f"路径非法 ({path}): {e}"}, ensure_ascii=False))
+            approved = await _approve_path_access(ctx, path, "apply_patch", str(e))
+            if approved is not None:
+                target = approved
+            else:
+                return ToolResult(content=json.dumps({"error": f"路径非法 ({path}): {e}"}, ensure_ascii=False))
         if action.type == ActionType.ADD:
             target.parent.mkdir(parents=True, exist_ok=True)
             await asyncio.to_thread(target.write_text, action.content, encoding="utf-8")
@@ -85,7 +107,11 @@ async def _apply_patch(args: dict, ctx: ToolContext) -> ToolResult:
                 try:
                     dest = wm.resolve_safe_path(ctx.is_group, ctx.chat_id, action.move_path, admin_override=admin_override)
                 except ValueError as e:
-                    return ToolResult(content=json.dumps({"error": f"移动路径非法 ({action.move_path}): {e}"}, ensure_ascii=False))
+                    approved = await _approve_path_access(ctx, action.move_path, "apply_patch", str(e))
+                    if approved is not None:
+                        dest = approved
+                    else:
+                        return ToolResult(content=json.dumps({"error": f"移动路径非法 ({action.move_path}): {e}"}, ensure_ascii=False))
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 summary["moved"].append(f"{path} → {action.move_path}")
             await asyncio.to_thread(dest.write_text, new_content, encoding="utf-8")
@@ -114,10 +140,16 @@ async def _read_file(args: dict, ctx: ToolContext) -> ToolResult:
     if not file_path:
         return ToolResult(content=json.dumps({"error": "请提供 file_path"}, ensure_ascii=False))
     admin_override = _is_admin_private(ctx)
+    approved_outside_sandbox = False
     try:
         target = wm.resolve_safe_path(ctx.is_group, ctx.chat_id, file_path, admin_override=admin_override)
     except ValueError as e:
-        return ToolResult(content=json.dumps({"error": str(e)}, ensure_ascii=False))
+        approved = await _approve_path_access(ctx, file_path, "read_file", str(e))
+        if approved is not None:
+            target = approved
+            approved_outside_sandbox = True
+        else:
+            return ToolResult(content=json.dumps({"error": str(e)}, ensure_ascii=False))
     if not target.exists():
         return ToolResult(content=json.dumps({"error": f"路径不存在: {file_path}"}, ensure_ascii=False))
 
@@ -127,14 +159,17 @@ async def _read_file(args: dict, ctx: ToolContext) -> ToolResult:
             items = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
         except PermissionError:
             return ToolResult(content=json.dumps({"error": "无权限访问该目录"}, ensure_ascii=False))
-        sandbox = wm.root_dir() if admin_override else wm.sandbox_dir(ctx.is_group, ctx.chat_id)
         files = []
         dirs = []
         for item in items:
-            try:
-                rel = str(item.relative_to(sandbox))
-            except ValueError:
-                continue
+            if approved_outside_sandbox:
+                rel = str(item)
+            else:
+                sandbox = wm.root_dir() if admin_override else wm.sandbox_dir(ctx.is_group, ctx.chat_id)
+                try:
+                    rel = str(item.relative_to(sandbox))
+                except ValueError:
+                    continue
             if item.is_dir():
                 dirs.append(rel + "/")
             else:
@@ -170,7 +205,11 @@ async def _write_file(args: dict, ctx: ToolContext) -> ToolResult:
     try:
         target = wm.resolve_safe_path(ctx.is_group, ctx.chat_id, file_path, admin_override=admin_override)
     except ValueError as e:
-        return ToolResult(content=json.dumps({"error": str(e)}, ensure_ascii=False))
+        approved = await _approve_path_access(ctx, file_path, "write_file", str(e))
+        if approved is not None:
+            target = approved
+        else:
+            return ToolResult(content=json.dumps({"error": str(e)}, ensure_ascii=False))
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         await asyncio.to_thread(target.write_text, content, encoding="utf-8")
@@ -197,7 +236,11 @@ async def _edit_file(args: dict, ctx: ToolContext) -> ToolResult:
     try:
         target = wm.resolve_safe_path(ctx.is_group, ctx.chat_id, file_path, admin_override=admin_override)
     except ValueError as e:
-        return ToolResult(content=json.dumps({"error": str(e)}, ensure_ascii=False))
+        approved = await _approve_path_access(ctx, file_path, "edit_file", str(e))
+        if approved is not None:
+            target = approved
+        else:
+            return ToolResult(content=json.dumps({"error": str(e)}, ensure_ascii=False))
     if not target.exists():
         return ToolResult(content=json.dumps({"error": f"文件不存在: {file_path}"}, ensure_ascii=False))
     try:

@@ -47,9 +47,11 @@ class ApprovalTestCommand:
             timeout_sec=60,
         )
 
-        # 记录审批以便按钮回调处理
-        if self.bot_engine:
-            self.bot_engine.pending_approvals[session_key] = (chat_type, chat_id)
+        # 注册到审批管理器（以便按钮回调能识别 session_key）
+        if self.bot_engine and self.bot_engine.approval_manager:
+            from asyncio import get_event_loop
+            future = get_event_loop().create_future()
+            self.bot_engine.approval_manager._pending[session_key] = future
 
         approval_sender = ApprovalSender(self.api, log_tag="ApprovalTest")
         await approval_sender.send(
