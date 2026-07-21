@@ -473,17 +473,30 @@ class BotEngine:
                 return await self.api.post_group_message(chat_id, msg, keyboard=keyboard)
             return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
 
-        return await self.api.send_text(
-            chat_type, chat_id, content,
-            reply_to=None,
-            markdown=markdown,
-        )
+        try:
+            return await self.api.send_text(
+                chat_type, chat_id, content,
+                reply_to=None,
+                markdown=markdown,
+            )
+        except Exception:
+            if markdown:
+                _log.warning("主动消息 Markdown 发送失败，降级为纯文本重试")
+                return await self.api.send_text(
+                    chat_type, chat_id, content,
+                    reply_to=None,
+                    markdown=False,
+                )
+            raise
 
     async def _send_reply(
         self, chat_id: str, content: str, message_id: str, is_group: bool = False
     ) -> None:
         """发送回复——委托给 send_reply。"""
         try:
-            await self.send_reply(chat_id, content, message_id=message_id, is_group=is_group)
+            if not message_id:
+                await self.send_proactive(chat_id, content, is_group=is_group)
+            else:
+                await self.send_reply(chat_id, content, message_id=message_id, is_group=is_group)
         except Exception as e:
             _log.error("发送回复失败 [%s]: %s", chat_id, e)
