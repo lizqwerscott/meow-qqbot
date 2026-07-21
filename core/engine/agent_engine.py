@@ -513,6 +513,7 @@ class AgentEngine:
         is_group: bool = True,
         delivery_channel: str = "",
         reply_to_message_id: str = "",
+        tools_allow: Optional[List[str]] = None,
     ) -> tuple[Optional[str], Optional[str]]:
         """在独立会话中执行后台任务。
 
@@ -526,11 +527,10 @@ class AgentEngine:
             is_group: 来源聊天是否为群聊（影响工具如 send_emoji 的接口选择）
             delivery_channel: 真实聊天 ID，用于 send_emoji 等需要真实 chat_id 的工具
             reply_to_message_id: 创建任务时的原始消息 ID，用于构造 msg_id
+            tools_allow: 后台任务可用工具列表（None=默认，["*"]=全部，[]=仅announce）
 
         Returns:
             (result_text, error_text)
-            - result_text: AI 的最终文本回复
-            - error_text: 如果有错误则返回错误描述
         """
         _log.info(
             f"开始后台任务: chat_id={chat_id[:20]}.. prompt={prompt[:60]}"
@@ -577,6 +577,7 @@ class AgentEngine:
             messages, tools_to_use = await self.prompt_builder.build_task_messages(
                 chat_id=chat_id,
                 prompt=prompt,
+                tools_allow=tools_allow,
             )
 
             # 执行工具循环

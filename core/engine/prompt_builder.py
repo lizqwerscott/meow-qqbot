@@ -10,7 +10,7 @@ import json
 import logging
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Set
 
 from core.message import InputMessage
 from core.tools.definitions import (
@@ -29,6 +29,9 @@ from core.tools.definitions import (
     LIST_CRON_JOBS_TOOL,
     SUB_AGENT_TOOLS,
     TTS_TOOLS,
+    TOOL_DEFINITION_MAP,
+    TOOL_SHORT_DESCRIPTIONS,
+    CRON_ALLOWED_TOOL_NAMES,
 )
 
 _log = logging.getLogger(__name__)
@@ -370,36 +373,127 @@ class PromptBuilder:
 
         return messages, tools_to_use
 
+    @staticmethod
+    def _resolve_task_tools(
+        tools_allow: Optional[List[str]],
+        *,
+        has_hindsight: bool = False,
+        has_workspace: bool = False,
+        has_skills: bool = False,
+    ) -> Tuple[Optional[List[dict]], str]:
+        """根据 tools_allow 解析后台任务的工具集和描述文本。
+
+        Args:
+            tools_allow: 工具允许列表
+                None = 默认工具集（announce + 记忆 + 文件）
+                ["*"] = 所有 cron 允许的工具
+                [工具名1, ...] = 指定工具列表
+                [] = 仅 announce
+            has_hindsight: 是否有记忆系统
+            has_workspace: 是否有工作区
+            has_skills: 是否有技能系统
+
+        Returns:
+            (tools_definitions, tool_descriptions_text)
+        """
+        # 解析工具名称列表
+        selected: Set[str] = set()
+
+        if tools_allow is None:
+            # 默认：announce + search_user + 记忆 + 文件
+            selected.add("announce")
+            selected.add("search_user")
+            if has_hindsight:
+                selected.update({"search_memory", "search_relation", "mark_important"})
+            if has_workspace:
+                selected.update({
+                    "read_file", "write_file", "edit_file",
+                    "list_files", "search_files", "apply_patch",
+                })
+        elif tools_allow == ["*"]:
+            # 所有 cron 允许的工具（按条件过滤）
+            selected.add("announce")
+            selected.add("search_user")
+            if has_hindsight:
+                selected.update({"search_memory", "search_relation", "mark_important"})
+            if has_workspace:
+                selected.update({
+                    "read_file", "write_file", "edit_file",
+                    "list_files", "search_files", "apply_patch",
+                })
+            selected.add("execute_command")
+            if has_skills:
+                selected.update({"view_skill", "execute_skill", "rescan_skills"})
+        elif tools_allow == []:
+            # 仅 announce
+            selected.add("announce")
+        else:
+            # 指定工具列表（非法工具名已在 create_cron_job 中校验，此处静默过滤）
+            for n in tools_allow:
+                if n in CRON_ALLOWED_TOOL_NAMES:
+                    selected.add(n)
+            # 检查条件依赖
+            memory_tools = {"search_memory", "search_relation", "mark_important"}
+            file_tools = {"read_file", "write_file", "edit_file", "list_files", "search_files", "apply_patch"}
+            skill_tools = {"view_skill", "execute_skill", "rescan_skills"}
+            if not has_hindsight:
+                selected -= memory_tools
+            if not has_workspace:
+                selected -= file_tools
+            if not has_skills:
+                selected -= skill_tools
+
+        # 保证 announce 始终可用
+        selected.add("announce")
+
+        # 构建工具定义列表
+        tools_defs: List[dict] = []
+        for name in sorted(selected):
+            defn = TOOL_DEFINITION_MAP.get(name)
+            if defn:
+                tools_defs.extend(defn)
+
+        # 构建描述文本
+        lines = ["可用工具："]
+        DEFAULT_ORDER = [
+            "announce", "search_user",
+            "search_memory", "search_relation", "mark_important",
+            "read_file", "write_file", "edit_file",
+            "list_files", "search_files", "apply_patch",
+            "execute_command", "view_skill", "execute_skill", "rescan_skills",
+        ]
+        # 防御：DEFAULT_ORDER 必须覆盖 CRON_ALLOWED_TOOL_NAMES
+        assert set(DEFAULT_ORDER) == CRON_ALLOWED_TOOL_NAMES, (
+            f"DEFAULT_ORDER 与 CRON_ALLOWED_TOOL_NAMES 不同步: "
+            f"多出={set(DEFAULT_ORDER) - CRON_ALLOWED_TOOL_NAMES}, "
+            f"缺少={CRON_ALLOWED_TOOL_NAMES - set(DEFAULT_ORDER)}"
+        )
+        for name in DEFAULT_ORDER:
+            if name in selected:
+                desc = TOOL_SHORT_DESCRIPTIONS.get(name, name)
+                lines.append(f"- {name}：{desc}")
+        desc_text = "\n".join(lines)
+
+        return (tools_defs or None), desc_text
+
     async def build_task_messages(
         self,
         chat_id: str,
         prompt: str,
+        tools_allow: Optional[List[str]] = None,
     ) -> Tuple[List[dict], Optional[List[dict]]]:
         """组装后台任务的 messages 列表（使用 task_chat.j2 模板）。
 
-        子智能体专用工具集：只保留搜索用户、记忆读写和文件操作。
+        工具集根据 tools_allow 动态决定。
         Returns:
             (messages, tools_to_use)
         """
-        tools_to_use: List[dict] = []
-        from core.tools.definitions import (
-            SEARCH_USER_TOOL,
-            SEARCH_MEMORY_TOOL,
-            SEARCH_RELATION_TOOL,
-            MARK_IMPORTANT_TOOL,
-            FILE_TOOLS,
-            ANNOUNCE_TOOL,
+        tools_to_use, tool_descriptions = self._resolve_task_tools(
+            tools_allow,
+            has_hindsight=bool(self.hindsight),
+            has_workspace=bool(self._workspace_manager),
+            has_skills=bool(self._skill_managers and self._skill_managers.has_skills),
         )
-
-        tools_to_use.extend(ANNOUNCE_TOOL)
-        tools_to_use.extend(SEARCH_USER_TOOL)
-        if self.hindsight:
-            tools_to_use.extend(SEARCH_MEMORY_TOOL)
-            tools_to_use.extend(SEARCH_RELATION_TOOL)
-            tools_to_use.extend(MARK_IMPORTANT_TOOL)
-        if self._workspace_manager:
-            tools_to_use.extend(FILE_TOOLS)
-        tools_to_use = tools_to_use or None
 
         # 渲染 task prompt
         from datetime import datetime, timezone, timedelta
@@ -407,6 +501,7 @@ class PromptBuilder:
         now = datetime.now(_tz)
         system_prompt = self.template_manager.get_task_chat_prompt(
             current_time=now.strftime("%Y-%m-%d %H:%M:%S (CST/UTC+8)"),
+            tool_descriptions=tool_descriptions,
         )
 
         messages: List[dict] = [

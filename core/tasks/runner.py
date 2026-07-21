@@ -19,7 +19,7 @@ import os
 import shlex
 import subprocess
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, List, Optional
 
 from .models import CronJob, SessionMode, TaskRecord, TaskStatus
 
@@ -63,7 +63,7 @@ class BackgroundTaskRunner:
     def set_execute_callback(self, cb: Callable) -> None:
         """注入任务执行回调。
 
-        cb: async (chat_id: str, prompt: str, sender_id: str, is_group: bool = True, delivery_channel: str = "", reply_to_message_id: str = "") -> (result: str | None, error: str | None)
+        cb: async (chat_id: str, prompt: str, sender_id: str, is_group: bool = True, delivery_channel: str = "", reply_to_message_id: str = "", tools_allow: list[str] | None = None) -> (result: str | None, error: str | None)
         """
         self._execute_prompt_cb = cb
 
@@ -81,6 +81,7 @@ class BackgroundTaskRunner:
         task: TaskRecord,
         timeout: float = 300.0,
         is_group: bool = True,
+        tools_allow: Optional[List[str]] = None,
     ) -> TaskRecord:
         """在独立 Session 中执行一个后台任务。
 
@@ -88,6 +89,7 @@ class BackgroundTaskRunner:
             task: 待执行的任务记录（状态应为 PENDING）
             timeout: 单个工具循环超时（秒）
             is_group: 来源聊天是否为群聊（影响工具如 send_emoji 的接口选择）
+            tools_allow: 可用的工具列表（None=默认，["*"]=全部，[]=仅announce）
 
         Returns:
             更新后的 TaskRecord
@@ -125,6 +127,7 @@ class BackgroundTaskRunner:
                     is_group=is_group,
                     delivery_channel=task.delivery_channel or "",
                     reply_to_message_id=task.reply_to_message_id,
+                    tools_allow=tools_allow,
                 ),
                 timeout=timeout,
             )
@@ -379,7 +382,11 @@ class BackgroundTaskRunner:
         elif job.payload_type == "system_event":
             task = await self._execute_system_event_payload(job, task)
         else:  # message（默认）
-            task = await self.run_task(task, timeout=timeout, is_group=job.is_group)
+            task = await self.run_task(
+                task, timeout=timeout,
+                is_group=job.is_group,
+                tools_allow=job.tools_allow,
+            )
 
         # 投递结果
         if job.enable_notify and job.delivery_channel and task and self._delivery_cb:

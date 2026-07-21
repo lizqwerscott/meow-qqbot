@@ -5,7 +5,7 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 from croniter import croniter
 
@@ -125,6 +125,13 @@ class CronJob:
     # 载荷类型
     payload_type: str = "message"           # message / command / system_event
     command: str = ""                       # shell 命令（command 载荷时使用）
+
+    # 工具权限
+    tools_allow: Optional[List[str]] = None
+    # None = 默认工具集（announce + 记忆 + 文件）
+    # ["*"] = 所有 cron 允许的工具
+    # [工具名1, 工具名2, ...] = 指定工具列表
+    # [] = 仅 announce
 
     # AI 选项
     model: Optional[str] = None             # 模型覆盖

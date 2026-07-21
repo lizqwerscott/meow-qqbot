@@ -216,6 +216,7 @@ class CronJobManager:
         command: str = "",
         model: Optional[str] = None,
         thinking: Optional[str] = None,
+        tools_allow: Optional[List[str]] = None,
     ) -> CronJob:
         if not cron_expression and at is None:
             raise ValueError("cron_expression 和 at 必须至少提供一个")
@@ -246,6 +247,7 @@ class CronJobManager:
             command=command,
             model=model,
             thinking=thinking,
+            tools_allow=tools_allow,
         )
         recalculate_next_run(job)
         await self._store.add_job(job)
