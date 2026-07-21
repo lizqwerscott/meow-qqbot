@@ -19,6 +19,23 @@ from core.tools.impl import execute as execute_tool
 
 _log = logging.getLogger(__name__)
 
+_SILENT_TOKENS = frozenset({"NO_REPLY", "HEARTBEAT_OK"})
+_ACK_MAX_CHARS = 100
+
+
+def _is_silent_reply_text(text: str) -> bool:
+    stripped = text.strip().strip("`").strip()
+    if not stripped:
+        return True
+    for token in _SILENT_TOKENS:
+        if stripped == token:
+            return True
+        if stripped.startswith(token):
+            remaining = stripped[len(token):].lstrip("`").strip("：:，, \t")
+            if not remaining or len(remaining) < _ACK_MAX_CHARS:
+                return True
+    return False
+
 
 def ensure_messages_consistent(messages: List[dict]) -> None:
     """清理 messages 中孤立的 tool_calls 并修复 tool 响应顺序。
@@ -133,6 +150,7 @@ class ToolLoop:
         """
         sent_emoji = False
         current_model_name: Optional[str] = None
+        suppress_reply = False
 
         if self._max_tool_rounds == -1:
             _rounds: Any = itertools.count()
@@ -254,13 +272,28 @@ class ToolLoop:
                     for tc in tool_calls
                 ]
 
+            # ── 预检：本轮是否有 heartbeat_respond(notify=false) ──
+            for tc in tool_calls:
+                if tc.function.name == "heartbeat_respond":
+                    try:
+                        tc_args = json.loads(tc.function.arguments)
+                        if not tc_args.get("notify", True):
+                            suppress_reply = True
+                    except json.JSONDecodeError:
+                        pass
+
             if response_text:
-                await reply_callback(
-                    chat_id=chat_id,
-                    content=response_text,
-                    message_id=reply_to,
-                    is_group=is_group,
-                )
+                if _is_silent_reply_text(response_text) or suppress_reply:
+                    _log.info(
+                        f"[工具循环 第{round_idx + 1}轮] 静默回复，跳过发送"
+                    )
+                else:
+                    await reply_callback(
+                        chat_id=chat_id,
+                        content=response_text,
+                        message_id=reply_to,
+                        is_group=is_group,
+                    )
 
             if response_text or tool_calls:
                 await self.context_manager.add_assistant_message_async(
@@ -308,6 +341,8 @@ class ToolLoop:
                     content = result.content
                     if result.sent_emoji:
                         sent_emoji = True
+                    if result.no_reply:
+                        suppress_reply = True
                 except Exception as e:
                     _log.error(f"工具 [{tc.function.name}] 执行异常: {e}")
                     content = json.dumps({"error": f"执行异常: {e}"}, ensure_ascii=False)

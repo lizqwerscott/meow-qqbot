@@ -9,23 +9,21 @@ _log = logging.getLogger(__name__)
 
 async def _heartbeat_respond(args: dict, ctx: ToolContext) -> ToolResult:
     hb_resp = get_dep("_heartbeat_response")
+    notify = bool(args.get("notify", False))
+    notification_text = (args.get("notification_text") or "").strip()
     if hb_resp is not None:
-        hb_resp["notify"] = bool(args.get("notify", False))
-        hb_resp["notification_text"] = (args.get("notification_text") or "").strip()
+        hb_resp["notify"] = notify
+        hb_resp["notification_text"] = notification_text
     else:
         _log.warning(
             "heartbeat_respond 在非心跳上下文中被调用，响应将被丢弃: "
-            f"notify={bool(args.get('notify', False))} "
-            f"text={(args.get('notification_text') or '')[:80]!r}"
+            f"notify={notify} text={notification_text[:80]!r}"
         )
-    _log.info(
-        f"心跳响应: notify={bool(args.get('notify', False))} "
-        f"text={(args.get('notification_text') or '')[:80]!r}"
+    _log.info(f"心跳响应: notify={notify} text={notification_text[:80]!r}")
+    return ToolResult(
+        content=json.dumps({"success": True, "acknowledged": True}, ensure_ascii=False),
+        no_reply=not notify,
     )
-    return ToolResult(content=json.dumps({
-        "success": True,
-        "acknowledged": True,
-    }, ensure_ascii=False))
 
 
 HEARTBEAT_PARAMS = {
