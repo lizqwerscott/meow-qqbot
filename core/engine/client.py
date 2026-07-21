@@ -85,7 +85,7 @@ class BotEngine:
         self.media_uploader = None
         self._bot_name: str = "机器人"
         self._deps_injected = False
-        self.pending_approvals: Dict[str, tuple] = {}
+        self.approval_manager: Optional[Any] = None
         self._session_id: Optional[str] = None
         self._last_seq: Optional[int] = None
 
@@ -361,11 +361,14 @@ class BotEngine:
         parsed = parse_approval_button_data(interaction.data.resolved.button_data)
         if parsed:
             session_key, decision = parsed
-            if session_key in self.pending_approvals:
-                self.pending_approvals.pop(session_key)
+            approver_id = interaction.operator_openid
+            resolved = self.approval_manager and self.approval_manager.resolve(
+                session_key, decision, approver_id,
+            )
+            if resolved:
                 responses = {
                     "allow-once": "✅ 已允许一次",
-                    "allow-always": "⭐ 已始终允许",
+                    "allow-always": "⭐ 已始终允许（已保存到白名单）",
                     "deny": "❌ 已拒绝",
                 }
                 await self.send_proactive(
@@ -373,7 +376,7 @@ class BotEngine:
                     responses.get(decision, f"❓ 审批结果: {decision}"),
                     is_group=(chat_type == "group"),
                 )
-                _log.info(f"审批响应: {decision}")
+                _log.info("审批响应: %s (by %s..)", decision, approver_id[:12])
             return
 
         # 自定义键盘

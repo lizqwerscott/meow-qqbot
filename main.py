@@ -443,6 +443,16 @@ async def main() -> None:
     from core.tools.impl import inject_deps
     inject_deps(bot_engine=engine)
 
+    # ── 审批系统 ──
+    from core.approval.approval_manager import ApprovalManager
+    approval_manager = ApprovalManager(
+        api_client=engine.api,
+        admin_ids=admin_ids,
+    )
+    inject_deps(approval_manager=approval_manager)
+    engine.approval_manager = approval_manager
+    _log.info("ApprovalManager 已初始化")
+
     # ── 注册 exec 进程退出回调 → WakeManager ──
     async def _on_exec_exit(session):
         chat_id = session.delivery_channel or session.chat_id
