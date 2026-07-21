@@ -259,9 +259,10 @@ def _register_all(register):
         name="exec",
         section="exec",
         description=(
-            "执行 shell 命令。默认前台运行并等待结果（类似 execute_command）。\n"
+            "执行 shell 命令，默认前台运行并等待结果。\n"
             "对于长时间运行的任务（构建服务器、文件监视器等），"
-            "设置 background=true 使其后台运行，然后使用 process 工具管理。"
+            "设置 background=true 使其后台运行，然后使用 process 工具管理。\n"
+            "安全限制：命令受 allowlist 限制，不在白名单中的命令会被拒绝。"
         ),
         parameters=EXEC_PARAMS,
         handler=_exec,
@@ -271,10 +272,10 @@ def _register_all(register):
         section="exec",
         description=(
             "管理后台进程会话（由 exec 的 background=true 创建）。\n"
-            "list: 列出所有会话\n"
+            "list: 列出所有后台会话（每个会话有 session_id、pid、command）\n"
             "poll: 等待新输出或进程退出（最长 timeout 秒）\n"
-            "log: 查看完整日志，支持 offset/limit 分页\n"
-            "write: 写入 stdin\n"
+            "log: 查看会话的完整日志，支持 offset/limit 分页\n"
+            "write: 写入数据到进程的 stdin\n"
             "kill: 终止进程\n"
             "remove: 终止并移除会话"
         ),
