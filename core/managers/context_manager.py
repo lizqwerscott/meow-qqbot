@@ -224,10 +224,11 @@ class ChatContext:
         return time.time() - self.last_activity
 
     def remove_orphaned_tool_calls(self) -> int:
-        """移除历史中孤立的 assistant(tool_calls) 消息（没有对应 tool 响应的）。
+        """移除历史中孤立的 assistant(tool_calls) 或 tool 消息。
 
-        当工具执行被 CancelledError 中断时，可能出现 assistant 已写入但
-        tool 响应未写入的情况。此方法清理这类孤立消息，防止后续 API 400 错误。
+        两个方向：
+        - assistant(tool_calls) 没有对应 tool 响应 → 移除 assistant
+        - tool 消息没有对应的 assistant(tool_calls) → 移除 tool
 
         Returns:
             移除的消息数量。
@@ -235,6 +236,7 @@ class ChatContext:
         removed = 0
         result = []
         history_list = list(self.history)
+        expected_ids: set = set()
         i = 0
         while i < len(history_list):
             msg = history_list[i]
@@ -255,6 +257,18 @@ class ChatContext:
                         i += 1
                         removed += 1
                         continue
+                    expected_ids.update(tc_ids)
+            elif msg.role == "tool" and msg.tool_call_id:
+                if msg.tool_call_id in expected_ids:
+                    expected_ids.discard(msg.tool_call_id)
+                else:
+                    _log.warning(
+                        f"移除孤立 tool 消息 [{self.chat_id[:12]}..]: "
+                        f"tool_call_id={msg.tool_call_id}"
+                    )
+                    i += 1
+                    removed += 1
+                    continue
             result.append(msg)
             i += 1
 

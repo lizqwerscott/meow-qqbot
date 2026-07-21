@@ -87,7 +87,12 @@ def ensure_messages_consistent(messages: List[dict]) -> None:
                 result.extend(tools)
                 result.extend(interleaved)
         else:
-            result.append(messages[i])
+            if msg.get("role") == "tool":
+                _log.warning(
+                    f"移除孤立的 tool 消息: tool_call_id={msg.get('tool_call_id')}"
+                )
+            else:
+                result.append(messages[i])
             i += 1
     messages[:] = result
 
