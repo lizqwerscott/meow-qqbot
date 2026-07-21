@@ -644,7 +644,7 @@ class AgentEngine:
             sender_id="system",
             chat_id=chat_id,
             content="[系统事件]",
-            is_group=True,
+            is_group=False,
             is_at_mention=False,
         )
 
@@ -667,7 +667,7 @@ class AgentEngine:
                 messages=messages,
                 tools=tools_to_use or [],
                 chat_id=chat_id,
-                is_group=True,
+                is_group=False,
                 reply_to="",
                 reply_callback=self._reply_callback,
                 sender_id="system",

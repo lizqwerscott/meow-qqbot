@@ -216,6 +216,8 @@ class PromptBuilder:
                 for e in events:
                     ts = time.strftime("%H:%M:%S", time.localtime(e.ts))
                     lines.append(f"System: [{ts}] {e.text}")
+                lines.append("")
+                lines.append("处理完成后，如果没有需要关注的事项，回复 NO_REPLY 静默结束，无需向用户发送消息。")
                 dynamic_parts.append("【系统事件】\n" + "\n".join(lines))
 
         # 技能条目列表
