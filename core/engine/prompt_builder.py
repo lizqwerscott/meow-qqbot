@@ -13,26 +13,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, List, Optional, Tuple, Set
 
 from core.message import InputMessage
-from core.tools.definitions import (
-    EMOJI_TOOLS,
-    SEARCH_USER_TOOL,
-    SEARCH_MEMORY_TOOL,
-    SEARCH_RELATION_TOOL,
-    MARK_IMPORTANT_TOOL,
-    SKILL_TOOLS,
-    EXECUTE_COMMAND_TOOL,
-    LEARNER_TOOLS,
-    TASK_TOOLS,
-    FILE_TOOLS,
-    HEARTBEAT_RESPOND_TOOL,
-    LIST_TASKS_TOOL,
-    LIST_CRON_JOBS_TOOL,
-    SUB_AGENT_TOOLS,
-    TTS_TOOLS,
-    TOOL_DEFINITION_MAP,
-    TOOL_SHORT_DESCRIPTIONS,
-    CRON_ALLOWED_TOOL_NAMES,
-)
+from core.tools.policy import build_tools, ChatContext, format_task_tool_descriptions
 
 _log = logging.getLogger(__name__)
 
@@ -41,14 +22,13 @@ _MEMORY_SYSTEM_DESC = (
     "你可以使用以下工具查询和保存长期记忆。\n"
     "\n"
     "**重要原则：不确定的先查记忆，不要猜测！**\n"
-    "- 当用户询问关于某人的背景、偏好、说过的话、过往经历时→ 先 search_memory，不要凭印象回答\n"
-    "- 当用户提到以前的事、上次的约定、之前讨论过的内容→ 先 search_memory 确认事实\n"
-    "- 当需要确认某个具体事实（如生日、爱好、说过的话）→ 先 search_memory 再回答\n"
-    "- 如果 search_memory 没有找到相关信息，如实告诉用户你不知道，不要编造\n"
+    "- 当用户询问关于某人的背景、偏好、说过的话、过往经历时→ 先 memory(action=search)，不要凭印象回答\n"
+    "- 当用户提到以前的事、上次的约定、之前讨论过的内容→ 先 memory(action=search) 确认事实\n"
+    "- 当需要确认某个具体事实（如生日、爱好、说过的话）→ 先 memory(action=search) 再回答\n"
+    "- 如果 memory(action=search) 没有找到相关信息，如实告诉用户你不知道，不要编造\n"
     "\n"
     "可用工具：\n"
-    "- search_memory：搜索记忆（指定 person_name 可查群友，不指定则查当前用户），可查画像、经历、事实等\n"
-    "- search_relation：搜索两个人之间的关系记忆，系统会同时搜索双方记忆和当前用户的记载\n"
+    "- memory：记忆搜索和关系查询。action=search 搜索记忆（指定 person_name 可查群友）；action=relation 查两人关系（指定 person_a + person_b）；可查画像、经历、事实等\n"
     "- mark_important：记录重要信息。用户解释背景/喜好/事实时主动调用，立即存入长期记忆\n"
 )
 
@@ -175,28 +155,23 @@ class PromptBuilder:
         else:
             has_users = False
 
-        tools_to_use: List[dict] = []
-        if has_emojis:
-            tools_to_use.extend(EMOJI_TOOLS)
-        if has_users:
-            tools_to_use.extend(SEARCH_USER_TOOL)
-        if self.hindsight:
-            tools_to_use.extend(SEARCH_MEMORY_TOOL)
-            tools_to_use.extend(SEARCH_RELATION_TOOL)
-            tools_to_use.extend(MARK_IMPORTANT_TOOL)
-        if self._skill_managers and self._skill_managers.has_skills:
-            tools_to_use.extend(SKILL_TOOLS)
-        if self.learners:
-            tools_to_use.extend(LEARNER_TOOLS)
-        if self._has_tasks:
-            tools_to_use.extend(TASK_TOOLS)
-        if self._has_sub_agents:
-            tools_to_use.extend(SUB_AGENT_TOOLS)
-        if self._workspace_manager:
-            tools_to_use.extend(FILE_TOOLS)
-        if self._tts_service:
-            tools_to_use.extend(TTS_TOOLS)
-        tools_to_use = tools_to_use or None
+        role = self._perm.get_user_role(sender_id) if self._perm else None
+        tools_to_use: Optional[List[dict]] = build_tools(
+            "normal",
+            ChatContext(
+                has_emojis=has_emojis,
+                has_hindsight=bool(self.hindsight),
+                has_users=has_users,
+                is_group=is_group,
+                has_skills=bool(self._skill_managers and self._skill_managers.has_skills),
+                has_workspace=bool(self._workspace_manager),
+                has_tasks=self._has_tasks,
+                has_tts=has_tts,
+                has_sub_agents=self._has_sub_agents,
+                has_learners=bool(self.learners),
+            ),
+            role=role,
+        ) or None
 
         # ── 3. 静态 system prompt ──
         skill_intro = (
@@ -229,20 +204,6 @@ class PromptBuilder:
 
         messages: List[dict] = [{"role": "system", "content": static_prompt}]
         messages.extend(history)
-
-        # ── 4b. 按角色过滤工具列表 ──
-        if tools_to_use and self._perm:
-            role = self._perm.get_user_role(sender_id)
-            before_count = len(tools_to_use)
-            tools_to_use = [
-                t for t in tools_to_use
-                if self._perm.can_use_tool(t["function"]["name"], role)
-            ]
-            if len(tools_to_use) < before_count:
-                _log.info(
-                    f"角色过滤: sender={sender_id[:16]}.. role={role} "
-                    f"tools={before_count}→{len(tools_to_use)}"
-                )
 
         # ── 5. 动态上下文（末尾单独一个 system 消息） ──
         dynamic_parts: List[str] = []
@@ -309,11 +270,11 @@ class PromptBuilder:
             dynamic_parts.append(f"当前{ws_type}工作区: {chat_id[:12]}")
             if is_admin_private:
                 dynamic_parts.append(
-                    "read_file / write_file / edit_file / list_files / search_files 五个文件工具可访问整个 workspaces/ 根目录（管理员权限）。"
+                    "read_file / write_file / edit_file / apply_patch 四个文件工具可访问整个 workspaces/ 根目录（管理员权限）。搜索文件内容请使用 execute_command + rg。"
                 )
             else:
                 dynamic_parts.append(
-                    "read_file / write_file / edit_file / list_files / search_files 五个文件工具仅限当前工作区内使用。"
+                    "read_file / write_file / edit_file / apply_patch 四个文件工具仅限当前工作区内使用。搜索文件内容请使用 execute_command + rg。"
                 )
 
         # HEARTBEAT.md（管理员的私聊专属）
@@ -373,108 +334,19 @@ class PromptBuilder:
 
         return messages, tools_to_use
 
-    @staticmethod
     def _resolve_task_tools(
+        self,
         tools_allow: Optional[List[str]],
-        *,
-        has_hindsight: bool = False,
-        has_workspace: bool = False,
-        has_skills: bool = False,
     ) -> Tuple[Optional[List[dict]], str]:
-        """根据 tools_allow 解析后台任务的工具集和描述文本。
-
-        Args:
-            tools_allow: 工具允许列表
-                None = 默认工具集（announce + 记忆 + 文件）
-                ["*"] = 所有 cron 允许的工具
-                [工具名1, ...] = 指定工具列表
-                [] = 仅 announce
-            has_hindsight: 是否有记忆系统
-            has_workspace: 是否有工作区
-            has_skills: 是否有技能系统
-
-        Returns:
-            (tools_definitions, tool_descriptions_text)
-        """
-        # 解析工具名称列表
-        selected: Set[str] = set()
-
-        if tools_allow is None:
-            # 默认：announce + search_user + 记忆 + 文件
-            selected.add("announce")
-            selected.add("search_user")
-            if has_hindsight:
-                selected.update({"search_memory", "search_relation", "mark_important"})
-            if has_workspace:
-                selected.update({
-                    "read_file", "write_file", "edit_file",
-                    "list_files", "search_files", "apply_patch",
-                })
-        elif tools_allow == ["*"]:
-            # 所有 cron 允许的工具（按条件过滤）
-            selected.add("announce")
-            selected.add("search_user")
-            if has_hindsight:
-                selected.update({"search_memory", "search_relation", "mark_important"})
-            if has_workspace:
-                selected.update({
-                    "read_file", "write_file", "edit_file",
-                    "list_files", "search_files", "apply_patch",
-                })
-            selected.add("execute_command")
-            if has_skills:
-                selected.update({"view_skill", "execute_skill", "rescan_skills"})
-        elif tools_allow == []:
-            # 仅 announce
-            selected.add("announce")
-        else:
-            # 指定工具列表（非法工具名已在 create_cron_job 中校验，此处静默过滤）
-            for n in tools_allow:
-                if n in CRON_ALLOWED_TOOL_NAMES:
-                    selected.add(n)
-            # 检查条件依赖
-            memory_tools = {"search_memory", "search_relation", "mark_important"}
-            file_tools = {"read_file", "write_file", "edit_file", "list_files", "search_files", "apply_patch"}
-            skill_tools = {"view_skill", "execute_skill", "rescan_skills"}
-            if not has_hindsight:
-                selected -= memory_tools
-            if not has_workspace:
-                selected -= file_tools
-            if not has_skills:
-                selected -= skill_tools
-
-        # 保证 announce 始终可用
-        selected.add("announce")
-
-        # 构建工具定义列表
-        tools_defs: List[dict] = []
-        for name in sorted(selected):
-            defn = TOOL_DEFINITION_MAP.get(name)
-            if defn:
-                tools_defs.extend(defn)
-
-        # 构建描述文本
-        lines = ["可用工具："]
-        DEFAULT_ORDER = [
-            "announce", "search_user",
-            "search_memory", "search_relation", "mark_important",
-            "read_file", "write_file", "edit_file",
-            "list_files", "search_files", "apply_patch",
-            "execute_command", "view_skill", "execute_skill", "rescan_skills",
-        ]
-        # 防御：DEFAULT_ORDER 必须覆盖 CRON_ALLOWED_TOOL_NAMES
-        assert set(DEFAULT_ORDER) == CRON_ALLOWED_TOOL_NAMES, (
-            f"DEFAULT_ORDER 与 CRON_ALLOWED_TOOL_NAMES 不同步: "
-            f"多出={set(DEFAULT_ORDER) - CRON_ALLOWED_TOOL_NAMES}, "
-            f"缺少={CRON_ALLOWED_TOOL_NAMES - set(DEFAULT_ORDER)}"
+        ctx = ChatContext(
+            has_hindsight=bool(self.hindsight),
+            has_workspace=bool(self._workspace_manager),
+            has_skills=bool(self._skill_managers and self._skill_managers.has_skills),
         )
-        for name in DEFAULT_ORDER:
-            if name in selected:
-                desc = TOOL_SHORT_DESCRIPTIONS.get(name, name)
-                lines.append(f"- {name}：{desc}")
-        desc_text = "\n".join(lines)
-
-        return (tools_defs or None), desc_text
+        tools_defs = build_tools("task", ctx, tools_allow=tools_allow) or []
+        names = {t["function"]["name"] for t in tools_defs}
+        desc_text = format_task_tool_descriptions(names)
+        return tools_defs or None, desc_text
 
     async def build_task_messages(
         self,
@@ -488,12 +360,7 @@ class PromptBuilder:
         Returns:
             (messages, tools_to_use)
         """
-        tools_to_use, tool_descriptions = self._resolve_task_tools(
-            tools_allow,
-            has_hindsight=bool(self.hindsight),
-            has_workspace=bool(self._workspace_manager),
-            has_skills=bool(self._skill_managers and self._skill_managers.has_skills),
-        )
+        tools_to_use, tool_descriptions = self._resolve_task_tools(tools_allow)
 
         # 渲染 task prompt
         from datetime import datetime, timezone, timedelta
@@ -533,30 +400,14 @@ class PromptBuilder:
         Returns:
             (messages, tools_to_use)
         """
-        tools_to_use: List[dict] = []
-
-        # 记忆工具
-        if self.hindsight:
-            tools_to_use.extend(SEARCH_MEMORY_TOOL)
-            tools_to_use.extend(SEARCH_RELATION_TOOL)
-            tools_to_use.extend(MARK_IMPORTANT_TOOL)
-
-        # 文件工具
-        if self._workspace_manager:
-            tools_to_use.extend(FILE_TOOLS)
-
-        # 命令工具（管理员才有权限，让 AI 尝试，权限系统会拦截）
-        tools_to_use.extend(EXECUTE_COMMAND_TOOL)
-
-        # 任务查看工具（只读：查看任务执行记录和定时任务定义）
-        if self._has_tasks:
-            tools_to_use.extend(LIST_TASKS_TOOL)
-            tools_to_use.extend(LIST_CRON_JOBS_TOOL)
-
-        # 心跳响应工具
-        tools_to_use.extend(HEARTBEAT_RESPOND_TOOL)
-
-        tools_to_use = tools_to_use or None
+        tools_to_use = build_tools(
+            "heartbeat",
+            ChatContext(
+                has_hindsight=bool(self.hindsight),
+                has_workspace=bool(self._workspace_manager),
+                has_tasks=self._has_tasks,
+            ),
+        ) or None
 
         # ── system message ──
         if system_prompt_mode == "normal":
@@ -635,8 +486,8 @@ class PromptBuilder:
         if self._workspace_manager:
             dynamic_parts.append(f"当前工作区: {chat_id[:12]}")
             dynamic_parts.append(
-                "read_file / write_file / edit_file / list_files / search_files "
-                "五个文件工具可访问整个 workspaces/ 根目录（管理员权限）。"
+                "read_file / write_file / edit_file / apply_patch "
+                "四个文件工具可访问整个 workspaces/ 根目录（管理员权限）。搜索文件内容请使用 execute_command + rg。"
             )
 
         return static_prompt + "\n\n" + "\n\n".join(dynamic_parts)

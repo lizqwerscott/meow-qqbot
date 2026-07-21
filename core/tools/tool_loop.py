@@ -14,7 +14,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from core.message import InputMessage, MessageType
 
-from core.tools.executor import ToolContext
+from core.tools._types import ToolContext
+from core.tools.impl import execute as execute_tool
 
 _log = logging.getLogger(__name__)
 
@@ -87,8 +88,8 @@ class ToolLoop:
     def __init__(
         self,
         ai_service: Any,
-        tool_executor: Any,
         *,
+        permission_manager: Any = None,
         cost_tracker: Any = None,
         context_manager: Any = None,
         session_manager: Any = None,
@@ -98,7 +99,7 @@ class ToolLoop:
         model_registry: Any = None,
     ):
         self.ai_service = ai_service
-        self.tool_executor = tool_executor
+        self._perm = permission_manager
         self.cost_tracker = cost_tracker
         self.context_manager = context_manager
         self.session_manager = session_manager
@@ -303,7 +304,7 @@ class ToolLoop:
                     continue
 
                 try:
-                    result = await self.tool_executor.execute(tc.function.name, args, ctx)
+                    result = await execute_tool(tc.function.name, args, ctx, self._perm)
                     content = result.content
                     if result.sent_emoji:
                         sent_emoji = True

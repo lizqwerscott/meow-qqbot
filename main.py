@@ -359,14 +359,15 @@ async def main() -> None:
     if tts_service:
         agent_engine.set_tts_service(tts_service)
 
-    # ── 将后台任务执行器注入 ToolExecutor（供 AI 工具调用） ──
+    # ── 将后台任务执行器注入工具系统 ──
     if task_manager or cron_job_manager or background_task_runner:
-        agent_engine.tool_executor.set_task_managers(
+        from core.tools.impl import inject_deps
+        inject_deps(
             task_manager=task_manager,
             cron_job_manager=cron_job_manager,
             background_task_runner=background_task_runner,
         )
-        _log.info("任务管理器已注入 ToolExecutor")
+        _log.info("任务管理器已注入工具系统")
 
     # ── 注入系统事件队列到后台任务执行器 ──
     if background_task_runner:
@@ -417,8 +418,9 @@ async def main() -> None:
         multimodal_service=multimodal_service,
     )
 
-    # ── 将 BotEngine 注入 ToolExecutor（供 AI 工具统一发消息） ──
-    agent_engine.tool_executor.set_bot_engine(engine)
+    # ── 将 BotEngine 注入工具系统（供 AI 工具统一发消息） ──
+    from core.tools.impl import inject_deps
+    inject_deps(bot_engine=engine)
 
     # ── 心跳系统 ──
     heartbeat_manager = None
