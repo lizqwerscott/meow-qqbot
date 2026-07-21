@@ -117,6 +117,7 @@ async def _exec(args: dict, ctx: ToolContext) -> ToolResult:
                     text=True,
                     timeout=effective_timeout,
                     env=env,
+                    cwd=workdir,
                 ),
                 timeout=effective_timeout + 5,
             )
