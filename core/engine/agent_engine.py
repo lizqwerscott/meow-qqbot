@@ -639,9 +639,8 @@ class AgentEngine:
 
         import time as _time
 
-        msg_id = f"wake_{chat_id}_{int(_time.time())}"
         msg = InputMessage(
-            id=msg_id,
+            id=f"wake_{chat_id}_{int(_time.time())}",
             sender_id="system",
             chat_id=chat_id,
             content="[系统事件]",
@@ -659,14 +658,20 @@ class AgentEngine:
                 cost_tracker=self.cost_tracker,
             )
 
+            model_chain = None
+            if self.rule_router and self.model_registry:
+                tier = self.rule_router.classify("[系统事件]")
+                model_chain = self.model_registry.get_chain(tier) or None
+
             await self.tool_loop.run(
                 messages=messages,
                 tools=tools_to_use or [],
                 chat_id=chat_id,
                 is_group=True,
-                reply_to=msg_id,
+                reply_to="",
                 reply_callback=self._reply_callback,
                 sender_id="system",
+                model_chain=model_chain,
             )
         except Exception as e:
             _log.error("trigger_event_response 异常: %s", e, exc_info=True)
