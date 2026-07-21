@@ -1,4 +1,4 @@
-"""共享安全逻辑 — 命令黑名单、解析检查、重定向检测。
+"""共享安全逻辑 — 命令黑名单、解析检查、重定向检测、环境变量过滤。
 
 从 SkillManagers 提取，供 exec 工具和后台任务执行器共用。
 """
@@ -7,7 +7,7 @@ import logging
 import os
 import re
 import shlex
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 _log = logging.getLogger(__name__)
 
@@ -53,3 +53,48 @@ def check_command_denied(parts: List[str]) -> Optional[str]:
         if DANGEROUS_TARGET_PATTERNS.search(arg):
             return f"参数包含危险的重定向目标: {arg[:60]}"
     return None
+
+
+_BLOCKED_ENV_PREFIXES = frozenset({
+    "LD_", "DYLD_", "BASH_FUNC_", "GIT_CONFIG_", "NPM_CONFIG_",
+})
+
+_SAFE_DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin"
+
+_BLOCKED_ENV_KEYS = frozenset({
+    "SHELLOPTS", "BASHOPTS",
+    "PYTHONPATH", "PYTHONSTARTUP",
+    "NODE_OPTIONS",
+    "RUBYOPT", "GEM_PATH", "PERLLIB", "PERL5LIB",
+    "IFS",
+})
+
+
+def sanitize_env() -> Dict[str, str]:
+    """返回安全的子进程环境变量副本（继承当前进程，移除危险项）。
+
+    过滤目标：
+    - LD_* / DYLD_* — 动态库劫持
+    - BASH_FUNC_* — shellshock 类攻击
+    - PYTHONPATH / NODE_OPTIONS 等语言运行时注入
+    - 其他已知的危险环境变量
+
+    PATH 不会被直接过滤，而是替换为安全默认值
+    （防止父进程被污染后指向恶意二进制）。
+    """
+    env = dict(os.environ)
+    removed: List[str] = []
+    for key in list(env):
+        if key in _BLOCKED_ENV_KEYS:
+            removed.append(key)
+            del env[key]
+        else:
+            for prefix in _BLOCKED_ENV_PREFIXES:
+                if key.upper().startswith(prefix):
+                    removed.append(key)
+                    del env[key]
+                    break
+    env["PATH"] = _SAFE_DEFAULT_PATH
+    if removed:
+        _log.debug("环境变量过滤: 移除了 %d 个危险项: %s", len(removed), removed)
+    return env

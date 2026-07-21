@@ -94,12 +94,14 @@ class ProcessRegistry:
             self._sessions[session_id] = session
 
         try:
+            from core.tools.security import sanitize_env
             process = await asyncio.create_subprocess_exec(
                 *parts,
                 cwd=workdir or ".",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
+                env=sanitize_env(),
             )
             session.pid = process.pid
             session.process = process
