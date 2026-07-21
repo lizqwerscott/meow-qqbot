@@ -181,6 +181,11 @@ class AgentEngine:
         inject_deps(media_uploader=media_uploader)
         _log.info("AgentEngine: MediaUploader 已注入")
 
+    def set_reply_callback(self, callback: Callable) -> None:
+        """注入真实消息投递回调（由 BotEngine 提供）。"""
+        self._reply_callback = callback
+        _log.info("AgentEngine: reply_callback 已注入")
+
     def set_router_model(self, router_model: Any):
         self.router_model = router_model
         _log.info("AgentEngine: RouterModel 已注入")
@@ -618,6 +623,52 @@ class AgentEngine:
                 exc_info=True,
             )
             return None, str(e)
+
+    async def trigger_event_response(self, chat_id: str) -> None:
+        """在 chat_id 的完整会话上下文中触发 AI turn。
+
+        由 WakeManager 调用。SystemEvent 已入队，
+        PromptBuilder.build_messages() 会自动 drain 并注入。
+        """
+        _log.info("trigger_event_response: chat_id=%s", chat_id[:24])
+
+        if not self._reply_callback:
+            _log.warning("reply_callback 未注入，无法投递 AI 回应")
+            return
+
+        import time as _time
+
+        msg_id = f"wake_{chat_id}_{int(_time.time())}"
+        msg = InputMessage(
+            id=msg_id,
+            sender_id="system",
+            chat_id=chat_id,
+            content="[系统事件]",
+            is_group=True,
+            is_at_mention=False,
+        )
+
+        try:
+            messages, tools_to_use = await self.prompt_builder.build(
+                chat_id=chat_id,
+                is_group=True,
+                user_nickname="系统",
+                sender_id="system",
+                input_message=msg,
+                cost_tracker=self.cost_tracker,
+            )
+
+            await self.tool_loop.run(
+                messages=messages,
+                tools=tools_to_use or [],
+                chat_id=chat_id,
+                is_group=True,
+                reply_to=msg_id,
+                reply_callback=self._reply_callback,
+                sender_id="system",
+            )
+        except Exception as e:
+            _log.error("trigger_event_response 异常: %s", e, exc_info=True)
 
     async def execute_heartbeat(
         self,

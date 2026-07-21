@@ -55,10 +55,15 @@ class BackgroundTaskRunner:
         self._delivery_cb: Optional[Callable] = None
         # async (chat_id, content, message_id, is_group) -> None
         self._system_events: Optional[Any] = None
+        self._wake_manager: Optional[Any] = None
 
     def set_system_events(self, system_events: Any) -> None:
         """注入系统事件队列。"""
         self._system_events = system_events
+
+    def set_wake_manager(self, wake_manager: Any) -> None:
+        """注入 WakeManager（事件完成时唤醒 AI）。"""
+        self._wake_manager = wake_manager
 
     def set_execute_callback(self, cb: Callable) -> None:
         """注入任务执行回调。
@@ -171,10 +176,8 @@ class BackgroundTaskRunner:
                 error=str(e),
             )
 
-        # ── 手动后台任务完成后：入队 system event ──
-        # cron 类型由 run_cron_job 的 _enqueue_events 处理，不重复
+        # ── 手动后台任务完成后：唤醒目标会话 ──
         if task and task.status in (TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.TIMEOUT) \
-           and self._system_events \
            and task.type == "manual":
             status_text = {
                 TaskStatus.SUCCESS: "已完成",
@@ -182,11 +185,20 @@ class BackgroundTaskRunner:
                 TaskStatus.TIMEOUT: "执行超时",
             }.get(task.status, "已完成")
             target = task.delivery_channel or f"task:{task.id}"
-            self._system_events.enqueue(
-                session_key=target,
-                text=f"后台任务{status_text}",
-                context_key=f"task:{task.id}",
-            )
+            if self._wake_manager:
+                await self._wake_manager.notify(
+                    session_key=target,
+                    text=f"后台任务{status_text}",
+                    context_key=f"task:{task.id}",
+                    source="task",
+                    trigger_ai=bool(task.delivery_channel),
+                )
+            elif self._system_events:
+                self._system_events.enqueue(
+                    session_key=target,
+                    text=f"后台任务{status_text}",
+                    context_key=f"task:{task.id}",
+                )
 
         return task
 
@@ -336,11 +348,21 @@ class BackgroundTaskRunner:
         """执行 system_event 载荷：推入对应 session 的系统事件队列。"""
         await self._task_manager.start_task(task.id)
         text = job.prompt or f"定时任务 [{job.name}] 触发"
-        await self._enqueue_events(
-            job, task.id, text,
-            context_key=f"cron:{job.id}",
-            replace=True,
-        )
+        if self._wake_manager and job.delivery_channel:
+            await self._wake_manager.notify(
+                session_key=job.delivery_channel,
+                text=text,
+                context_key=f"cron:{job.id}",
+                source="cron",
+                trigger_ai=True,
+                replace=True,
+            )
+        elif self._system_events:
+            await self._enqueue_events(
+                job, task.id, text,
+                context_key=f"cron:{job.id}",
+                replace=True,
+            )
         return await self._task_manager.finish_task(
             task.id, TaskStatus.SUCCESS,
             result=f"[系统事件] {text}",
@@ -410,18 +432,26 @@ class BackgroundTaskRunner:
         # 系统事件：message/command 任务完成后通知目标 session
         # system_event 类型由 _execute_system_event_payload 自行入队，不重复
         if task and task.status in (TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.TIMEOUT) \
-           and self._system_events \
            and job.payload_type != "system_event":
             status_text = {
                 TaskStatus.SUCCESS: "已完成",
                 TaskStatus.FAILED: "执行失败",
                 TaskStatus.TIMEOUT: "执行超时",
             }.get(task.status, "已完成")
-            await self._enqueue_events(
-                job, task.id,
-                text=f"任务 '{job.name}'{status_text}",
-                context_key=f"task:{task.id}",
-            )
+            if self._wake_manager and job.delivery_channel:
+                await self._wake_manager.notify(
+                    session_key=job.delivery_channel,
+                    text=f"任务 '{job.name}'{status_text}",
+                    context_key=f"task:{task.id}",
+                    source="cron",
+                    trigger_ai=True,
+                )
+            elif self._system_events:
+                await self._enqueue_events(
+                    job, task.id,
+                    text=f"任务 '{job.name}'{status_text}",
+                    context_key=f"task:{task.id}",
+                )
 
         return task
 

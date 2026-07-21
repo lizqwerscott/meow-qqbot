@@ -270,11 +270,11 @@ class PromptBuilder:
             dynamic_parts.append(f"当前{ws_type}工作区: {chat_id[:12]}")
             if is_admin_private:
                 dynamic_parts.append(
-                    "read_file / write_file / edit_file / apply_patch 四个文件工具可访问整个 workspaces/ 根目录（管理员权限）。搜索文件内容请使用 execute_command + rg。"
+                    "read_file / write_file / edit_file / apply_patch 四个文件工具可访问整个 workspaces/ 根目录（管理员权限）。搜索文件内容请使用 exec + rg。"
                 )
             else:
                 dynamic_parts.append(
-                    "read_file / write_file / edit_file / apply_patch 四个文件工具仅限当前工作区内使用。搜索文件内容请使用 execute_command + rg。"
+                    "read_file / write_file / edit_file / apply_patch 四个文件工具仅限当前工作区内使用。搜索文件内容请使用 exec + rg。"
                 )
 
         # HEARTBEAT.md（管理员的私聊专属）
@@ -389,7 +389,7 @@ class PromptBuilder:
     ) -> Tuple[List[dict], Optional[List[dict]]]:
         """组装心跳检查的 messages 列表。
 
-        工具集：文件工具 + 记忆工具 + heartbeat_respond + execute_command。
+        工具集：文件工具 + 记忆工具 + heartbeat_respond + exec。
         system_prompt_mode:
           - "normal": 复用正常聊天的角色卡 SP（角色卡 + 技能介绍 + 记忆系统描述 + 动态上下文）
           - "minimal": 极简 heartbeat 专用 SP
@@ -487,7 +487,7 @@ class PromptBuilder:
             dynamic_parts.append(f"当前工作区: {chat_id[:12]}")
             dynamic_parts.append(
                 "read_file / write_file / edit_file / apply_patch "
-                "四个文件工具可访问整个 workspaces/ 根目录（管理员权限）。搜索文件内容请使用 execute_command + rg。"
+                "四个文件工具可访问整个 workspaces/ 根目录（管理员权限）。搜索文件内容请使用 exec + rg。"
             )
 
         return static_prompt + "\n\n" + "\n\n".join(dynamic_parts)

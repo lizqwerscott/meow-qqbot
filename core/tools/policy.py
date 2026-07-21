@@ -92,7 +92,7 @@ def format_task_tool_descriptions(names: set[str]) -> str:
         "announce", "search_user",
         "memory", "mark_important",
         "read_file", "write_file", "edit_file", "apply_patch",
-        "execute_command", "view_skill", "execute_skill", "rescan_skills",
+        "exec", "view_skill", "execute_skill", "rescan_skills",
     ]
     for name in DEFAULT_ORDER:
         if name in names:

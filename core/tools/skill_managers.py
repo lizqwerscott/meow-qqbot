@@ -5,38 +5,12 @@
 
 import json
 import logging
-import os
-import re
-import shlex
-import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from skillkit import SkillManager
 
 _log = logging.getLogger(__name__)
-
-
-DENIED_COMMANDS: frozenset = frozenset({
-    "rm", "chmod", "chown", "sudo", "su", "doas",
-    "dd", "mkfs", "fdisk", "parted", "mkswap",
-    "shutdown", "reboot", "poweroff", "halt", "init", "systemctl",
-    "useradd", "usermod", "groupadd", "userdel", "groupdel",
-    "setuid", "setgid", "chattr", "lsattr",
-    "tcpdump", "nmap", "tshark",
-    "pkill", "killall", "kill", "passwd",
-    "service", "grub-install", "grub-mkconfig",
-    "modprobe", "insmod", "rmmod",
-    "iptables", "ufw",
-    "docker", "podman",
-    "crontab", "at",
-    "mount", "umount",
-    "swapon", "swapoff",
-    "sysctl",
-    "unshare", "nsenter",
-})
-
-_DANGEROUS_TARGET_PATTERNS = re.compile(r">(?:/[^/\s]+){1,4}(?:/[^/\s]+)?")
 
 
 class SkillManagers:
@@ -64,28 +38,6 @@ class SkillManagers:
     @property
     def has_skills(self) -> bool:
         return self._skills_loaded
-
-    @staticmethod
-    def _parse_command_safe(raw_command: str) -> Optional[List[str]]:
-        """安全地将命令字符串解析为 args 列表。返回 None 表示解析失败。"""
-        try:
-            parts = shlex.split(raw_command)
-        except ValueError:
-            return None
-        if not parts:
-            return None
-        return parts
-
-    @staticmethod
-    def _check_command_safe(parts: List[str]) -> Optional[str]:
-        """检查命令是否安全。返回 None 表示通过，否则返回拒绝原因。"""
-        cmd_name = os.path.basename(parts[0])
-        if cmd_name in DENIED_COMMANDS:
-            return f"命令 '{cmd_name}' 被禁止执行"
-        for arg in parts[1:]:
-            if _DANGEROUS_TARGET_PATTERNS.search(arg):
-                return f"参数包含危险的重定向目标: {arg[:60]}"
-        return None
 
     def get_skill_system_intro(self) -> str:
         return (
@@ -171,83 +123,6 @@ class SkillManagers:
             _log.warning(
                 f"执行 skill 脚本失败 [{skill_name}/{script_name}]: {e}"
             )
-            return {"success": False, "error": str(e)}
-
-    def execute_command(
-        self,
-        command: str,
-        timeout: Optional[int] = None,
-        workdir: Optional[str] = None,
-        user_role: str = "admin",
-    ) -> Dict[str, Any]:
-        if timeout is None:
-            timeout = self._default_timeout()
-        command = command.strip()
-        if not command:
-            return {"success": False, "error": "命令为空"}
-
-        # 安全解析命令字符串为 args 列表
-        parts = self._parse_command_safe(command)
-        if parts is None:
-            _log.warning(f"execute_command 命令格式无效: {command[:80]}")
-            return {
-                "success": False,
-                "error": f"命令格式无效（引号不匹配等）: {command[:80]}",
-            }
-
-        # 安全检查 — 黑名单 + 危险重定向
-        reason = self._check_command_safe(parts)
-        if reason:
-            _log.warning(f"execute_command 被拒绝: {reason}")
-            return {"success": False, "error": reason}
-
-        # 白名单检查（非 admin）
-        if user_role != "admin" and self._perm:
-            reason = self._perm.check_command_allowed(command, parts, user_role)
-            if reason:
-                _log.warning(f"execute_command 白名单拒绝: {reason}")
-                return {"success": False, "error": reason}
-
-        effective_timeout = min(timeout, self._max_timeout())
-        cwd = workdir or "."
-
-        try:
-            result = subprocess.run(
-                parts,
-                shell=False,
-                capture_output=True,
-                text=True,
-                timeout=effective_timeout,
-                cwd=cwd,
-            )
-            stdout = result.stdout[-100000:] if len(result.stdout) > 100000 else result.stdout
-            stderr = result.stderr[-100000:] if len(result.stderr) > 100000 else result.stderr
-            truncated = {
-                "stdout": len(result.stdout) > 100000,
-                "stderr": len(result.stderr) > 100000,
-            }
-
-            _log.info(
-                f"execute_command: exit={result.returncode} "
-                f"cmd={command[:80]!r}... "
-                f"stdout={len(stdout)}b stderr={len(stderr)}b"
-            )
-
-            return {
-                "success": result.returncode == 0,
-                "stdout": stdout,
-                "stderr": stderr,
-                "exit_code": result.returncode,
-                "truncated": truncated,
-            }
-        except subprocess.TimeoutExpired:
-            _log.warning(f"execute_command 超时 [{command[:80]}..]")
-            return {
-                "success": False,
-                "error": f"命令执行超时 ({effective_timeout}秒)",
-            }
-        except Exception as e:
-            _log.warning(f"execute_command 执行失败: {e}")
             return {"success": False, "error": str(e)}
 
     def list_skill_names(self) -> list:

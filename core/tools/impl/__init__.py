@@ -15,6 +15,7 @@ registry = ToolRegistry()
 _IMPL_MODULES = [
     "emoji", "user", "memory", "learner", "skill",
     "task", "file", "heartbeat", "sub_agent", "tts",
+    "exec_process",
 ]
 
 

@@ -12,7 +12,7 @@ _CRON_ALLOWED: frozenset = frozenset({
     "announce", "search_user",
     "memory", "mark_important",
     "read_file", "write_file", "edit_file", "apply_patch",
-    "execute_command",
+    "exec",
     "view_skill", "execute_skill", "rescan_skills",
 })
 
