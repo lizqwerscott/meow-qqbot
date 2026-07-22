@@ -13,6 +13,10 @@ SEND_MESSAGE_PARAMS = {
             "type": "string",
             "description": "要发送给用户的文本内容",
         },
+        "reply_to": {
+            "type": "string",
+            "description": "回复的目标消息 ID。不填则按上下文决定（对话中回复当前消息，主动触发时发送新消息）；设为空字符串则强制发送为主动消息。",
+        },
     },
     "required": ["text"],
 }
@@ -23,10 +27,14 @@ async def _send_message(args: dict, ctx: ToolContext) -> ToolResult:
     if not text:
         return ToolResult(content="消息为空", sent_text=False)
 
+    reply_to = args.get("reply_to")
+    if reply_to is None:
+        reply_to = ctx.reply_to
+
     await ctx.reply_callback(
         chat_id=ctx.chat_id,
         content=text,
-        message_id=ctx.reply_to,
+        message_id=reply_to,
         is_group=ctx.is_group,
     )
     _log.info(
