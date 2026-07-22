@@ -16,18 +16,15 @@ import time
 from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from core.ai.service import AIService
-from core.managers.context_manager import ChatContextManager
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager
-from core.message import InputMessage, MessageType
 from core.managers.nickname_manager import NicknameManager
-from core.managers.template_manager import TemplateManager
+from core.message import InputMessage, MessageType
 from core.tools import SubAgentManager
 from core.tools.impl import inject_deps, get_dep
 from core.learners.base import sanitize_for_learners
-from core.learners.orchestrator import LearningOrchestrator
 
+from core.engine.context import EngineContext
 from core.engine.prompt_builder import PromptBuilder
 from core.managers.session_manager import SessionTaskManager
 from core.tools.tool_loop import ToolLoop
@@ -38,120 +35,49 @@ _log = logging.getLogger(__name__)
 class AgentEngine:
     """核心业务引擎 (Facade)。"""
 
-    def __init__(
-        self,
-        ai_service: AIService,
-        template_manager: TemplateManager,
-        context_manager: ChatContextManager,
-        bot_id: str,
-        admin_id: List[str],
-        nickname_manager: Optional[NicknameManager] = None,
-        emoji_manager: Optional[EmojiManager] = None,
-        hindsight_memory: Optional[Any] = None,
-        search_top_k: int = 3,
-        skill_managers: Optional[Any] = None,
-        learning_orchestrator: Optional[LearningOrchestrator] = None,
-        max_tool_rounds: int = -1,
-        cost_tracker: Optional[CostTracker] = None,
-        context_window: int = 1000000,
-        task_manager: Optional[Any] = None,
-        cron_job_manager: Optional[Any] = None,
-        rule_router: Optional[Any] = None,
-        model_registry: Optional[Any] = None,
-        sub_agent_manager=None,
-        permission_manager=None,
-        archive_manager=None,
-        system_events=None,
-        workspace_manager=None,
-    ):
-        self.ai_service = ai_service
-        self.template_manager = template_manager
-        self.context_manager = context_manager
-        self._bot_id = bot_id
-        self._admin_id = admin_id
-        self.rule_router = rule_router
-        self.model_registry = model_registry
+    def __init__(self, ctx: EngineContext):
+        self._ctx = ctx
 
-        self._nm = nickname_manager
-        self.emoji_manager = emoji_manager
+        self.ai_service = ctx.ai.ai_service
+        self.template_manager = ctx.prompt.template_manager
+        self.context_manager = ctx.mgmt.context_manager
+        self._bot_id = ctx.sys.bot_id
+        self._admin_id = list(ctx.sys.admin_ids)
+        self.rule_router = ctx.ai.rule_router
+        self.model_registry = ctx.ai.model_registry
+
+        self._nm = ctx.prompt.nickname_manager
+        self.emoji_manager = ctx.prompt.emoji_manager
         self.media_uploader = None
-        self.multimodal_service = None
+        self.multimodal_service = ctx.ai.multimodal_service
         self._tts_service = None
         self._api_client = None
 
-        self.hindsight = hindsight_memory
-        self._skill_managers = skill_managers
-        self.learners = learning_orchestrator
-        self.cost_tracker = cost_tracker or CostTracker()
-        self._task_manager = task_manager
-        self._cron_job_manager = cron_job_manager
-        self._archive_manager = archive_manager
-        self._system_events = system_events
+        self.hindsight = ctx.memory.hindsight_memory
+        self._skill_managers = ctx.prompt.skill_managers
+        self.learners = ctx.prompt.learning_orchestrator
+        self.cost_tracker = ctx.mgmt.cost_tracker or CostTracker()
+        self._task_manager = ctx.bg.task_manager
+        self._cron_job_manager = ctx.bg.cron_job_manager
+        self._archive_manager = ctx.mgmt.archive_manager
+        self._system_events = ctx.mgmt.system_events
+        self._workspace_manager = ctx.mgmt.workspace_manager
 
-        inject_deps(
-            emoji_manager=emoji_manager,
-            media_uploader=None,
-            api_client=None,
-            hindsight=hindsight_memory,
-            nickname_manager=nickname_manager,
-            bot_id=bot_id,
-            skill_managers=skill_managers,
-            learning_orchestrator=learning_orchestrator,
-            admin_ids=admin_id,
-            permission_manager=permission_manager,
-            system_events=system_events,
-            search_top_k=search_top_k,
-            workspace_manager=workspace_manager,
-            tts_service=None,
-            task_manager=task_manager,
-            cron_job_manager=cron_job_manager,
-            background_task_runner=None,
-            sub_agent_manager=sub_agent_manager,
-            bot_engine=None,
-        )
-
-        # ── 工作区 ──
-        self._workspace_manager = workspace_manager
+        inject_deps(**ctx.to_deps_dict())
 
         # ── 子模块 ──
         self.session_manager = SessionTaskManager()
-
-        self.prompt_builder = PromptBuilder(
-            template_manager=template_manager,
-            context_manager=context_manager,
-            ai_service=ai_service,
-            bot_id=bot_id,
-            nickname_manager=nickname_manager,
-            emoji_manager=emoji_manager,
-            skill_managers=skill_managers,
-            hindsight_memory=hindsight_memory,
-            search_top_k=search_top_k,
-            admin_ids=admin_id,
-            learning_orchestrator=self.learners,
-            has_tasks=self._task_manager is not None,
-            has_sub_agents=sub_agent_manager is not None,
-            permission_manager=permission_manager,
-            workspace_manager=workspace_manager,
-            archive_manager=archive_manager,
-            system_events=system_events,
-        )
-
+        self.prompt_builder = PromptBuilder(ctx)
         self.tool_loop = ToolLoop(
-            ai_service=ai_service,
-            permission_manager=permission_manager,
-            cost_tracker=self.cost_tracker,
-            context_manager=context_manager,
-            session_manager=self.session_manager,
+            ctx,
             prompt_builder=self.prompt_builder,
-            hindsight_memory=hindsight_memory,
-            max_rounds=max_tool_rounds,
-            model_registry=model_registry,
+            session_manager=self.session_manager,
         )
 
         # ── 子智能体管理器 ──
-        self._sub_agent_manager = sub_agent_manager
-        if sub_agent_manager:
-            sub_agent_manager.set_execute_callback(self.execute_background_task)
+        self._sub_agent_manager = ctx.sub.sub_agent_manager
+        if self._sub_agent_manager:
+            self._sub_agent_manager.set_execute_callback(self.execute_background_task)
 
         # ── 消息钩子 ──
         self._message_hooks: list = []
