@@ -45,7 +45,6 @@ class AgentEngine:
         context_manager: ChatContextManager,
         bot_id: str,
         admin_id: List[str],
-        openai_config: dict,
         nickname_manager: Optional[NicknameManager] = None,
         emoji_manager: Optional[EmojiManager] = None,
         hindsight_memory: Optional[Any] = None,
@@ -70,7 +69,6 @@ class AgentEngine:
         self.context_manager = context_manager
         self._bot_id = bot_id
         self._admin_id = admin_id
-        self._openai_config = openai_config
         self.rule_router = rule_router
         self.model_registry = model_registry
 
