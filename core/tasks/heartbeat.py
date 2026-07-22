@@ -447,7 +447,7 @@ class HeartbeatManager:
             return
 
         admin_id = self._admin_ids[0]
-        content = f"[❤️ 心跳提醒]\n{text[:500]}"
+        content = f"[❤️ 心跳提醒]\n{text}"
         try:
             await self._api.send_text("c2c", admin_id, content, reply_to=None)
             _log.info(f"心跳提醒已投递到管理员 {admin_id[:12]}..")
