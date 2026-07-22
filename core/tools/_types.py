@@ -20,6 +20,7 @@ class ToolResult:
     content: str
     sent_emoji: bool = False
     no_reply: bool = False
+    sent_text: bool = False
 
 
 @dataclass

@@ -190,7 +190,7 @@ class PromptBuilder:
 
         # 系统事件（会话外部感知上下文，最优先显示）
         if self._system_events:
-            events = self._system_events.drain(chat_id)
+            events = self._system_events.peek_and_snapshot(chat_id)
             if events:
                 lines = []
                 for e in events:
@@ -199,6 +199,12 @@ class PromptBuilder:
                 lines.append("")
                 lines.append("处理完成后，如果没有需要关注的事项，回复 NO_REPLY 静默结束，无需向用户发送消息。")
                 dynamic_parts.append("【系统事件】\n" + "\n".join(lines))
+
+        # send_message 工具投递提示
+        dynamic_parts.append(
+            "【消息投递】你的工具调用之间的文本正常展示给用户。"
+            "如果需要在最终回复中使用 send_message 工具，send_message 投递后你的后续文本将不再自动发送。"
+        )
 
         # 技能条目列表
         if self._skill_managers and self._skill_managers.has_skills:
@@ -402,7 +408,7 @@ class PromptBuilder:
 
         # ── 系统事件（心跳触发时注入） ──
         if self._system_events:
-            events = self._system_events.drain(system_event_key)
+            events = self._system_events.peek_and_snapshot(system_event_key)
             if events:
                 lines = []
                 for e in events:

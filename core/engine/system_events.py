@@ -34,6 +34,7 @@ class _SessionQueue:
 class SystemEventQueue:
     def __init__(self):
         self._queues: dict[str, _SessionQueue] = {}
+        self._snapshots: dict[str, set[tuple]] = {}
 
     # ── 公开 API ──
 
@@ -84,6 +85,27 @@ class SystemEventQueue:
 
         _log.debug("system event enqueued [%s..]: %s", session_key[:12], cleaned[:60])
         return True
+
+    def peek_and_snapshot(self, session_key: str) -> list[SystemEvent]:
+        """Peek 事件并记录快照。后续 consume_snapshot 只移除快照内的事件，
+        不会误删 peek 后新增的事件。"""
+        events = self.peek(session_key)
+        self._snapshots[session_key] = {(e.text, e.context_key) for e in events}
+        return events
+
+    def consume_snapshot(self, session_key: str) -> None:
+        """只消费 peek_and_snapshot 时快照内的事件，保留快照外的事件。"""
+        keys = self._snapshots.pop(session_key, set())
+        if not keys:
+            return
+        sq = self._queues.get(session_key)
+        if not sq:
+            return
+        sq.queue = [e for e in sq.queue if (e.text, e.context_key) not in keys]
+        sq._seen = {(e.text, e.context_key) for e in sq.queue}
+        if not sq.queue:
+            self._queues.pop(session_key, None)
+        _log.debug("consumed snapshot %d events [%s..]", len(keys), session_key[:12])
 
     def drain(self, session_key: str) -> list[SystemEvent]:
         """取出并清空该 session 的所有排队事件。"""
