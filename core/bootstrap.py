@@ -1,0 +1,580 @@
+"""ServiceGraph — 服务构造 + 连线 + 生命周期管理。
+
+将 main.py 中的级联初始化封装为可测试的构造器类。
+"""
+
+import asyncio
+import logging
+import sys
+
+import httpx
+
+from core.ai.model_registry import ModelRegistry
+from core.ai.multimodal import MultimodalService
+from core.ai.tts_service import TtsService
+from core.command_handlers import register_all_commands
+from core.config_loader import ConfigLoader
+from core.engine.agent_engine import AgentEngine
+from core.engine.client import BotEngine
+from core.engine.hindsight_memory import HindsightMemory
+from core.engine.router import Router
+from core.engine.system_events import SystemEventQueue
+from core.engine.wake_manager import WakeManager
+from core.learners.orchestrator import LearningOrchestrator
+from core.managers.archive_manager import ArchiveManager
+from core.managers.context_manager import ChatContextManager
+from core.managers.cost_tracker import CostTracker
+from core.managers.emoji_manager import EmojiManager
+from core.managers.nickname_manager import NicknameManager
+from core.managers.permission_manager import PermissionManager
+from core.managers.template_manager import TemplateManager
+from core.managers.workspace_manager import WorkspaceManager
+from core.plugins.manager import PluginManager
+from core.rule_router import RuleRouter
+from core.tasks import (
+    BackgroundTaskRunner,
+    CronJobManager,
+    CronJobScheduler,
+    TaskManager,
+    TaskStore,
+)
+from core.tasks.heartbeat import HeartbeatManager
+from core.tools.impl import inject_deps
+from core.tools.process_registry import ProcessRegistry
+from core.tools.skill_managers import SkillManagers
+from core.tools.sub_agent_manager import SubAgentManager
+from core.webui import create_app, start_webui
+
+
+_log = logging.getLogger(__name__)
+
+
+class ServiceGraph:
+    """服务依赖图 — 单次 build() 完成所有构造 + 连线。"""
+
+    def __init__(self, cfg: ConfigLoader):
+        self.cfg = cfg
+
+    # ── build: 三阶段构造 ──────────────────────────────────────────
+
+    async def build(self):
+        self._build_services()
+        self._build_bot_engine()
+        self._wire_callbacks()
+        self._setup_extras()
+        return self
+
+    # ── 阶段 1: 构造所有服务 ───────────────────────────────────────
+
+    def _build_services(self):
+        self.http_client = httpx.AsyncClient(timeout=60.0)
+
+        self.template_manager = TemplateManager(self.cfg.character_card)
+
+        providers_config = self.cfg.providers
+        groups_config = self.cfg.groups
+        _has_model_config = bool(providers_config and groups_config)
+
+        self.model_registry = None
+        if _has_model_config:
+            self.model_registry = ModelRegistry(
+                providers_config, groups_config,
+                cooldown_config=self.cfg.cooldown,
+            )
+            n_models = sum(len(p.get("models", [])) for p in providers_config.values())
+            _log.info("模型注册表已初始化: %d 个模型, %d 个组", n_models, len(groups_config))
+
+        if not self.model_registry or not self.model_registry.default_service:
+            _log.critical("未配置模型注册表（缺少 [providers] 或 [groups]），无法启动")
+            sys.exit(1)
+        self.ai_service = self.model_registry.default_service
+
+        # ── 多模态 ──
+        multimodal_config = self.cfg.multimodal
+        self.multimodal_service = None
+        if multimodal_config.get("enabled", False):
+            multimodal_group = multimodal_config.get("group", "multimodal")
+            chain = self.model_registry.get_chain(multimodal_group)
+            raw = [self.model_registry.get(n) for n in chain]
+            pairs = [(s, n) for s, n in zip(raw, chain) if s is not None]
+            if pairs:
+                services, model_names = zip(*pairs)
+                self.multimodal_service = MultimodalService(
+                    list(services),
+                    model_names=list(model_names),
+                    cooldown_manager=self.model_registry.cooldown_manager,
+                )
+                _log.info("多模态服务已启用 (组 [%s]): %s", multimodal_group, list(model_names))
+            else:
+                _log.warning("多模态服务未启用: 组 [%s] 找不到对应模型", multimodal_group)
+        else:
+            _log.info("多模态服务未启用（enabled=false），跳过 VLM 图片分析")
+
+        # ── EmojiManager ──
+        self.emoji_manager = EmojiManager(
+            http_client=self.http_client,
+            multimodal_service=self.multimodal_service,
+            emoji_dir="data/emojis/",
+        )
+
+        # ── 上下文管理 ──
+        ctx_mgmt = self.cfg.context_management
+        _cache_cfg = ctx_mgmt.get("cache", {})
+        self.context_manager = ChatContextManager(
+            max_history_per_chat=ctx_mgmt.get("max_history", 10000),
+            compact_threshold_tokens=ctx_mgmt.get("compact_threshold_tokens", 950000),
+            keep_recent_tokens=ctx_mgmt.get("keep_recent_tokens", 50000),
+            max_tool_results=ctx_mgmt.get("max_tool_results", 5),
+            keep_last_assistants=ctx_mgmt.get("keep_last_assistants", 3),
+            soft_trim=ctx_mgmt.get("soft_trim", 20000),
+            hard_clear=ctx_mgmt.get("hard_clear", 180000),
+            cache_dir=(
+                (_cache_cfg.get("dir") or "data/sessions/")
+                if _cache_cfg.get("enabled", True)
+                else None
+            ),
+        )
+
+        # ── ArchiveManager ──
+        archive_config = self.cfg.archive
+        self.archive_manager = None
+        if archive_config.get("enabled", True):
+            self.archive_manager = ArchiveManager(
+                context_manager=self.context_manager,
+                cache_dir=_cache_cfg.get("dir", "data/sessions/"),
+                memory_dir=archive_config.get("memory_dir", "data/archives/memory/"),
+                archive_hour=archive_config.get("archive_hour", 4),
+                replay_count=archive_config.get("replay_count", 6),
+                summary_count=archive_config.get("summary_count", 15),
+                summary_days=archive_config.get("summary_days", 2),
+                retention_days=archive_config.get("retention_days", 30),
+            )
+            _log.info(
+                "归档系统已启用 (每日 %d:00 检查, 摘要 %d 条, 回放 %d 条)",
+                archive_config.get("archive_hour", 4),
+                archive_config.get("summary_count", 15),
+                archive_config.get("replay_count", 6),
+            )
+
+        # ── CostTracker ──
+        cost_tracking_config = self.cfg.cost_tracking
+        self.cost_tracker = (
+            CostTracker(pricing=cost_tracking_config.get("pricing"))
+            if cost_tracking_config.get("enabled", True)
+            else CostTracker()
+        )
+
+        # ── Hindsight 记忆 ──
+        hindsight_config = self.cfg.hindsight
+        self.hindsight_memory = None
+        if hindsight_config.get("enabled", True):
+            self.hindsight_memory = HindsightMemory(
+                base_url=hindsight_config.get("base_url", "http://127.0.0.1:8888"),
+                bank_id=hindsight_config.get("bank_id", "qq_bot"),
+            )
+            _log.info("Hindsight 记忆系统已启用: %s", hindsight_config.get("base_url"))
+        else:
+            _log.info("Hindsight 记忆系统未启用")
+
+        # ── 后台任务系统 ──
+        tasks_config = self.cfg.tasks
+        self.task_manager = None
+        self.cron_job_manager = None
+        self.background_task_runner = None
+        self.cron_scheduler = None
+        self._tasks_config = tasks_config
+
+        if tasks_config.get("enabled", True):
+            scheduler_cfg = tasks_config.get("scheduler", {})
+            task_store = TaskStore(
+                data_dir=tasks_config.get("data_dir", "data/tasks/"),
+                max_tasks=tasks_config.get("max_tasks", 10000),
+                terminal_ttl_hours=tasks_config.get("terminal_ttl_hours", 168),
+                lost_ttl_hours=tasks_config.get("lost_ttl_hours", 24),
+            )
+            self.task_manager = TaskManager(store=task_store)
+            self.cron_job_manager = CronJobManager(store=task_store)
+            self.background_task_runner = BackgroundTaskRunner(task_manager=self.task_manager)
+
+            if scheduler_cfg.get("enabled", True):
+                self.cron_scheduler = CronJobScheduler(
+                    poll_interval=scheduler_cfg.get("poll_interval", 30),
+                    catch_up_window=scheduler_cfg.get("catch_up_window", 3600),
+                    max_concurrent=scheduler_cfg.get("max_concurrent", 3),
+                )
+            _log.info("后台任务系统已初始化")
+
+        self.bot_id = self.cfg.bot_id
+
+        # ── Permission + Workspace + Nickname ──
+        self.permission_manager = PermissionManager("config/allowlist.toml")
+        self.admin_ids = self.permission_manager.get_role_ids("admin")
+        workspace_config = self.cfg.workspace
+        self.workspace_manager = WorkspaceManager(
+            root=workspace_config.get("root", "workspaces"),
+        )
+        self.nickname_manager = NicknameManager(bot_id=self.bot_id)
+
+        # ── Skills ──
+        self.skill_managers = SkillManagers(
+            project_skill_dir="./.agents/skills/",
+            permission_manager=self.permission_manager,
+        )
+
+        # ── RuleRouter ──
+        self.rule_router = None
+        routing_enabled = self.cfg.routing.get("enabled", False)
+        if routing_enabled and self.model_registry:
+            tier_config = self.cfg.routing.get("tiers", {})
+            self.model_registry.configure_tiers(tier_config)
+            self.rule_router = RuleRouter()
+            _log.info("ClawRouter 规则路由已初始化")
+
+        # ── Learning ──
+        learners_config = self.cfg.learners
+        self.learning_orchestrator = None
+        if learners_config.get("enabled", True):
+            self.learning_orchestrator = LearningOrchestrator(
+                config=learners_config,
+                ai_service=self.ai_service,
+                data_dir=learners_config.get("data_dir", "data/learners/"),
+                emoji_manager=self.emoji_manager,
+            )
+            _log.info("学习系统已启用")
+        else:
+            _log.info("学习系统未启用")
+
+        # ── 系统事件队列 ──
+        self.system_events = SystemEventQueue()
+        _log.info("SystemEventQueue 已初始化")
+
+        # ── 后台进程注册表 ──
+        self.process_registry = ProcessRegistry()
+        _log.info("ProcessRegistry 已初始化")
+
+        # ── 子智能体 ──
+        sub_agent_config = self.cfg.sub_agents
+        self.sub_agent_manager = None
+        if sub_agent_config.get("enabled", True):
+            self.sub_agent_manager = SubAgentManager(
+                max_concurrent=sub_agent_config.get("max_concurrent", 4),
+                max_children=sub_agent_config.get("max_children", 5),
+                run_timeout=sub_agent_config.get("run_timeout", 900),
+                system_events=self.system_events,
+            )
+            _log.info(
+                "子智能体系统已启用 (max_concurrent=%d, max_children=%d, run_timeout=%ds)",
+                sub_agent_config.get("max_concurrent", 4),
+                sub_agent_config.get("max_children", 5),
+                sub_agent_config.get("run_timeout", 900),
+            )
+        else:
+            _log.info("子智能体系统未启用")
+
+        # ── TTS ──
+        tts_config = self.cfg.tts
+        self.tts_service = None
+        if tts_config.get("enabled", False):
+            self.tts_service = TtsService(
+                base_url=tts_config.get("base_url", "http://localhost:8080"),
+                http_client=self.http_client,
+                model=tts_config.get("model", "voxcpm"),
+                temp_dir=tts_config.get("temp_dir", "data/tts_temp/"),
+                ref_audio=tts_config.get("ref_audio"),
+                ref_text=tts_config.get("ref_text"),
+                cfg_value=tts_config.get("cfg_value"),
+                inference_timesteps=tts_config.get("inference_timesteps"),
+                temperature=tts_config.get("temperature"),
+                seed=tts_config.get("seed"),
+                max_steps=tts_config.get("max_steps"),
+            )
+            _log.info(
+                "TTS 语音服务已初始化 (base_url=%s, model=%s)",
+                tts_config.get("base_url", "http://localhost:8080"),
+                tts_config.get("model", "voxcpm"),
+            )
+
+        # ── AgentEngine ──
+        self.agent_engine = AgentEngine(
+            ai_service=self.ai_service,
+            template_manager=self.template_manager,
+            context_manager=self.context_manager,
+            bot_id=self.bot_id,
+            admin_id=self.admin_ids,
+            nickname_manager=self.nickname_manager,
+            emoji_manager=self.emoji_manager,
+            hindsight_memory=self.hindsight_memory,
+            search_top_k=hindsight_config.get("search_top_k", 5),
+            skill_managers=self.skill_managers,
+            learning_orchestrator=self.learning_orchestrator,
+            max_tool_rounds=self.cfg.max_tool_rounds,
+            cost_tracker=self.cost_tracker,
+            task_manager=self.task_manager,
+            cron_job_manager=self.cron_job_manager,
+            rule_router=self.rule_router,
+            model_registry=self.model_registry,
+            permission_manager=self.permission_manager,
+            workspace_manager=self.workspace_manager,
+            archive_manager=self.archive_manager,
+            system_events=self.system_events,
+            sub_agent_manager=self.sub_agent_manager,
+        )
+
+        # ── 注入 TTS ──
+        if self.tts_service:
+            self.agent_engine.set_tts_service(self.tts_service)
+
+    # ── 阶段 2: 构造 BotEngine ─────────────────────────────────────
+
+    def _build_bot_engine(self):
+        router = Router(agent_engine=self.agent_engine)
+        self.bot_engine = BotEngine(
+            app_id=self.cfg.appid,
+            client_secret=self.cfg.secret,
+            bot_id=self.bot_id,
+            agent_engine=self.agent_engine,
+            router=router,
+            admin_id=self.admin_ids,
+            permission_manager=self.permission_manager,
+            nickname_manager=self.nickname_manager,
+            emoji_manager=self.emoji_manager,
+            multimodal_service=self.multimodal_service,
+        )
+
+    # ── 阶段 3: 交叉连线 ────────────────────────────────────────────
+
+    def _wire_callbacks(self):
+        self.agent_engine.set_reply_callback(self.bot_engine._send_reply)
+
+        # ── WakeManager ──
+        self.wake_manager = WakeManager(
+            system_events=self.system_events,
+            agent_engine=self.agent_engine,
+        )
+        _log.info("WakeManager 已初始化")
+
+        # ── 注入后台任务 deps ──
+        if self.task_manager or self.cron_job_manager or self.background_task_runner:
+            inject_deps(
+                task_manager=self.task_manager,
+                cron_job_manager=self.cron_job_manager,
+                background_task_runner=self.background_task_runner,
+                process_registry=self.process_registry,
+            )
+            _log.info("任务管理器 + 进程注册表已注入工具系统")
+        else:
+            inject_deps(process_registry=self.process_registry)
+
+        # ── 后台任务执行器连线 ──
+        if self.background_task_runner:
+            self.background_task_runner.set_system_events(self.system_events)
+            self.background_task_runner.set_wake_manager(self.wake_manager)
+
+        if self.background_task_runner and self.task_manager:
+            self.background_task_runner.set_execute_callback(
+                self.agent_engine.execute_background_task
+            )
+
+            async def _deliver(chat_id, content, message_id, is_group):
+                try:
+                    actual = self.context_manager.get_chat_type(chat_id)
+                    if actual is not None:
+                        is_group = actual
+                    await self.bot_engine.send_proactive(chat_id, content, is_group=is_group)
+                except Exception as e:
+                    _log.error("投递任务结果失败: %s", e)
+
+            self.background_task_runner.set_delivery_callback(_deliver)
+
+        # ── Cron 调度器连线 ──
+        if self.cron_scheduler and self.cron_job_manager:
+            self.cron_scheduler.set_callbacks(
+                on_trigger=lambda job: self.background_task_runner.run_cron_job(
+                    job=job,
+                    timeout=self.cfg.tasks
+                    .get("scheduler", {})
+                    .get("task_timeout", 300),
+                ),
+                get_jobs=self.cron_job_manager.list_jobs,
+                update_job=self.cron_job_manager.update_job,
+                delete_job=self.cron_job_manager.delete_job,
+            )
+
+        # ── 注入 BotEngine 到工具系统 ──
+        inject_deps(bot_engine=self.bot_engine)
+
+        # ── 审批系统 ──
+        from core.approval.approval_manager import ApprovalManager
+        self.approval_manager = ApprovalManager(
+            api_client=self.bot_engine.api,
+            admin_ids=self.admin_ids,
+        )
+        inject_deps(approval_manager=self.approval_manager)
+        self.bot_engine.approval_manager = self.approval_manager
+        _log.info("ApprovalManager 已初始化")
+
+        # ── exec 进程退出回调 ──
+        async def _on_exec_exit(session):
+            chat_id = session.delivery_channel or session.chat_id
+            summary = session.command[:80]
+            status = f"exit {session.exit_code}" if session.exit_code is not None else "terminated"
+            await self.wake_manager.notify(
+                session_key=chat_id,
+                text=f"后台进程完成: {summary} ({status})",
+                context_key=f"exec:{session.id}",
+                source="exec:exit",
+                trigger_ai=bool(session.delivery_channel),
+            )
+
+        self.process_registry.on_exit(_on_exec_exit)
+
+    # ── 阶段 4: 心跳 / 命令 / 插件 / WebUI ─────────────────────────
+
+    def _setup_extras(self):
+        # ── 心跳 ──
+        self.heartbeat_manager = None
+        if self.cfg.heartbeat.get("enabled", False):
+            self.heartbeat_manager = HeartbeatManager(
+                config=self.cfg.heartbeat,
+                ai_service=self.ai_service,
+                model_registry=self.model_registry,
+                bot_id=self.bot_id,
+                admin_ids=self.admin_ids,
+                api_client=self.bot_engine.api,
+                agent_engine=self.agent_engine,
+                context_manager=self.context_manager,
+                heartbeat_path=str(self.workspace_manager.heartbeat_path()),
+                system_events=self.system_events,
+                task_manager=self.task_manager,
+            )
+
+        # ── 命令注册 ──
+        register_all_commands(
+            self.bot_engine.command_manager,
+            context_manager=self.context_manager,
+            emoji_manager=self.emoji_manager,
+            agent_engine=self.agent_engine,
+            skill_managers=self.skill_managers,
+            learning_orchestrator=self.learning_orchestrator,
+            api_client=self.bot_engine.api,
+            bot_engine=self.bot_engine,
+            ai_service=self.ai_service,
+            task_manager=self.task_manager,
+            cron_job_manager=self.cron_job_manager,
+            background_task_runner=self.background_task_runner,
+            heartbeat_manager=self.heartbeat_manager,
+            archive_manager=self.archive_manager,
+            tts_service=self.tts_service,
+        )
+
+        # ── 插件加载 ──
+        plugin_manager = PluginManager(plugin_dir="plugins")
+        plugin_manager.load_all(
+            command_manager=self.bot_engine.command_manager,
+            context_manager=self.context_manager,
+            emoji_manager=self.emoji_manager,
+            agent_engine=self.agent_engine,
+            skill_managers=self.skill_managers,
+            api_client=self.bot_engine.api,
+            bot_engine=self.bot_engine,
+        )
+
+        # ── WebUI ──
+        webui_config = self.cfg.webui
+        if webui_config.get("enabled", False):
+            webui_app = create_app(
+                managers={
+                    "emoji_manager": self.emoji_manager,
+                    "nickname_manager": self.nickname_manager,
+                    "context_manager": self.context_manager,
+                    "cost_tracker": self.cost_tracker,
+                    "agent_engine": self.agent_engine,
+                    "learning_orchestrator": self.learning_orchestrator,
+                    "archive_manager": self.archive_manager,
+                },
+                webui_config=webui_config,
+            )
+            _webui_host = webui_config.get("host", "127.0.0.1")
+            _webui_port = webui_config.get("port", 8080)
+            _log.info("WebUI 管理面板将在 http://%s:%d 启动", _webui_host, _webui_port)
+            if _webui_host in ("0.0.0.0", "::"):
+                _log.info("局域网内可通过 http://<本机IP>:%d 访问", _webui_port)
+            asyncio.create_task(start_webui(webui_app, webui_config))
+
+    # ── Hindsight 健康检查（async，需单独调用） ────────────────────
+
+    async def check_hindsight_health(self):
+        if self.hindsight_memory:
+            health_result = await self.hindsight_memory.health()
+            if health_result.get("status") == "ok":
+                _log.info("Hindsight 健康检查通过 (%sms)", health_result.get("latency_ms"))
+            else:
+                _log.warning(
+                    "Hindsight 健康检查失败: %s — 记忆功能将降级运行",
+                    health_result.get("error"),
+                )
+
+    # ── start / stop ───────────────────────────────────────────────
+
+    async def start(self):
+        """启动所有后台服务。"""
+        await self.check_hindsight_health()
+
+        gateway_url = await self.bot_engine.api.get_gateway_url()
+        loop = asyncio.get_running_loop()
+        self.bot_engine.start(gateway_url, loop)
+        print(f"机器人已启动，WebSocket 网关: {gateway_url}")
+
+        await self.process_registry.start()
+
+        if self.cron_scheduler:
+            self.cron_scheduler.start()
+
+        if self.heartbeat_manager:
+            await self.heartbeat_manager.start()
+
+        self.task_cleanup_task = None
+        if self.task_manager:
+            self._start_task_cleanup()
+
+    def _start_task_cleanup(self):
+        tasks_config = self._tasks_config
+        lost_detection_minutes = tasks_config.get("lost_detection_minutes", 30)
+        max_terminal_per_job = tasks_config.get("max_terminal_per_job", 2000)
+
+        async def _run_cycle():
+            lost = await self.task_manager.detect_lost_tasks(lost_detection_minutes)
+            cleaned = await self.task_manager.cleanup_old_tasks()
+            capped = await self.task_manager.enforce_per_job_terminal_limit(max_terminal_per_job)
+            if lost or cleaned or capped:
+                _log.info(
+                    "任务清理周期: %d 丢失标记, %d TTL 清理, %d job 上限裁剪",
+                    lost, cleaned, capped,
+                )
+
+        async def _periodic_cleanup():
+            try:
+                await _run_cycle()
+            except Exception as e:
+                _log.warning("定时清理任务异常(首次): %s", e)
+            while True:
+                await asyncio.sleep(3600)
+                try:
+                    await _run_cycle()
+                except Exception as e:
+                    _log.warning("定时清理任务异常: %s", e)
+
+        self.task_cleanup_task = asyncio.create_task(_periodic_cleanup())
+
+    async def stop(self):
+        """优雅关闭。"""
+        await self.process_registry.stop()
+        if self.cron_scheduler:
+            await self.cron_scheduler.stop()
+        if self.heartbeat_manager:
+            await self.heartbeat_manager.stop()
+        if self.task_cleanup_task:
+            self.task_cleanup_task.cancel()
+        if self.tts_service:
+            await self.tts_service.close()
+        await self.bot_engine.stop()
