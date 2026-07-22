@@ -6,16 +6,14 @@ from core.tools._types import ToolEntry, ToolContext, ToolResult
 
 _log = logging.getLogger(__name__)
 
+_SYNTHETIC_ID_PREFIXES = ("wake_", "hb_", "bg_", "subagent:")
+
 SEND_MESSAGE_PARAMS = {
     "type": "object",
     "properties": {
         "text": {
             "type": "string",
             "description": "要发送给用户的文本内容",
-        },
-        "reply_to": {
-            "type": "string",
-            "description": "回复的目标消息 ID。不填则按上下文决定（对话中回复当前消息，主动触发时发送新消息）；设为空字符串则强制发送为主动消息。",
         },
     },
     "required": ["text"],
@@ -27,9 +25,10 @@ async def _send_message(args: dict, ctx: ToolContext) -> ToolResult:
     if not text:
         return ToolResult(content="消息为空", sent_text=False)
 
-    reply_to = args.get("reply_to")
-    if reply_to is None:
-        reply_to = ctx.reply_to
+    # 自动判断回复还是主动：只有真实 QQ 消息 ID 才回复，合成 ID 回退到主动消息
+    reply_to = ctx.reply_to
+    if reply_to and reply_to.startswith(_SYNTHETIC_ID_PREFIXES):
+        reply_to = ""
 
     await ctx.reply_callback(
         chat_id=ctx.chat_id,
