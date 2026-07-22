@@ -21,6 +21,7 @@ dependencies = [
     "hindsight-client>=0.8.4",
     "httpx>=0.27.0",
     "aiofiles>=25.1.0",
+    "pydantic>=2.12.5",
 ]
 
 [tool.uv.sources]
