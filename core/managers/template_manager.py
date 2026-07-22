@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import jinja2
 
@@ -14,18 +14,12 @@ class TemplateManager:
     _GROUP_CHAT_TEMPLATE = "prompts/group_chat.j2"
     _TASK_CHAT_TEMPLATE = "prompts/task_chat.j2"
 
-    def __init__(self, config: Dict[str, Any]):
-        """
-        初始化模板管理器
-
-        Args:
-            config: 配置文件字典
-        """
+    def __init__(self, character_card: str = "characters/default.md"):
         self.template_loader = jinja2.FileSystemLoader(searchpath=".")
         self.template_env = jinja2.Environment(loader=self.template_loader)
 
         # 加载角色卡
-        card_path = config.get("character_card", "characters/default.md")
+        card_path = character_card
         self.character_card = ""
         if card_path and os.path.exists(card_path):
             try:
@@ -35,7 +29,7 @@ class TemplateManager:
                 _log.error(f"读取角色卡文件失败: {e}")
 
     def render_prompt_template(
-        self, template_path: str, context: Dict[str, Any]
+        self, template_path: str, context: dict
     ) -> str:
         """
         渲染提示模板
@@ -167,7 +161,7 @@ class TemplateManager:
             prompt = "你是一个后台任务执行助手。请根据指令完成任务。"
         return prompt
 
-    def get_template_paths(self) -> Dict[str, str]:
+    def get_template_paths(self) -> dict[str, str]:
         """获取所有模板路径"""
         return {
             "private_chat": self._PRIVATE_CHAT_TEMPLATE,
