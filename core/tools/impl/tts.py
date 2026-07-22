@@ -29,8 +29,15 @@ async def _synthesize_speech(args: dict, ctx: ToolContext) -> ToolResult:
     instructions = (args.get("instructions") or "").strip()
     voice_mode = (args.get("voice_mode") or "preset").strip()
 
+    MAX_TEXT_LENGTH = 500
+    if len(text) > MAX_TEXT_LENGTH:
+        return ToolResult(content=json.dumps(
+            {"error": f"文本过长（{len(text)} 字），超过 {MAX_TEXT_LENGTH} 字限制，请精简后重试"},
+            ensure_ascii=False,
+        ))
+
     try:
-        audio_path = await tts_service.synthesize(
+        audio_bytes = await tts_service.synthesize(
             text=text,
             instructions=instructions or None,
             voice_mode=voice_mode,
@@ -40,22 +47,24 @@ async def _synthesize_speech(args: dict, ctx: ToolContext) -> ToolResult:
             {"error": f"语音合成失败: {e}"}, ensure_ascii=False,
         ))
 
-    if not audio_path:
+    if not audio_bytes:
         return ToolResult(content=json.dumps(
             {"error": "语音合成无输出"}, ensure_ascii=False,
         ))
 
+    temp_path = tts_service.save_temp_audio(audio_bytes)
+
     effective_chat_id = ctx.delivery_channel or ctx.chat_id
-    is_background = bool(ctx.delivery_channel)
-    effective_reply_to = None if is_background else ctx.reply_to
+    effective_reply_to = None if ctx.delivery_channel else ctx.reply_to
     chat_type = "group" if ctx.is_group else "c2c"
 
     try:
         file_info = await media_uploader.upload(
             chat_type=chat_type,
             chat_id=effective_chat_id,
-            source=str(audio_path),
+            source=temp_path,
             file_type=MEDIA_TYPE_VOICE,
+            file_name="tts.wav",
         )
     except Exception as e:
         return ToolResult(content=json.dumps(
@@ -90,8 +99,8 @@ TTS_PARAMS = {
         "text": {
             "type": "string",
             "description": (
-                "要转为语音的文字内容。请使用短句配合标点控制停顿韵律（句号长停顿、逗号短中断、省略号犹豫），"
-                "过长的文本会导致生成超时，应在 30 秒可读完的范围内。"
+                "要转为语音的文字内容。使用短句配合标点控制停顿韵律（句号长停顿、逗号短中断、省略号犹豫）。"
+                "限制不超过 500 字，超长会被拒绝。"
                 "如需方言，使用地道方言词汇。"
                 "可在文中加 [laughing]、[sigh] 等非语言标签增强表现力。"
                 "注意：text 至少 3-5 个字，太短会生成断裂的音频。"
