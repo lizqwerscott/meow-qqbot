@@ -14,13 +14,12 @@ import logging
 import re as _re
 import time
 from collections import OrderedDict
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, List, Optional, Set
 
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager
 from core.managers.nickname_manager import NicknameManager
 from core.message import InputMessage, MessageType
-from core.tools import SubAgentManager
 from core.tools.impl import inject_deps, get_dep
 from core.learners.base import sanitize_for_learners
 
@@ -36,8 +35,6 @@ class AgentEngine:
     """核心业务引擎 (Facade)。"""
 
     def __init__(self, ctx: EngineContext):
-        self._ctx = ctx
-
         self.ai_service = ctx.ai.ai_service
         self.template_manager = ctx.prompt.template_manager
         self.context_manager = ctx.mgmt.context_manager

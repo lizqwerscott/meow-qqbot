@@ -10,7 +10,7 @@ import json
 import logging
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Any, List, Optional, Tuple, Set
+from typing import Any, List, Optional, Tuple
 
 from core.message import InputMessage
 from core.tools.policy import build_tools, ChatContext, format_task_tool_descriptions
