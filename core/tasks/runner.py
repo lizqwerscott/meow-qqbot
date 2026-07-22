@@ -422,7 +422,7 @@ class BackgroundTaskRunner:
                 try:
                     await self._delivery_cb(
                         chat_id=job.delivery_channel,
-                        content=f"{prefix} 定时任务 [{job.name}] 执行{'成功' if task.status == TaskStatus.SUCCESS else '失败'}：\n{content[:500]}",
+                        content=f"{prefix} 定时任务 [{job.name}] 执行{'成功' if task.status == TaskStatus.SUCCESS else '失败'}：\n{content}",
                         message_id="",
                         is_group=job.is_group,
                     )

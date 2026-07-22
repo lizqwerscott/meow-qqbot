@@ -754,12 +754,16 @@ class AgentEngine:
             )
 
             # 优先检查 heartbeat_respond 工具响应
+            HEARTBEAT_ACK_MAX_CHARS = 300
             if hb_resp.get("notify"):
                 text = hb_resp.get("notification_text", "").strip()
-                if text:
-                    _log.info(f"心跳 heartbeat_respond: 需要通知")
+                if text and len(text) > HEARTBEAT_ACK_MAX_CHARS:
+                    _log.info("心跳 heartbeat_respond: 需要通知")
                     return True, text
-                _log.info("心跳 heartbeat_respond: notify=true 但内容为空，视为不通知")
+                if text:
+                    _log.info("心跳 heartbeat_respond: notify=true 但文本过短（<=%d），视为心跳确认", HEARTBEAT_ACK_MAX_CHARS)
+                else:
+                    _log.info("心跳 heartbeat_respond: notify=true 但内容为空，视为不通知")
                 return False, None
 
             if hb_resp:
@@ -767,7 +771,7 @@ class AgentEngine:
                 return False, None
 
             # 降级回退：解析文本 HEARTBEAT_OK
-            ack_max_chars = 60
+            ack_max_chars = HEARTBEAT_ACK_MAX_CHARS
             for reply in captured_replies:
                 # 去空白后检查 HEARTBEAT_OK（出现在任意位置都算 ack）
                 compact = _re.sub(r"\s+", "", reply)
