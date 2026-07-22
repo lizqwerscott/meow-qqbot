@@ -2,10 +2,11 @@ import asyncio
 import logging
 import os
 import sys
-import tomllib
 
 import httpx
 from colorlog import ColoredFormatter
+
+from core.config_loader import ConfigLoader
 
 from core.ai.model_registry import ModelRegistry
 from core.ai.multimodal import MultimodalService
@@ -69,22 +70,21 @@ def setup_logging() -> logging.Logger:
 async def main() -> None:
     _log = setup_logging()
 
-    with open("config/config.toml", "rb") as f:
-        config = tomllib.load(f)
+    cfg = ConfigLoader()
 
     # ── 1. 初始化全局单例服务 ──
     # 共享 HTTP 客户端
     http_client = httpx.AsyncClient(timeout=60.0)
 
     # 模板管理器
-    template_manager = TemplateManager(config)
+    template_manager = TemplateManager(cfg.character_card)
 
     # 模型 Provider + Group 配置
-    providers_config = config.get("providers", {})
-    groups_config = config.get("groups", {})
+    providers_config = cfg.providers
+    groups_config = cfg.groups
 
     # ── 模型冷却配置 ──
-    cooldown_config = config.get("cooldown", {})
+    cooldown_config = cfg.cooldown
 
     # ── 模型注册表（始终创建，供 heartbeat / fallback / multimodal 使用） ──
     model_registry = None
@@ -105,7 +105,7 @@ async def main() -> None:
     ai_service = model_registry.default_service
 
     # 多模态配置
-    multimodal_config = config.get("multimodal", {})
+    multimodal_config = cfg.multimodal
 
     # 多模态服务（如果启用，从注册表获取模型配置）
     multimodal_service = None
@@ -139,7 +139,7 @@ async def main() -> None:
     )
 
     # 上下文管理配置
-    ctx_mgmt = config.get("context_management", {})
+    ctx_mgmt = cfg.context_management
 
     # 全局 ChatContextManager（短期记忆，append-only，token 阈值触发 compaction）
     cache_cfg = ctx_mgmt.get("cache", {})
@@ -159,7 +159,7 @@ async def main() -> None:
     )
 
     # ── ArchiveManager（会话归档 + 自动摘要） ──
-    archive_config = config.get("archive", {})
+    archive_config = cfg.archive
     archive_manager = None
     if archive_config.get("enabled", True):
         archive_manager = ArchiveManager(
@@ -180,7 +180,7 @@ async def main() -> None:
         )
 
     # ── CostTracker（AI 消耗追踪） ──
-    cost_tracking_config = config.get("cost_tracking", {})
+    cost_tracking_config = cfg.cost_tracking
     cost_tracker = (
         CostTracker(
             pricing=cost_tracking_config.get("pricing"),
@@ -190,7 +190,7 @@ async def main() -> None:
     )
 
     # ── Hindsight 长期记忆系统 ──
-    hindsight_config = config.get("hindsight", {})
+    hindsight_config = cfg.hindsight
     hindsight_memory = None
     if hindsight_config.get("enabled", True):
         hindsight_memory = HindsightMemory(
@@ -215,7 +215,7 @@ async def main() -> None:
             )
 
     # ── 后台任务系统（Tasks + Cron） ──
-    tasks_config = config.get("tasks", {})
+    tasks_config = cfg.tasks
     task_manager = None
     cron_job_manager = None
     background_task_runner = None
@@ -241,14 +241,14 @@ async def main() -> None:
             )
         _log.info("后台任务系统已初始化")
 
-    bot_id = config.get("bot_id", "")
+    bot_id = cfg.bot_id
 
     # ── Permissions（权限管理器，全局单例） ──
     permission_manager = PermissionManager("config/allowlist.toml")
     admin_ids = permission_manager.get_role_ids("admin")
 
     # ── WorkspaceManager（工作区路径管理与沙箱） ──
-    workspace_config = config.get("workspace", {})
+    workspace_config = cfg.workspace
     workspace_manager = WorkspaceManager(
         root=workspace_config.get("root", "workspaces"),
     )
@@ -264,15 +264,15 @@ async def main() -> None:
 
     # ── 规则路由（ClawRouter 风格，可选） ──
     rule_router = None
-    routing_enabled = config.get("routing", {}).get("enabled", False)
+    routing_enabled = cfg.routing.get("enabled", False)
     if routing_enabled and model_registry:
-        tier_config = config.get("routing", {}).get("tiers", {})
+        tier_config = cfg.routing.get("tiers", {})
         model_registry.configure_tiers(tier_config)
         rule_router = RuleRouter()
         _log.info("ClawRouter 规则路由已初始化")
 
     # ── LearningOrchestrator（学习系统） ──
-    learners_config = config.get("learners", {})
+    learners_config = cfg.learners
     learning_orchestrator = None
     if learners_config.get("enabled", True):
         learning_orchestrator = LearningOrchestrator(
@@ -294,7 +294,7 @@ async def main() -> None:
     _log.info("ProcessRegistry 已初始化")
 
     # ── 子智能体系统 ──
-    sub_agent_config = config.get("sub_agents", {})
+    sub_agent_config = cfg.sub_agents
     sub_agent_manager = None
     if sub_agent_config.get("enabled", True):
         sub_agent_manager = SubAgentManager(
@@ -313,7 +313,7 @@ async def main() -> None:
         _log.info("子智能体系统未启用")
 
     # ── TTS 语音合成服务 (VoxCPM2) ──
-    tts_config = config.get("tts", {})
+    tts_config = cfg.tts
     tts_service = None
     if tts_config.get("enabled", False):
         tts_service = TtsService(
@@ -348,7 +348,7 @@ async def main() -> None:
         search_top_k=hindsight_config.get("search_top_k", 5),
         skill_managers=skill_managers,
         learning_orchestrator=learning_orchestrator,
-        max_tool_rounds=config.get("max_tool_rounds", -1),
+        max_tool_rounds=cfg.max_tool_rounds,
         cost_tracker=cost_tracker,
         task_manager=task_manager,
         cron_job_manager=cron_job_manager,
@@ -414,7 +414,7 @@ async def main() -> None:
         cron_scheduler.set_callbacks(
             on_trigger=lambda job: background_task_runner.run_cron_job(
                 job=job,
-                timeout=config.get("tasks", {})
+                timeout=cfg.tasks
                 .get("scheduler", {})
                 .get("task_timeout", 300),
             ),
@@ -427,8 +427,8 @@ async def main() -> None:
     router = Router(agent_engine=agent_engine)
 
     engine = BotEngine(
-        app_id=config["appid"],
-        client_secret=config["secret"],
+        app_id=cfg.appid,
+        client_secret=cfg.secret,
         bot_id=bot_id,
         agent_engine=agent_engine,
         router=router,
@@ -472,9 +472,9 @@ async def main() -> None:
 
     # ── 心跳系统 ──
     heartbeat_manager = None
-    if config.get("heartbeat", {}).get("enabled", False):
+    if cfg.heartbeat.get("enabled", False):
         heartbeat_manager = HeartbeatManager(
-            config=config["heartbeat"],
+            config=cfg.heartbeat,
             ai_service=ai_service,
             model_registry=model_registry,
             bot_id=bot_id,
@@ -519,7 +519,7 @@ async def main() -> None:
     )
 
     # ── 5. 启动 WebUI（如果启用） ──
-    webui_config = config.get("webui", {})
+    webui_config = cfg.webui
     if webui_config.get("enabled", False):
         webui_app = create_app(
             managers={
