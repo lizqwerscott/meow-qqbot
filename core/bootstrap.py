@@ -16,6 +16,7 @@ from core.command_handlers import register_all_commands
 from core.config_loader import ConfigLoader
 from core.engine.agent_engine import AgentEngine
 from core.engine.client import BotEngine
+from core.engine.context import AIContext, BgContext, EngineContext, MemoryContext, MgmtContext, PromptContext, SubContext, SysContext
 from core.engine.hindsight_memory import HindsightMemory
 from core.engine.router import Router
 from core.engine.system_events import SystemEventQueue
@@ -294,31 +295,44 @@ class ServiceGraph:
                 tts_config.get("model", "voxcpm"),
             )
 
-        # ── AgentEngine ──
-        self.agent_engine = AgentEngine(
-            ai_service=self.ai_service,
-            template_manager=self.template_manager,
-            context_manager=self.context_manager,
-            bot_id=self.bot_id,
-            admin_id=self.admin_ids,
-            nickname_manager=self.nickname_manager,
-            emoji_manager=self.emoji_manager,
-            hindsight_memory=self.hindsight_memory,
-            search_top_k=hindsight_config.get("search_top_k", 5),
-            skill_managers=self.skill_managers,
-            learning_orchestrator=self.learning_orchestrator,
-            max_tool_rounds=self.cfg.max_tool_rounds,
-            cost_tracker=self.cost_tracker,
-            task_manager=self.task_manager,
-            cron_job_manager=self.cron_job_manager,
-            rule_router=self.rule_router,
-            model_registry=self.model_registry,
-            permission_manager=self.permission_manager,
-            workspace_manager=self.workspace_manager,
-            archive_manager=self.archive_manager,
-            system_events=self.system_events,
-            sub_agent_manager=self.sub_agent_manager,
+        # ── EngineContext ──
+        ctx = EngineContext(
+            ai=AIContext(
+                ai_service=self.ai_service,
+                model_registry=self.model_registry,
+                rule_router=self.rule_router,
+                multimodal_service=self.multimodal_service,
+                max_tool_rounds=self.cfg.max_tool_rounds,
+            ),
+            prompt=PromptContext(
+                template_manager=self.template_manager,
+                nickname_manager=self.nickname_manager,
+                emoji_manager=self.emoji_manager,
+                skill_managers=self.skill_managers,
+                learning_orchestrator=self.learning_orchestrator,
+            ),
+            memory=MemoryContext(
+                hindsight_memory=self.hindsight_memory,
+                search_top_k=hindsight_config.get("search_top_k", 5),
+            ),
+            mgmt=MgmtContext(
+                context_manager=self.context_manager,
+                permission_manager=self.permission_manager,
+                cost_tracker=self.cost_tracker,
+                workspace_manager=self.workspace_manager,
+                archive_manager=self.archive_manager,
+                system_events=self.system_events,
+            ),
+            bg=BgContext(
+                task_manager=self.task_manager,
+                cron_job_manager=self.cron_job_manager,
+            ),
+            sub=SubContext(sub_agent_manager=self.sub_agent_manager),
+            sys=SysContext(bot_id=self.bot_id, admin_ids=tuple(self.admin_ids)),
         )
+
+        # ── AgentEngine ──
+        self.agent_engine = AgentEngine(ctx)
 
         # ── 注入 TTS ──
         if self.tts_service:

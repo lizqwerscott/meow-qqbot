@@ -72,44 +72,24 @@ class PromptBuilder:
     4. 拼接动态上下文（记忆、时间、表情标签、群友列表、技能条目）
     """
 
-    def __init__(
-        self,
-        template_manager: Any,
-        context_manager: Any,
-        ai_service: Any,
-        *,
-        bot_id: str = "",
-        nickname_manager: Any = None,
-        emoji_manager: Any = None,
-        skill_managers: Any = None,
-        hindsight_memory: Any = None,
-        search_top_k: int = 3,
-        admin_ids: Optional[List[str]] = None,
-        learning_orchestrator: Any = None,
-        has_tasks: bool = False,
-        has_sub_agents: bool = False,
-        permission_manager=None,
-        workspace_manager=None,
-        archive_manager=None,
-        system_events=None,
-    ):
-        self.template_manager = template_manager
-        self.context_manager = context_manager
-        self.ai_service = ai_service
-        self._bot_id = bot_id
-        self._nm = nickname_manager
-        self.emoji_manager = emoji_manager
-        self._skill_managers = skill_managers
-        self.hindsight = hindsight_memory
-        self.learners = learning_orchestrator
-        self._search_top_k = search_top_k
-        self._admin_ids = admin_ids or []
-        self._has_tasks = has_tasks
-        self._has_sub_agents = has_sub_agents
-        self._perm = permission_manager
-        self._workspace_manager = workspace_manager
-        self._archive_manager = archive_manager
-        self._system_events = system_events
+    def __init__(self, ctx):
+        self.template_manager = ctx.prompt.template_manager
+        self.context_manager = ctx.mgmt.context_manager
+        self.ai_service = ctx.ai.ai_service
+        self._bot_id = ctx.sys.bot_id
+        self._nm = ctx.prompt.nickname_manager
+        self.emoji_manager = ctx.prompt.emoji_manager
+        self._skill_managers = ctx.prompt.skill_managers
+        self.hindsight = ctx.memory.hindsight_memory
+        self.learners = ctx.prompt.learning_orchestrator
+        self._search_top_k = ctx.memory.search_top_k
+        self._admin_ids = list(ctx.sys.admin_ids)
+        self._has_tasks = ctx.bg.task_manager is not None
+        self._has_sub_agents = ctx.sub.sub_agent_manager is not None
+        self._perm = ctx.mgmt.permission_manager
+        self._workspace_manager = ctx.mgmt.workspace_manager
+        self._archive_manager = ctx.mgmt.archive_manager
+        self._system_events = ctx.mgmt.system_events
         self._tts_service = None
 
     async def build(

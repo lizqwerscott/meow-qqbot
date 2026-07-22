@@ -107,28 +107,16 @@ class ToolLoop:
     4. Queue Steering：新消息注入
     """
 
-    def __init__(
-        self,
-        ai_service: Any,
-        *,
-        permission_manager: Any = None,
-        cost_tracker: Any = None,
-        context_manager: Any = None,
-        session_manager: Any = None,
-        prompt_builder: Any = None,
-        hindsight_memory: Any = None,
-        max_rounds: int = -1,
-        model_registry: Any = None,
-    ):
-        self.ai_service = ai_service
-        self._perm = permission_manager
-        self.cost_tracker = cost_tracker
-        self.context_manager = context_manager
+    def __init__(self, ctx, *, prompt_builder=None, session_manager=None):
+        self.ai_service = ctx.ai.ai_service
+        self._perm = ctx.mgmt.permission_manager
+        self.cost_tracker = ctx.mgmt.cost_tracker
+        self.context_manager = ctx.mgmt.context_manager
         self.session_manager = session_manager
         self.prompt_builder = prompt_builder
-        self.hindsight = hindsight_memory
-        self._max_tool_rounds = max_rounds
-        self._model_registry = model_registry
+        self.hindsight = ctx.memory.hindsight_memory
+        self._max_tool_rounds = ctx.ai.max_tool_rounds
+        self._model_registry = ctx.ai.model_registry
 
     async def run(
         self,
