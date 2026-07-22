@@ -43,10 +43,7 @@ from core.tools.sub_agent_manager import SubAgentManager
 from core.webui import create_app, start_webui
 
 
-async def main() -> None:
-    print("Hello from meow-qqbot!")
-
-    # --- 彩色日志配置 ---
+def setup_logging() -> logging.Logger:
     _colors = {
         "DEBUG": "cyan",
         "INFO": "green",
@@ -66,7 +63,11 @@ async def main() -> None:
     _handler.setFormatter(_formatter)
     logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
 
-    _log = logging.getLogger(__name__)
+    return logging.getLogger(__name__)
+
+
+async def main() -> None:
+    _log = setup_logging()
 
     with open("config/config.toml", "rb") as f:
         config = tomllib.load(f)
@@ -341,7 +342,6 @@ async def main() -> None:
         context_manager=context_manager,
         bot_id=bot_id,
         admin_id=admin_ids,
-        openai_config={},
         nickname_manager=nickname_manager,
         emoji_manager=emoji_manager,
         hindsight_memory=hindsight_memory,
