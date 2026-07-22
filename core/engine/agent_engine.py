@@ -438,6 +438,9 @@ class AgentEngine:
             model_chain=input_message.model_chain,
         )
 
+        if self._system_events:
+            self._system_events.consume_snapshot(chat_id)
+
         _log.info(f"消息处理完成: {input_message.id}")
 
     # ── 后台任务执行 ──
@@ -588,7 +591,7 @@ class AgentEngine:
                 tier = self.rule_router.classify("[系统事件]")
                 model_chain = self.model_registry.get_chain(tier) or None
 
-            await self.tool_loop.run(
+            _, text_was_sent = await self.tool_loop.run(
                 messages=messages,
                 tools=tools_to_use or [],
                 chat_id=chat_id,
@@ -598,6 +601,9 @@ class AgentEngine:
                 sender_id="system",
                 model_chain=model_chain,
             )
+
+            if text_was_sent and self._system_events:
+                self._system_events.consume_snapshot(chat_id)
         except Exception as e:
             _log.error("trigger_event_response 异常: %s", e, exc_info=True)
 
@@ -673,6 +679,10 @@ class AgentEngine:
                 ),
                 timeout=timeout,
             )
+
+            # 条件消费：只有 AI 要求通知时才消费事件
+            if hb_resp.get("notify") and self._system_events:
+                self._system_events.consume_snapshot(system_event_key)
 
             # 优先检查 heartbeat_respond 工具响应
             HEARTBEAT_ACK_MAX_CHARS = 300

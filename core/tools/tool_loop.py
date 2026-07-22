@@ -131,7 +131,7 @@ class ToolLoop:
         delivery_channel: str = "",
         reply_to_message_id: str = "",
         model_chain: Optional[List[str]] = None,
-    ) -> bool:
+    ) -> tuple[bool, bool]:
         """执行工具调用循环。
 
         Args:
@@ -139,9 +139,13 @@ class ToolLoop:
             model_chain: 模型链（如 ["cheap", "primary"]），启用 fallback。
 
         Returns:
-            sent_emoji: 是否在循环中发送了表情。
+            (sent_emoji, text_was_sent)
+            - sent_emoji: 是否在循环中发送了表情
+            - text_was_sent: 是否通过 reply_callback 发送了文本
         """
         sent_emoji = False
+        text_was_sent = False
+        message_delivered = False
         current_model_name: Optional[str] = None
         suppress_reply = False
 
@@ -161,7 +165,7 @@ class ToolLoop:
             else:
                 _log.warning(f"模型链全部冷却/无效: {model_chain}")
                 await reply_callback(chat_id, "所有模型均不可用，请稍后重试", reply_to, is_group)
-                return False
+                return False, True
 
         for round_idx in _rounds:
             # ── 防御：清理 messages 中孤立的 tool_calls ──
@@ -213,7 +217,7 @@ class ToolLoop:
                     await reply_callback(
                         chat_id, "所有模型均不可用", reply_to, is_group,
                     )
-                    return False
+                    return False, True
 
                 _log.warning(
                     f"模型 [{resolved_model_name}] 失败，从剩余链重新解析: {remaining}"
@@ -239,6 +243,7 @@ class ToolLoop:
 
             if message is None:
                 await reply_callback(chat_id, "AI 服务异常", reply_to, is_group)
+                text_was_sent = True
                 break
 
             response_text = message.content or ""
@@ -281,7 +286,11 @@ class ToolLoop:
                         pass
 
             if response_text:
-                if _is_silent_reply_text(response_text) or suppress_reply:
+                if message_delivered:
+                    _log.info(
+                        f"[工具循环 第{round_idx + 1}轮] send_message 已投递，跳过后续文本发送"
+                    )
+                elif _is_silent_reply_text(response_text) or suppress_reply:
                     _log.info(
                         f"[工具循环 第{round_idx + 1}轮] 静默回复，跳过发送"
                     )
@@ -292,6 +301,7 @@ class ToolLoop:
                         message_id=reply_to,
                         is_group=is_group,
                     )
+                    text_was_sent = True
 
             if response_text or tool_calls:
                 await self.context_manager.add_assistant_message_async(
@@ -339,6 +349,9 @@ class ToolLoop:
                     content = result.content
                     if result.sent_emoji:
                         sent_emoji = True
+                    if result.sent_text:
+                        text_was_sent = True
+                        message_delivered = True
                     if result.no_reply:
                         suppress_reply = True
                 except Exception as e:
@@ -381,9 +394,10 @@ class ToolLoop:
                 )
                 if steer_msgs:
                     suppress_reply = False  # 新用户消息注入后，重置静默标志
+                    message_delivered = False
                 messages.extend(steer_msgs)
 
-        return sent_emoji
+        return sent_emoji, text_was_sent
 
     async def _drain_steering_messages(
         self,

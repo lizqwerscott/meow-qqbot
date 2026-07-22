@@ -13,6 +13,7 @@ SECTIONS: dict[str, set[str]] = {
     "sub_agent": {"spawn_subagent", "subagents"},
     "heartbeat": {"heartbeat_respond"},
     "learner":   {"define_jargon", "report_behavior_effect"},
+    "message":   {"send_message"},
 }
 
 _ALL_TOOLS: set[str] = set()
@@ -33,6 +34,7 @@ PROFILES: dict[str, set[str]] = {
     },
     "task": {
         "announce", "search_user",
+        "send_message",
         "memory", "mark_important",
         "read_file", "write_file", "edit_file", "apply_patch",
         "exec", "process",
