@@ -197,7 +197,7 @@ class PromptBuilder:
                     ts = time.strftime("%H:%M:%S", time.localtime(e.ts))
                     lines.append(f"System: [{ts}] {e.text}")
                 lines.append("")
-                lines.append("处理完成后，如果没有需要关注的事项，回复 NO_REPLY 静默结束，无需向用户发送消息。")
+                lines.append("处理完成后，如果没有需要关注的事项，必须且只能回复 NO_REPLY 三个英文字符，不得添加任何其他内容（包括角色文本、颜文字、标点符号）。回复 NO_REPLY 之外的任何内容都会被发送给用户。")
                 dynamic_parts.append("【系统事件】\n" + "\n".join(lines))
 
         # send_message 工具投递提示
@@ -414,6 +414,8 @@ class PromptBuilder:
                 for e in events:
                     ts = time.strftime("%H:%M:%S", time.localtime(e.ts))
                     lines.append(f"System: [{ts}] {e.text}")
+                lines.append("")
+                lines.append("处理完成后，如果没有需要关注的事项，必须且只能回复 NO_REPLY 三个英文字符，不得添加任何其他内容。回复 NO_REPLY 之外的任何内容都会被发送给用户。")
                 messages.insert(1, {
                     "role": "system",
                     "content": "【系统事件（本次心跳触发）】\n" + "\n".join(lines),
