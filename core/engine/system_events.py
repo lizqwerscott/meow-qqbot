@@ -23,6 +23,7 @@ class SystemEvent:
     text: str
     ts: float
     context_key: Optional[str] = None
+    heartbeat_only: bool = False
 
 
 @dataclass
@@ -45,6 +46,7 @@ class SystemEventQueue:
         context_key: Optional[str] = None,
         *,
         replace: bool = False,
+        heartbeat_only: bool = False,
     ) -> bool:
         """推入系统事件到指定 session 的队列。
 
@@ -68,14 +70,14 @@ class SystemEventQueue:
         sq = self._get_or_create(session_key)
 
         if replace and context_key:
-            return self._replace_in_queue(sq, cleaned, context_key)
+            return self._replace_in_queue(sq, cleaned, context_key, heartbeat_only)
 
         # 去重：同 session 内 (text, context_key) 相同则跳过
         dedup_key = (cleaned, context_key)
         if dedup_key in sq._seen:
             return False
 
-        event = SystemEvent(text=cleaned, ts=time.time(), context_key=context_key)
+        event = SystemEvent(text=cleaned, ts=time.time(), context_key=context_key, heartbeat_only=heartbeat_only)
         sq.queue.append(event)
         sq._seen.add(dedup_key)
 
@@ -131,6 +133,31 @@ class SystemEventQueue:
         sq = self._queues.get(session_key)
         return bool(sq and sq.queue)
 
+    def drain_non_heartbeat(self, session_key: str) -> list[SystemEvent]:
+        """只取出并清除非 heartbeat_only 的事件，保留 heartbeat_only 事件。
+        
+        同时清理该 session_key 的 stale snapshot 记录。
+        """
+        sq = self._queues.get(session_key)
+        if not sq:
+            self._snapshots.pop(session_key, None)
+            return []
+        kept = [e for e in sq.queue if e.heartbeat_only]
+        removed = [e for e in sq.queue if not e.heartbeat_only]
+        sq.queue = kept
+        sq._seen = {(e.text, e.context_key) for e in kept}
+        if not sq.queue:
+            self._queues.pop(session_key, None)
+        self._snapshots.pop(session_key, None)
+        _log.debug("drained %d non-heartbeat events [%s..]", len(removed), session_key[:12])
+        return removed
+
+    def peek_non_heartbeat(self, session_key: str) -> list[SystemEvent]:
+        sq = self._queues.get(session_key)
+        if not sq:
+            return []
+        return [e for e in sq.queue if not e.heartbeat_only]
+
     def clear(self, session_key: str) -> None:
         self._queues.pop(session_key, None)
 
@@ -149,7 +176,7 @@ class SystemEventQueue:
             self._queues[session_key] = _SessionQueue()
         return self._queues[session_key]
 
-    def _replace_in_queue(self, sq: _SessionQueue, text: str, context_key: str) -> bool:
+    def _replace_in_queue(self, sq: _SessionQueue, text: str, context_key: str, heartbeat_only: bool = False) -> bool:
         """替换同 context_key 的事件。没有匹配到则追加。"""
         for i, event in enumerate(sq.queue):
             if event.context_key == context_key:
@@ -166,7 +193,7 @@ class SystemEventQueue:
         if add_key in sq._seen:
             return False
 
-        event = SystemEvent(text=text, ts=time.time(), context_key=context_key)
+        event = SystemEvent(text=text, ts=time.time(), context_key=context_key, heartbeat_only=heartbeat_only)
         sq.queue.append(event)
         sq._seen.add(add_key)
 

@@ -20,7 +20,8 @@ from core.engine.context import AIContext, BgContext, EngineContext, MemoryConte
 from core.engine.hindsight_memory import HindsightMemory
 from core.engine.router import Router
 from core.engine.system_events import SystemEventQueue
-from core.engine.wake_manager import WakeManager
+from core.engine.wake_dispatcher import WakeDispatcher
+from core.tasks.heartbeat_cooldown import HeartbeatCooldown
 from core.learners.orchestrator import LearningOrchestrator
 from core.managers.archive_manager import ArchiveManager
 from core.managers.context_manager import ChatContextManager
@@ -69,6 +70,8 @@ class ServiceGraph:
 
     def _build_services(self):
         self.http_client = httpx.AsyncClient(timeout=60.0)
+        self.heartbeat_manager = None
+        self._wake_runner = None
 
         self.template_manager = TemplateManager(self.cfg.character_card)
 
@@ -360,13 +363,6 @@ class ServiceGraph:
     def _wire_callbacks(self):
         self.agent_engine.set_reply_callback(self.bot_engine._send_reply)
 
-        # ── WakeManager ──
-        self.wake_manager = WakeManager(
-            system_events=self.system_events,
-            agent_engine=self.agent_engine,
-        )
-        _log.info("WakeManager 已初始化")
-
         # ── 注入后台任务 deps ──
         if self.task_manager or self.cron_job_manager or self.background_task_runner:
             inject_deps(
@@ -382,7 +378,6 @@ class ServiceGraph:
         # ── 后台任务执行器连线 ──
         if self.background_task_runner:
             self.background_task_runner.set_system_events(self.system_events)
-            self.background_task_runner.set_wake_manager(self.wake_manager)
 
         if self.background_task_runner and self.task_manager:
             self.background_task_runner.set_execute_callback(
@@ -427,40 +422,113 @@ class ServiceGraph:
         self.bot_engine.approval_manager = self.approval_manager
         _log.info("ApprovalManager 已初始化")
 
-        # ── exec 进程退出回调 ──
-        async def _on_exec_exit(session):
-            chat_id = session.delivery_channel or session.chat_id
-            summary = session.command[:80]
-            status = f"exit {session.exit_code}" if session.exit_code is not None else "terminated"
-            await self.wake_manager.notify(
-                session_key=chat_id,
-                text=f"后台进程完成: {summary} ({status})",
-                context_key=f"exec:{session.id}",
-                source="exec:exit",
-                trigger_ai=bool(session.delivery_channel),
-            )
-
-        self.process_registry.on_exit(_on_exec_exit)
+        # ── 兼容层 WakeDispatcher ──
+        min_spacing = self.cfg.heartbeat.get("min_spacing_seconds", 30)
+        flood_window = self.cfg.heartbeat.get("cooldown_flood_window_seconds", 60)
+        flood_threshold = self.cfg.heartbeat.get("cooldown_flood_threshold", 5)
+        self._cooldown = HeartbeatCooldown(
+            min_spacing_seconds=min_spacing,
+            flood_window_seconds=flood_window,
+            flood_threshold=flood_threshold,
+        )
+        self.wake_dispatcher = WakeDispatcher(
+            system_events=self.system_events,
+            agent_engine=self.agent_engine,
+            cooldown=self._cooldown,
+        )
+        # BackgroundTaskRunner 需保留 wake_dispatcher 引用用于 NOW 模式
+        if self.background_task_runner:
+            self.background_task_runner.set_wake_dispatcher(self.wake_dispatcher)
 
     # ── 阶段 4: 心跳 / 命令 / 插件 / WebUI ─────────────────────────
 
     def _setup_extras(self):
         # ── 心跳 ──
-        self.heartbeat_manager = None
         if self.cfg.heartbeat.get("enabled", False):
             self.heartbeat_manager = HeartbeatManager(
                 config=self.cfg.heartbeat,
-                ai_service=self.ai_service,
-                model_registry=self.model_registry,
-                bot_id=self.bot_id,
-                admin_ids=self.admin_ids,
                 api_client=self.bot_engine.api,
-                agent_engine=self.agent_engine,
+                admin_ids=self.admin_ids,
                 context_manager=self.context_manager,
+                agent_engine=self.agent_engine,
+                wake_dispatcher=self.wake_dispatcher,
                 heartbeat_path=str(self.workspace_manager.heartbeat_path()),
-                system_events=self.system_events,
-                task_manager=self.task_manager,
+                cooldown=self._cooldown,
             )
+
+        # ── WakeCoalescer + WakeRunner + Delivery ──
+        from core.tasks.wake_coalescer import set_wake_handler
+        from core.tasks.wake_runner import WakeRunner
+        from core.tasks.delivery_strategy import (
+            HeartbeatDeliveryStrategy, ChatReplyDeliveryStrategy,
+        )
+
+        hb_delivery = None
+        if self.heartbeat_manager is not None:
+            show_ok = self.cfg.heartbeat.get("show_ok", False)
+            show_alerts = self.cfg.heartbeat.get("show_alerts", True)
+            hb_delivery = HeartbeatDeliveryStrategy(
+                self.heartbeat_manager,
+                show_ok=show_ok,
+                show_alerts=show_alerts,
+            )
+
+        chat_delivery = ChatReplyDeliveryStrategy(
+            reply_callback=self.bot_engine._send_reply,
+            context_manager=self.context_manager,
+        )
+
+        active_hours_cfg = self.cfg.heartbeat.get("active_hours", {})
+        ah = (
+            active_hours_cfg.get("start"),
+            active_hours_cfg.get("end"),
+            active_hours_cfg.get("timezone", "Asia/Shanghai"),
+        )
+
+        delivery_strategies: dict = {}
+        if hb_delivery:
+            delivery_strategies["interval"] = hb_delivery
+            delivery_strategies["manual"] = hb_delivery
+        delivery_strategies["exec-event"] = chat_delivery
+        delivery_strategies["cron"] = chat_delivery
+        delivery_strategies["background-task"] = chat_delivery
+
+        hb_isolated_key_fn = (self.heartbeat_manager.resolve_isolated_session_key
+                              if self.heartbeat_manager else None)
+
+        self._wake_runner = WakeRunner(
+            agent_engine=self.agent_engine,
+            system_events=self.system_events,
+            cooldown=self._cooldown,
+            delivery_strategies=delivery_strategies,
+            active_hours=ah,
+            session_active_check=self.agent_engine.is_session_active,
+            has_cron_check=lambda: bool(
+                self.cron_job_manager and self.cron_job_manager.list_jobs()
+            ) if hasattr(self, 'cron_job_manager') else False,
+            main_lane_busy_check=lambda: False,    # 可扩展：从 BotEngine 获取队列状态
+            agent_busy_check=lambda: False,         # 可扩展：从 AgentEngine 获取
+            skip_when_busy=self.cfg.heartbeat.get("skip_when_busy", False),
+            session_lane_busy_check=lambda _: False,
+            isolated_session_key_fn=hb_isolated_key_fn,
+            delivery_pending_check=(self.heartbeat_manager.is_delivery_pending
+                                    if self.heartbeat_manager else lambda: False),
+        )
+        set_wake_handler(self._wake_runner)
+        _log.info("WakeCoalescer + WakeRunner 已初始化")
+
+        # ── exec 进程退出回调 ──
+        async def _on_exec_exit(session):
+            chat_id = session.delivery_channel or session.chat_id
+            import core.tasks.wake_coalescer as _coalescer
+            _coalescer.request_wake(
+                source="exec-event", intent="event",
+                session_key=chat_id,
+                delivery_target=chat_id,
+                reason=f"后台进程完成: {session.command[:80]}",
+            )
+
+        self.process_registry.on_exit(_on_exec_exit)
 
         # ── 命令注册 ──
         register_all_commands(

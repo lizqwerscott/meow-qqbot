@@ -39,6 +39,10 @@ class SessionTaskManager:
     def get_queue_sizes(self) -> Dict[str, int]:
         return {cid: q.qsize() for cid, q in self._queues.items() if q.qsize() > 0}
 
+    def has_active_consumer(self, chat_id: str) -> bool:
+        """检查指定 session 当前是否有活跃的 consumer。"""
+        return chat_id in self._running
+
     async def cleanup_session(self, chat_id: str):
         async with self._lock:
             self._queues.pop(chat_id, None)

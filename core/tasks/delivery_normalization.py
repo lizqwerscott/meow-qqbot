@@ -1,0 +1,83 @@
+"""Delivery normalization — 投递标准化管道。
+
+对应 OpenClaw heartbeat-delivery-normalization.ts。
+"""
+
+import re
+from typing import Tuple
+
+ACK_MAX_CHARS_DEFAULT = 300
+
+
+def strip_heartbeat_token(text: str, ack_max_chars: int = ACK_MAX_CHARS_DEFAULT) -> Tuple[str, bool]:
+    """剥离 HEARTBEAT_OK / NO_REPLY token。
+
+    返回 (清理后文本, 是否应跳过投递)。
+    对应 OpenClaw stripHeartbeatToken(mode="heartbeat")。
+    """
+    if not text or not text.strip():
+        return "", True
+
+    # 剥离 HTML/Markdown 包裹
+    cleaned = re.sub(r'<[^>]*>', ' ', text)
+    cleaned = cleaned.strip().strip("*`~_").strip()
+
+    token, alt_token = "HEARTBEAT_OK", "NO_REPLY"
+    has_token = token in cleaned or alt_token in cleaned
+
+    # 无 token → 不跳过，不剥离（openclaw 规则）
+    if not has_token:
+        return cleaned, False
+
+    # 循环剥离首尾 token
+    changed = True
+    while changed:
+        changed = False
+        for tok in (token, alt_token):
+            if cleaned.startswith(tok):
+                cleaned = cleaned[len(tok):].lstrip()
+                changed = True
+            m = re.search(re.escape(tok) + r'[^\w]{0,4}$', cleaned)
+            if m:
+                cleaned = cleaned[:m.start()]
+                changed = True
+
+    if not cleaned.strip():
+        return "", True
+
+    rest = cleaned.strip()
+    if len(rest) <= ack_max_chars:
+        return "", True
+    return rest, False
+
+
+def strip_trailing_notify_false(text: str) -> Tuple[str, bool]:
+    """剥离行尾 notify=false 指令。
+
+    对应 OpenClaw stripTrailingHeartbeatNotifyFalse。
+    """
+    m = re.search(
+        r'(?:^|[\r\n])[ \t]*notify\s*=\s*false[ \t]*(?:\r?\n[ \t]*)*$',
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        return text[:m.start()].rstrip(), True
+    return text, False
+
+
+def normalize_heartbeat_reply(
+    text: str,
+    ack_max_chars: int = ACK_MAX_CHARS_DEFAULT,
+) -> Tuple[str, bool]:
+    """完整标准化管道。
+
+    1. strip_heartbeat_token（剥离 token + markdown 包裹）
+    2. strip_trailing_notify_false（剥离 notify=false）
+    返回 (清洗后文本, 是否应跳过投递)。
+    """
+    cleaned, should_skip = strip_heartbeat_token(text, ack_max_chars)
+    if should_skip:
+        return "", True
+    cleaned, _ = strip_trailing_notify_false(cleaned)
+    return cleaned, False

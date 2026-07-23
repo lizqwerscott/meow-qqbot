@@ -11,7 +11,6 @@
 
 import asyncio
 import logging
-import re as _re
 import time
 from collections import OrderedDict
 from typing import Any, Callable, List, Optional, Set
@@ -91,6 +90,9 @@ class AgentEngine:
         self.router_model = None
         self.last_active_chat: str = ""
         self.last_active_time: float = 0.0
+
+        # ── reply_callback（由 bootstrap 注入） ──
+        self._reply_callback: Optional[Callable] = None
 
         self._register_builtin_hooks()
 
@@ -439,7 +441,7 @@ class AgentEngine:
         )
 
         if self._system_events:
-            self._system_events.consume_snapshot(chat_id)
+            self._system_events.drain_non_heartbeat(chat_id)
 
         _log.info(f"消息处理完成: {input_message.id}")
 
@@ -551,97 +553,140 @@ class AgentEngine:
             )
             return None, str(e)
 
-    async def trigger_event_response(self, chat_id: str) -> None:
-        """在 chat_id 的完整会话上下文中触发 AI turn。
+    async def run_wake_turn(
+        self,
+        *,
+        source: str = "system",
+        intent: str = "event",
+        reason: str = "",
+        session_key: str = "",
+        delivery_target: str = "",
+        extra_prompt: str = "",
+        system_event_key: str = "",
+        messages: Optional[list[dict]] = None,
+        tools: Optional[list[dict]] = None,
+        timeout: int = 120,
+    ) -> Any:
+        """统一的 wake/heartbeat AI turn。
 
-        由 WakeManager 调用。采用心跳式投递：
-        - AI 文本通过 capturing_callback 捕获，不直接投递
-        - 通过 heartbeat_respond 工具控制通知
-        - 没有 heartbeat_respond 时按 fallback 转发
+        可接收预制 messages/tools（由 WakeRunner 传入），
+        也支持向后兼容的无 messages 模式（自动构建）。
+
+        Args:
+            source: 触发来源(interval/exec-event/cron/manual/system)
+            session_key: chat_id 或 heartbeat:events
+            delivery_target: 投递目标 chat_id
+            extra_prompt: 额外 prompt（HEARTBEAT.md 内容等）
+            messages: 预制消息列表（由 WakeRunner 传入）
+            tools: 预制工具列表（由 WakeRunner 传入）
+            system_event_key: 系统事件队列 key
         """
-        _log.info("trigger_event_response: chat_id=%s", chat_id[:24])
+        from core.engine.wake_dispatcher import WakeResult as _WakeResult
+        from core.tools.impl import inject_deps as _inject_deps
+        from core.tools.tool_loop import _is_silent_reply_text as _check_silent
+        import time as _time
+
+        result = _WakeResult()
 
         if not self._reply_callback:
             _log.warning("reply_callback 未注入，无法投递 AI 回应")
-            return
+            return result
 
-        is_group = self.context_manager.get_chat_type(chat_id) or False
+        is_group = (self.context_manager.get_chat_type(session_key)
+                    if self.context_manager else False) or False
 
-        import time as _time
+        chat_id = session_key
+        if source in ("interval", "manual") and not chat_id.startswith("heartbeat:"):
+            chat_id = f"heartbeat:{int(_time.time())}"
 
         msg = InputMessage(
             id=f"wake_{chat_id}_{int(_time.time())}",
             sender_id="system",
             chat_id=chat_id,
-            content="[系统事件]",
+            content=extra_prompt or "[系统事件]",
             is_group=is_group,
             is_at_mention=False,
         )
 
-        captured_replies: list[str] = []
+        captured: list[str] = []
         wake_resp: dict = {}
 
-        async def capturing_callback(
-            chat_id: str,
-            content: str,
-            message_id: str,
-            is_group: bool,
-        ) -> None:
-            captured_replies.append(content)
-
-        from core.tools.impl import inject_deps as _inject_deps
-
         _inject_deps(_heartbeat_response=wake_resp)
-        real_text_sent = False
-
         try:
-            messages, tools_to_use = await self.prompt_builder.build(
-                chat_id=chat_id,
-                is_group=is_group,
-                user_nickname="系统",
-                sender_id="system",
-                input_message=msg,
-                cost_tracker=self.cost_tracker,
-            )
+            # 向后兼容：无预制 messages 时自己构建
+            if messages is None:
+                if source in ("interval", "manual"):
+                    messages, tools = await self.prompt_builder.build_heartbeat_messages(
+                        prompt=extra_prompt,
+                        system_prompt_mode="minimal" if source == "interval" else "normal",
+                        session_mode="isolated",
+                        admin_chat_id=self._admin_id[0] if self._admin_id else "",
+                        chat_id=chat_id,
+                        system_event_key=system_event_key or "heartbeat:events",
+                    )
+                else:
+                    messages, tools = await self.prompt_builder.build(
+                        chat_id=session_key,
+                        is_group=is_group,
+                        user_nickname="系统",
+                        sender_id="system",
+                        input_message=msg,
+                        cost_tracker=self.cost_tracker,
+                    )
 
             model_chain = None
             if self.rule_router and self.model_registry:
-                tier = self.rule_router.classify("[系统事件]")
+                tier = self.rule_router.classify(extra_prompt or "[系统事件]")
                 model_chain = self.model_registry.get_chain(tier) or None
 
-            await self.tool_loop.run(
-                messages=messages,
-                tools=tools_to_use or [],
-                chat_id=chat_id,
-                is_group=is_group,
-                reply_to="",
-                reply_callback=capturing_callback,
-                sender_id="system",
-                model_chain=model_chain,
+            async def _capture(chat_id, content, message_id, is_group):
+                captured.append(content)
+            await asyncio.wait_for(
+                self.tool_loop.run(
+                    messages=messages, tools=tools or [],
+                    chat_id=chat_id, is_group=is_group,
+                    reply_to=msg.id,
+                    reply_callback=_capture,
+                    sender_id="system",
+                    model_chain=model_chain,
+                ),
+                timeout=timeout,
             )
 
-            # ── 通知决策（同 OpenClaw 心跳模式） ──
+            # ── 通知决策（不再区分 source，统一通知文本） ──
             if wake_resp.get("notify"):
                 text = wake_resp.get("notification_text", "").strip()
                 if text:
-                    await self._reply_callback(chat_id, text, "", is_group)
-                    real_text_sent = True
+                    result.notification_text = text
+                    result.should_notify = True
             else:
-                # fallback: 转发捕获的非静默文本
-                from core.tools.tool_loop import _is_silent_reply_text as _check_silent
-
-                for reply in captured_replies:
+                for reply in captured:
                     if not _check_silent(reply):
-                        await self._reply_callback(chat_id, reply, "", is_group)
-                        real_text_sent = True
+                        result.notification_text = reply
+                        result.should_notify = True
                         break
 
-            if real_text_sent and self._system_events:
-                self._system_events.consume_snapshot(chat_id)
+            result.captured_replies = captured
         except Exception as e:
-            _log.error("trigger_event_response 异常: %s", e, exc_info=True)
+            _log.error("run_wake_turn 异常 [%s]: %s", source, e, exc_info=True)
+            result.error = str(e)
         finally:
             _inject_deps(_heartbeat_response=None)
+
+        return result
+
+    def is_session_active(self, session_key: str) -> bool:
+        """检查指定 session 是否当前在对话中（供 WakeRunner preflight 使用）。"""
+        if session_key in (self.last_active_chat, "heartbeat:events"):
+            return (time.time() - self.last_active_time) < 120
+        return self.session_manager.has_active_consumer(session_key)
+
+    async def trigger_event_response(self, chat_id: str) -> None:
+        """保留：由 WakeManager 调用，转向 run_wake_turn。"""
+        await self.run_wake_turn(
+            source="system", intent="event",
+            session_key=chat_id,
+        )
 
     async def execute_heartbeat(
         self,
@@ -653,120 +698,21 @@ class AgentEngine:
         system_event_key: str = "heartbeat:events",
         timeout: int = 120,
     ) -> tuple[bool, str | None]:
-        """执行心跳检查的工具调用循环。
-
-        工具调用：搜索记忆、检查文件，最终通过 heartbeat_respond 工具回应。
-
-        HEARTBEAT.md 内容已由 HeartbeatManager 预读并注入 prompt。
-        聊天历史由 build_heartbeat_messages 按独立消息对注入。
-
-        Args:
-            prompt: 完整的 user message（HEARTBEAT.md 内容 + 时间）
-            session: "isolated"（无历史）或 "main"（含最近历史）
-            system_prompt_mode: "normal"（复用完整角色卡 SP）或 "minimal"（极简 SP）
-            model_chain: 模型链（如 ["modelscope/ds-flash", ...]），启用 fallback
-            chat_id: 心跳使用的 chat_id。为 None 时自动生成 f"heartbeat:<timestamp>"
-            system_event_key: 系统事件队列的 drain key，默认 "heartbeat:events"
-
-        Returns:
-            (should_notify, notification_text)
-        """
+        """保留兼容接口，转向 run_wake_turn。"""
         if chat_id is None:
-            chat_id = f"heartbeat:{int(time.time())}"
-        _log.info(f"开始心跳检查: chat_id={chat_id} session={session} mode={system_prompt_mode} prompt={prompt[:80]}")
-        prompt = prompt or ""
+            import time as _t
+            chat_id = f"heartbeat:{int(_t.time())}"
 
-        captured_replies: list[str] = []
-
-        async def capturing_reply_callback(
-            chat_id: str,
-            content: str,
-            message_id: str,
-            is_group: bool,
-        ) -> None:
-            captured_replies.append(content)
-
-        msg_id = f"hb_{int(time.time())}"
-
-        hb_resp: dict = {}
-        inject_deps(_heartbeat_response=hb_resp)
-
-        try:
-            messages, tools_to_use = await self.prompt_builder.build_heartbeat_messages(
-                prompt=prompt,
-                system_prompt_mode=system_prompt_mode,
-                session_mode=session,
-                admin_chat_id=self._admin_id[0] if self._admin_id else "",
-                chat_id=chat_id,
-                system_event_key=system_event_key,
-            )
-
-            await asyncio.wait_for(
-                self.tool_loop.run(
-                    messages=messages,
-                    tools=tools_to_use,
-                    chat_id=chat_id,
-                    is_group=False,
-                    reply_to=msg_id,
-                    reply_callback=capturing_reply_callback,
-                    sender_id="system",
-                    get_user_nickname=lambda _: "系统",
-                    model_chain=model_chain,
-                ),
-                timeout=timeout,
-            )
-
-            # 条件消费：只有 AI 要求通知时才消费事件
-            if hb_resp.get("notify") and self._system_events:
-                self._system_events.consume_snapshot(system_event_key)
-
-            # 优先检查 heartbeat_respond 工具响应
-            HEARTBEAT_ACK_MAX_CHARS = 300
-            if hb_resp.get("notify"):
-                text = hb_resp.get("notification_text", "").strip()
-                if text and len(text) > HEARTBEAT_ACK_MAX_CHARS:
-                    _log.info("心跳 heartbeat_respond: 需要通知")
-                    return True, text
-                if text:
-                    _log.info("心跳 heartbeat_respond: notify=true 但文本过短（<=%d），视为心跳确认", HEARTBEAT_ACK_MAX_CHARS)
-                else:
-                    _log.info("心跳 heartbeat_respond: notify=true 但内容为空，视为不通知")
-                return False, None
-
-            if hb_resp:
-                _log.debug("心跳 heartbeat_respond: notify=false，静默")
-                return False, None
-
-            # 降级回退：解析文本 HEARTBEAT_OK
-            ack_max_chars = HEARTBEAT_ACK_MAX_CHARS
-            for reply in captured_replies:
-                # 去空白后检查 HEARTBEAT_OK（出现在任意位置都算 ack）
-                compact = _re.sub(r"\s+", "", reply)
-                ok_pos = compact.find("HEARTBEAT_OK")
-                if ok_pos >= 0:
-                    remaining = compact[:ok_pos] + compact[ok_pos + len("HEARTBEAT_OK"):]
-                else:
-                    remaining = compact
-                if not remaining or len(remaining) <= ack_max_chars:
-                    _log.debug("心跳 ack（文本 <= %d 字），静默", ack_max_chars)
-                    return False, None
-                _log.info(f"心跳文本降级: 需要通知")
-                return True, reply.strip()
-
-            _log.debug("心跳无任何响应，静默")
-            return False, None
-
-        except asyncio.CancelledError:
-            _log.warning("心跳检查被取消")
-            return False, None
-        except asyncio.TimeoutError:
-            _log.warning(f"心跳检查超时 ({timeout}s)")
-            return True, f"心跳检查超时（{timeout}秒），请检查 AI 服务状态。"
-        except Exception as e:
-            _log.error(f"心跳检查异常: {e}", exc_info=True)
-            return False, None
-        finally:
-            inject_deps(_heartbeat_response=None)
+        result = await self.run_wake_turn(
+            source="interval" if session == "isolated" else "manual",
+            intent="scheduled",
+            reason="定时心跳",
+            session_key=chat_id,
+            extra_prompt=prompt,
+            system_event_key=system_event_key,
+            timeout=timeout,
+        )
+        return result.should_notify, result.notification_text or None
 
     # ── 统计 ──
 

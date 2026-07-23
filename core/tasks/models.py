@@ -122,6 +122,9 @@ class CronJob:
     session_mode: str = SessionMode.ISOLATED.value  # isolated/custom/main
     custom_session_id: Optional[str] = None  # custom 模式下的命名 session ID
 
+    # 唤醒策略
+    wake_mode: str = "now"                  # now / next-heartbeat
+
     # 载荷类型
     payload_type: str = "message"           # message / command / system_event
     command: str = ""                       # shell 命令（command 载荷时使用）
@@ -145,6 +148,10 @@ class CronJob:
     def to_dict(self) -> dict:
         d = asdict(self)
         return d
+
+    def __post_init__(self):
+        if self.wake_mode not in ("now", "next-heartbeat"):
+            self.wake_mode = "now"
 
     @classmethod
     def from_dict(cls, d: dict) -> "CronJob":
