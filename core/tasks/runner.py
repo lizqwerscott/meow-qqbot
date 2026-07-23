@@ -55,15 +55,19 @@ class BackgroundTaskRunner:
         self._delivery_cb: Optional[Callable] = None
         # async (chat_id, content, message_id, is_group) -> None
         self._system_events: Optional[Any] = None
-        self._wake_manager: Optional[Any] = None
+        self._wake_dispatcher: Optional[Any] = None
 
     def set_system_events(self, system_events: Any) -> None:
         """注入系统事件队列。"""
         self._system_events = system_events
 
+    def set_wake_dispatcher(self, wake_dispatcher: Any) -> None:
+        """注入 WakeDispatcher（事件完成时唤醒 AI）。"""
+        self._wake_dispatcher = wake_dispatcher
+
     def set_wake_manager(self, wake_manager: Any) -> None:
-        """注入 WakeManager（事件完成时唤醒 AI）。"""
-        self._wake_manager = wake_manager
+        """旧接口兼容，转向 set_wake_dispatcher。"""
+        self._wake_dispatcher = wake_manager
 
     def set_execute_callback(self, cb: Callable) -> None:
         """注入任务执行回调。
@@ -185,13 +189,12 @@ class BackgroundTaskRunner:
                 TaskStatus.TIMEOUT: "执行超时",
             }.get(task.status, "已完成")
             target = task.delivery_channel or f"task:{task.id}"
-            if self._wake_manager:
-                await self._wake_manager.notify(
+            if self._wake_dispatcher and task.delivery_channel:
+                await self._wake_dispatcher.request(
+                    source="background-task", intent="event",
                     session_key=target,
-                    text=f"后台任务{status_text}",
-                    context_key=f"task:{task.id}",
-                    source="task",
-                    trigger_ai=bool(task.delivery_channel),
+                    event_text=f"后台任务{status_text}",
+                    event_context_key=f"task:{task.id}",
                 )
             elif self._system_events:
                 self._system_events.enqueue(
@@ -348,14 +351,13 @@ class BackgroundTaskRunner:
         """执行 system_event 载荷：推入对应 session 的系统事件队列。"""
         await self._task_manager.start_task(task.id)
         text = job.prompt or f"定时任务 [{job.name}] 触发"
-        if self._wake_manager and job.delivery_channel:
-            await self._wake_manager.notify(
+        if self._wake_dispatcher and job.delivery_channel:
+            await self._wake_dispatcher.request(
+                source="cron", intent="event",
                 session_key=job.delivery_channel,
-                text=text,
-                context_key=f"cron:{job.id}",
-                source="cron",
-                trigger_ai=True,
-                replace=True,
+                event_text=text,
+                event_context_key=f"cron:{job.id}",
+                event_replace=True,
             )
         elif self._system_events:
             await self._enqueue_events(
@@ -438,13 +440,12 @@ class BackgroundTaskRunner:
                 TaskStatus.FAILED: "执行失败",
                 TaskStatus.TIMEOUT: "执行超时",
             }.get(task.status, "已完成")
-            if self._wake_manager and job.delivery_channel:
-                await self._wake_manager.notify(
+            if self._wake_dispatcher and job.delivery_channel:
+                await self._wake_dispatcher.request(
+                    source="cron", intent="event",
                     session_key=job.delivery_channel,
-                    text=f"任务 '{job.name}'{status_text}",
-                    context_key=f"task:{task.id}",
-                    source="cron",
-                    trigger_ai=True,
+                    event_text=f"任务 '{job.name}'{status_text}",
+                    event_context_key=f"task:{task.id}",
                 )
             elif self._system_events:
                 await self._enqueue_events(

@@ -1,117 +1,55 @@
-"""HeartbeatManager — 周期心跳（OpenClaw 风格工具调用流）。
+"""HeartbeatManager — 心跳投递管理器。
 
-独立 asyncio 循环，不创建 TaskRecord/CronJob。
-让 AI 通过工具调用循环定期检查是否有需要关注的事项，有提醒则发给管理员。
-
-HEARTBEAT.md 由框架预读后直接注入 user message（AI 不需要 tool call 读取）。
-通知 DM 同时写入 context_manager，保证后续心跳能感知反馈链路。
+不负责调度和 AI 执行（由 WakeDispatcher 统一处理），仅负责：
+- 注册 interval schedule
+- 接收执行结果并决定是否投递给管理员
+- 通知抑制（相同文本冷却期）、上下文清理
 """
 
 import asyncio
 import logging
 import re
 import time
-from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
-from core.tasks.heartbeat_wake import (
-    HeartbeatWakeScheduler,
-    HeartbeatWakeRequest,
-    WakeSource,
-    WakeIntent,
-)
-from core.tasks.heartbeat_cooldown import HeartbeatCooldown
-from core.tasks.heartbeat_events import HeartbeatEvent, HeartbeatEvents
+from core.engine.wake_dispatcher import WakeDispatcher, SOURCE_INTERVAL, SOURCE_MANUAL
 
 _log = logging.getLogger(__name__)
 
-HEARTBEAT_DEFAULT_PROMPT = (
-    "请进行心跳检查。检查记忆和任务系统中是否有待办事项、提醒或需要关注的事情。"
-    "如果没有需要关注的事项，调用 heartbeat_respond(notify=false) 静默结束。"
-    "不需要汇报正常状态，只需要在确实需要提醒时才通知管理员。"
-)
-
 
 class HeartbeatManager:
-    """周期心跳管理器。
+    """心跳投递管理器。
 
-    不依赖 CronJobScheduler / TaskStore。
-    独立 asyncio 循环，不创建 TaskRecord。
-    使用 AgentEngine.execute_heartbeat() 走完整工具调用循环。
-
-    Args:
-        config: heartbeat 配置段
-        agent_engine: AgentEngine 实例
-        api_client: QQApiClient 实例
-        admin_ids: 管理员 ID 列表
-        context_manager: ChatContextManager（用于记录通知 DM）
+    不再包含调度循环，所有 wake 请求通过 WakeDispatcher 统一处理。
     """
 
     def __init__(
         self,
         config: dict,
-        router_model: Any = None,
-        ai_service: Any = None,
-        model_registry: Any = None,
-        bot_id: str = "",
-        admin_ids: Optional[list] = None,
         api_client: Any = None,
-        agent_engine: Any = None,
-        heartbeat_path: str = "",
+        admin_ids: Optional[list] = None,
         context_manager: Any = None,
-        system_events: Any = None,
-        task_manager: Any = None,
+        agent_engine: Any = None,
+        wake_dispatcher: Optional[WakeDispatcher] = None,
+        heartbeat_path: str = "",
     ):
         self._enabled = config.get("enabled", False)
         self._every_minutes = config.get("every", 30)
-
-        raw_models = config.get("model", "")
-        if isinstance(raw_models, str):
-            self._model_names = [raw_models] if raw_models else []
-        elif isinstance(raw_models, list):
-            self._model_names = raw_models
-        else:
-            self._model_names = []
-
-        self._heartbeat_path = heartbeat_path
-
-        active_hours = config.get("active_hours", {})
-        self._active_start = active_hours.get("start", "00:00")
-        self._active_end = active_hours.get("end", "24:00")
-        self._timezone_str = active_hours.get("timezone", "Asia/Shanghai")
-
-        self._skip_when_busy = config.get("skip_when_busy", True)
-        self._busy_idle_minutes = config.get("busy_idle_minutes", 10)
-
-        self._router_model = router_model
-        self._ai_service = ai_service
-        self._model_registry = model_registry
-        self._bot_id = bot_id
         self._admin_ids = admin_ids if isinstance(admin_ids, list) else []
         self._api = api_client
-        self._agent_engine = agent_engine
         self._context_manager = context_manager
-        self._system_events = system_events
-        self._task_manager = task_manager
+        self._agent_engine = agent_engine
+        self._wake = wake_dispatcher
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
-        self._heartbeat_lock = asyncio.Lock()
-        self._last_heartbeat_time: float = 0.0
-        self._session = config.get("session", "isolated")
-        self._system_prompt_mode = config.get("system_prompt", "minimal")
-        self._config_prompt = config.get("prompt", "")
+
         self._last_notification_text: str = ""
         self._last_notification_sent_at: float = 0.0
         self._notification_cooldown_hours: float = config.get("notification_cooldown_hours", 12.0)
-        self._heartbeat_timeout = config.get("timeout_seconds", 120)
 
-        self._wake = HeartbeatWakeScheduler(coalesce_ms=100)
-        self._wake.set_handler(self._on_wake)
-        # min-spacing = 心跳周期的一半，使 scheduled intent 的门控实际生效
-        min_spacing = max(30.0, self._every_minutes * 60 * 0.5)
-        self._cooldown = HeartbeatCooldown(min_spacing_seconds=min_spacing)
-        self.events = HeartbeatEvents()
+        self._heartbeat_path = heartbeat_path
+        self._config_prompt = config.get("prompt", "")
 
     async def start(self):
         if not self._enabled:
@@ -120,309 +58,101 @@ class HeartbeatManager:
         if self._running:
             return
         self._running = True
-        self._task = asyncio.create_task(self._loop())
+
+        hb_prompt = await self._load_heartbeat_content()
+
+        # 注册 delivery callback
+        if self._wake:
+            self._wake.set_delivery_callback(SOURCE_MANUAL, self._on_heartbeat_result)
+            self._wake.set_delivery_callback(SOURCE_INTERVAL, self._on_heartbeat_result)
+            await self._wake.start_interval(self._every_minutes, prompt=hb_prompt)
+
         _log.info(
-            f"心跳系统已启动: every={self._every_minutes}min "
-            f"active={self._active_start}-{self._active_end} "
+            f"心跳已启动: every={self._every_minutes}min "
             f"admin={self._admin_ids[0] if self._admin_ids else 'none'}"
         )
 
     async def stop(self):
         self._running = False
-        self._wake.cancel_pending()
-        # 等正在执行的心跳完成（带超时）
-        try:
-            await asyncio.wait_for(self._heartbeat_lock.acquire(), timeout=10.0)
-            self._heartbeat_lock.release()
-        except asyncio.TimeoutError:
-            _log.warning("等待心跳执行超时（10s），强制停止")
-        if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
-        _log.info("心跳系统已停止")
-
-    async def _loop(self):
-        while self._running:
-            try:
-                elapsed = time.time() - self._last_heartbeat_time
-                sleep_for = max(0, self._every_minutes * 60 - elapsed)
-                await asyncio.sleep(sleep_for)
-                self._wake.request(HeartbeatWakeRequest(
-                    source=WakeSource.INTERVAL,
-                    intent=WakeIntent.SCHEDULED,
-                    reason="定时心跳",
-                ))
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                _log.error(f"心跳循环异常: {e}", exc_info=True)
-
-    async def _on_wake(self, req: HeartbeatWakeRequest):
-        """Wake handler：串行执行心跳，经过冷却门控和活跃时段检查。"""
-        async with self._heartbeat_lock:
-            # 先检查活跃时段（不重试，静默跳过）
-            if not self._in_active_hours():
-                self.events.emit(HeartbeatEvent(
-                    status="deferred",
-                    source=req.source.value,
-                    reason="outside-active-hours",
-                ))
-                _log.debug("心跳跳过：不在活跃时段")
-                return
-
-            # 再检查冷却状态（忙态/flood 等会重试）
-            dec = self._cooldown.should_defer(
-                intent=req.intent,
-                is_busy=self._is_busy() if self._skip_when_busy else False,
-            )
-            if dec.defer:
-                _log.debug(f"心跳 defer: {dec.reason} (retry={dec.retry_after_ms}ms)")
-                self.events.emit(HeartbeatEvent(
-                    status="deferred",
-                    source=req.source.value,
-                    reason=dec.reason,
-                ))
-                if dec.retry_after_ms > 0:
-                    self._wake.retry(dec.retry_after_ms)
-                return
-
-            self._cooldown.record_run_start()
-            self.events.emit(HeartbeatEvent(
-                status="running",
-                source=req.source.value,
-            ))
-            await self._run_heartbeat(req.extra_prompt)
+        if self._wake:
+            await self._wake.stop_interval()
 
     async def trigger_heartbeat(self, prompt: str = "") -> tuple[bool, str | None]:
-        """公开接口：手动触发心跳，带锁保护，重置计时器。
-
-        不走 wake 调度器，直接执行（manual 意图），同时更新冷却门控。
-        如果锁被其他心跳占用，最多等 LOCK_TIMEOUT 秒后放弃。
-
-        Args:
-            prompt: 自定义 prompt，为空时使用默认时间 prompt
-
-        Returns:
-            (should_notify, notification_text)
-        """
-        LOCK_TIMEOUT = 10.0
-        try:
-            await asyncio.wait_for(self._heartbeat_lock.acquire(), timeout=LOCK_TIMEOUT)
-        except asyncio.TimeoutError:
-            _log.warning("心跳锁获取超时，心跳正在执行中")
-            return True, "⚠️ 心跳正在执行中，请稍后再试"
-        try:
-            self._cooldown.record_run_start()
-            return await self._run_heartbeat(prompt)
-        finally:
-            self._heartbeat_lock.release()
-
-    async def _run_heartbeat(self, manual_prompt: str = "") -> tuple[bool, str | None]:
-        """内部执行心跳（调用方需持有 _heartbeat_lock）。
-
-        user message 组装优先级：
-        manual_prompt（手动触发）>
-        config.prompt >
-        HEARTBEAT.md 文件内容 >
-        HEARTBEAT_DEFAULT_PROMPT
-        """
-        if not self._agent_engine:
-            _log.warning("心跳跳过：AgentEngine 未就绪")
-            return False, None
-
-        # 自动心跳：无待办事项则跳过
-        if not manual_prompt:
-            if not self._has_pending_events() and not self._has_pending_tasks():
-                _log.debug("心跳跳过：无待办事项")
-                return False, None
-
-        hb_content = await self._load_heartbeat_content(manual_prompt)
-        tz = self._resolve_timezone()
-        now = datetime.now(tz)
-        now_str = now.strftime("%Y-%m-%d %H:%M")
-        tz_name = self._timezone_str
-        user_prompt = f"{hb_content}\n\n当前时间：{now_str}（{tz_name}）。"
-
-        # 为本次心跳生成唯一 chat_id，与上下文存储解耦
-        chat_id = f"heartbeat:{int(time.time())}"
-
-        # 解析模型链（支持组名如 "cheap" 转完整 fallback 链）
-        model_chain = None
-        if self._model_registry and self._model_names:
-            all_models = []
-            for name in self._model_names:
-                chain = self._model_registry.get_chain(name)
-                if chain:
-                    all_models.extend(chain)
-            if all_models:
-                model_chain = all_models
-
-        start_time = time.time()
-        try:
-            should_notify, text = await self._agent_engine.execute_heartbeat(
-                prompt=user_prompt,
-                session=self._session,
-                system_prompt_mode=self._system_prompt_mode,
-                model_chain=model_chain,
-                chat_id=chat_id,
-                timeout=self._heartbeat_timeout,
+        """手动触发心跳，直接走 WakeDispatcher.request(MANUAL)。"""
+        full_prompt = prompt or await self._load_heartbeat_content()
+        result = None
+        if self._wake:
+            result = await self._wake.request(
+                source=SOURCE_MANUAL, intent="manual",
+                session_key="heartbeat:events",
+                reason="manual-trigger",
+                extra_prompt=full_prompt,
+                coalesce_ms=0,
             )
+        if result and result.should_notify:
+            return True, result.notification_text or None
+        return False, None
 
-            if not self._running:
-                _log.debug("心跳结果丢弃：系统已停止")
-                return False, None
+    async def _on_heartbeat_result(self, result: Any) -> None:
+        """从 WakeDispatcher 接收执行结果，决定是否投递。"""
+        from core.engine.wake_dispatcher import WakeResult
+        if not isinstance(result, WakeResult):
+            _log.warning("_on_heartbeat_result 收到非 WakeResult 类型: %s", type(result))
+            return
+        if not result.should_notify or not result.notification_text:
+            return
+        if not self._running:
+            return
+        text = result.notification_text.strip()
 
-            self._last_heartbeat_time = time.time()
+        if self._should_suppress(text):
+            _log.debug("心跳抑制：与上次通知相同（冷却期内）")
+            return
 
-            self.events.emit(HeartbeatEvent(
-                status="completed",
-                duration_ms=(time.time() - start_time) * 1000,
-                result_text=text[:200] if text else None,
-                source="heartbeat",
-            ))
+        await self._deliver_to_admin(text)
+        self._last_notification_text = text
+        self._last_notification_sent_at = time.time()
 
-            if should_notify and text:
-                if self._should_suppress(text):
-                    _log.info("心跳抑制：与上次通知相同（冷却期内）")
-                else:
-                    await self._deliver_to_admin(text)
-                    self._last_notification_text = text
-                    self._last_notification_sent_at = time.time()
-                    _log.info(f"心跳提醒已投递: text={text[:80]!r}")
-            else:
-                _log.debug("心跳无需投递")
+        # 清理旧心跳 context，防止内存泄漏
+        await self._cleanup_heartbeat_contexts(keep_last=3)
 
-            return should_notify, text
-        except Exception:
-            self.events.emit(HeartbeatEvent(
-                status="error",
-                source="heartbeat",
-            ))
-            raise
-        finally:
-            # 清理旧心跳上下文，防止 context_manager 膨胀
-            await self._cleanup_old_heartbeat_contexts(keep_last=3)
+    # ── HEARTBEAT.md 内容加载 ──
 
-    async def _load_heartbeat_content(self, manual_prompt: str = "") -> str:
-        """加载心跳指令内容。
-        优先级：manual_prompt > config.prompt > HEARTBEAT.md > HEARTBEAT_DEFAULT_PROMPT
-        """
-        if manual_prompt and manual_prompt.strip():
-            return manual_prompt.strip()
-
-        if self._config_prompt and self._config_prompt.strip():
-            return self._config_prompt.strip()
-
+    async def _load_heartbeat_content(self) -> str:
         content = await self._read_heartbeat_file()
         if content and content.strip():
             return content.strip()
-
-        return HEARTBEAT_DEFAULT_PROMPT
+        if self._config_prompt and self._config_prompt.strip():
+            return self._config_prompt.strip()
+        return (
+            "请进行心跳检查。检查记忆和任务系统中是否有待办事项、提醒或需要关注的事情。"
+            "如果没有需要关注的事项，调用 heartbeat_respond(notify=false) 静默结束。"
+        )
 
     async def _read_heartbeat_file(self) -> str:
-        """异步读取 HEARTBEAT.md 文件内容。"""
         if not self._heartbeat_path:
             return ""
         try:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, self._sync_read_heartbeat_file)
         except Exception as e:
-            _log.warning(f"异步读取 HEARTBEAT 文件失败: {e}")
+            _log.warning(f"读取 HEARTBEAT 文件失败: {e}")
             return ""
 
     def _sync_read_heartbeat_file(self) -> str:
+        import os
         try:
             with open(self._heartbeat_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            return content.strip() if content.strip() else ""
+                return f.read().strip()
         except FileNotFoundError:
             return ""
         except Exception as e:
-            _log.warning(f"同步读取 HEARTBEAT 文件失败: {e}")
+            _log.warning(f"读取心跳文件失败: {e}")
             return ""
 
-    def _resolve_timezone(self):
-        """将 self._timezone_str 解析为 timezone 对象。
-
-        优先使用 zoneinfo（Python 3.9+），
-        兜底解析 ±HH:MM 格式，
-        都不行则回退 UTC+8 并记 warning。
-        """
-        try:
-            import zoneinfo
-            return zoneinfo.ZoneInfo(self._timezone_str)
-        except ImportError:
-            pass
-        except (KeyError, TypeError):
-            pass
-        cleaned = self._timezone_str.replace("UTC", "").replace("GMT", "").strip()
-        m = re.match(r"^[+-]?(\d{1,2})(?::(\d{2}))?$", cleaned)
-        if m:
-            h, mi = m.groups()
-            return timezone(timedelta(hours=int(h), minutes=int(mi or 0)))
-        _log.warning(
-            "无法解析时区 '%s'（zoneinfo 不可用），回退到 UTC+8",
-            self._timezone_str,
-        )
-        return timezone(timedelta(hours=8))
-
-    def _in_active_hours(self) -> bool:
-        try:
-            tz = self._resolve_timezone()
-            now = datetime.now(tz)
-            cur = now.hour * 60 + now.minute
-
-            start_parts = self._active_start.split(":")
-            end_parts = self._active_end.split(":")
-            start_min = int(start_parts[0]) * 60 + int(start_parts[1])
-            end_min = int(end_parts[0]) * 60 + int(end_parts[1])
-
-            if end_min <= start_min:
-                return cur >= start_min or cur < end_min
-            return start_min <= cur < end_min
-        except Exception as e:
-            _log.warning(f"活跃时间解析失败 [{self._active_start}-{self._active_end}]: {e}")
-            return True
-
-    def _is_busy(self) -> bool:
-        """检查是否有用户最近活跃。"""
-        if not self._agent_engine:
-            return False
-        last_time = getattr(self._agent_engine, "last_active_time", 0.0)
-        if last_time <= 0:
-            return False
-        elapsed = time.time() - last_time
-        return elapsed < self._busy_idle_minutes * 60
-
-    def _has_pending_events(self) -> bool:
-        return bool(self._system_events and self._system_events.has_events("heartbeat:events"))
-
-    def _has_pending_tasks(self) -> bool:
-        if not self._task_manager:
-            return False
-        from core.tasks.models import TaskStatus
-        failed = self._task_manager.list_tasks(limit=1, status=TaskStatus.FAILED)
-        if failed:
-            return True
-        running = self._task_manager.list_tasks(limit=1, status=TaskStatus.RUNNING)
-        if running:
-            return True
-        return False
+    # ── 通知抑制 ──
 
     def _should_suppress(self, text: str) -> bool:
-        """检查是否应抑制本次通知（同文本 + 冷却期）。
-
-        比较前对文本做归一化（去除多余空白），避免微小格式差异导致重复通知。
-
-        Args:
-            text: 本次要通知的文本（来自 heartbeat_respond 的原始文本）
-
-        Returns:
-            True 表示抑制，不投递
-        """
         if not self._last_notification_text or self._last_notification_sent_at <= 0:
             return False
         if self._notification_cooldown_hours <= 0:
@@ -434,10 +164,10 @@ class HeartbeatManager:
         elapsed = time.time() - self._last_notification_sent_at
         return elapsed < self._notification_cooldown_hours * 3600
 
+    # ── 投递 ──
+
     async def _deliver_to_admin(self, text: str):
-        """发送心跳提醒给第一个管理员，同时写入 context_manager 保证反馈链路。"""
         if not self._running:
-            _log.debug("投递跳过：系统已停止")
             return
         if not self._admin_ids:
             _log.warning("心跳无法投递：未配置管理员 ID")
@@ -451,8 +181,6 @@ class HeartbeatManager:
         try:
             await self._api.send_text("c2c", admin_id, content, reply_to=None)
             _log.info(f"心跳提醒已投递到管理员 {admin_id[:12]}..")
-
-            # 写入 context_manager，后续心跳（session=main）能感知反馈链路
             if self._context_manager:
                 await self._context_manager.add_assistant_message_async(
                     admin_id, content, f"hb_{int(time.time())}"
@@ -460,27 +188,27 @@ class HeartbeatManager:
         except Exception as e:
             _log.error(f"心跳投递失败: {e}")
 
-    async def _cleanup_old_heartbeat_contexts(self, keep_last: int = 3):
+    async def _cleanup_heartbeat_contexts(self, keep_last: int = 3):
         """清理旧的心跳上下文，只保留最近 keep_last 次。
 
         匹配 pattern heartbeat:\\d+ 的 chat_id，按时间戳排序，
         移除超出 keep_last 的上下文。
-        同时删除磁盘上的 .jsonl 缓存文件。
         """
         if not self._context_manager:
             return
-        pattern = re.compile(r"^heartbeat:\d+$")
-        heartbeat_ids = [
-            cid for cid in self._context_manager.get_all_chat_ids()
-            if pattern.match(cid)
-        ]
-        if len(heartbeat_ids) <= keep_last:
-            return
-        heartbeat_ids.sort(key=lambda x: int(x.split(":")[1]))
-        for cid in heartbeat_ids[:-keep_last]:
-            try:
+        try:
+            import re
+            pattern = re.compile(r"^heartbeat:\d+$")
+            hb_ids = [
+                cid for cid in self._context_manager.get_all_chat_ids()
+                if pattern.match(cid)
+            ]
+            if len(hb_ids) <= keep_last:
+                return
+            hb_ids.sort(key=lambda x: int(x.split(":")[1]))
+            for cid in hb_ids[:-keep_last]:
                 await self._context_manager.clear_chat_history_async(cid)
                 self._context_manager.remove_context(cid)
                 _log.debug("已清理旧心跳上下文: %s", cid)
-            except Exception as e:
-                _log.warning("清理心跳上下文失败 [%s]: %s", cid, e)
+        except Exception as e:
+            _log.warning("清理心跳上下文失败: %s", e)

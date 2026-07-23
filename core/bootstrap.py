@@ -20,7 +20,8 @@ from core.engine.context import AIContext, BgContext, EngineContext, MemoryConte
 from core.engine.hindsight_memory import HindsightMemory
 from core.engine.router import Router
 from core.engine.system_events import SystemEventQueue
-from core.engine.wake_manager import WakeManager
+from core.engine.wake_dispatcher import WakeDispatcher
+from core.tasks.heartbeat_cooldown import HeartbeatCooldown
 from core.learners.orchestrator import LearningOrchestrator
 from core.managers.archive_manager import ArchiveManager
 from core.managers.context_manager import ChatContextManager
@@ -360,12 +361,24 @@ class ServiceGraph:
     def _wire_callbacks(self):
         self.agent_engine.set_reply_callback(self.bot_engine._send_reply)
 
-        # ── WakeManager ──
-        self.wake_manager = WakeManager(
+        # ── WakeDispatcher ──
+        min_spacing = self.cfg.heartbeat.get("min_spacing_seconds", 30)
+        cooldown = HeartbeatCooldown(min_spacing_seconds=min_spacing)
+        self.wake_dispatcher = WakeDispatcher(
             system_events=self.system_events,
             agent_engine=self.agent_engine,
+            cooldown=cooldown,
         )
-        _log.info("WakeManager 已初始化")
+        _log.info("WakeDispatcher 已初始化")
+
+        # 活跃时段（非 manual 触发检查）
+        active_hours = self.cfg.heartbeat.get("active_hours", {})
+        if active_hours.get("start") and active_hours.get("end"):
+            self.wake_dispatcher.set_active_hours(
+                start=active_hours["start"],
+                end=active_hours["end"],
+                tz=active_hours.get("timezone", "Asia/Shanghai"),
+            )
 
         # ── 注入后台任务 deps ──
         if self.task_manager or self.cron_job_manager or self.background_task_runner:
@@ -382,7 +395,7 @@ class ServiceGraph:
         # ── 后台任务执行器连线 ──
         if self.background_task_runner:
             self.background_task_runner.set_system_events(self.system_events)
-            self.background_task_runner.set_wake_manager(self.wake_manager)
+            self.background_task_runner.set_wake_dispatcher(self.wake_dispatcher)
 
         if self.background_task_runner and self.task_manager:
             self.background_task_runner.set_execute_callback(
@@ -432,12 +445,11 @@ class ServiceGraph:
             chat_id = session.delivery_channel or session.chat_id
             summary = session.command[:80]
             status = f"exit {session.exit_code}" if session.exit_code is not None else "terminated"
-            await self.wake_manager.notify(
+            await self.wake_dispatcher.request(
+                source="exec-event", intent="event",
                 session_key=chat_id,
-                text=f"后台进程完成: {summary} ({status})",
-                context_key=f"exec:{session.id}",
-                source="exec:exit",
-                trigger_ai=bool(session.delivery_channel),
+                event_text=f"后台进程完成: {summary} ({status})",
+                event_context_key=f"exec:{session.id}",
             )
 
         self.process_registry.on_exit(_on_exec_exit)
@@ -450,16 +462,12 @@ class ServiceGraph:
         if self.cfg.heartbeat.get("enabled", False):
             self.heartbeat_manager = HeartbeatManager(
                 config=self.cfg.heartbeat,
-                ai_service=self.ai_service,
-                model_registry=self.model_registry,
-                bot_id=self.bot_id,
-                admin_ids=self.admin_ids,
                 api_client=self.bot_engine.api,
-                agent_engine=self.agent_engine,
+                admin_ids=self.admin_ids,
                 context_manager=self.context_manager,
+                agent_engine=self.agent_engine,
+                wake_dispatcher=self.wake_dispatcher,
                 heartbeat_path=str(self.workspace_manager.heartbeat_path()),
-                system_events=self.system_events,
-                task_manager=self.task_manager,
             )
 
         # ── 命令注册 ──
