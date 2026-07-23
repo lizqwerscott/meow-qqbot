@@ -12,8 +12,15 @@ async def _heartbeat_respond(args: dict, ctx: ToolContext) -> ToolResult:
     notify = bool(args.get("notify", False))
     notification_text = (args.get("notification_text") or "").strip()
     if hb_resp is not None:
+        if hb_resp.get("recorded"):
+            _log.warning("heartbeat_respond 在同一轮中被重复调用，忽略")
+            return ToolResult(
+                content=json.dumps({"success": False, "error": "already recorded for this turn"}),
+                no_reply=not notify,
+            )
         hb_resp["notify"] = notify
         hb_resp["notification_text"] = notification_text
+        hb_resp["recorded"] = True
     else:
         _log.warning(
             "heartbeat_respond 在非心跳上下文中被调用，响应将被丢弃: "

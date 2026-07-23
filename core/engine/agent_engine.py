@@ -554,8 +554,10 @@ class AgentEngine:
     async def trigger_event_response(self, chat_id: str) -> None:
         """在 chat_id 的完整会话上下文中触发 AI turn。
 
-        由 WakeManager 调用。SystemEvent 已入队，
-        PromptBuilder.build_messages() 会自动 drain 并注入。
+        由 WakeManager 调用。采用心跳式投递：
+        - AI 文本通过 capturing_callback 捕获，不直接投递
+        - 通过 heartbeat_respond 工具控制通知
+        - 没有 heartbeat_respond 时按 fallback 转发
         """
         _log.info("trigger_event_response: chat_id=%s", chat_id[:24])
 
@@ -576,6 +578,22 @@ class AgentEngine:
             is_at_mention=False,
         )
 
+        captured_replies: list[str] = []
+        wake_resp: dict = {}
+
+        async def capturing_callback(
+            chat_id: str,
+            content: str,
+            message_id: str,
+            is_group: bool,
+        ) -> None:
+            captured_replies.append(content)
+
+        from core.tools.impl import inject_deps as _inject_deps
+
+        _inject_deps(_heartbeat_response=wake_resp)
+        real_text_sent = False
+
         try:
             messages, tools_to_use = await self.prompt_builder.build(
                 chat_id=chat_id,
@@ -591,21 +609,39 @@ class AgentEngine:
                 tier = self.rule_router.classify("[系统事件]")
                 model_chain = self.model_registry.get_chain(tier) or None
 
-            _, text_was_sent = await self.tool_loop.run(
+            await self.tool_loop.run(
                 messages=messages,
                 tools=tools_to_use or [],
                 chat_id=chat_id,
                 is_group=is_group,
                 reply_to="",
-                reply_callback=self._reply_callback,
+                reply_callback=capturing_callback,
                 sender_id="system",
                 model_chain=model_chain,
             )
 
-            if text_was_sent and self._system_events:
+            # ── 通知决策（同 OpenClaw 心跳模式） ──
+            if wake_resp.get("notify"):
+                text = wake_resp.get("notification_text", "").strip()
+                if text:
+                    await self._reply_callback(chat_id, text, "", is_group)
+                    real_text_sent = True
+            else:
+                # fallback: 转发捕获的非静默文本
+                from core.tools.tool_loop import _is_silent_reply_text as _check_silent
+
+                for reply in captured_replies:
+                    if not _check_silent(reply):
+                        await self._reply_callback(chat_id, reply, "", is_group)
+                        real_text_sent = True
+                        break
+
+            if real_text_sent and self._system_events:
                 self._system_events.consume_snapshot(chat_id)
         except Exception as e:
             _log.error("trigger_event_response 异常: %s", e, exc_info=True)
+        finally:
+            _inject_deps(_heartbeat_response=None)
 
     async def execute_heartbeat(
         self,

@@ -20,8 +20,8 @@ _ALL_TOOLS: set[str] = set()
 for _s in SECTIONS.values():
     _ALL_TOOLS.update(_s)
 
-# normal profile = 所有工具，但排除仅 heartbeat 专用的工具
-_NORMAL_EXCLUDE = SECTIONS["heartbeat"]
+# normal profile = 除 heartbeat 专用的某些工具
+_NORMAL_EXCLUDE: set[str] = set()
 
 PROFILES: dict[str, set[str]] = {
     "normal": _ALL_TOOLS - _NORMAL_EXCLUDE,
