@@ -17,9 +17,7 @@ from typing import Any, Callable, List, Optional, Set
 
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager
-from core.managers.nickname_manager import NicknameManager
 from core.message import InputMessage, MessageType
-from core.tools.impl import inject_deps, get_dep
 from core.learners.base import sanitize_for_learners
 
 from core.engine.context import EngineContext
@@ -58,8 +56,6 @@ class AgentEngine:
         self._archive_manager = ctx.mgmt.archive_manager
         self._system_events = ctx.mgmt.system_events
         self._workspace_manager = ctx.mgmt.workspace_manager
-
-        inject_deps(**ctx.to_deps_dict())
 
         # ── 子模块 ──
         self.session_manager = SessionTaskManager()
@@ -102,7 +98,8 @@ class AgentEngine:
 
     def set_media_uploader(self, media_uploader: Any):
         self.media_uploader = media_uploader
-        inject_deps(media_uploader=media_uploader)
+        if hasattr(self, '_deps') and self._deps:
+            self._deps.media_uploader.value = media_uploader
         _log.info("AgentEngine: MediaUploader 已注入")
 
     def set_reply_callback(self, callback: Callable) -> None:
@@ -116,7 +113,8 @@ class AgentEngine:
 
     def set_api_client(self, api_client: Any):
         self._api_client = api_client
-        inject_deps(api_client=api_client)
+        if hasattr(self, '_deps') and self._deps:
+            self._deps.api_client.value = api_client
         _log.info("AgentEngine: QQApiClient 已注入")
 
     def set_multimodal_service(self, multimodal_service: Any):
@@ -125,16 +123,14 @@ class AgentEngine:
     def set_tts_service(self, tts_service: Any):
         self._tts_service = tts_service
         self.prompt_builder._tts_service = tts_service
-        inject_deps(tts_service=tts_service)
+        if hasattr(self, '_deps') and self._deps:
+            self._deps.tts_service.value = tts_service
 
     def set_emoji_manager(self, emoji_manager: EmojiManager):
         self.emoji_manager = emoji_manager
         self.prompt_builder.emoji_manager = emoji_manager
-
-    def set_nickname_manager(self, nm: NicknameManager):
-        self._nm = nm
-        inject_deps(nickname_manager=nm)
-        self.prompt_builder._nm = nm
+        if hasattr(self, '_deps') and self._deps:
+            self._deps.emoji_manager = emoji_manager
 
     # ── 消息钩子系统 ──
 
@@ -582,7 +578,7 @@ class AgentEngine:
             system_event_key: 系统事件队列 key
         """
         from core.engine.wake_dispatcher import WakeResult as _WakeResult
-        from core.tools.impl import inject_deps as _inject_deps
+        from core.tools.impl.heartbeat import heartbeat_response as _heartbeat_response
         from core.tools.tool_loop import _is_silent_reply_text as _check_silent
         import time as _time
 
@@ -611,7 +607,7 @@ class AgentEngine:
         captured: list[str] = []
         wake_resp: dict = {}
 
-        _inject_deps(_heartbeat_response=wake_resp)
+        token = _heartbeat_response.set(wake_resp)
         try:
             # 向后兼容：无预制 messages 时自己构建
             if messages is None:
@@ -671,7 +667,7 @@ class AgentEngine:
             _log.error("run_wake_turn 异常 [%s]: %s", source, e, exc_info=True)
             result.error = str(e)
         finally:
-            _inject_deps(_heartbeat_response=None)
+            _heartbeat_response.reset(token)
 
         return result
 

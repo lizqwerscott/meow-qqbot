@@ -72,7 +72,7 @@ class PromptBuilder:
     4. 拼接动态上下文（记忆、时间、表情标签、群友列表、技能条目）
     """
 
-    def __init__(self, ctx):
+    def __init__(self, ctx, deps=None):
         self.template_manager = ctx.prompt.template_manager
         self.context_manager = ctx.mgmt.context_manager
         self.ai_service = ctx.ai.ai_service
@@ -91,6 +91,7 @@ class PromptBuilder:
         self._archive_manager = ctx.mgmt.archive_manager
         self._system_events = ctx.mgmt.system_events
         self._tts_service = None
+        self._deps = deps
 
     async def build(
         self,
@@ -150,6 +151,7 @@ class PromptBuilder:
                 has_sub_agents=self._has_sub_agents,
                 has_learners=bool(self.learners),
             ),
+            deps=self._deps,
             role=role,
         ) or None
 
@@ -331,7 +333,7 @@ class PromptBuilder:
             has_workspace=bool(self._workspace_manager),
             has_skills=bool(self._skill_managers and self._skill_managers.has_skills),
         )
-        tools_defs = build_tools("task", ctx, tools_allow=tools_allow) or []
+        tools_defs = build_tools("task", ctx, deps=self._deps, tools_allow=tools_allow) or []
         names = {t["function"]["name"] for t in tools_defs}
         desc_text = format_task_tool_descriptions(names)
         return tools_defs or None, desc_text
@@ -395,6 +397,7 @@ class PromptBuilder:
                 has_workspace=bool(self._workspace_manager),
                 has_tasks=self._has_tasks,
             ),
+            deps=self._deps,
         ) or None
 
         # ── system message ──

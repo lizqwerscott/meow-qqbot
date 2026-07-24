@@ -5,6 +5,7 @@ from typing import Optional
 
 from core.tools.catalog import SECTIONS, PROFILES, CRON_ALLOWED, FEATURE_SECTION_MAP
 from core.tools.impl import registry
+from core.tools.deps import ToolDeps
 
 
 @dataclass
@@ -24,6 +25,7 @@ class ChatContext:
 def build_tools(
     profile: str,
     ctx: ChatContext,
+    deps: ToolDeps | None = None,
     role: Optional[str] = None,
     tools_allow: Optional[list[str]] = None,
 ) -> list[dict]:
@@ -62,7 +64,7 @@ def build_tools(
 
     # Step 3: 按角色过滤（从 allowlist.toml）
     if role:
-        perm = registry.get_dep("permission_manager")
+        perm = deps.permission_manager if deps else None
         if perm:
             names = {n for n in names if perm.can_use_tool(n, role)}
 

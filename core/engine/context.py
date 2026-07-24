@@ -69,25 +69,4 @@ class EngineContext:
     sub: SubContext = field(default_factory=SubContext)
     sys: SysContext = field(default_factory=SysContext)
 
-    def to_deps_dict(self) -> dict:
-        return {
-            "emoji_manager": self.prompt.emoji_manager,
-            "media_uploader": None,
-            "api_client": None,
-            "hindsight": self.memory.hindsight_memory,
-            "nickname_manager": self.prompt.nickname_manager,
-            "bot_id": self.sys.bot_id,
-            "skill_managers": self.prompt.skill_managers,
-            "learning_orchestrator": self.prompt.learning_orchestrator,
-            "admin_ids": list(self.sys.admin_ids),
-            "permission_manager": self.mgmt.permission_manager,
-            "system_events": self.mgmt.system_events,
-            "search_top_k": self.memory.search_top_k,
-            "workspace_manager": self.mgmt.workspace_manager,
-            "tts_service": None,
-            "task_manager": self.bg.task_manager,
-            "cron_job_manager": self.bg.cron_job_manager,
-            "background_task_runner": None,
-            "sub_agent_manager": self.sub.sub_agent_manager,
-            "bot_engine": None,
-        }
+

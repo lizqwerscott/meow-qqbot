@@ -1,8 +1,8 @@
-"""ToolRegistry — 工具注册中心，替代全局 _TOOL_MAP + _DEPS"""
+"""ToolRegistry — 类型安全的工具注册中心"""
 
 import json
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 from core.tools._types import ToolEntry, ToolContext, ToolResult
 
@@ -14,22 +14,12 @@ class ToolRegistry:
 
     职责：
     1. 注册/查找 ToolEntry
-    2. 管理依赖注入（_DEPS 替代）
-    3. 执行工具调用（含权限检查）
-    4. 生成 OpenAI 格式的 tool specs
+    2. 执行工具调用（含权限检查）
+    3. 生成 OpenAI 格式的 tool specs
     """
 
     def __init__(self):
         self._tools: dict[str, ToolEntry] = {}
-        self._deps: dict[str, Any] = {}
-
-    # ── 依赖注入 ──
-
-    def inject(self, **deps):
-        self._deps.update(deps)
-
-    def get_dep(self, name: str) -> Any:
-        return self._deps.get(name)
 
     # ── 注册 ──
 

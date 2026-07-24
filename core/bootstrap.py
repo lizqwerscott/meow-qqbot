@@ -41,7 +41,10 @@ from core.tasks import (
     TaskStore,
 )
 from core.tasks.heartbeat import HeartbeatManager
-from core.tools.impl import inject_deps
+from core.tools.ref import Ref
+from core.tools.deps import ToolDeps
+from core.tools.aggregation import create_all_tool_entries
+from core.tools.impl import registry
 from core.tools.process_registry import ProcessRegistry
 from core.tools.skill_managers import SkillManagers
 from core.tools.sub_agent_manager import SubAgentManager
@@ -341,6 +344,38 @@ class ServiceGraph:
         if self.tts_service:
             self.agent_engine.set_tts_service(self.tts_service)
 
+        # ── 构造 ToolDeps 并注册工具 ──
+        self.tool_deps = ToolDeps(
+            emoji_manager=self.emoji_manager,
+            nickname_manager=self.nickname_manager,
+            skill_managers=self.skill_managers,
+            hindsight=self.hindsight_memory,
+            learning_orchestrator=self.learning_orchestrator,
+            permission_manager=self.permission_manager,
+            workspace_manager=self.workspace_manager,
+            sub_agent_manager=self.sub_agent_manager,
+            system_events=self.system_events,
+            search_top_k=hindsight_config.get("search_top_k", 5),
+            admin_ids=list(self.admin_ids),
+            bot_id=self.bot_id,
+            media_uploader=Ref(),
+            bot_engine=Ref(),
+            api_client=Ref(),
+            tts_service=Ref(self.tts_service),
+            process_registry=Ref(self.process_registry),
+            approval_manager=Ref(),
+            task_manager=Ref(self.task_manager),
+            cron_job_manager=Ref(self.cron_job_manager),
+            background_task_runner=Ref(self.background_task_runner),
+        )
+        self.agent_engine._deps = self.tool_deps
+        self.agent_engine.prompt_builder._deps = self.tool_deps
+
+        entries = create_all_tool_entries(self.tool_deps)
+        for entry in entries:
+            registry.register(entry)
+        _log.info("工具系统已初始化: %d 个工具", len(entries))
+
     # ── 阶段 2: 构造 BotEngine ─────────────────────────────────────
 
     def _build_bot_engine(self):
@@ -363,17 +398,15 @@ class ServiceGraph:
     def _wire_callbacks(self):
         self.agent_engine.set_reply_callback(self.bot_engine._send_reply)
 
-        # ── 注入后台任务 deps ──
+        # ── 更新后台任务 Ref ──
         if self.task_manager or self.cron_job_manager or self.background_task_runner:
-            inject_deps(
-                task_manager=self.task_manager,
-                cron_job_manager=self.cron_job_manager,
-                background_task_runner=self.background_task_runner,
-                process_registry=self.process_registry,
-            )
+            self.tool_deps.task_manager.value = self.task_manager
+            self.tool_deps.cron_job_manager.value = self.cron_job_manager
+            self.tool_deps.background_task_runner.value = self.background_task_runner
+            self.tool_deps.process_registry.value = self.process_registry
             _log.info("任务管理器 + 进程注册表已注入工具系统")
         else:
-            inject_deps(process_registry=self.process_registry)
+            self.tool_deps.process_registry.value = self.process_registry
 
         # ── 后台任务执行器连线 ──
         if self.background_task_runner:
@@ -410,7 +443,7 @@ class ServiceGraph:
             )
 
         # ── 注入 BotEngine 到工具系统 ──
-        inject_deps(bot_engine=self.bot_engine)
+        self.tool_deps.bot_engine.value = self.bot_engine
 
         # ── 审批系统 ──
         from core.approval.approval_manager import ApprovalManager
@@ -418,7 +451,7 @@ class ServiceGraph:
             api_client=self.bot_engine.api,
             admin_ids=self.admin_ids,
         )
-        inject_deps(approval_manager=self.approval_manager)
+        self.tool_deps.approval_manager.value = self.approval_manager
         self.bot_engine.approval_manager = self.approval_manager
         _log.info("ApprovalManager 已初始化")
 
