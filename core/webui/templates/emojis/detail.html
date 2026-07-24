@@ -18,6 +18,7 @@
                     <tr><th style="width:120px">Hash</th><td><code>{{ emoji.hash }}</code></td></tr>
                     <tr><th>原始 URL</th><td><a href="{{ emoji.url }}" target="_blank" style="word-break:break-all">{{ emoji.url[:60] }}..</a></td></tr>
                     <tr><th>文件名</th><td>{{ emoji.file_name }}</td></tr>
+                    <tr><th>自动摘要</th><td>{{ emoji.auto_summary or '-' }}</td></tr>
                     <tr><th>自动描述</th><td>{{ emoji.auto_description or '-' }}</td></tr>
                     <tr><th>自动标签</th><td>{% for t in (emoji.auto_tags or []) %}<span class="badge">{{ t }}</span> {% else %}-{% endfor %}</td></tr>
                     <tr><th>自定义描述</th><td>{{ emoji.user_description or '-' }}</td></tr>

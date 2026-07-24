@@ -12,7 +12,9 @@
     → 5. 保存到 data/emojis/<hash>.<ext>
     → 6. VLM 分析（MultimodalService.analyze_emoji）
     → 7. 写入 JSON 缓存
-    → 8. 返回 (description, emotion_tags)
+    → 8. 返回 (display_text, full_description, emotion_tags, emoji_hash)
+         display_text  = user_description > auto_summary > auto_description[:20] > "自定义表情"
+         full_description = user_description > auto_description > ""
 """
 
 import asyncio
@@ -160,19 +162,23 @@ class EmojiManager:
 
     async def get_or_build(
         self, attachment: MessageAttachment
-    ) -> Tuple[str, List[str], str]:
+    ) -> Tuple[str, str, List[str], str]:
         image_bytes = await self._download_emoji(attachment.resolved_url)
 
         emoji_hash = hashlib.sha256(image_bytes).hexdigest()
 
         cached = self._storage.get(emoji_hash)
         if cached:
-            desc = cached.get("user_description") or cached.get("auto_description", "") or "[自定义表情]"
+            auto_summary = cached.get("auto_summary", "")
+            auto_desc = cached.get("auto_description", "")
+            user_desc = cached.get("user_description")
             tags = cached.get("user_tags") or cached.get("auto_tags", [])
+            full_desc = user_desc or auto_desc or ""
+            display = user_desc or auto_summary or (auto_desc[:20] if auto_desc else "自定义表情")
             await self._storage.update(
                 emoji_hash, used_count=cached.get("used_count", 0) + 1
             )
-            return (desc, tags, emoji_hash)
+            return (display, full_desc, tags, emoji_hash)
 
         ext = self._infer_ext(attachment.content_type, attachment.filename)
         is_gif = ext == ".gif"
@@ -180,7 +186,7 @@ class EmojiManager:
         file_path = self._emoji_dir / f"{emoji_hash}{ext}"
         file_path.write_bytes(image_bytes)
 
-        auto_desc, auto_tags = "", []
+        auto_summary, auto_desc, auto_tags = "", "", []
         if self._multimodal:
             try:
                 if is_gif:
@@ -192,7 +198,7 @@ class EmojiManager:
                 else:
                     processed_path = self._maybe_normalize_image(file_path)
 
-                auto_desc, auto_tags = await self._multimodal.analyze_emoji(
+                auto_summary, auto_desc, auto_tags = await self._multimodal.analyze_emoji(
                     str(processed_path), is_gif=is_gif
                 )
 
@@ -204,7 +210,7 @@ class EmojiManager:
 
                 _log.info(
                     f"VLM 表情分析完成 [{emoji_hash[:12]}..]: "
-                    f"desc={auto_desc}, tags={auto_tags}"
+                    f"summary={auto_summary}, desc={auto_desc}, tags={auto_tags}"
                 )
             except Exception:
                 _log.warning(
@@ -216,6 +222,7 @@ class EmojiManager:
             "hash": emoji_hash,
             "file_name": f"{emoji_hash}{ext}",
             "url": attachment.resolved_url,
+            "auto_summary": auto_summary,
             "auto_description": auto_desc,
             "auto_tags": auto_tags,
             "user_description": None,
@@ -226,8 +233,8 @@ class EmojiManager:
         }
         await self._storage.save(record)
 
-        final_desc = auto_desc or "[自定义表情]"
-        return (final_desc, auto_tags or [], emoji_hash)
+        display = auto_summary or (auto_desc[:20] if auto_desc else "自定义表情")
+        return (display, auto_desc, auto_tags or [], emoji_hash)
 
     async def set_custom(
         self,
@@ -305,7 +312,8 @@ class EmojiManager:
                 analysis_path = file_path.with_suffix(".analysis.jpg")
                 analysis_path.write_bytes(static_bytes)
                 processed_path = self._maybe_normalize_image(analysis_path)
-                auto_desc, auto_tags = await self._multimodal.analyze_emoji(
+                self._multimodal.invalidate_cache(str(processed_path), "emoji")
+                auto_summary, auto_desc, auto_tags = await self._multimodal.analyze_emoji(
                     str(processed_path), is_gif=True
                 )
                 for p in [analysis_path, processed_path]:
@@ -313,16 +321,22 @@ class EmojiManager:
                         p.unlink()
             else:
                 processed_path = self._maybe_normalize_image(file_path)
-                auto_desc, auto_tags = await self._multimodal.analyze_emoji(
+                self._multimodal.invalidate_cache(str(processed_path), "emoji")
+                auto_summary, auto_desc, auto_tags = await self._multimodal.analyze_emoji(
                     str(processed_path), is_gif=False
                 )
 
+            if not auto_summary and not auto_desc:
+                _log.warning(f"重新分析返回空结果 [{emoji_hash[:12]}..]，保留原有数据")
+                return False
+
             await self._storage.update(
                 emoji_hash,
+                auto_summary=auto_summary,
                 auto_description=auto_desc,
                 auto_tags=auto_tags,
             )
-            _log.info(f"表情重新分析完成 [{emoji_hash[:12]}..]: desc={auto_desc}, tags={auto_tags}")
+            _log.info(f"表情重新分析完成 [{emoji_hash[:12]}..]: summary={auto_summary}, desc={auto_desc}, tags={auto_tags}")
             return True
         except Exception:
             _log.warning(
@@ -356,7 +370,7 @@ class EmojiManager:
                 1 if (r.get("user_tags") or r.get("auto_tags")) else 0
             ),
             "has_description": lambda r: (
-                1 if (r.get("user_description") or r.get("auto_description", "")) else 0
+                1 if (r.get("user_description") or r.get("auto_summary", "") or r.get("auto_description", "")) else 0
             ),
             "has_custom": lambda r: (
                 1 if (r.get("user_description") or r.get("user_tags")) else 0
@@ -409,6 +423,8 @@ class EmojiManager:
 
         for r in records:
             desc = _get_desc(r).lower()
+            summary = (r.get("auto_summary", "") or "").lower()
+            search_text = f"{desc} {summary}".strip()
             tags = [t.lower().strip('<>') for t in _get_tags(r)]
             score = 0
 
@@ -417,7 +433,7 @@ class EmojiManager:
                     score += 10
                 elif any(k in t for t in tags):
                     score += 3
-                if k in desc:
+                if k in search_text:
                     score += 5
 
             if score > best_score:
@@ -437,6 +453,8 @@ class EmojiManager:
 
         def _score(r):
             desc = (r.get("user_description") or r.get("auto_description", "") or "").lower()
+            summary = (r.get("auto_summary", "") or "").lower()
+            search_text = f"{desc} {summary}".strip()
             tags = [t.lower().strip('<>') for t in (r.get("user_tags") or r.get("auto_tags", []) or [])]
             score = 0
             matched_keywords = 0
@@ -445,7 +463,7 @@ class EmojiManager:
                 kw_score = 0
                 if k in tags:
                     kw_score += 10
-                if k in desc:
+                if k in search_text:
                     kw_score += 5
                 for t in tags:
                     if k in t:
@@ -489,10 +507,12 @@ class EmojiManager:
 
         for r in records:
             short_hash = r["hash"][:12]
+            summary = r.get("auto_summary", "") or ""
             desc = r.get("user_description") or r.get("auto_description", "") or "(无描述)"
+            display = f"{summary} - {desc}" if summary else desc
             tags = r.get("user_tags") or r.get("auto_tags", []) or []
             tag_str = f" [{', '.join(tags)}]" if tags else ""
-            lines.append(f"- {desc}{tag_str} (hash: {short_hash})")
+            lines.append(f"- {display}{tag_str} (hash: {short_hash})")
 
         return "\n".join(lines)
 
@@ -547,8 +567,6 @@ class EmojiManager:
                 return image_path
 
             new_path = image_path.with_stem(image_path.stem + "_norm")
-            import base64 as b64_mod
-
             ImageUtils.base64_to_image(
                 normalized_b64, str(new_path)
             )

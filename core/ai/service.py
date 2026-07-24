@@ -59,6 +59,7 @@ class AIService:
         model: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        response_format: Optional[Dict] = None,
     ) -> tuple[Optional[str], Optional[Dict]]:
         model_to_use = model or self.model
         max_tokens_to_use = max_tokens if max_tokens is not None else self.max_tokens
@@ -79,6 +80,9 @@ class AIService:
 
             if self.reasoning_effort:
                 kwargs["reasoning_effort"] = self.reasoning_effort
+
+            if response_format:
+                kwargs["response_format"] = response_format
 
             extra_body = self._build_extra_body()
             if extra_body:

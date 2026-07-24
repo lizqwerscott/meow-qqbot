@@ -29,7 +29,10 @@ class EmojiListCommand:
             lines = [f"已知自定义表情（共 {result['total']} 个，第 {result['page']} 页）："]
             for emoji in result["emojis"]:
                 short_hash = emoji["hash"][:12]
-                desc = emoji.get("user_description") or emoji.get("auto_description", "")
+                desc = (emoji.get("user_description")
+                        or emoji.get("auto_summary", "")
+                        or emoji.get("auto_description", "")
+                        or "")
                 tags = emoji.get("user_tags") or emoji.get("auto_tags", [])
                 tag_str = f" [{', '.join(tags[:3])}]" if tags else ""
                 marker = " ★" if (emoji.get("user_description") is not None or emoji.get("user_tags")) else ""

@@ -7,7 +7,7 @@
 
 <div class="search-bar">
     <form method="get" action="/emojis" style="display:flex;gap:8px;width:100%">
-        <input type="text" name="q" placeholder="搜索表情（描述/标签）" value="{{ query or '' }}">
+        <input type="text" name="q" placeholder="搜索表情（摘要/描述/标签）" value="{{ query or '' }}">
         <button type="submit" class="btn btn-primary">搜索</button>
         {% if query %}
         <a href="/emojis" class="btn">清除</a>
@@ -37,7 +37,7 @@
                 {% endif %}
             </td>
             <td><code>{{ emoji.hash[:12] }}..</code></td>
-            <td>{{ emoji.user_description or emoji.auto_description or '-' }}</td>
+            <td>{{ emoji.user_description or emoji.auto_summary or emoji.auto_description or '-' }}</td>
             <td>
                 {% for tag in (emoji.user_tags or emoji.auto_tags or []) %}
                 <span class="badge">{{ tag }}</span>
@@ -47,7 +47,7 @@
             </td>
             <td>{{ emoji.used_count }}</td>
             <td>
-                {% if emoji.user_description %}<span class="badge success">自定义</span>
+                {% if emoji.user_description is not none or emoji.user_tags is not none %}<span class="badge success">自定义</span>
                 {% else %}<span class="badge">自动</span>{% endif %}
             </td>
             <td>

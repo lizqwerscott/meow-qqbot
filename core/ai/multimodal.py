@@ -3,7 +3,7 @@
 
 封装与视觉大模型（VLM）的交互，提供两个核心方法：
 - analyze_image(image_path) → 图片内容描述
-- analyze_emoji(image_path) → (内容描述, 情绪标签列表)
+- analyze_emoji(image_path) → (摘要, 详细描述, 情绪标签列表)
 
 支持多模型 fallback：传入服务列表，按顺序调用直到成功。
 """
@@ -28,10 +28,10 @@ class MultimodalService:
     使用 OpenAI 兼容的 Vision API 分析图片内容。
     支持多 AIService fallback：列表中的模型按顺序调用，失败自动切换。
 
-    使用方式：
-        service = MultimodalService([ai_svc_1, ai_svc_2], ["deepseek/vlm", "modelscope/vlm"])
-        description = await service.analyze_image("/path/to/image.jpg")
-        desc, tags = await service.analyze_emoji("/path/to/emoji.png")
+        使用方式：
+            service = MultimodalService([ai_svc_1, ai_svc_2], ["deepseek/vlm", "modelscope/vlm"])
+            description = await service.analyze_image("/path/to/image.jpg")
+            summary, desc, tags = await service.analyze_emoji("/path/to/emoji.png")
     """
 
     def __init__(
@@ -71,46 +71,66 @@ class MultimodalService:
         result = await self._call_vlm(base64_data, prompt)
         result = (result or "图片").strip()
 
-        self._set_cache(cache_key, result, [])
+        self._set_cache(cache_key, result, result, [])
         return result
 
-    async def analyze_emoji(self, image_path: str, is_gif: bool = False) -> Tuple[str, List[str]]:
+    async def analyze_emoji(self, image_path: str, is_gif: bool = False) -> Tuple[str, str, List[str]]:
         cache_key = self._get_cache_key(image_path, "emoji")
         if cache_key in self._cache:
             _log.debug(f"分析表情命中缓存: {image_path}")
             self._cache.move_to_end(cache_key)
             cached = self._cache[cache_key]
-            return cached[0], cached[1]
+            return cached[0], cached[1], cached[2]
 
         base64_data = self._encode_image(image_path)
 
+        prompt = self._build_emoji_prompt(is_gif)
+
+        strategies = [
+            ("json_object", {"type": "json_object"}, "", 4096),
+            ("no_format", None, "", 4096),
+            ("retry", None, "\n请务必只返回合法的 JSON 格式，不要添加其他任何文字。", 4096),
+        ]
+
+        summary = description = ""
+        emotions: List[str] = []
+
+        for i, (name, rf, extra, mt) in enumerate(strategies):
+            result = await self._call_vlm(
+                base64_data, prompt + extra,
+                max_tokens=mt, response_format=rf,
+            )
+            summary, description, emotions = self._parse_emoji_result(result or "")
+            if summary or description:
+                break
+            _log.warning(f"VLM 表情分析失败 (策略={name}), {i+1}/3 次重试")
+
+        if summary or description:
+            self._set_cache(cache_key, summary, description, emotions)
+        return summary, description, emotions
+
+    @staticmethod
+    def _build_emoji_prompt(is_gif: bool) -> str:
+        fmt = (
+            '仅返回以下 JSON 格式（不要 markdown 包裹）：\n'
+            '{\n'
+            '  "summary": "10字以内简短概括",\n'
+            '  "description": "尽可能详细的图片描述",\n'
+            '  "emotions": ["情感标签1", "情感标签2"]\n'
+            '}\n'
+        )
         if is_gif:
-            prompt = (
-                '这是一张将动图各帧从左到右拼接的图片，展示了一个动态动画过程。'
-                '请分析这个动画表现的内容和动作，仅返回以下 JSON 格式'
-                '（不要包含其他文字或 markdown 包裹）：\n'
-                '{\n'
-                '  "description": "一句话描述这个动画表达的内容和动作",\n'
-                '  "emotions": ["标签1", "标签2", "标签3"]\n'
-                '}\n'
-                '其中 emotions 给出 1-3 个情绪/情感标签，反映这个动画传递的情感。'
+            return (
+                '这是一张将动图各帧从左到右拼接的图片，展示了一个动态动画过程。\n'
+                '请详细描述这个动画中的人物、动作、表情、背景和所有视觉细节，越详细越好。\n'
+                f'{fmt}'
+                '其中 emotions 给出 1-3 个情绪标签，反映这个动画传递的情感。'
             )
-        else:
-            prompt = (
-                '请分析这张表情/贴图图片，仅返回以下 JSON 格式'
-                '（不要包含其他文字或 markdown 包裹）：\n'
-                '{\n'
-                '  "description": "一句话描述图片中的主要内容",\n'
-                '  "emotions": ["标签1", "标签2", "标签3"]\n'
-                '}\n'
-                '其中 emotions 给出 1-3 个情绪/情感标签。'
-            )
-
-        result = await self._call_vlm(base64_data, prompt)
-        description, emotions = self._parse_emoji_result(result or "")
-
-        self._set_cache(cache_key, description, emotions)
-        return description, emotions
+        return (
+            '请详细描述这张图片中的人物、动物、动作、表情、背景、文字及所有视觉细节，越详细越好。\n'
+            f'{fmt}'
+            '其中 emotions 给出 1-3 个情绪标签。'
+        )
 
     def _encode_image(self, image_path: str) -> str:
         path = Path(image_path)
@@ -131,7 +151,13 @@ class MultimodalService:
         mime = mime_map.get(ext, "image/jpeg")
         return f"data:{mime};base64,{b64}"
 
-    async def _call_vlm(self, base64_image: str, prompt: str) -> Optional[str]:
+    async def _call_vlm(
+        self,
+        base64_image: str,
+        prompt: str,
+        max_tokens: int = 300,
+        response_format: Optional[Dict] = None,
+    ) -> Optional[str]:
         for idx, svc in enumerate(self._services):
             qualified_name = self._model_names[idx] if idx < len(self._model_names) else ""
 
@@ -157,8 +183,9 @@ class MultimodalService:
                             ],
                         }
                     ],
-                    max_tokens=300,
+                    max_tokens=max_tokens,
                     temperature=0.3,
+                    response_format=response_format,
                 )
                 if content:
                     if self._cooldown and qualified_name:
@@ -190,7 +217,7 @@ class MultimodalService:
         return None
 
     @staticmethod
-    def _parse_emoji_result(result: str) -> Tuple[str, List[str]]:
+    def _parse_emoji_result(result: str) -> Tuple[str, str, List[str]]:
         import json
 
         text = result.strip()
@@ -209,7 +236,8 @@ class MultimodalService:
 
         try:
             data = json.loads(text)
-            desc = data.get("description", "").strip()
+            summary = (data.get("summary") or "").strip()
+            description = (data.get("description") or "").strip()
             raw_emotions = data.get("emotions", [])
             if isinstance(raw_emotions, list):
                 emotions = [
@@ -218,13 +246,13 @@ class MultimodalService:
                 ]
             else:
                 emotions = []
-            return desc, emotions
+            return summary, description, emotions
         except (json.JSONDecodeError, TypeError):
             _log.warning(
                 f"解析表情 JSON 失败，原始返回: {result[:200]}",
                 exc_info=True,
             )
-            return result.strip(), []
+            return "", "", []
 
     def _get_cache_key(self, image_path: str, mode: str) -> str:
         try:
@@ -236,10 +264,16 @@ class MultimodalService:
             _log.debug(f"计算图片缓存键失败 [{image_path}]: {e}")
             return f"{image_path}:{mode}"
 
-    def _set_cache(self, key: str, description: str, tags: List[str]) -> None:
+    def _set_cache(self, key: str, summary: str, description: str, tags: List[str]) -> None:
         if len(self._cache) >= self._cache_max:
             self._cache.popitem(last=False)
-        self._cache[key] = (description, tags)
+        self._cache[key] = (summary, description, tags)
+
+    def invalidate_cache(self, image_path: str, mode: str = "emoji") -> None:
+        key = self._get_cache_key(image_path, mode)
+        if key in self._cache:
+            del self._cache[key]
+            _log.debug(f"已清除多模态缓存: {key}")
 
     def clear_cache(self) -> None:
         self._cache.clear()

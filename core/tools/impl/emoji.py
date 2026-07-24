@@ -30,9 +30,11 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
         result_data = []
         for r in results:
             desc = r.get("user_description") or r.get("auto_description", "") or "(无描述)"
+            summary = r.get("auto_summary", "") or ""
             tags = r.get("user_tags") or r.get("auto_tags", []) or []
             result_data.append({
                 "hash": r["hash"][:12],
+                "summary": summary,
                 "description": desc,
                 "tags": tags,
             })
@@ -93,14 +95,9 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
         emoji_manager, media_uploader, bot_engine,
         chat_id: str, emoji_hash: str, is_group: bool, reply_to: str | None = None,
     ) -> tuple[bool, str, str, str]:
-        if len(emoji_hash) < 12:
-            record = emoji_manager.get_info(emoji_hash)
-            if not record:
-                return False, "", "", f"未找到表情: {emoji_hash}"
-        else:
-            record = emoji_manager.find_by_hash(emoji_hash)
-            if not record:
-                return False, "", "", f"未找到表情: {emoji_hash[:12]}.."
+        record = emoji_manager.find_by_hash(emoji_hash)
+        if not record:
+            return False, "", "", f"未找到表情: {emoji_hash[:12]}"
 
         full_hash = record["hash"]
         file_name = record.get("file_name", "")
@@ -148,7 +145,7 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
         "properties": {
             "query": {
                 "type": "string",
-                "description": "用于搜索的标签，多个标签用空格分隔，例如：开心 撒娇 猫娘。标签越具体搜索越精准。",
+                "description": "用于搜索的关键词，多个词用空格分隔，例如：开心 撒娇 白猫 挥手。关键词越具体搜索越精准。",
             }
         },
         "required": ["query"],
@@ -173,7 +170,7 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
         ToolEntry(
             name="search_emoji",
             section="emoji",
-            description="搜索表情图片。输入一个或多个标签，用空格分开。系统会匹配其中任意标签，按匹配数量排序返回。输入多个标签可以得到更精准的搜索结果。",
+            description="搜索表情图片。输入一个或多个关键词（标签、描述词均可），用空格分开。系统会匹配任意关键词，按匹配数量排序返回。关键词越具体搜索越精准。",
             parameters=EMOJI_SEARCH_PARAMS,
             handler=_search_emoji,
         ),

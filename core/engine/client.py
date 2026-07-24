@@ -433,11 +433,11 @@ class BotEngine:
             msg_type = MessageType.EMOJI
             try:
                 if self.emoji_manager:
-                    desc, tags, emoji_hash = await self.emoji_manager.get_or_build(
+                    summary, desc, tags, emoji_hash = await self.emoji_manager.get_or_build(
                         event.attachments[0]
                     )
                     tag_str = " ".join(tags) if tags else ""
-                    event.content = f"[表情: {desc}]"
+                    event.content = f"[表情: {summary}]"
                     if tag_str:
                         event.content += f" [情绪: {tag_str}]"
                     resources = [
@@ -525,11 +525,11 @@ class BotEngine:
             if elem.attachments and is_custom_emoji(elem.content or "", elem.attachments):
                 try:
                     if self.emoji_manager:
-                        desc, tags, _ = await self.emoji_manager.get_or_build(
+                        summary, desc, tags, _ = await self.emoji_manager.get_or_build(
                             elem.attachments[0]
                         )
                         tag_str = " ".join(tags) if tags else ""
-                        replied_content = f"[表情: {desc}]"
+                        replied_content = f"[表情: {summary}]"
                         if tag_str:
                             replied_content += f" [情绪: {tag_str}]"
                 except Exception as e:

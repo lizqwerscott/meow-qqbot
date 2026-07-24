@@ -58,12 +58,13 @@ class OllamaService:
         model: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        response_format: Optional[Dict] = None,
     ) -> tuple[Optional[str], Optional[Dict]]:
         model_to_use = model or self.model
         try:
             raw = list(messages)
             self._normalize_vision_messages(raw)
-            response = await self._client.chat(
+            kwargs: Dict[str, Any] = dict(
                 model=model_to_use,
                 messages=raw,
                 options={
@@ -71,6 +72,17 @@ class OllamaService:
                     "num_predict": max_tokens if max_tokens is not None else self.max_tokens,
                 },
             )
+            if response_format:
+                rf_type = response_format.get("type", "")
+                if rf_type == "json_object":
+                    kwargs["format"] = "json"
+                elif rf_type == "json_schema":
+                    schema = response_format.get("json_schema", {})
+                    if isinstance(schema, dict) and "schema" in schema:
+                        kwargs["format"] = schema["schema"]
+                    elif isinstance(schema, dict):
+                        kwargs["format"] = schema
+            response = await self._client.chat(**kwargs)
             content = response.get("message", {}).get("content")
             usage = self._build_usage(response)
             return content, usage

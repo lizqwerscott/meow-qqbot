@@ -89,7 +89,7 @@ async def main():
                     host=mcfg.get("host", "http://localhost:11434"),
                     model=model,
                     temperature=mcfg.get("temperature", 0.3),
-                    max_tokens=mcfg.get("max_tokens", 300),
+                    max_tokens=mcfg.get("max_tokens", 4096),
                     timeout=mcfg.get("timeout", 120),
                 )
                 _add_service(svc, f"models.{mname}")
@@ -105,7 +105,7 @@ async def main():
                 host=multimodal_cfg.get("host", "http://localhost:11434"),
                 model=model,
                 temperature=0.3,
-                max_tokens=300,
+                max_tokens=4096,
                 timeout=120,
             )
             _add_service(svc, model)
@@ -135,8 +135,8 @@ async def main():
         pending = all_emojis
         reason = f"强制重新分析全部（共 {len(pending)} 个）"
     else:
-        pending = [e for e in all_emojis if not e.get("auto_description")]
-        reason = f"auto_description 为空（共 {len(pending)} 个）"
+        pending = [e for e in all_emojis if not e.get("auto_summary")]
+        reason = f"auto_summary 为空（共 {len(pending)} 个）"
 
     if not pending:
         print(f"\n所有 {len(all_emojis)} 个表情均已分析完成，无需重新分析。")

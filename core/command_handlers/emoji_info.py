@@ -28,10 +28,11 @@ class EmojiInfoCommand:
             f"文件名: {record.get('file_name', 'N/A')}",
             f"使用次数: {record.get('used_count', 0)}",
             f"",
-            f"AI 描述: {record.get('auto_description', '(无)')}",
+            f"AI 摘要: {record.get('auto_summary', '(无)')}",
+            f"AI 详细描述: {record.get('auto_description', '(无)')}",
             f"AI 标签: {', '.join(record.get('auto_tags', [])) or '(无)'}",
         ]
-        has_custom = record.get("user_description") is not None or record.get("user_tags")
+        has_custom = record.get("user_description") is not None or record.get("user_tags") is not None
         if has_custom:
             lines.append(f"")
             lines.append(f"★ 用户自定义描述: {record.get('user_description', '(无)')}")
