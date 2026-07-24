@@ -9,8 +9,6 @@ from qqbot_agent_sdk import (
     QQApiClient,
     QQWebSocket,
     WSCallbacks,
-    EventParser,
-    InboundEvent,
     parse_interaction_event,
     parse_approval_button_data,
 )
@@ -18,14 +16,14 @@ from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
 from qqbot_agent_sdk.dto import InlineKeyboard, MediaInfo, MessageToCreate, QQMessageType, WSReadyData
 from qqbot_agent_sdk.media_loader import MediaUploader
 
-from core.card_parser import parse_card
 from core.engine.agent_engine import AgentEngine
-from core.managers.command_manager import CommandManager
-from core.managers.emoji_manager import EmojiManager, is_custom_emoji
-from core.message import InputMessage, MessageType, ResourceMeta
-from core.ai.multimodal import MultimodalService
-from core.managers.nickname_manager import NicknameManager
+from core.engine.message_parser import MessageParser, MessageParserDeps
 from core.engine.router import Router
+from core.managers.command_manager import CommandManager
+from core.managers.emoji_manager import EmojiManager
+from core.managers.nickname_manager import NicknameManager
+from core.message import InputMessage
+from core.ai.multimodal import MultimodalService
 
 _log = logging.getLogger(__name__)
 
@@ -79,6 +77,7 @@ class BotEngine:
         self.emoji_manager = emoji_manager
         self.multimodal_service = multimodal_service
         self.permission_manager = permission_manager
+        self.parser = MessageParser(MessageParserDeps(emoji_manager=emoji_manager))
         self.command_manager: CommandManager = CommandManager(
             admin_id=admin_id,
             permission_manager=permission_manager,
@@ -417,154 +416,32 @@ class BotEngine:
     # ── 事件处理 ──
 
     async def _on_message_event(self, event_type: str, raw: dict) -> None:
-        """处理所有入站消息事件，解析后交由 Router 分发。"""
-        event = EventParser().parse(event_type, raw)
-        if event is None:
+        parsed = await self.parser.parse(event_type, raw)
+        if parsed is None:
             return
 
-        _log.info(f"[{event.chat_scope}][({event_type})] {event.user_id}: {event.content}")
+        _log.info(f"[{parsed.chat_scope}][({event_type})] {parsed.sender_id}: {parsed.content}")
 
-        msg_type: MessageType = MessageType.TEXT
-        resources: List[ResourceMeta] = []
+        # 采集昵称（副作用）
+        self.nickname_manager.collect(parsed.author_id, parsed.author_username)
+        for uid, name in parsed.mention_entries:
+            self.nickname_manager.collect(uid, name)
+        for uid, name in parsed.reply_author_entries:
+            self.nickname_manager.collect(uid, name)
 
-        # ── 检测自定义表情（faceType=6 + attachments）──
-        if is_custom_emoji(event.content, event.attachments):
-            _log.info(f"检测到自定义表情，用户: {event.user_id}")
-            msg_type = MessageType.EMOJI
-            try:
-                if self.emoji_manager:
-                    summary, desc, tags, emoji_hash = await self.emoji_manager.get_or_build(
-                        event.attachments[0]
-                    )
-                    tag_str = " ".join(tags) if tags else ""
-                    event.content = f"[表情: {summary}]"
-                    if tag_str:
-                        event.content += f" [情绪: {tag_str}]"
-                    resources = [
-                        ResourceMeta(
-                            resource_type="emoji",
-                            resource_id=emoji_hash,
-                            hash=emoji_hash,
-                            mime_type=event.attachments[0].content_type or "",
-                            filename=event.attachments[0].filename or "",
-                            size=event.attachments[0].size or 0,
-                        )
-                    ]
-                else:
-                    event.content = "[自定义表情]"
-            except Exception as e:
-                _log.error(f"自定义表情处理失败: {e}")
-                event.content = "[自定义表情]"
-
-        # ── 检测卡片消息（ARK/EMBED）──
-        elif event.raw and ("ark" in event.raw or "ark_data" in event.raw or "embed" in event.raw or event.message_type in (3, 4)):
-            _log.info(f"Card raw: {event.raw}")
-            card_text = parse_card(event.raw or {}, event.message_type)
-            if card_text:
-                _log.info(f"检测到卡片消息，解析为: {card_text}")
-                event.content = card_text
-                msg_type = MessageType.CARD
-            else:
-                _log.info("卡片消息解析失败，跳过")
-                return
-
-        # ── 检测附件类型（图片/语音/视频/文件）──
-        elif event.attachments:
-            ct = (event.attachments[0].content_type or "").lower()
-            if ct.startswith("image/"):
-                msg_type = MessageType.IMAGE
-            elif "voice" in ct or "audio" in ct or ct.endswith(".silk") or ct.endswith(".amr"):
-                msg_type = MessageType.VOICE
-            elif ct.startswith("video/"):
-                msg_type = MessageType.VIDEO
-            else:
-                msg_type = MessageType.FILE
-            _log.info(f"检测到{msg_type}消息: {event.attachments[0].filename}")
-            resources = [
-                ResourceMeta(
-                    resource_type=str(msg_type),
-                    resource_id=att.url.strip(),
-                    mime_type=att.content_type or "",
-                    height=att.height or 0,
-                    width=att.width or 0,
-                    size=att.size or 0,
-                    filename=att.filename or "",
-                )
-                for att in event.attachments
-            ]
-
-        else:
-            # 跳过空内容或仅 QQ 内置表情
-            stripped = event.content.strip()
-            if not stripped:
-                return
-            cleaned = re.sub(r'<faceType=\d+,[^>]+>', '', stripped).strip()
-            if not cleaned:
-                return
-
-        # 解析 @提及
-        mentioned_ids = []
-        mentions_data = raw.get("mentions", [])
-        for m in mentions_data:
-            uid = m.get("id")
-            if uid:
-                mentioned_ids.append(uid)
-                event.content = event.content.replace(f"<@{uid}>", f"@{uid}")
-        event.content = event.content.strip()
-
-        is_at_mention = any(m.get("is_you") for m in mentions_data)
-
-        # 提取引用消息
-        replied_content = ""
-        replied_author = ""
-        if event.msg_elements:
-            elem = event.msg_elements[0]
-            raw_elems = raw.get("msg_elements", [])
-            if raw_elems:
-                replied_author = raw_elems[0].get("author", {}).get("username", "")
-            if elem.attachments and is_custom_emoji(elem.content or "", elem.attachments):
-                try:
-                    if self.emoji_manager:
-                        summary, desc, tags, _ = await self.emoji_manager.get_or_build(
-                            elem.attachments[0]
-                        )
-                        tag_str = " ".join(tags) if tags else ""
-                        replied_content = f"[表情: {summary}]"
-                        if tag_str:
-                            replied_content += f" [情绪: {tag_str}]"
-                except Exception as e:
-                    _log.error(f"解析引用消息中的自定义表情失败: {e}")
-                    replied_content = "[引用消息: 自定义表情]"
-            elif elem.attachments:
-                replied_content = (elem.content or "") + " [含附件]"
-            else:
-                replied_content = elem.content or ""
-
-        # 采集昵称
-        self.nickname_manager.collect(
-            raw.get("author", {}).get("id", ""),
-            raw.get("author", {}).get("username", ""),
-        )
-        for m in mentions_data:
-            self.nickname_manager.collect(m.get("id", ""), m.get("username", ""))
-        for raw_elem in raw.get("msg_elements", []):
-            elem_author = raw_elem.get("author", {})
-            self.nickname_manager.collect(elem_author.get("id", ""), elem_author.get("username", ""))
-
-        # 构造 InputMessage 并交给 Router
         input_message = InputMessage(
-            id=event.message_id,
-            sender_id=event.user_id,
-            chat_id=event.chat_id,
-            content=event.content,
-            is_group=(event.chat_scope == "group"),
-            is_at_mention=is_at_mention,
+            id=parsed.id,
+            sender_id=parsed.sender_id,
+            chat_id=parsed.chat_id,
+            content=parsed.content,
+            is_group=(parsed.chat_scope == "group"),
+            is_at_mention=parsed.is_at_mention,
             bot_id=self._bot_id,
-            mentioned_ids=mentioned_ids,
-            replied_content=replied_content,
-            replied_author=replied_author,
-            msg_type=msg_type,
-            resources=resources,
+            mentioned_ids=parsed.mentioned_ids,
+            replied_content=parsed.replied_content,
+            replied_author=parsed.replied_author,
+            msg_type=parsed.msg_type,
+            resources=parsed.resources,
         )
 
         await self.router.route(
