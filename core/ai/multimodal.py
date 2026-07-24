@@ -5,7 +5,7 @@
 - analyze_image(image_path) → 图片内容描述
 - analyze_emoji(image_path) → (内容描述, 情绪标签列表)
 
-支持多模型 fallback：传入 AIService 列表，按顺序调用直到成功。
+支持多模型 fallback：传入服务列表，按顺序调用直到成功。
 """
 
 import asyncio
@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.ai.cooldown import ModelCooldownManager
-from core.ai.service import AIService
 
 _log = logging.getLogger(__name__)
 
@@ -37,7 +36,7 @@ class MultimodalService:
 
     def __init__(
         self,
-        ai_services: List[AIService],
+        ai_services: List[Any],
         model_names: Optional[List[str]] = None,
         cooldown_manager: Optional[ModelCooldownManager] = None,
     ):
@@ -144,7 +143,7 @@ class MultimodalService:
                 continue
 
             try:
-                response = await svc.client.chat.completions.create(
+                content, _ = await svc.chat_completion(
                     model=svc.model,
                     messages=[
                         {
@@ -161,13 +160,13 @@ class MultimodalService:
                     max_tokens=300,
                     temperature=0.3,
                 )
-                if response.choices and response.choices[0].message.content:
+                if content:
                     if self._cooldown and qualified_name:
                         await self._cooldown.record_success(qualified_name)
                     _log.info(
                         f"VLM 调用成功 (模型 [{qualified_name or svc.model}])"
                     )
-                    return response.choices[0].message.content
+                    return content
                 # 空结果不写入全局冷却
                 _log.warning(
                     f"VLM 返回空结果 (模型 [{qualified_name or svc.model}])"

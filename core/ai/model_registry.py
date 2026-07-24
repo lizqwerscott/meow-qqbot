@@ -32,10 +32,10 @@ class ModelRegistry:
         groups_config: dict,
         cooldown_config: Optional[Dict] = None,
     ):
-        self._services: Dict[str, AIService] = {}
+        self._services: Dict[str, Any] = {}
         self._groups: Dict[str, List[str]] = {}
         self._tier_map: Dict[str, str] = {}
-        self._default_service: Optional[AIService] = None
+        self._default_service: Optional[Any] = None
         self._cooldown = ModelCooldownManager(cooldown_config or {})
 
         for provider_name, pcfg in providers_config.items():
@@ -62,6 +62,18 @@ class ModelRegistry:
                         max_retries=model_cfg.get("max_retries", 0),
                         temperature=model_cfg.get("temperature", 0.7),
                         max_tokens=model_cfg.get("max_tokens", 8192),
+                        reasoning_effort=model_cfg.get("reasoning_effort"),
+                    )
+                elif provider_type == "ollama":
+                    from core.ai.ollama_service import OllamaService
+                    host = pcfg.get("host", "http://localhost:11434")
+                    svc = OllamaService(
+                        api_key=api_key,
+                        host=host,
+                        model=model_cfg.get("model", "llama3.2"),
+                        timeout=model_cfg.get("timeout", 120),
+                        temperature=model_cfg.get("temperature", 0.7),
+                        max_tokens=model_cfg.get("max_tokens", 4096),
                         reasoning_effort=model_cfg.get("reasoning_effort"),
                     )
                 else:
@@ -96,10 +108,10 @@ class ModelRegistry:
                 self._default_service = self._services.get(valid_chain[0])
 
     @property
-    def default_service(self) -> Optional[AIService]:
+    def default_service(self) -> Optional[Any]:
         return self._default_service
 
-    def get(self, name: str) -> Optional[AIService]:
+    def get(self, name: str) -> Optional[Any]:
         return self._services.get(name)
 
     def get_group(self, group_name: str) -> List[str]:

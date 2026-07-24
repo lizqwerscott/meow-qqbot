@@ -11,6 +11,7 @@ dependencies = [
     "fastapi>=0.115.0",
     "jinja2>=3.1.6",
     "numpy>=2.4.6",
+    "ollama>=0.4.0",
     "openai[aiohttp]>=2.26.0",
     "pillow>=12.2.0",
     "python-multipart>=0.0.20",
