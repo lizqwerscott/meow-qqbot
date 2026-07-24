@@ -15,6 +15,11 @@ import sys
 import tomllib
 from pathlib import Path
 
+# 确保项目根目录在 sys.path 中，使 core 模块可导入
+_project_root = Path(__file__).resolve().parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 import httpx
 
 logging.basicConfig(
