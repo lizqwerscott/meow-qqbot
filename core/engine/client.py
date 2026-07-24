@@ -618,7 +618,63 @@ class BotEngine:
             )
             _log.info(f"自定义键盘选择: {choice}")
 
-    # ── 统一发送接口 ──
+    # ── 统一发送 ──
+
+    async def _send(
+        self,
+        chat_id: str,
+        content: str = "",
+        *,
+        reply_to: str | None = None,
+        is_group: bool = False,
+        media_file_info: Optional[str] = None,
+        markdown: bool = True,
+        keyboard: Optional[InlineKeyboard] = None,
+    ) -> Dict[str, Any]:
+        chat_type = "group" if is_group else "c2c"
+
+        if media_file_info:
+            msg = MessageToCreate(
+                msg_type=QQMessageType.RICH_MEDIA,
+                msg_seq=self.api.next_msg_seq(),
+                media=MediaInfo(file_info=media_file_info),
+            )
+            if reply_to is not None:
+                msg.msg_id = reply_to
+            if is_group:
+                return await self.api.post_group_message(chat_id, msg, keyboard=keyboard)
+            return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
+
+        if keyboard:
+            msg = self.api.build_text_body(content, reply_to=reply_to, markdown=markdown)
+            if is_group:
+                return await self.api.post_group_message(chat_id, msg, keyboard=keyboard)
+            return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
+
+        chunks = BotEngine._split_markdown(content)
+        last_result: Dict[str, Any] = {}
+        for i, chunk in enumerate(chunks):
+            if len(chunks) > 1:
+                chunk = f"[{i + 1}/{len(chunks)}]\n{chunk}"
+            try:
+                last_result = await self.api.send_text(
+                    chat_type, chat_id, chunk,
+                    reply_to=reply_to,
+                    markdown=markdown,
+                )
+            except Exception:
+                if markdown:
+                    _log.warning("Chunk %d Markdown 发送失败，降级为纯文本重试", i)
+                    last_result = await self.api.send_text(
+                        chat_type, chat_id, chunk,
+                        reply_to=reply_to,
+                        markdown=False,
+                    )
+                else:
+                    raise
+            if i < len(chunks) - 1:
+                await asyncio.sleep(0.3)
+        return last_result
 
     async def send_reply(
         self,
@@ -631,56 +687,10 @@ class BotEngine:
         markdown: bool = True,
         keyboard: Optional[InlineKeyboard] = None,
     ) -> Dict[str, Any]:
-        """发送回复消息（被动消息，带 msg_id 上下文）。
-
-        统一处理文本 / markdown / 富媒体。根据参数自动选择：
-        - media_file_info 非空 → 富媒体 msg_type=7
-        - keyboard 非空 → 附加内联键盘
-        - 其他 → 文本 / markdown，长文本自动拆分多条
-        """
-        chat_type = "group" if is_group else "c2c"
-
-        if media_file_info:
-            msg = MessageToCreate(
-                msg_type=QQMessageType.RICH_MEDIA,
-                msg_seq=self.api.next_msg_seq(),
-                msg_id=message_id,
-                media=MediaInfo(file_info=media_file_info),
-            )
-            if is_group:
-                return await self.api.post_group_message(chat_id, msg, keyboard=keyboard)
-            return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
-
-        if keyboard:
-            msg = self.api.build_text_body(content, reply_to=message_id, markdown=markdown)
-            if is_group:
-                return await self.api.post_group_message(chat_id, msg, keyboard=keyboard)
-            return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
-
-        chunks = BotEngine._split_markdown(content)
-        last_result: Dict[str, Any] = {}
-        for i, chunk in enumerate(chunks):
-            if len(chunks) > 1:
-                chunk = f"[{i + 1}/{len(chunks)}]\n{chunk}"
-            try:
-                last_result = await self.api.send_text(
-                    chat_type, chat_id, chunk,
-                    reply_to=message_id,
-                    markdown=markdown,
-                )
-            except Exception:
-                if markdown:
-                    _log.warning("Chunk %d Markdown 发送失败，降级为纯文本重试", i)
-                    last_result = await self.api.send_text(
-                        chat_type, chat_id, chunk,
-                        reply_to=message_id,
-                        markdown=False,
-                    )
-                else:
-                    raise
-            if i < len(chunks) - 1:
-                await asyncio.sleep(0.3)
-        return last_result
+        return await self._send(
+            chat_id, content, reply_to=message_id, is_group=is_group,
+            media_file_info=media_file_info, markdown=markdown, keyboard=keyboard,
+        )
 
     async def send_proactive(
         self,
@@ -692,58 +702,16 @@ class BotEngine:
         markdown: bool = True,
         keyboard: Optional[InlineKeyboard] = None,
     ) -> Dict[str, Any]:
-        """发送主动消息（无被动消息上下文，不含 msg_id）。"""
-        chat_type = "group" if is_group else "c2c"
-
-        if media_file_info:
-            msg = MessageToCreate(
-                msg_type=QQMessageType.RICH_MEDIA,
-                msg_seq=self.api.next_msg_seq(),
-                media=MediaInfo(file_info=media_file_info),
-            )
-            if is_group:
-                return await self.api.post_group_message(chat_id, msg, keyboard=keyboard)
-            return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
-
-        if keyboard:
-            msg = self.api.build_text_body(content, reply_to=None, markdown=markdown)
-            if is_group:
-                return await self.api.post_group_message(chat_id, msg, keyboard=keyboard)
-            return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
-
-        chunks = BotEngine._split_markdown(content)
-        last_result: Dict[str, Any] = {}
-        for i, chunk in enumerate(chunks):
-            if len(chunks) > 1:
-                chunk = f"[{i + 1}/{len(chunks)}]\n{chunk}"
-            try:
-                last_result = await self.api.send_text(
-                    chat_type, chat_id, chunk,
-                    reply_to=None,
-                    markdown=markdown,
-                )
-            except Exception:
-                if markdown:
-                    _log.warning("主动消息 Chunk %d Markdown 发送失败，降级为纯文本重试", i)
-                    last_result = await self.api.send_text(
-                        chat_type, chat_id, chunk,
-                        reply_to=None,
-                        markdown=False,
-                    )
-                else:
-                    raise
-            if i < len(chunks) - 1:
-                await asyncio.sleep(0.3)
-        return last_result
+        return await self._send(
+            chat_id, content, reply_to=None, is_group=is_group,
+            media_file_info=media_file_info, markdown=markdown, keyboard=keyboard,
+        )
 
     async def _send_reply(
         self, chat_id: str, content: str, message_id: str, is_group: bool = False
     ) -> None:
-        """发送回复——委托给 send_reply。"""
         try:
-            if not message_id:
-                await self.send_proactive(chat_id, content, is_group=is_group)
-            else:
-                await self.send_reply(chat_id, content, message_id=message_id, is_group=is_group)
+            reply_to = message_id if message_id else None
+            await self._send(chat_id, content, reply_to=reply_to, is_group=is_group)
         except Exception as e:
             _log.error("发送回复失败 [%s]: %s", chat_id, e)
