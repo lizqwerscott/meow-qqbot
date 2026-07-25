@@ -25,6 +25,7 @@ from core.tasks.heartbeat_cooldown import HeartbeatCooldown
 from core.learners.orchestrator import LearningOrchestrator
 from core.managers.archive_manager import ArchiveManager
 from core.managers.context_manager import ChatContextManager
+from core.managers.context_store import JSONLContextStore, MemoryContextStore
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager
 from core.managers.nickname_manager import NicknameManager
@@ -127,7 +128,18 @@ class ServiceGraph:
         # ── 上下文管理 ──
         ctx_mgmt = self.cfg.context_management
         _cache_cfg = ctx_mgmt.get("cache", {})
+        _cache_dir = (
+            (_cache_cfg.get("dir") or "data/sessions/")
+            if _cache_cfg.get("enabled", True)
+            else None
+        )
+        _store = (
+            JSONLContextStore(base_dir=_cache_dir)
+            if _cache_dir
+            else MemoryContextStore()
+        )
         self.context_manager = ChatContextManager(
+            store=_store,
             max_history_per_chat=ctx_mgmt.get("max_history", 10000),
             compact_threshold_tokens=ctx_mgmt.get("compact_threshold_tokens", 950000),
             keep_recent_tokens=ctx_mgmt.get("keep_recent_tokens", 50000),
@@ -135,11 +147,6 @@ class ServiceGraph:
             keep_last_assistants=ctx_mgmt.get("keep_last_assistants", 3),
             soft_trim=ctx_mgmt.get("soft_trim", 20000),
             hard_clear=ctx_mgmt.get("hard_clear", 180000),
-            cache_dir=(
-                (_cache_cfg.get("dir") or "data/sessions/")
-                if _cache_cfg.get("enabled", True)
-                else None
-            ),
         )
 
         # ── ArchiveManager ──
@@ -148,7 +155,6 @@ class ServiceGraph:
         if archive_config.get("enabled", True):
             self.archive_manager = ArchiveManager(
                 context_manager=self.context_manager,
-                cache_dir=_cache_cfg.get("dir", "data/sessions/"),
                 memory_dir=archive_config.get("memory_dir", "data/archives/memory/"),
                 archive_hour=archive_config.get("archive_hour", 4),
                 replay_count=archive_config.get("replay_count", 6),

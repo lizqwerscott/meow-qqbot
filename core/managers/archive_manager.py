@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, List, Optional, Set
 
+from core.managers.chat_message import ChatMessage
+
 _log = logging.getLogger(__name__)
 
 # ── 常量 ──
@@ -37,11 +39,6 @@ def _format_archive_timestamp(t: Optional[float] = None) -> str:
 
 
 def _daily_reset_at(hour: int, t: Optional[float] = None) -> float:
-    """计算最近的归档时间点的时间戳。
-
-    返回已经过去的、离当前最近的 `hour:00`。如果今天的 hour:00 还没到，
-    则回退到昨天的 hour:00，防止 0:00~hour 之间每条消息都误触发归档。
-    """
     dt = datetime.fromtimestamp(t or time.time())
     today_reset = dt.replace(hour=hour, minute=0, second=0, microsecond=0)
     if today_reset.timestamp() > (t or time.time()):
@@ -50,7 +47,6 @@ def _daily_reset_at(hour: int, t: Optional[float] = None) -> float:
 
 
 def _strip_content_prefix(content: str) -> str:
-    """去除 content 开头重复的 [name 在 timestamp]: 前缀。"""
     while _RE_PREFIX.match(content):
         content = _RE_PREFIX.sub('', content)
     return content
@@ -63,10 +59,6 @@ def _date_str(t: Optional[float] = None) -> str:
 
 def _get_memory_dir(memory_root: str, chat_id: str) -> Path:
     return Path(memory_root) / chat_id
-
-
-def _get_archive_path(jsonl_path: Path, ts: str) -> Path:
-    return jsonl_path.parent / f"{jsonl_path.name}.archived.{ts}"
 
 
 # ── ArchiveResult ──
@@ -99,7 +91,6 @@ class ArchiveManager:
     def __init__(
         self,
         context_manager: Any,
-        cache_dir: str,
         memory_dir: str = "data/archives/memory/",
         archive_hour: int = _DEFAULT_ARCHIVE_HOUR,
         replay_count: int = _DEFAULT_REPLAY_COUNT,
@@ -108,7 +99,6 @@ class ArchiveManager:
         retention_days: int = _DEFAULT_RETENTION_DAYS,
     ):
         self._cm = context_manager
-        self._cache_dir = cache_dir
         self._memory_dir = memory_dir
         self._archive_hour = archive_hour
         self._replay_count = replay_count
@@ -116,20 +106,17 @@ class ArchiveManager:
         self._summary_days = summary_days
         self._retention_days = retention_days
 
-        # 待注入摘要的 chat_id 集合（归档后首次 build 消耗后移除）
         self._pending_injection: Set[str] = set()
+
+    @property
+    def _store(self):
+        return self._cm.store
 
     # ── 公开方法 ──
 
     async def archive_if_stale(
         self, chat_id: str, is_group: bool
     ) -> Optional[ArchiveResult]:
-        """检查日期边界，跨天则归档（在 per-chat 锁内完成检查和归档）。
-
-        由 dispatch() 在 add_user_message 前调用。
-        Returns:
-            ArchiveResult 或 None（未跨天或无历史时）。
-        """
         async def _do():
             ctx = self._cm.get_context(chat_id)
 
@@ -139,7 +126,6 @@ class ArchiveManager:
             now = time.time()
             today_reset = _daily_reset_at(self._archive_hour, now)
 
-            # last_activity >= today_reset → 未跨天
             if ctx.last_activity >= today_reset:
                 return None
 
@@ -148,10 +134,6 @@ class ArchiveManager:
         return await self._cm.with_chat_lock(chat_id, _do)
 
     def load_recent_summaries(self, chat_id: str) -> Optional[str]:
-        """读取最近 N 天的 memory/*.md 文件，返回拼接后的文本。
-
-        N 由 summary_days 配置控制，默认 2（含今天）。
-        """
         mem_dir = _get_memory_dir(self._memory_dir, chat_id)
         if not mem_dir.is_dir():
             return None
@@ -175,39 +157,24 @@ class ArchiveManager:
         return "\n\n---\n\n".join(parts) if parts else None
 
     def consume_summary(self, chat_id: str) -> Optional[str]:
-        """获取并消耗待注入的摘要。首次 build() 注入后不再重复。"""
         if chat_id not in self._pending_injection:
             return None
         self._pending_injection.discard(chat_id)
         return self.load_recent_summaries(chat_id)
 
     async def archive_manual(self, chat_id: str, is_group: bool) -> ArchiveResult:
-        """手动触发归档（猫猫 /归档 执行）。在 per-chat 锁内执行。"""
         async def _do():
             ctx = self._cm.get_context(chat_id)
             return self._do_archive(ctx, chat_id, is_group, "manual")
         return await self._cm.with_chat_lock(chat_id, _do)
 
     def cleanup_old_archives(self) -> int:
-        """清理超过保留天数的归档文件和摘要目录。"""
-        now = time.time()
-        cutoff = now - self._retention_days * 86400
-        removed = 0
-
-        # 清理 .archived.* 文件
-        if Path(self._cache_dir).is_dir():
-            for f in Path(self._cache_dir).iterdir():
-                if ".archived." in f.name:
-                    try:
-                        mtime = f.stat().st_mtime
-                        if mtime < cutoff:
-                            f.unlink()
-                            removed += 1
-                    except Exception as e:
-                        _log.warning("清理归档文件失败 %s: %s", f.name, e)
+        retention_seconds = self._retention_days * 86400
+        removed = self._store.cleanup_stale_archives(retention_seconds)
 
         # 清理过期的 .md 摘要
         mem_root = Path(self._memory_dir)
+        cutoff = time.time() - retention_seconds
         if mem_root.is_dir():
             for chat_dir in mem_root.iterdir():
                 if not chat_dir.is_dir():
@@ -220,7 +187,9 @@ class ArchiveManager:
                                 f.unlink()
                                 removed += 1
                         except Exception as e:
-                            _log.warning("清理摘要文件失败 %s: %s", f.name, e)
+                            _log.warning(
+                                "清理摘要文件失败 %s: %s", f.name, e
+                            )
 
         if removed:
             _log.info("归档清理完成: 移除了 %d 个文件", removed)
@@ -231,65 +200,39 @@ class ArchiveManager:
     def _do_archive(
         self, ctx: Any, chat_id: str, is_group: bool, reason: str
     ) -> ArchiveResult:
-        """执行实际的归档操作（调用方已持有 per-chat 锁）。"""
-        # 1. 确保数据落盘
-        ctx.save()
-
-        # 2. 准备路径
-        path = ctx._get_cache_path()
+        store = self._store
         now = time.time()
         ts = _format_archive_timestamp(now)
-        archive_path: Optional[Path] = None
-
-        # 3. 收集消息
-        all_msgs = list(ctx.history)
-
-        # 4. 提取回放消息
-        replay_msgs = self._extract_replay_messages(
-            all_msgs, self._replay_count
-        )
-
-        # 5. 生成摘要文本
         date = _date_str(now)
+
+        # 1. 确保数据落盘
+        store.flush(chat_id, [m.to_dict() for m in ctx.get_history()])
+
+        # 2. 收集消息
+        all_msgs = ctx.get_history()
+
+        # 3. 提取回放消息
+        replay_msgs = self._extract_replay_messages(all_msgs, self._replay_count)
+
+        # 4. 生成摘要文本
         summary_text = self._format_summary_text(
             all_msgs, self._summary_count, is_group, chat_id, date
         )
 
-        # 6. 重命名 JSONL
-        if path and path.exists():
-            archive_path = _get_archive_path(path, ts)
-            try:
-                path.rename(archive_path)
-                _log.info(
-                    "归档会话 [%s..] %s → %s",
-                    chat_id[:12], path.name, archive_path.name,
-                )
-            except Exception as e:
-                _log.warning(
-                    "重命名 JSONL 失败 [%s..]: %s", chat_id[:12], e,
-                )
-                archive_path = None
+        # 5. 归档（重命名 JSONL）
+        archive_path = store.archive(chat_id, ts)
 
-        # 7. 写入摘要 .md
+        # 6. 写入摘要 .md
         summary_path: Optional[str] = None
         if summary_text:
-            summary_path = self._write_memory_file(
-                chat_id, date, summary_text
-            )
+            summary_path = self._write_memory_file(chat_id, date, summary_text)
 
-        # 8. 清空上下文
-        ctx.history.clear()
-        ctx._flushed_count = 0
-
-        # 9. 回放消息到新的 session
-        for msg in replay_msgs:
-            ctx.history.append(msg)
-
-        # 10. 更新 last_activity 为当前时间，防止后续重复归档
+        # 7. 清空 + 回放新历史
+        ctx.set_messages(replay_msgs)
         ctx.last_activity = time.time()
 
-        # 11. 写入新 JSONL（含回放消息）
-        ctx.save()
+        # 8. 写入新数据（含回放消息）
+        store.flush(chat_id, [m.to_dict() for m in replay_msgs])
 
         _log.info(
             "归档完成 [%s..]: reason=%s replay=%d summary=%s",
@@ -300,12 +243,11 @@ class ArchiveManager:
         result = ArchiveResult(
             chat_id=chat_id,
             reason=reason,
-            archive_path=str(archive_path) if archive_path else None,
+            archive_path=archive_path,
             summary_path=summary_path,
             replay_count=len(replay_msgs),
         )
 
-        # 标记待注入（仅当有摘要且非手动归档时才自动注入）
         if summary_text and reason != "manual":
             self._pending_injection.add(chat_id)
 
@@ -316,18 +258,6 @@ class ArchiveManager:
     def _extract_replay_messages(
         self, messages: List[Any], count: int
     ) -> List[Any]:
-        """从消息列表中提取最近 N 条有效消息用于回放。
-
-        过滤规则：
-        - 跳过 role=tool
-        - 跳过 assistant(tool_calls)
-        - 跳过 assistant(content="[助手发送了一个表情]")
-        - 跳过 sender_id=system
-        - 清理 reasoning_content
-        - user 消息清理 content 前缀
-        """
-        from core.managers.context_manager import ChatMessage
-
         result: List[ChatMessage] = []
         for msg in reversed(messages):
             if msg.role == "tool":
@@ -343,7 +273,6 @@ class ArchiveManager:
             if msg.sender_id == "system":
                 continue
 
-            # 清理
             content = msg.content or ""
             if msg.role == "user":
                 content = _strip_content_prefix(content)
@@ -372,7 +301,6 @@ class ArchiveManager:
         chat_id: str,
         date: str,
     ) -> Optional[str]:
-        """从消息列表中提取最近 N 条有效消息，格式化为 .md 文件内容。"""
         lines: List[str] = []
         for msg in reversed(messages):
             if msg.role == "tool":
@@ -388,7 +316,6 @@ class ArchiveManager:
             if msg.sender_id == "system":
                 continue
 
-            # 取显示名
             if msg.role == "user":
                 display = msg.name or msg.sender_id or "未知"
                 content = _strip_content_prefix(msg.content or "")
@@ -427,7 +354,6 @@ class ArchiveManager:
     def _write_memory_file(
         self, chat_id: str, date: str, text: str
     ) -> Optional[str]:
-        """写入摘要 .md 文件。"""
         mem_dir = _get_memory_dir(self._memory_dir, chat_id)
         try:
             mem_dir.mkdir(parents=True, exist_ok=True)
