@@ -22,6 +22,7 @@ class ChatContextManager:
         keep_last_assistants: int = 3,
         soft_trim: int = 20000,
         hard_clear: int = 180000,
+        merge_window_seconds: int = 15,
     ):
         self._store = store
         self.max_history_per_chat = max_history_per_chat
@@ -32,6 +33,7 @@ class ChatContextManager:
         self.keep_last_assistants = keep_last_assistants
         self.soft_trim = soft_trim
         self.hard_clear = hard_clear
+        self.merge_window_seconds = merge_window_seconds
         self.contexts: Dict[str, ChatContext] = {}
         self._ctx_lock = asyncio.Lock()
         self._ctx_sync_lock = threading.Lock()
@@ -58,6 +60,7 @@ class ChatContextManager:
                     max_history=self.max_history_per_chat,
                     compact_threshold_tokens=self.compact_threshold_tokens,
                     keep_recent_tokens=self.keep_recent_tokens,
+                    merge_window_seconds=self.merge_window_seconds,
                 )
                 ctx.restore_from_store()
                 self.contexts[chat_id] = ctx

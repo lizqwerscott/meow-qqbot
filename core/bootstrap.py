@@ -127,6 +127,7 @@ class ServiceGraph:
 
         # ── 上下文管理 ──
         ctx_mgmt = self.cfg.context_management
+        _merge_ws = ctx_mgmt.get("merge_window_seconds", 15)
         _cache_cfg = ctx_mgmt.get("cache", {})
         _cache_dir = (
             (_cache_cfg.get("dir") or "data/sessions/")
@@ -147,6 +148,7 @@ class ServiceGraph:
             keep_last_assistants=ctx_mgmt.get("keep_last_assistants", 3),
             soft_trim=ctx_mgmt.get("soft_trim", 20000),
             hard_clear=ctx_mgmt.get("hard_clear", 180000),
+            merge_window_seconds=_merge_ws,
         )
 
         # ── ArchiveManager ──
@@ -161,6 +163,7 @@ class ServiceGraph:
                 summary_count=archive_config.get("summary_count", 15),
                 summary_days=archive_config.get("summary_days", 2),
                 retention_days=archive_config.get("retention_days", 30),
+                merge_window_seconds=_merge_ws,
             )
             _log.info(
                 "归档系统已启用 (每日 %d:00 检查, 摘要 %d 条, 回放 %d 条)",

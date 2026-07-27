@@ -1,9 +1,25 @@
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from deepseek_tokenizer import ds_token
+
+# 匹配 to_dict() 中 user 消息添加的 [发言人 在 YYYY-MM-DD HH:MM:SS]: 前缀
+_RE_PREFIX = re.compile(
+    r'^\[.*? 在 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]:\s*'
+)
+
+
+def strip_content_prefix(content: str) -> str:
+    """移除消息内容中由 to_dict() 添加的 [NAME 在 TIME]: 前缀。
+    
+    仅在从旧 JSONL 数据恢复时需要（新数据通过 raw_content 字段避免污染）。
+    """
+    while _RE_PREFIX.match(content):
+        content = _RE_PREFIX.sub('', content)
+    return content
 
 
 def _estimate_tokens(text: Optional[str]) -> int:
@@ -45,6 +61,7 @@ class ChatMessage:
         d: Dict = {
             "role": self.role,
             "content": content,
+            "raw_content": self.content,
             "timestamp": self.timestamp,
             "message_id": self.message_id,
             "sender_id": self.sender_id,
@@ -62,9 +79,10 @@ class ChatMessage:
 
     @staticmethod
     def from_dict(data: dict) -> "ChatMessage":
+        content = data.get("raw_content", data.get("content", ""))
         return ChatMessage(
             role=data.get("role", "user"),
-            content=data.get("content", ""),
+            content=content,
             timestamp=data.get("timestamp", 0.0),
             message_id=data.get("message_id"),
             sender_id=data.get("sender_id"),
@@ -74,3 +92,42 @@ class ChatMessage:
             tool_calls=data.get("tool_calls"),
             reasoning_content=data.get("reasoning_content"),
         )
+
+
+def group_user_messages(messages: List["ChatMessage"]) -> List[List["ChatMessage"]]:
+    """将连续同发送人的 user 消息分组。
+    
+    非 user 消息（assistant/tool）或 sender_id 为 None 的消息各自为一组。
+    用户消息按连续 + 同 sender_id 合并为同一组，不关心时间窗口。
+    时间窗口仅在格式化时使用。
+    
+    Returns:
+        List of groups, each group is a list of ChatMessage objects.
+        单元素组表示无需合并（非 user 或独立 user 消息）。
+    """
+    groups: List[List[ChatMessage]] = []
+    buf: List[ChatMessage] = []
+
+    for msg in messages:
+        if msg.role != "user" or not msg.sender_id:
+            if buf:
+                groups.append(buf)
+                buf = []
+            groups.append([msg])
+            continue
+
+        if not buf:
+            buf.append(msg)
+            continue
+
+        if msg.sender_id != buf[0].sender_id:
+            groups.append(buf)
+            buf = [msg]
+            continue
+
+        buf.append(msg)
+
+    if buf:
+        groups.append(buf)
+
+    return groups

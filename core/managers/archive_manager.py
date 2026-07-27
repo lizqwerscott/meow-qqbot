@@ -8,21 +8,14 @@
 """
 
 import logging
-import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, List, Optional, Set
 
-from core.managers.chat_message import ChatMessage
+from core.managers.chat_message import ChatMessage, group_user_messages, strip_content_prefix
 
 _log = logging.getLogger(__name__)
-
-# ── 常量 ──
-
-_RE_PREFIX = re.compile(
-    r'^\[.*? 在 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]:\s*'
-)
 
 _DEFAULT_SUMMARY_COUNT = 15
 _DEFAULT_REPLAY_COUNT = 6
@@ -44,12 +37,6 @@ def _daily_reset_at(hour: int, t: Optional[float] = None) -> float:
     if today_reset.timestamp() > (t or time.time()):
         today_reset -= timedelta(days=1)
     return today_reset.timestamp()
-
-
-def _strip_content_prefix(content: str) -> str:
-    while _RE_PREFIX.match(content):
-        content = _RE_PREFIX.sub('', content)
-    return content
 
 
 def _date_str(t: Optional[float] = None) -> str:
@@ -97,6 +84,7 @@ class ArchiveManager:
         summary_count: int = _DEFAULT_SUMMARY_COUNT,
         summary_days: int = _DEFAULT_SUMMARY_DAYS,
         retention_days: int = _DEFAULT_RETENTION_DAYS,
+        merge_window_seconds: int = 15,
     ):
         self._cm = context_manager
         self._memory_dir = memory_dir
@@ -105,6 +93,7 @@ class ArchiveManager:
         self._summary_count = summary_count
         self._summary_days = summary_days
         self._retention_days = retention_days
+        self.merge_window_seconds = merge_window_seconds
 
         self._pending_injection: Set[str] = set()
 
@@ -275,7 +264,7 @@ class ArchiveManager:
 
             content = msg.content or ""
             if msg.role == "user":
-                content = _strip_content_prefix(content)
+                content = strip_content_prefix(content)
 
             cleaned = ChatMessage(
                 role=msg.role,
@@ -301,8 +290,9 @@ class ArchiveManager:
         chat_id: str,
         date: str,
     ) -> Optional[str]:
-        lines: List[str] = []
-        for msg in reversed(messages):
+        # 1. 正向收集有效消息
+        selected: List[ChatMessage] = []
+        for msg in messages:
             if msg.role == "tool":
                 continue
             if msg.role == "assistant" and msg.tool_calls:
@@ -317,23 +307,27 @@ class ArchiveManager:
                 continue
 
             if msg.role == "user":
-                display = msg.name or msg.sender_id or "未知"
-                content = _strip_content_prefix(msg.content or "")
+                raw = strip_content_prefix(msg.content or "")
+                if not raw:
+                    continue
             else:
-                display = "猫猫"
-                content = msg.content or ""
+                raw = msg.content or ""
+                if not raw:
+                    continue
 
-            if not content:
-                continue
+            selected.append(msg)
 
-            lines.append(f"{display}: {content}")
-            if len(lines) >= count:
-                break
-
-        if not lines:
+        # 取最后 count 条
+        selected = selected[-count:]
+        if not selected:
             return None
 
-        lines.reverse()
+        # 2. 分组合并
+        groups = group_user_messages(selected)
+
+        lines: List[str] = []
+        for group in groups:
+            _build_summary_group(lines, group, self.merge_window_seconds)
 
         chat_type = "群聊" if is_group else "私聊"
         short_id = chat_id[:16] + "…" if len(chat_id) > 16 else chat_id
@@ -369,3 +363,35 @@ class ArchiveManager:
                 "写入归档摘要失败 [%s..]: %s", chat_id[:12], e,
             )
             return None
+
+
+def _build_summary_group(lines: List[str], group: List[ChatMessage], window_seconds: int) -> None:
+    """将合并分组格式化为一行或多行，追加到 lines。"""
+    first = group[0]
+
+    if first.role != "user":
+        content = first.content or ""
+        lines.append(f"猫猫: {content}")
+        return
+
+    display = first.name or first.sender_id or "未知"
+    content_parts: List[str] = []
+    prev_ts = first.timestamp
+
+    for msg in group:
+        raw = strip_content_prefix(msg.content or "").strip()
+        if not raw:
+            continue
+
+        if content_parts:
+            gap = msg.timestamp - prev_ts
+            if gap > window_seconds:
+                ts_marker = time.strftime("[%H:%M:%S]", time.localtime(msg.timestamp))
+                content_parts.append(ts_marker)
+
+        content_parts.append(raw)
+        prev_ts = msg.timestamp
+
+    if content_parts:
+        joined = "\n".join(content_parts)
+        lines.append(f"{display}: {joined}")

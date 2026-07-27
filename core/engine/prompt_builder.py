@@ -182,7 +182,7 @@ class PromptBuilder:
             )
 
         # ── 4. 完整历史 ──
-        history = ctx.get_history_as_dicts()
+        history = ctx.get_history_as_dicts_merged()
 
         messages: List[dict] = [{"role": "system", "content": static_prompt}]
         messages.extend(history)

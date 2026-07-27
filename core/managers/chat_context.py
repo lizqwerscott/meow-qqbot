@@ -4,7 +4,7 @@ import time
 from collections import deque
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from core.managers.chat_message import ChatMessage, _estimate_tokens
+from core.managers.chat_message import ChatMessage, _estimate_tokens, group_user_messages, strip_content_prefix
 from core.managers.context_store import ContextStore
 
 _log = logging.getLogger(__name__)
@@ -19,12 +19,14 @@ class ChatContext:
         max_history: int = 10000,
         compact_threshold_tokens: int = 950000,
         keep_recent_tokens: int = 50000,
+        merge_window_seconds: int = 15,
     ):
         self.chat_id = chat_id
         self.store = store
         self.max_history = max_history
         self.compact_threshold_tokens = compact_threshold_tokens
         self.keep_recent_tokens = keep_recent_tokens
+        self.merge_window_seconds = merge_window_seconds
         self.history = deque(maxlen=max_history)
         self.last_activity = time.time()
         self.lock = asyncio.Lock()
@@ -106,6 +108,25 @@ class ChatContext:
     ) -> List[Dict]:
         messages = self.get_history(max_messages)
         return [msg.to_dict() for msg in messages]
+
+    def get_history_as_dicts_merged(
+        self, max_messages: Optional[int] = None
+    ) -> List[Dict]:
+        """返回合并后的消息 dict 列表（仅合并连续同用户消息）。
+        
+        原始 ChatContext.history 不变，所有现有系统不受影响。
+        """
+        messages = self.get_history(max_messages)
+        groups = group_user_messages(messages)
+        result: List[Dict] = []
+        for group in groups:
+            if len(group) == 1 or group[0].role != "user":
+                result.append(group[0].to_dict())
+            else:
+                merged = _build_merged_dict(group, self.merge_window_seconds)
+                if merged is not None:
+                    result.append(merged)
+        return result
 
     def get_conversation_context(
         self, max_messages: Optional[int] = None
@@ -549,3 +570,51 @@ class ChatContext:
             new_history.append(m)
         self.history = new_history
         return True, usage
+
+
+def _build_merged_dict(
+    group: List[ChatMessage], window_seconds: int
+) -> Optional[Dict]:
+    """将一组连续同发送人的 user 消息合并为单个 dict。
+    
+    group 由 group_user_messages() 产出，保证所有 msg.role == "user"
+    且 sender_id 相同。
+
+    合并规则：
+    - 用组内第一个有效内容的消息生成前缀
+    - 间隔 ≤ window_seconds：\n 直接拼接
+    - 间隔 > window_seconds：插入 [HH:MM:SS] 标记后拼接
+    - 内容为空的消息跳过
+    """
+    first = _first_non_empty(group)
+    if first is None:
+        return None
+
+    d = first.to_dict()
+    merged = [d["content"]]
+    prev_ts = first.timestamp
+
+    for msg in group:
+        if msg is first:
+            continue
+        raw = strip_content_prefix(msg.content).strip()
+        if not raw:
+            continue
+
+        gap = msg.timestamp - prev_ts
+        if gap > window_seconds:
+            ts_marker = time.strftime("[%H:%M:%S]", time.localtime(msg.timestamp))
+            merged.append(ts_marker)
+        merged.append(raw)
+        prev_ts = msg.timestamp
+
+    d["content"] = "\n".join(merged)
+    return d
+
+
+def _first_non_empty(group: List[ChatMessage]) -> Optional[ChatMessage]:
+    """找到组内第一个有非空内容的消息。"""
+    for msg in group:
+        if msg.content.strip():
+            return msg
+    return None
