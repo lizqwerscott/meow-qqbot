@@ -19,17 +19,16 @@ _log = logging.getLogger(__name__)
 
 _MEMORY_SYSTEM_DESC = (
     "【记忆系统】\n"
-    "你可以使用以下工具查询和保存长期记忆。\n"
+    "你可以使用 memory 和 mark_important 工具管理长期记忆。\n"
     "\n"
-    "**重要原则：不确定的先查记忆，不要猜测！**\n"
-    "- 当用户询问关于某人的背景、偏好、说过的话、过往经历时→ 先 memory(action=search)，不要凭印象回答\n"
-    "- 当用户提到以前的事、上次的约定、之前讨论过的内容→ 先 memory(action=search) 确认事实\n"
-    "- 当需要确认某个具体事实（如生日、爱好、说过的话）→ 先 memory(action=search) 再回答\n"
-    "- 如果 memory(action=search) 没有找到相关信息，如实告诉用户你不知道，不要编造\n"
+    "**核心原则：不确定的先查记忆，不要猜测或编造！**\n"
+    "- 涉及用户的背景、偏好、过往经历、约定 → 先 memory(action=search) 确认\n"
+    "- 需要核实某个具体事实（生日、爱好、说过的话）→ 先 memory(action=search) 再回答\n"
+    "- 搜不到相关信息时，如实告诉用户你不知道\n"
     "\n"
-    "可用工具：\n"
-    "- memory：记忆搜索和关系查询。action=search 搜索记忆（指定 person_name 可查群友）；action=relation 查两人关系（指定 person_a + person_b）；可查画像、经历、事实等\n"
-    "- mark_important：记录重要信息。用户解释背景/喜好/事实时主动调用，立即存入长期记忆\n"
+    "工具说明：\n"
+    "- memory：action=search 查画像/经历/事实（指定 person_name 可查群友），action=relation 查两人关系\n"
+    "- mark_important：记录重要信息到长期记忆。用户解释背景/喜好/事实时主动调用\n"
 )
 
 HEARTBEAT_MINIMAL_SYSTEM_PROMPT = (
@@ -266,22 +265,14 @@ class PromptBuilder:
                     _admin_chat = sender_id in self._admin_ids
             if _admin_chat:
                 ws_root = str(self._workspace_manager.root_dir())
-                dynamic_parts.append(f"当前管理员工作区: {ws_root}/")
                 dynamic_parts.append(
-                    "工作区目录结构：\n"
-                    "  workspaces/\n"
-                    "  ├── HEARTBEAT.md          (心跳检查清单，可选)\n"
-                    "  ├── groups/{群聊ID}/files/  (群聊的文件工作区)\n"
-                    "  └── private/{私聊ID}/files/ (私聊的文件工作区)\n"
+                    f"管理员工作区: {ws_root}/\n"
+                    "目录：HEARTBEAT.md（可选）| groups/{群聊ID}/files/ | private/{私聊ID}/files/\n"
                     "\n"
-                    "你当前处于管理员模式，文件工具可访问整个 workspaces/ 目录。\n"
-                    "如有需要，使用 read_file、list_dir 等浏览各子目录查看其他会话的工作区文件。\n"
-                    "如使用 list_dir 看到 'groups/' 和 'private/'，这些是其他聊天的工作区目录。"
-                )
-                dynamic_parts.append(
-                    "文件工具 (read_file / write_file / edit_file / apply_patch / list_dir) 和搜索工具 (search_content / find_files) 可访问整个 workspaces/ 目录（管理员权限）。"
-                    "文件路径请使用相对于工作区根目录的相对路径（例如 'HEARTBEAT.md' 或 'groups/xxx/files/note.txt'）。"
-                    "如需访问 workspaces/ 外部的文件（如项目外的配置文件），使用 .. 路径越界，系统会向你发送审批请求，批准后即可访问。"
+                    "你处于管理员模式，文件/搜索工具可访问整个 workspaces/ 目录。\n"
+                    "路径使用相对于工作区根目录的相对路径（如 'HEARTBEAT.md'、'groups/xxx/files/note.txt'）。\n"
+                    "访问 workspaces/ 外的文件用 .. 路径越界，系统会发送审批请求。\n"
+                    "使用 list_dir 可浏览 groups/ 和 private/ 查看其他会话的工作区。"
                 )
             else:
                 sandbox = str(self._workspace_manager.sandbox_dir(is_group, chat_id))
