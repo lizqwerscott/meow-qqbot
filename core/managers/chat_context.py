@@ -187,14 +187,17 @@ class ChatContext:
         if data is None:
             return False
         for item in data:
-            self.history.append(ChatMessage.from_dict(item))
+            try:
+                self.history.append(ChatMessage.from_dict(item))
+            except Exception as e:
+                _log.warning("跳过损坏的历史条目 [%s..]: %s", self.chat_id[:12], e)
 
         if self._is_expired():
             _log.info(
                 "会话缓存已过期 [%s..]，交由 ArchiveManager 处理",
                 self.chat_id[:12],
             )
-            self.last_activity = self.history[-1].timestamp
+            self.last_activity = self.history[-1].timestamp if self.history else time.time()
             return False
         self.last_activity = time.time()
         _log.info(

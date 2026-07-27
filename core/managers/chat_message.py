@@ -1,10 +1,13 @@
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from deepseek_tokenizer import ds_token
+
+_log = logging.getLogger(__name__)
 
 # 匹配 to_dict() 中 user 消息添加的 [发言人 在 YYYY-MM-DD HH:MM:SS]: 前缀
 _RE_PREFIX = re.compile(
@@ -78,7 +81,10 @@ class ChatMessage:
         return d
 
     @staticmethod
-    def from_dict(data: dict) -> "ChatMessage":
+    def from_dict(data) -> "ChatMessage":
+        if isinstance(data, str):
+            _log.warning("from_dict 收到 str 而非 dict (len=%d)，按 user 消息兜底", len(data))
+            return ChatMessage(role="user", content=data, timestamp=0.0)
         content = data.get("raw_content", data.get("content", ""))
         return ChatMessage(
             role=data.get("role", "user"),

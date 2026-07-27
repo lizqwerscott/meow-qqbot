@@ -76,7 +76,7 @@ class JSONLContextStore(ContextStore):
 
         self._chat_types: Dict[str, bool] = {}
         self._chat_types_lock = asyncio.Lock()
-        self._chat_types_path = self._base_dir / "chat_types.json"
+        self._chat_types_path = self._base_dir / "meta" / "chat_types.json"
         self._load_chat_types()
 
     # ── 内部工具 ──
@@ -214,30 +214,39 @@ class JSONLContextStore(ContextStore):
     # ── 聊天类型 ──
 
     def _load_chat_types(self) -> None:
-        if not self._chat_types_path.exists():
-            old_path = self._base_dir.parent / "chat_types.json"
-            if old_path.exists():
-                try:
-                    old_data = json.loads(old_path.read_text())
-                    self._chat_types = {k: bool(v) for k, v in old_data.items()}
-                    self._chat_types_path.write_text(
-                        json.dumps(self._chat_types, ensure_ascii=False)
-                    )
-                    old_path.unlink(missing_ok=True)
-                    _log.info(
-                        "已迁移 chat_types.json → data/cache/ (%d 条)",
-                        len(self._chat_types),
-                    )
-                except Exception as e:
-                    _log.warning("chat_types.json 迁移失败: %s", e)
+        if self._chat_types_path.exists():
+            try:
+                data = json.loads(self._chat_types_path.read_text())
+                self._chat_types = {k: bool(v) for k, v in data.items()}
+                _log.info("已加载 %d 个聊天类型记录 (meta/)", len(self._chat_types))
+            except Exception:
+                _log.warning("meta/chat_types.json 加载失败，使用空映射")
             return
 
-        try:
-            data = json.loads(self._chat_types_path.read_text())
-            self._chat_types = {k: bool(v) for k, v in data.items()}
-            _log.info("已加载 %d 个聊天类型记录", len(self._chat_types))
-        except Exception:
-            _log.warning("chat_types.json 加载失败，使用空映射")
+        self._migrate_chat_types()
+        if self._chat_types:
+            return
+
+    def _migrate_chat_types(self) -> None:
+        candidates = [
+            ("data/chat_types.json", self._base_dir.parent / "chat_types.json"),
+            ("data/sessions/chat_types.json", self._base_dir / "chat_types.json"),
+        ]
+        for label, path in candidates:
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text())
+                    parsed = {k: bool(v) for k, v in data.items()}
+                    if parsed:
+                        self._chat_types_path.parent.mkdir(parents=True, exist_ok=True)
+                        self._chat_types_path.write_text(json.dumps(parsed, ensure_ascii=False))
+                        path.unlink(missing_ok=True)
+                        self._chat_types = parsed
+                        _log.info("已迁移 %s → meta/ (%d 条)", label, len(parsed))
+                        return
+                except Exception as e:
+                    _log.warning("%s 加载/迁移失败: %s", label, e)
+                    continue
 
     def get_chat_type(self, chat_id: str) -> Optional[bool]:
         return self._chat_types.get(chat_id)
