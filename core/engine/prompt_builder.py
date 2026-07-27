@@ -257,14 +257,19 @@ class PromptBuilder:
         if self._workspace_manager:
             ws_type = "群聊" if is_group else "私聊"
             is_admin_private = not is_group and chat_id in self._admin_ids
-            dynamic_parts.append(f"当前{ws_type}工作区: {chat_id[:12]}")
             if is_admin_private:
+                ws_root = str(self._workspace_manager.root_dir())
+                dynamic_parts.append(f"当前管理员工作区: {ws_root}/")
                 dynamic_parts.append(
-                    "read_file / write_file / edit_file / apply_patch 四个文件工具可访问整个 workspaces/ 根目录（管理员权限）。搜索文件内容请使用 exec + rg。"
+                    "read_file / write_file / edit_file / apply_patch 四个文件工具可访问整个 workspaces/ 目录（管理员权限）。"
+                    "文件路径请使用相对于工作区根目录的相对路径（例如 'HEARTBEAT.md' 或 'groups/xxx/files/note.txt'），不要使用绝对路径。"
                 )
             else:
+                sandbox = str(self._workspace_manager.sandbox_dir(is_group, chat_id))
+                dynamic_parts.append(f"当前{ws_type}工作区: {sandbox}/")
                 dynamic_parts.append(
-                    "read_file / write_file / edit_file / apply_patch 四个文件工具仅限当前工作区内使用。搜索文件内容请使用 exec + rg。"
+                    "read_file / write_file / edit_file / apply_patch 四个文件工具仅限当前工作区内使用。"
+                    "文件路径请使用相对于工作区的相对路径（例如 'memo.txt'），不要使用绝对路径。"
                 )
 
         # HEARTBEAT.md（管理员的私聊专属）
@@ -477,10 +482,11 @@ class PromptBuilder:
         )
 
         if self._workspace_manager:
-            dynamic_parts.append(f"当前工作区: {chat_id[:12]}")
+            ws_root = str(self._workspace_manager.root_dir())
+            dynamic_parts.append(f"当前工作区: {ws_root}/")
             dynamic_parts.append(
-                "read_file / write_file / edit_file / apply_patch "
-                "四个文件工具可访问整个 workspaces/ 根目录（管理员权限）。搜索文件内容请使用 exec + rg。"
+                "read_file / write_file / edit_file / apply_patch 四个文件工具可访问整个 workspaces/ 目录（管理员权限）。"
+                "文件路径请使用相对于工作区根目录的相对路径（例如 'HEARTBEAT.md' 或 'groups/xxx/files/note.txt'），不要使用绝对路径。"
             )
 
         return static_prompt + "\n\n" + "\n\n".join(dynamic_parts)
