@@ -34,7 +34,8 @@ _MEMORY_SYSTEM_DESC = (
 
 HEARTBEAT_MINIMAL_SYSTEM_PROMPT = (
     "你是一个群聊助手的心跳检查器，运行在独立的 Heartbeat Session 中。\n\n"
-    "可用工具：文件工具、记忆工具、命令工具、heartbeat_respond。\n\n"
+    "可用工具：read_file / write_file / edit_file / apply_patch / list_dir / search_content / find_files、记忆工具、exec、heartbeat_respond。\n"
+    "文件路径均相对于 workspaces/ 根目录，例如 read_file(file_path='HEARTBEAT.md')。\n\n"
     "回应方式：\n"
     "- 如果没有任何需要关注的事项，调用 heartbeat_respond(notify=false)\n"
     "- 如果有需要提醒的事项，调用 heartbeat_respond(notify=true, notification_text=\"...\")\n"
@@ -256,35 +257,93 @@ class PromptBuilder:
         # 工作区上下文
         if self._workspace_manager:
             ws_type = "群聊" if is_group else "私聊"
-            _admin_chat = not is_group and chat_id in self._admin_ids
+            _admin_chat = False
+            if not is_group:
+                if self._perm:
+                    role = self._perm.get_user_role(sender_id)
+                    _admin_chat = self._perm.is_admin_role(role)
+                else:
+                    _admin_chat = sender_id in self._admin_ids
             if _admin_chat:
                 ws_root = str(self._workspace_manager.root_dir())
                 dynamic_parts.append(f"当前管理员工作区: {ws_root}/")
                 dynamic_parts.append(
+                    "工作区目录结构：\n"
+                    "  workspaces/\n"
+                    "  ├── HEARTBEAT.md          (心跳检查清单，可选)\n"
+                    "  ├── groups/{群聊ID}/files/  (群聊的文件工作区)\n"
+                    "  └── private/{私聊ID}/files/ (私聊的文件工作区)\n"
+                    "\n"
+                    "你当前处于管理员模式，文件工具可访问整个 workspaces/ 目录。\n"
+                    "如有需要，使用 read_file、list_dir 等浏览各子目录查看其他会话的工作区文件。\n"
+                    "如使用 list_dir 看到 'groups/' 和 'private/'，这些是其他聊天的工作区目录。"
+                )
+                dynamic_parts.append(
                     "文件工具 (read_file / write_file / edit_file / apply_patch / list_dir) 和搜索工具 (search_content / find_files) 可访问整个 workspaces/ 目录（管理员权限）。"
-                    "文件路径请使用相对于工作区根目录的相对路径（例如 'HEARTBEAT.md' 或 'groups/xxx/files/note.txt'），不要使用绝对路径。"
+                    "文件路径请使用相对于工作区根目录的相对路径（例如 'HEARTBEAT.md' 或 'groups/xxx/files/note.txt'）。"
+                    "如需访问 workspaces/ 外部的文件（如项目外的配置文件），使用 .. 路径越界，系统会向你发送审批请求，批准后即可访问。"
                 )
             else:
                 sandbox = str(self._workspace_manager.sandbox_dir(is_group, chat_id))
                 dynamic_parts.append(f"当前{ws_type}工作区: {sandbox}/")
                 dynamic_parts.append(
+                    "你的文件工作区位于上述 files/ 目录下。"
                     "文件工具 (read_file / write_file / edit_file / apply_patch / list_dir) 和搜索工具 (search_content / find_files) 均限当前工作区内使用。"
                     "文件路径请使用相对于工作区的相对路径（例如 'memo.txt'），不要使用绝对路径。"
                 )
 
-        # 工具使用建议
+        # 文件与搜索工具调用原则
         if self._workspace_manager:
+            _path_rules = (
+                "- 使用相对于工作区目录的相对路径（如 'note.txt' 或 'subdir/file.md'）\n"
+                "- 路径中不要包含 `..` ——这会被拒绝"
+            )
+            if _admin_chat:
+                _path_rules = (
+                    "- 使用相对于工作区根目录的相对路径（如 'HEARTBEAT.md' 或 'groups/xxx/files/note.txt'）\n"
+                    "- 如需访问 workspaces/ 外部的文件，使用 .. 路径越界，系统会向你发送审批请求，批准后即可访问"
+                )
             dynamic_parts.append(
-                "工具使用建议：\n"
-                "- 搜索文件内容优先用 search_content (rg)，不要在 exec 里用 grep/rg\n"
-                "- 查找文件优先用 find_files (fd)，不要在 exec 里用 find/fd\n"
-                "- 列目录用 list_dir，不要在 exec 里用 ls\n"
-                "- 读取/编辑/写入文件用 read_file/edit_file/write_file，不要在 exec 里用 cat/sed\n"
-                "- 不要使用 2>/dev/null 或类似手段掩盖错误输出"
+                "【文件与搜索工具调用原则】\n"
+                "\n"
+                "**路径规范：**\n"
+                f"{_path_rules}\n"
+                "\n"
+                "**工具选择：**\n"
+                "- 读取文件内容用 `read_file`（支持文本文件，1MB 上限），不要用 exec + cat\n"
+                "- 查看目录结构用 `list_dir`，不要用 exec + ls\n"
+                "- 编辑文件用 `edit_file`（精确字符串替换），不要用 exec + sed\n"
+                "- 创建新文件或覆写已存在文件用 `write_file`，父目录自动创建\n"
+                "- 批量新建/修改/删除/移动文件用 `apply_patch`（一个 patch 支持多个操作）\n"
+                "- 搜索文件内容（关键字/正则）用 `search_content`，不要用 exec + grep/rg\n"
+                "- 按文件名搜索文件用 `find_files`（支持 glob 通配符），不要用 exec + find/fd\n"
+                "\n"
+                "**`edit_file` 使用要点：**\n"
+                "- `old_string` 必须**完全匹配**文件中的原文（包括空格和换行）\n"
+                "- 如果文件中有多处相同文本，设置 `replace_all=true` 替换全部\n"
+                "- 如果不确定唯一性，先 `read_file` 查看上下文，选择足够独特的匹配片段\n"
+                "\n"
+                "**`apply_patch` 使用要点：**\n"
+                "- 一个 patch 可以同时 ADD（新建）、DELETE（删除）、UPDATE（修改）、MOVE（移动）多个文件\n"
+                "- Patch 格式需包含 `*** Begin Patch` 和 `*** End Patch` 包围\n"
+                "- 如果只改一个文件的一小段，优先用 `edit_file` 而不是 apply_patch\n"
+                "\n"
+                "**`search_content` 使用要点：**\n"
+                "- 默认正则搜索，设置 `literal=true` 可做字面搜索（特殊字符无需转义）\n"
+                "- 设置 `glob=*.py` 可限定文件类型\n"
+                "- 设置 `ignore_case=true` 可忽略大小写\n"
+                "\n"
+                "**`find_files` 使用要点：**\n"
+                "- 使用 glob 模式，如 `**/*.py` 或 `src/**/*.ts`\n"
+                "- 自动忽略 .gitignore 中列出的文件\n"
+                "\n"
+                "**重要限制：**\n"
+                "- `read_file` 和 `edit_file` 只能处理 **1MB 以下**的文本文件\n"
+                "- 二进制文件和超大文件请使用 `exec` 命令处理"
             )
 
         # HEARTBEAT.md（管理员的私聊专属）
-        if self._workspace_manager and not is_group and chat_id in self._admin_ids:
+        if self._workspace_manager and _admin_chat:
             hb_path = self._workspace_manager.heartbeat_path()
             if hb_path.exists():
                 dynamic_parts.append(
@@ -497,12 +556,15 @@ class PromptBuilder:
             dynamic_parts.append(f"当前工作区: {ws_root}/")
             dynamic_parts.append(
                 "文件工具 (read_file / write_file / edit_file / apply_patch / list_dir) 和搜索工具 (search_content / find_files) 可访问整个 workspaces/ 目录（管理员权限）。"
-                "文件路径请使用相对于工作区根目录的相对路径（例如 'HEARTBEAT.md' 或 'groups/xxx/files/note.txt'），不要使用绝对路径。"
+                "文件路径请使用相对于工作区根目录的相对路径。"
+                "如需访问外部文件，使用 .. 路径越界，系统会发送审批请求。"
             )
             dynamic_parts.append(
                 "工具使用建议：\n"
                 "- 搜索文件内容优先用 search_content (rg)，不要在 exec 里用 grep/rg\n"
                 "- 查找文件优先用 find_files (fd)，不要在 exec 里用 find/fd\n"
+                "- 列目录用 list_dir，不要在 exec 里用 ls\n"
+                "- 读取/编辑/写入文件用 read_file/edit_file/write_file，不要在 exec 里用 cat/sed\n"
                 "- 不要使用 2>/dev/null 或类似手段掩盖错误输出"
             )
 

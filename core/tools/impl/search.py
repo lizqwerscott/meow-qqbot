@@ -296,14 +296,14 @@ def create_search_entries(deps: ToolDeps) -> list[ToolEntry]:
         ToolEntry(
             name="search_content",
             section="search",
-            description="搜索文件内容。基于 ripgrep (rg)，支持正则、忽略大小写、文件名过滤。自动忽略 .gitignore。比 exec + grep/rg 更高效。",
+            description="搜索文件内容。基于 ripgrep (rg)，支持正则、忽略大小写、文件名过滤。自动忽略 .gitignore。默认限工作区内使用，管理员可通过审批访问越界路径。比 exec + grep/rg 更高效。",
             parameters=SEARCH_CONTENT_PARAMS,
             handler=_search_content,
         ),
         ToolEntry(
             name="find_files",
             section="search",
-            description="按 glob 模式搜索文件名。基于 fd，自动忽略 .gitignore。比 exec + find/fd 更高效。",
+            description="按 glob 模式搜索文件名。基于 fd，自动忽略 .gitignore。默认限工作区内使用，管理员可通过审批访问越界路径。比 exec + find/fd 更高效。",
             parameters=FIND_FILES_PARAMS,
             handler=_find_files,
         ),
