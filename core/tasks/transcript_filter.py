@@ -7,12 +7,11 @@
 匹配 OpenClaw heartbeat-filter.ts 的 span-aware 状态机。
 """
 
-
+from .delivery_normalization import strip_heartbeat_token
 
 
 def is_heartbeat_ack_only(content: str) -> bool:
     """检测仅含 HEARTBEAT_OK / NO_REPLY 的纯静默回复。"""
-    from .delivery_normalization import strip_heartbeat_token
     _, should_skip = strip_heartbeat_token(str(content))
     return should_skip
 

@@ -23,6 +23,7 @@ from core.learners.base import sanitize_for_learners
 from core.engine.context import EngineContext
 from core.engine.prompt_builder import PromptBuilder
 from core.managers.session_manager import SessionTaskManager
+from core.tasks.wake_coalescer import WakeTurnResult
 from core.tools.tool_loop import ToolLoop
 
 _log = logging.getLogger(__name__)
@@ -577,12 +578,11 @@ class AgentEngine:
             tools: 预制工具列表（由 WakeRunner 传入）
             system_event_key: 系统事件队列 key
         """
-        from core.engine.wake_dispatcher import WakeResult as _WakeResult
         from core.tools.impl.heartbeat import heartbeat_response as _heartbeat_response
         from core.tools.tool_loop import _is_silent_reply_text as _check_silent
         import time as _time
 
-        result = _WakeResult()
+        result = WakeTurnResult()
 
         if not self._reply_callback:
             _log.warning("reply_callback 未注入，无法投递 AI 回应")

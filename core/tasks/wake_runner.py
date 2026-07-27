@@ -18,6 +18,7 @@ from .wake_coalescer import (
     PendingWake, WakeRunResult,
     SOURCE_INTERVAL, SOURCE_MANUAL,
     SOURCE_EXEC, SOURCE_CRON, SOURCE_TASK,
+    WakeTurnResult,
 )
 from .preflight import PreflightContext, PreflightResult, run_preflight
 from .system_event_prompt import build_system_events_prompt
@@ -93,15 +94,16 @@ class WakeRunner:
         )
         pf_result = run_preflight(ctx)
         if pf_result.skip_reason:
-            _log.debug(
-                "Wake 跳过 [%s..]: %s (source=%s)",
-                pw.session_key[:12], pf_result.skip_reason, pw.source,
+            _log.info(
+                "[WakeRunner] wake 跳过: source=%s intent=%s reason=%s",
+                pw.source, pw.intent, pf_result.skip_reason,
             )
             return WakeRunResult(
                 status="skipped",
                 skip_reason=pf_result.skip_reason,
                 duration_ms=(time.time() - started) * 1000,
             )
+        _log.info("[WakeRunner] 预检通过: source=%s intent=%s → run_wake_turn()", pw.source, pw.intent)
 
         # ── 2. 系统事件注入 ──
 
@@ -161,8 +163,7 @@ class WakeRunner:
             turn_ok = True
         except Exception as e:
             _log.error("run_wake_turn 异常 [%s]: %s", pw.source, e)
-            from core.engine.wake_dispatcher import WakeResult as _WakeResult
-            result = _WakeResult(error=str(e))
+            result = WakeTurnResult(error=str(e))
 
         # ── 5. 消费系统事件快照（仅在 AI 成功执行后） ──
         if self._events and turn_ok:
@@ -180,11 +181,16 @@ class WakeRunner:
                 try:
                     await strategy.deliver(result, delivery_target=pw.delivery_target)
                 except Exception as e:
-                    _log.error("delivery 异常 [%s]: %s", pw.source, e)
+                    _log.error("[WakeRunner] delivery 异常: source=%s strategy=%s err=%s", pw.source, type(strategy).__name__, e)
 
         duration = (time.time() - started) * 1000
+        status = "ran" if turn_ok else "failed"
+        _log.info(
+            "[WakeRunner] wake 完成: source=%s status=%s duration=%.0fms",
+            pw.source, status, duration,
+        )
         return WakeRunResult(
-            status="ran" if turn_ok else "failed",
+            status=status,
             skip_reason=str(result.error) if not turn_ok and result.error else "",
             duration_ms=duration,
             result=result,

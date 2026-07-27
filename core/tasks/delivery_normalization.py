@@ -23,23 +23,26 @@ def strip_heartbeat_token(text: str, ack_max_chars: int = ACK_MAX_CHARS_DEFAULT)
     cleaned = cleaned.strip().strip("*`~_").strip()
 
     token, alt_token = "HEARTBEAT_OK", "NO_REPLY"
-    has_token = token in cleaned or alt_token in cleaned
+    cleaned_upper = cleaned.upper()
+    has_token = token in cleaned_upper or alt_token in cleaned_upper
 
     # 无 token → 不跳过，不剥离（openclaw 规则）
     if not has_token:
         return cleaned, False
 
-    # 循环剥离首尾 token
+    # 循环剥离首尾 token（大小写不敏感）
     changed = True
     while changed:
         changed = False
         for tok in (token, alt_token):
-            if cleaned.startswith(tok):
-                cleaned = cleaned[len(tok):].lstrip()
-                changed = True
-            m = re.search(re.escape(tok) + r'[^\w]{0,4}$', cleaned)
+            stripped = cleaned
+            if stripped.upper().startswith(tok):
+                stripped = stripped[len(tok):].lstrip()
+            m = re.search(re.escape(tok) + r'[^\w]{0,4}$', stripped, re.IGNORECASE)
             if m:
-                cleaned = cleaned[:m.start()]
+                stripped = stripped[:m.start()]
+            if stripped != cleaned:
+                cleaned = stripped
                 changed = True
 
     if not cleaned.strip():
@@ -79,5 +82,7 @@ def normalize_heartbeat_reply(
     cleaned, should_skip = strip_heartbeat_token(text, ack_max_chars)
     if should_skip:
         return "", True
-    cleaned, _ = strip_trailing_notify_false(cleaned)
+    cleaned, had_notify_false = strip_trailing_notify_false(cleaned)
+    if had_notify_false and not cleaned.strip():
+        return "", True
     return cleaned, False

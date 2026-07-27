@@ -73,6 +73,15 @@ class WakeRunResult:
     result:        Any = None
 
 
+@dataclass
+class WakeTurnResult:
+    """run_wake_turn 的返回容器（AI turn 完成后的结果）。"""
+    should_notify: bool = False
+    notification_text: str = ""
+    captured_replies: list = field(default_factory=list)
+    error: str = ""
+
+
 WakeHandler = Callable[[PendingWake], "Awaitable[WakeRunResult]"]
 
 # ── Module-level state ──
@@ -80,6 +89,7 @@ WakeHandler = Callable[[PendingWake], "Awaitable[WakeRunResult]"]
 _handler: Optional[WakeHandler] = None
 _handler_generation: int = 0
 _pending: dict[str, PendingWake] = {}
+_retry_count: dict[str, int] = {}
 _timer: Optional[asyncio.TimerHandle] = None
 _timer_due_at: float = 0
 _running: bool = False
@@ -87,6 +97,7 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 
 DEFAULT_COALESCE_MS = 250
 DEFAULT_RETRY_MS = 1000
+MAX_RETRY_COUNT = 10
 
 # ── 内部 ──
 
@@ -108,11 +119,16 @@ def _target_key(pw: PendingWake) -> str:
 def _merge_pending(key: str, pw: PendingWake) -> None:
     existing = _pending.get(key)
     if not existing:
+        _log.debug("[Coalescer] 新 pending: key=%s source=%s intent=%s", key[:24], pw.source, pw.intent)
         _pending[key] = pw
         return
     new_prio = _INTENT_PRIORITY.get(pw.intent, 99)
     old_prio = _INTENT_PRIORITY.get(existing.intent, 99)
     if new_prio < old_prio or (new_prio == old_prio and pw.timestamp >= existing.timestamp):
+        _log.debug(
+            "[Coalescer] 合并覆盖: key=%s old=%s(prio=%d) new=%s(prio=%d)",
+            key[:24], existing.intent, old_prio, pw.intent, new_prio,
+        )
         _pending[key] = pw
 
 
@@ -123,24 +139,46 @@ async def _drain_pending() -> None:
     try:
         batch = list(_pending.values())
         _pending.clear()
+        _log.info("[Coalescer] _drain_pending: batch=%d", len(batch))
         for pw in batch:
             if _handler_generation != gen:
-                break      # handler 被替换，丢弃剩余 pending
+                _log.warning("[Coalescer] handler 已替换，丢弃剩余 pending (%d 项)", len(batch) - batch.index(pw))
+                break
             if not _handler:
                 continue
             try:
                 result = await _handler(pw)
             except Exception as e:
-                _log.error("wake handler 异常 [%s]: %s", pw.session_key[:12], e)
+                _log.error("[Coalescer] handler 异常 [%s]: %s", pw.session_key[:12], e)
                 continue
             if result.status == "skipped" and result.skip_reason in RETRYABLE_SKIP_REASONS:
                 key = _target_key(pw)
+                retries = _retry_count.get(key, 0) + 1
+                if retries > MAX_RETRY_COUNT:
+                    _log.warning(
+                        "[Coalescer] 重试超限: key=%s source=%s intent=%s retries=%d → 丢弃",
+                        key[:24], pw.source, pw.intent, retries - 1,
+                    )
+                    _retry_count.pop(key, None)
+                    continue
+                _retry_count[key] = retries
+                pw.timestamp = time.time()  # 更新重试时间戳，避免被新请求覆盖
                 _merge_pending(key, pw)
+                _log.info(
+                    "[Coalescer] retryable skip: key=%s reason=%s retry=%d/%d → 1000ms 后重试",
+                    key[:24], result.skip_reason, retries, MAX_RETRY_COUNT,
+                )
                 _schedule(DEFAULT_RETRY_MS)
+            else:
+                key = _target_key(pw)
+                _retry_count.pop(key, None)
     finally:
         _running = False
         if _pending:
+            _log.debug("[Coalescer] _drain_pending: 仍有 pending %d 项，继续调度", len(_pending))
             _schedule(DEFAULT_COALESCE_MS)
+        else:
+            _log.info("[Coalescer] _drain_pending 完成: 无剩余 pending")
 
 
 def _schedule(coalesce_ms: int) -> None:
@@ -148,8 +186,10 @@ def _schedule(coalesce_ms: int) -> None:
     now = time.time()
     due_at = now + coalesce_ms / 1000
     if _timer and _timer_due_at <= due_at:
+        _log.debug("[Coalescer] 跳过调度: 已有更早的 timer (due_at=%.3f)", _timer_due_at)
         return
     if _timer:
+        _log.debug("[Coalescer] 取消旧 timer, 重设为 %.0fms 后", coalesce_ms)
         _timer.cancel()
     loop = _ensure_loop()
     _timer_due_at = due_at
@@ -157,6 +197,7 @@ def _schedule(coalesce_ms: int) -> None:
         coalesce_ms / 1000,
         lambda: asyncio.ensure_future(_drain_pending(), loop=loop),
     )
+    _log.debug("[Coalescer] 调度 _drain_pending: %dms 后", coalesce_ms)
 
 # ── 公开 API ──
 
@@ -182,6 +223,10 @@ def request_wake(
         extra_prompt=extra_prompt,
     )
     key = _target_key(pw)
+    _log.info(
+        "[Coalescer] 收到 wake: source=%s intent=%s reason=%s session=%s has_prompt=%s",
+        source, intent, reason, session_key[:20], bool(extra_prompt),
+    )
     _merge_pending(key, pw)
     _schedule(coalesce_ms)
 
@@ -216,6 +261,7 @@ def set_wake_handler(handler: Optional[WakeHandler]) -> Callback:
     _handler_generation += 1
     generation = _handler_generation
     _handler = handler
+    _retry_count.clear()
     if _timer:
         _timer.cancel()
         _timer = None
@@ -236,16 +282,22 @@ def set_wake_handler(handler: Optional[WakeHandler]) -> Callback:
 
 def clear_pending() -> None:
     global _timer, _timer_due_at
+    count = len(_pending)
     _pending.clear()
+    _retry_count.clear()
     if _timer:
         _timer.cancel()
         _timer = None
         _timer_due_at = 0
+    if count:
+        _log.info("[Coalescer] clear_pending: 清除了 %d 项 pending", count)
 
 
 def get_status() -> dict:
     return {
         "pending": list(_pending.keys()),
+        "pending_count": len(_pending),
         "running": _running,
         "has_handler": _handler is not None,
+        "retry_count": dict(_retry_count),
     }

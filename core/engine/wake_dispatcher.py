@@ -55,7 +55,6 @@ class WakeDispatcher:
         self,
         system_events: Any = None,
         agent_engine: Any = None,
-        cooldown: Any = None,
     ):
         self._events = system_events
         self._agent = agent_engine

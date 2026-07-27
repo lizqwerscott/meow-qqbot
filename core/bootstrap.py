@@ -473,7 +473,6 @@ class ServiceGraph:
         self.wake_dispatcher = WakeDispatcher(
             system_events=self.system_events,
             agent_engine=self.agent_engine,
-            cooldown=self._cooldown,
         )
         # BackgroundTaskRunner 需保留 wake_dispatcher 引用用于 NOW 模式
         if self.background_task_runner:

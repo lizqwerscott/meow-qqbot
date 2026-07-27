@@ -32,33 +32,99 @@ class HeartbeatTask:
     command: str = ""
 
 
+def _yaml_get_key_ci(data: dict, key: str) -> Any:
+    """从 YAML dict 中大小写不敏感地获取 key。"""
+    for k, v in data.items():
+        if k.lower() == key.lower():
+            return v
+    return None
+
+
+def _find_front_matter(content: str) -> tuple[str, Optional[str]]:
+    """提取 YAML front matter（--- 分隔块）。
+
+    返回 (去除 front matter 后的纯文本, YAML 文本或 None)
+    """
+    if not content.startswith('---'):
+        return content.strip(), None
+    m = re.search(r'\n---[ \t]*$', content[3:], re.MULTILINE)
+    if not m:
+        return content.strip(), None
+    end = 3 + m.start() + 1
+    yaml_text = content[3:end].strip()
+    clean = content[end + 3:].strip()
+    return clean, yaml_text
+
+
+def _find_tasks_yaml(content: str) -> tuple[str, Optional[str]]:
+    """HEARTBEAT.md 中寻找 YAML tasks 块。
+
+    支持两种格式（按优先级）:
+    1. YAML front matter (--- ... ---) — 推荐
+    2. 行内 tasks: 块 — 向后兼容
+
+    返回 (去除 YAML 后的纯文本, 解析后的 YAML 文本或 None)
+    """
+    # 优先 front matter
+    front_clean, front_yaml = _find_front_matter(content)
+    if front_yaml:
+        return front_clean, front_yaml
+    # 回退到行内 tasks: 块
+    m = re.search(
+        r'^(?:#+\s*)?tasks\s*:',
+        content,
+        re.MULTILINE | re.IGNORECASE,
+    )
+    if not m:
+        return content.strip(), None
+    clean = content[:m.start()].strip()
+    raw_yaml = content[m.start():]
+    lines = raw_yaml.split('\n')
+    if lines and lines[0].lstrip().startswith('#'):
+        lines[0] = re.sub(r'^#+\s*', '', lines[0])
+    yaml_text = '\n'.join(lines).strip()
+    return clean, yaml_text
+
+
 def parse_heartbeat_tasks(content: str) -> list[HeartbeatTask]:
-    tasks: list[HeartbeatTask] = []
-    current: Optional[dict] = None
-    in_tasks = False
-    for line in content.split("\n"):
-        s = line.strip()
-        if s.lower().strip("#").strip() == "tasks":
-            in_tasks = True
-            continue
-        if not in_tasks:
-            continue
-        if s.startswith("- name:"):
-            if current:
-                tasks.append(HeartbeatTask(**current))
-            current = {"name": s.split(":", 1)[1].strip()}
-        elif current and ":" in s:
-            k, _, v = s.partition(":")
-            kk = k.strip().lower()
-            if kk == "interval":
-                current["interval_seconds"] = int(v.strip())
-            elif kk == "prompt":
-                current["prompt"] = v.strip()
-            elif kk == "command":
-                current["command"] = v.strip()
-    if current:
-        tasks.append(HeartbeatTask(**current))
-    return tasks
+    """从 HEARTBEAT.md 中解析 YAML 格式的 tasks 块。
+
+    格式示例:
+        tasks:
+          - name: check_morning
+            interval_seconds: 3600
+            prompt: 检查早间状态
+          - name: check_evening
+            interval_seconds: 7200
+            command: status
+    """
+    _, yaml_text = _find_tasks_yaml(content)
+    if not yaml_text:
+        return []
+    import yaml
+    try:
+        data = yaml.safe_load(yaml_text)
+        if not isinstance(data, dict):
+            return []
+        items = _yaml_get_key_ci(data, 'tasks')
+        if not isinstance(items, list):
+            return []
+        result = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name', '') or '')
+            if not name:
+                continue
+            hb = HeartbeatTask(name=name)
+            hb.interval_seconds = int(item.get('interval_seconds', item.get('interval', 3600)))
+            hb.prompt = str(item.get('prompt', '') or '')
+            hb.command = str(item.get('command', '') or '')
+            result.append(hb)
+        return result
+    except Exception as e:
+        _log.warning("HEARTBEAT.md YAML tasks 解析失败: %s", e)
+        return []
 
 
 def filter_due_tasks(tasks: list[HeartbeatTask], last_run: dict[str, float]) -> list[HeartbeatTask]:
@@ -119,7 +185,6 @@ class HeartbeatManager:
 
     def resolve_isolated_session_key(self, base_key: str) -> str:
         """折叠 :heartbeat 链，返回真正的隔离 session key。"""
-        import re
         collapsed = re.sub(r'(:heartbeat)+$', '', base_key)
         return f"{collapsed}:heartbeat"
 
@@ -218,10 +283,16 @@ class HeartbeatManager:
         content = await self._read_heartbeat_file()
         if content and content.strip():
             tasks = parse_heartbeat_tasks(content)
+            clean, _ = _find_tasks_yaml(content)
             due = filter_due_tasks(tasks, self._task_last_run)
             for t in due:
                 self._task_last_run[t.name] = time.time()
-            return content.strip()
+            if due:
+                lines = "\n".join(
+                    f"- {t.name}: {t.prompt or t.command}" for t in due
+                )
+                return f"{clean}\n\n当前需要关注的子任务：\n{lines}"
+            return clean
         if self._config_prompt and self._config_prompt.strip():
             return self._config_prompt.strip()
         return (
@@ -241,7 +312,6 @@ class HeartbeatManager:
             return ""
 
     def _sync_read(self) -> str:
-        import os
         try:
             with open(self._heartbeat_path, "r", encoding="utf-8") as f:
                 return f.read().strip()
@@ -258,8 +328,11 @@ class HeartbeatManager:
             return False
         if self._cooldown_hours <= 0:
             return False
-        normalized_prev = re.sub(r"\s+", " ", self._last_text).strip()
-        normalized_cur = re.sub(r"\s+", " ", text).strip()
+        from .delivery_normalization import strip_heartbeat_token
+        norm_prev, _ = strip_heartbeat_token(self._last_text, ack_max_chars=0)
+        norm_cur, _ = strip_heartbeat_token(text, ack_max_chars=0)
+        normalized_prev = re.sub(r"\s+", " ", norm_prev).strip()
+        normalized_cur = re.sub(r"\s+", " ", norm_cur).strip()
         if normalized_cur != normalized_prev:
             return False
         return (time.time() - self._last_sent) < self._cooldown_hours * 3600
@@ -289,14 +362,20 @@ class HeartbeatManager:
         if not self._context_manager:
             return
         try:
-            pattern = re.compile(r"^heartbeat:\d+$")
+            pattern = re.compile(r"^heartbeat:\d+(:heartbeat)?$|^heartbeat:events:heartbeat$")
             hb_ids = [
                 cid for cid in self._context_manager.get_all_chat_ids()
                 if pattern.match(cid)
             ]
             if len(hb_ids) <= keep_last:
                 return
-            hb_ids.sort(key=lambda x: int(x.split(":")[1]))
+            def _sort_key(cid: str) -> int:
+                ts_part = cid.split(":")[1]
+                try:
+                    return int(ts_part)
+                except ValueError:
+                    return 0
+            hb_ids.sort(key=_sort_key)
             for cid in hb_ids[:-keep_last]:
                 await self._context_manager.clear_chat_history_async(cid)
                 self._context_manager.remove_context(cid)

@@ -4,13 +4,16 @@
 匹配 OpenClaw heartbeat-runner.ts 的 resolveHeartbeatPreflight + 10-step skip chain。
 """
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from core.tasks.heartbeat_wake import WakeIntent as WI
-from .wake_coalescer import INTENT_MANUAL, INTENT_IMMEDIATE, SOURCE_INTERVAL
+from .wake_coalescer import INTENT_MANUAL, INTENT_IMMEDIATE
 from .heartbeat_schedule import is_in_active_hours_ts
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -55,6 +58,17 @@ def run_preflight(ctx: PreflightContext) -> PreflightResult:
     步骤顺序：retryable reasons 在前，non-retryable 在后。
     """
     result = PreflightResult()
+    _start = time.time()
+
+    _log.info(
+        "[Preflight] entry: source=%s intent=%s session=%s "
+        "cron=%s session_active=%s agent_busy=%s events=%s prompt=%s "
+        "active_hours=%s delivery_pending=%s",
+        ctx.source, ctx.intent, ctx.session_key[:20],
+        ctx.has_cron_jobs, ctx.is_session_active, ctx.is_agent_busy,
+        ctx.has_system_events, ctx.has_extra_prompt,
+        ctx.active_hours, ctx.is_delivery_pending,
+    )
 
     # ── 分类唤醒载荷 ──
     if ctx.source_is_exec:
@@ -68,56 +82,74 @@ def run_preflight(ctx: PreflightContext) -> PreflightResult:
 
     result.pending_event_count = 1 if ctx.has_system_events else 0
 
-    # Step 2: 活跃时段
+    # Step 02: 活跃时段
     if not ctx.source_is_manual:
         start, end, tz = ctx.active_hours
         if start and end:
             if not is_in_active_hours_ts(time.time(), start, end, tz or "Asia/Shanghai"):
+                _log.info("[Preflight] step=02 active_hours: SKIP → quiet-hours")
                 result.skip_reason = "quiet-hours"
                 return result
+    _log.debug("[Preflight] step=02 active_hours: pass")
 
-    # Step 3: Cron 运行中 (retryable — 在 cooldown 之前)
+    # Step 03: Cron 运行中 (retryable)
     if ctx.has_cron_jobs:
+        _log.info("[Preflight] step=03 cron_in_progress: SKIP → cron-in-progress")
         result.skip_reason = "cron-in-progress"
         return result
+    _log.debug("[Preflight] step=03 cron_in_progress: pass")
 
-    # Step 4: 主 command lane 忙 (retryable)
+    # Step 04: 主 command lane 忙 (retryable)
     if ctx.is_main_lane_busy:
+        _log.info("[Preflight] step=04 main_lane_busy: SKIP → requests-in-flight")
         result.skip_reason = "requests-in-flight"
         return result
+    _log.debug("[Preflight] step=04 main_lane_busy: pass")
 
-    # Step 5: Session 忙态 (retryable)
+    # Step 05: Session 忙态 (retryable)
     if ctx.is_session_active:
+        _log.info("[Preflight] step=05 session_active: SKIP → requests-in-flight")
         result.skip_reason = "requests-in-flight"
         return result
+    _log.debug("[Preflight] step=05 session_active: pass")
 
-    # Step 6: skipWhenBusy (retryable)
+    # Step 06: skipWhenBusy (retryable)
     if ctx.skip_when_busy and ctx.is_agent_busy:
+        _log.info("[Preflight] step=06 skip_when_busy: SKIP → lanes-busy")
         result.skip_reason = "lanes-busy"
         return result
+    _log.debug("[Preflight] step=06 skip_when_busy: pass")
 
-    # Step 7: agent busy for non-immediate/manual (retryable)
+    # Step 07: agent busy for non-immediate/manual (retryable)
     if ctx.intent not in ("immediate", "manual") and ctx.is_agent_busy:
+        _log.info("[Preflight] step=07 agent_busy: SKIP → requests-in-flight")
         result.skip_reason = "requests-in-flight"
         return result
+    _log.debug("[Preflight] step=07 agent_busy: pass")
 
-    # Step 8: interval + 无事件 + 无 prompt (non-retryable, 但轻量)
-    if ctx.source == SOURCE_INTERVAL:
+    # Step 08: interval + 无事件 + 无 prompt (non-retryable)
+    if ctx.source_is_interval:
         if not ctx.has_system_events and not ctx.has_extra_prompt:
+            _log.info("[Preflight] step=08 no_event_no_prompt: SKIP → no-events")
             result.skip_reason = "no-events"
             return result
+    _log.debug("[Preflight] step=08 no_event_no_prompt: pass")
 
-    # Step 9: pending final delivery (retryable — wake_coalescer 会重试)
+    # Step 09: pending final delivery (retryable)
     if ctx.is_delivery_pending:
+        _log.info("[Preflight] step=09 delivery_pending: SKIP → requests-in-flight")
         result.skip_reason = "requests-in-flight"
         return result
+    _log.debug("[Preflight] step=09 delivery_pending: pass")
 
     # Step 10: 目标 session lane 忙 (retryable)
     if ctx.is_session_lane_busy:
+        _log.info("[Preflight] step=10 session_lane_busy: SKIP → requests-in-flight")
         result.skip_reason = "requests-in-flight"
         return result
+    _log.debug("[Preflight] step=10 session_lane_busy: pass")
 
-    # Step 11: Cooldown (not-due/min-spacing/flood — non-retryable, 最后检查)
+    # Step 11: Cooldown (not-due/min-spacing/flood)
     intent_map = {
         INTENT_MANUAL: WI.MANUAL,
         INTENT_IMMEDIATE: WI.IMMEDIATE,
@@ -128,7 +160,13 @@ def run_preflight(ctx: PreflightContext) -> PreflightResult:
         intent=intent_map.get(ctx.intent, WI.SCHEDULED),
     )
     if dec.defer:
+        _log.info("[Preflight] step=11 cooldown: SKIP → %s", dec.reason)
         result.skip_reason = dec.reason
         return result
+    _log.debug("[Preflight] step=11 cooldown: pass")
 
+    _log.info(
+        "[Preflight] result: PASS (duration=%.1fms)",
+        (time.time() - _start) * 1000,
+    )
     return result
