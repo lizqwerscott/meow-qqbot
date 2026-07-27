@@ -20,6 +20,7 @@ def create_all_tool_entries(deps: ToolDeps) -> list[ToolEntry]:
     from core.tools.impl.tts import create_tts_entries
     from core.tools.impl.exec_process import create_exec_process_entries
     from core.tools.impl.message import create_message_entries
+    from core.tools.impl.search import create_search_entries
 
     entries = []
     entries.extend(create_emoji_entries(deps))
@@ -29,6 +30,7 @@ def create_all_tool_entries(deps: ToolDeps) -> list[ToolEntry]:
     entries.extend(create_skill_entries(deps))
     entries.extend(create_task_entries(deps))
     entries.extend(create_file_entries(deps))
+    entries.extend(create_search_entries(deps))
     entries.extend(create_heartbeat_entries(deps))
     entries.extend(create_sub_agent_entries(deps))
     entries.extend(create_tts_entries(deps))

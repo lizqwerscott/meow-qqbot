@@ -91,6 +91,9 @@ class PluginManageCommand:
 
             _log.info(f"插件已克隆: {url} → {plugin_dir}")
         except asyncio.TimeoutError:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
             return make_reply(msg, "git clone 超时（60秒），请检查网络")
         except FileNotFoundError:
             return make_reply(msg, "系统未安装 git，无法使用 install 功能")
@@ -128,6 +131,9 @@ class PluginManageCommand:
                 if proc.returncode == 0:
                     _log.info(f"插件 {name} git pull 成功")
             except Exception:
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
                 _log.warning(f"插件 {name} git pull 失败，继续重载")
 
         meta = self.pm.reload_plugin(name)

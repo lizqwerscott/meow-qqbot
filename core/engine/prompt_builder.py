@@ -256,21 +256,32 @@ class PromptBuilder:
         # 工作区上下文
         if self._workspace_manager:
             ws_type = "群聊" if is_group else "私聊"
-            is_admin_private = not is_group and chat_id in self._admin_ids
-            if is_admin_private:
+            _admin_chat = not is_group and chat_id in self._admin_ids
+            if _admin_chat:
                 ws_root = str(self._workspace_manager.root_dir())
                 dynamic_parts.append(f"当前管理员工作区: {ws_root}/")
                 dynamic_parts.append(
-                    "read_file / write_file / edit_file / apply_patch 四个文件工具可访问整个 workspaces/ 目录（管理员权限）。"
+                    "文件工具 (read_file / write_file / edit_file / apply_patch / list_dir) 和搜索工具 (search_content / find_files) 可访问整个 workspaces/ 目录（管理员权限）。"
                     "文件路径请使用相对于工作区根目录的相对路径（例如 'HEARTBEAT.md' 或 'groups/xxx/files/note.txt'），不要使用绝对路径。"
                 )
             else:
                 sandbox = str(self._workspace_manager.sandbox_dir(is_group, chat_id))
                 dynamic_parts.append(f"当前{ws_type}工作区: {sandbox}/")
                 dynamic_parts.append(
-                    "read_file / write_file / edit_file / apply_patch 四个文件工具仅限当前工作区内使用。"
+                    "文件工具 (read_file / write_file / edit_file / apply_patch / list_dir) 和搜索工具 (search_content / find_files) 均限当前工作区内使用。"
                     "文件路径请使用相对于工作区的相对路径（例如 'memo.txt'），不要使用绝对路径。"
                 )
+
+        # 工具使用建议
+        if self._workspace_manager:
+            dynamic_parts.append(
+                "工具使用建议：\n"
+                "- 搜索文件内容优先用 search_content (rg)，不要在 exec 里用 grep/rg\n"
+                "- 查找文件优先用 find_files (fd)，不要在 exec 里用 find/fd\n"
+                "- 列目录用 list_dir，不要在 exec 里用 ls\n"
+                "- 读取/编辑/写入文件用 read_file/edit_file/write_file，不要在 exec 里用 cat/sed\n"
+                "- 不要使用 2>/dev/null 或类似手段掩盖错误输出"
+            )
 
         # HEARTBEAT.md（管理员的私聊专属）
         if self._workspace_manager and not is_group and chat_id in self._admin_ids:
@@ -485,8 +496,14 @@ class PromptBuilder:
             ws_root = str(self._workspace_manager.root_dir())
             dynamic_parts.append(f"当前工作区: {ws_root}/")
             dynamic_parts.append(
-                "read_file / write_file / edit_file / apply_patch 四个文件工具可访问整个 workspaces/ 目录（管理员权限）。"
+                "文件工具 (read_file / write_file / edit_file / apply_patch / list_dir) 和搜索工具 (search_content / find_files) 可访问整个 workspaces/ 目录（管理员权限）。"
                 "文件路径请使用相对于工作区根目录的相对路径（例如 'HEARTBEAT.md' 或 'groups/xxx/files/note.txt'），不要使用绝对路径。"
+            )
+            dynamic_parts.append(
+                "工具使用建议：\n"
+                "- 搜索文件内容优先用 search_content (rg)，不要在 exec 里用 grep/rg\n"
+                "- 查找文件优先用 find_files (fd)，不要在 exec 里用 find/fd\n"
+                "- 不要使用 2>/dev/null 或类似手段掩盖错误输出"
             )
 
         return static_prompt + "\n\n" + "\n\n".join(dynamic_parts)

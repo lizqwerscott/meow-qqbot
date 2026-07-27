@@ -58,6 +58,9 @@ class PermissionManager:
     def _role_level(self, role: str) -> int:
         return ROLE_LEVEL.get(role, 1)
 
+    def is_admin_role(self, role: str) -> bool:
+        return self._role_level(role) >= 3
+
     # ── 工具权限 ──
 
     def can_use_tool(self, tool_name: str, user_role: str) -> bool:

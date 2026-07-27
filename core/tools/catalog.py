@@ -6,7 +6,8 @@ SECTIONS: dict[str, set[str]] = {
     "user":      {"search_user"},
     "skill":     {"view_skill", "execute_skill", "rescan_skills"},
     "exec":      {"exec", "process"},
-    "file":      {"read_file", "write_file", "edit_file", "apply_patch"},
+    "search":    {"search_content", "find_files"},
+    "file":      {"read_file", "write_file", "edit_file", "apply_patch", "list_dir"},
     "cron":      {"cron"},
     "task":      {"task"},
     "tts":       {"synthesize_speech"},
@@ -29,34 +30,37 @@ PROFILES: dict[str, set[str]] = {
         "heartbeat_respond",
         "memory", "mark_important",
         "exec", "process",
-        "read_file", "write_file", "edit_file", "apply_patch",
+        "search_content", "find_files",
+        "read_file", "write_file", "edit_file", "apply_patch", "list_dir",
         "task",
     },
     "task": {
         "announce", "search_user",
         "send_message",
         "memory", "mark_important",
-        "read_file", "write_file", "edit_file", "apply_patch",
+        "read_file", "write_file", "edit_file", "apply_patch", "list_dir",
+        "search_content", "find_files",
         "exec", "process",
         "view_skill", "execute_skill", "rescan_skills",
     },
 }
 
-# ChatContext 标志位 → section 名称映射
-FEATURE_SECTION_MAP: dict[str, str] = {
-    "has_emojis":      "emoji",
-    "has_hindsight":   "memory",
-    "has_skills":      "skill",
-    "has_workspace":   "file",
-    "has_tts":         "tts",
-    "has_sub_agents":  "sub_agent",
-    "has_learners":    "learner",
+# ChatContext 标志位 → section 名称集合映射
+FEATURE_SECTION_MAP: dict[str, set[str]] = {
+    "has_emojis":      {"emoji"},
+    "has_hindsight":   {"memory"},
+    "has_skills":      {"skill"},
+    "has_workspace":   {"file", "search"},
+    "has_tts":         {"tts"},
+    "has_sub_agents":  {"sub_agent"},
+    "has_learners":    {"learner"},
 }
 
 CRON_ALLOWED: set[str] = {
     "announce", "search_user",
     "memory", "mark_important",
-    "read_file", "write_file", "edit_file", "apply_patch",
+    "read_file", "write_file", "edit_file", "apply_patch", "list_dir",
+    "search_content", "find_files",
     "exec", "process",
     "view_skill", "execute_skill", "rescan_skills",
 }

@@ -44,10 +44,11 @@ def build_tools(
     names = set(PROFILES.get(profile, set()))
 
     # Step 2: 按功能存在性过滤
-    # - FEATURE_SECTION_MAP 中定义的标志位 → 移除对应 section 的工具
-    for flag, section in FEATURE_SECTION_MAP.items():
-        if not getattr(ctx, flag, False) and section:
-            names -= SECTIONS.get(section, set())
+    # - FEATURE_SECTION_MAP 中定义的标志位 → 移除对应的一组 section 的工具
+    for flag, sections in FEATURE_SECTION_MAP.items():
+        if not getattr(ctx, flag, False):
+            for section in sections:
+                names -= SECTIONS.get(section, set())
 
     # is_group + has_users 特殊处理（用户搜索仅在群聊且有用户数据时可用）
     if not ctx.is_group or not ctx.has_users:
@@ -93,7 +94,8 @@ def format_task_tool_descriptions(names: set[str]) -> str:
     DEFAULT_ORDER = [
         "announce", "search_user",
         "memory", "mark_important",
-        "read_file", "write_file", "edit_file", "apply_patch",
+        "read_file", "write_file", "edit_file", "apply_patch", "list_dir",
+        "search_content", "find_files",
         "exec", "view_skill", "execute_skill", "rescan_skills",
     ]
     for name in DEFAULT_ORDER:
