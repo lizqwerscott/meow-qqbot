@@ -296,14 +296,26 @@ def create_search_entries(deps: ToolDeps) -> list[ToolEntry]:
         ToolEntry(
             name="search_content",
             section="search",
-            description="搜索文件内容。基于 ripgrep (rg)，支持正则、忽略大小写、文件名过滤。自动忽略 .gitignore。默认限工作区内使用，管理员可通过审批访问越界路径。比 exec + grep/rg 更高效。",
+            description=(
+                "搜索文件内容（基于 ripgrep）。"
+                "默认正则搜索，设 literal=true 做字面搜索（特殊字符无需转义）。"
+                "设 glob=*.py 限定文件类型，设 ignore_case=true 忽略大小写。"
+                "自动忽略 .gitignore。"
+                "优先使用本工具搜索内容，不要使用 exec + grep/rg。"
+                "默认限工作区内使用，管理员可通过审批访问越界路径。"
+            ),
             parameters=SEARCH_CONTENT_PARAMS,
             handler=_search_content,
         ),
         ToolEntry(
             name="find_files",
             section="search",
-            description="按 glob 模式搜索文件名。基于 fd，自动忽略 .gitignore。默认限工作区内使用，管理员可通过审批访问越界路径。比 exec + find/fd 更高效。",
+            description=(
+                "按 glob 模式搜索文件名（基于 fd），如 **/*.py 或 src/**/*.ts。"
+                "自动忽略 .gitignore。"
+                "优先使用本工具搜索文件，不要使用 exec + find/fd。"
+                "默认限工作区内使用，管理员可通过审批访问越界路径。"
+            ),
             parameters=FIND_FILES_PARAMS,
             handler=_find_files,
         ),

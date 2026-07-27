@@ -292,56 +292,6 @@ class PromptBuilder:
                     "文件路径请使用相对于工作区的相对路径（例如 'memo.txt'），不要使用绝对路径。"
                 )
 
-        # 文件与搜索工具调用原则
-        if self._workspace_manager:
-            _path_rules = (
-                "- 使用相对于工作区目录的相对路径（如 'note.txt' 或 'subdir/file.md'）\n"
-                "- 路径中不要包含 `..` ——这会被拒绝"
-            )
-            if _admin_chat:
-                _path_rules = (
-                    "- 使用相对于工作区根目录的相对路径（如 'HEARTBEAT.md' 或 'groups/xxx/files/note.txt'）\n"
-                    "- 如需访问 workspaces/ 外部的文件，使用 .. 路径越界，系统会向你发送审批请求，批准后即可访问"
-                )
-            dynamic_parts.append(
-                "【文件与搜索工具调用原则】\n"
-                "\n"
-                "**路径规范：**\n"
-                f"{_path_rules}\n"
-                "\n"
-                "**工具选择：**\n"
-                "- 读取文件内容用 `read_file`（支持文本文件，1MB 上限），不要用 exec + cat\n"
-                "- 查看目录结构用 `list_dir`，不要用 exec + ls\n"
-                "- 编辑文件用 `edit_file`（精确字符串替换），不要用 exec + sed\n"
-                "- 创建新文件或覆写已存在文件用 `write_file`，父目录自动创建\n"
-                "- 批量新建/修改/删除/移动文件用 `apply_patch`（一个 patch 支持多个操作）\n"
-                "- 搜索文件内容（关键字/正则）用 `search_content`，不要用 exec + grep/rg\n"
-                "- 按文件名搜索文件用 `find_files`（支持 glob 通配符），不要用 exec + find/fd\n"
-                "\n"
-                "**`edit_file` 使用要点：**\n"
-                "- `old_string` 必须**完全匹配**文件中的原文（包括空格和换行）\n"
-                "- 如果文件中有多处相同文本，设置 `replace_all=true` 替换全部\n"
-                "- 如果不确定唯一性，先 `read_file` 查看上下文，选择足够独特的匹配片段\n"
-                "\n"
-                "**`apply_patch` 使用要点：**\n"
-                "- 一个 patch 可以同时 ADD（新建）、DELETE（删除）、UPDATE（修改）、MOVE（移动）多个文件\n"
-                "- Patch 格式需包含 `*** Begin Patch` 和 `*** End Patch` 包围\n"
-                "- 如果只改一个文件的一小段，优先用 `edit_file` 而不是 apply_patch\n"
-                "\n"
-                "**`search_content` 使用要点：**\n"
-                "- 默认正则搜索，设置 `literal=true` 可做字面搜索（特殊字符无需转义）\n"
-                "- 设置 `glob=*.py` 可限定文件类型\n"
-                "- 设置 `ignore_case=true` 可忽略大小写\n"
-                "\n"
-                "**`find_files` 使用要点：**\n"
-                "- 使用 glob 模式，如 `**/*.py` 或 `src/**/*.ts`\n"
-                "- 自动忽略 .gitignore 中列出的文件\n"
-                "\n"
-                "**重要限制：**\n"
-                "- `read_file` 和 `edit_file` 只能处理 **1MB 以下**的文本文件\n"
-                "- 二进制文件和超大文件请使用 `exec` 命令处理"
-            )
-
         # HEARTBEAT.md（管理员的私聊专属）
         if self._workspace_manager and _admin_chat:
             hb_path = self._workspace_manager.heartbeat_path()
@@ -558,14 +508,6 @@ class PromptBuilder:
                 "文件工具 (read_file / write_file / edit_file / apply_patch / list_dir) 和搜索工具 (search_content / find_files) 可访问整个 workspaces/ 目录（管理员权限）。"
                 "文件路径请使用相对于工作区根目录的相对路径。"
                 "如需访问外部文件，使用 .. 路径越界，系统会发送审批请求。"
-            )
-            dynamic_parts.append(
-                "工具使用建议：\n"
-                "- 搜索文件内容优先用 search_content (rg)，不要在 exec 里用 grep/rg\n"
-                "- 查找文件优先用 find_files (fd)，不要在 exec 里用 find/fd\n"
-                "- 列目录用 list_dir，不要在 exec 里用 ls\n"
-                "- 读取/编辑/写入文件用 read_file/edit_file/write_file，不要在 exec 里用 cat/sed\n"
-                "- 不要使用 2>/dev/null 或类似手段掩盖错误输出"
             )
 
         return static_prompt + "\n\n" + "\n\n".join(dynamic_parts)

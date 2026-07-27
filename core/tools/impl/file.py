@@ -377,35 +377,62 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
         ToolEntry(
             name="apply_patch",
             section="file",
-            description="批量修改工作区文件。一个 patch 可以同时新建、删除、更新、移动多个文件。默认不支持路径穿越(..)，管理员可通过审批访问越界路径。",
+            description=(
+                "批量修改工作区文件，一个 patch 可同时新建(ADD)、删除(DELETE)、"
+                "更新(UPDATE)、移动(MOVE)多个文件。"
+                "Patch 格式需包含 *** Begin Patch 和 *** End Patch 包围。"
+                "若只改单个文件的一小段，优先使用 edit_file 而非本工具。"
+                "默认不支持路径穿越(..)，管理员可通过审批访问越界路径。"
+            ),
             parameters=APPLY_PATCH_PARAMS,
             handler=_apply_patch,
         ),
         ToolEntry(
             name="read_file",
             section="file",
-            description="读取工作区文件内容。不支持读取目录（请使用 list_dir 列出目录）。默认不支持路径穿越(..)，管理员可通过审批访问越界路径。",
+            description=(
+                "读取工作区文件内容。仅支持 1MB 以下的文本文件。"
+                "不支持读取目录（使用 list_dir）。"
+                "优先使用本工具读取文件，不要使用 exec + cat/head/tail。"
+                "默认不支持路径穿越(..)，管理员可通过审批访问越界路径。"
+            ),
             parameters=FILE_READ_PARAMS,
             handler=_read_file,
         ),
         ToolEntry(
             name="list_dir",
             section="file",
-            description="列出工作区内目录的内容。目录以 / 结尾，文件附带大小。默认不支持路径穿越(..)，管理员可通过审批访问越界路径。",
+            description=(
+                "列出工作区目录内容。目录以 / 结尾，文件附带大小。"
+                "优先使用本工具查看目录，不要使用 exec + ls/dir。"
+                "默认不支持路径穿越(..)，管理员可通过审批访问越界路径。"
+            ),
             parameters=LIST_DIR_PARAMS,
             handler=_list_dir,
         ),
         ToolEntry(
             name="write_file",
             section="file",
-            description="写入文件到工作区。路径相对于工作区目录（非管理员为当前聊天的 files/，管理员为 workspaces/ 根目录），父目录自动创建。已存在的文件会被覆盖。默认不支持路径穿越(..)，管理员可通过审批访问越界路径。",
+            description=(
+                "写入文件到工作区，父目录自动创建，已存在文件会被覆盖。"
+                "优先使用本工具创建/覆写文件，不要使用 exec + echo/cat/tee。"
+                "默认不支持路径穿越(..)，管理员可通过审批访问越界路径。"
+            ),
             parameters=FILE_WRITE_PARAMS,
             handler=_write_file,
         ),
         ToolEntry(
             name="edit_file",
             section="file",
-            description="编辑工作区内的文件，进行精确的字符串替换。路径相对于工作区目录。默认不支持路径穿越(..)，管理员可通过审批访问越界路径。比使用 sed 更可靠。",
+            description=(
+                "编辑工作区文件，进行精确字符串替换。"
+                "old_string 必须完全匹配原文（含空格换行）。"
+                "若文件有多处相同文本设 replace_all=true 替换全部。"
+                "不确定唯一性时先 read_file 查看上下文确认。"
+                "仅支持 1MB 以下的文本文件。"
+                "优先使用本工具编辑文件，不要使用 exec + sed/awk。"
+                "默认不支持路径穿越(..)，管理员可通过审批访问越界路径。"
+            ),
             parameters=FILE_EDIT_PARAMS,
             handler=_edit_file,
         ),

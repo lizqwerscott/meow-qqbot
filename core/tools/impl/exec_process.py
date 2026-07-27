@@ -281,7 +281,11 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                 "执行 shell 命令，默认前台运行并等待结果。\n"
                 "对于长时间运行的任务（构建服务器、文件监视器等），"
                 "设置 background=true 使其后台运行，然后使用 process 工具管理。\n"
-                "安全限制：命令受 allowlist 限制，不在白名单中的命令会被拒绝。"
+                "安全限制：命令受 allowlist 限制，不在白名单中的命令会被拒绝。\n"
+                "注意：文件读取/编辑用 read_file/edit_file/write_file，"
+                "内容搜索用 search_content，文件查找用 find_files，"
+                "目录列表用 list_dir——不要用 exec 包装这些操作。"
+                "二进制文件或超大文件（>1MB）的操作请使用本工具。"
             ),
             parameters=EXEC_PARAMS,
             handler=_exec,
