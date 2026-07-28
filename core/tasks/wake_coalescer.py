@@ -140,9 +140,16 @@ async def _drain_pending() -> None:
         batch = list(_pending.values())
         _pending.clear()
         _log.info("[Coalescer] _drain_pending: batch=%d", len(batch))
-        for pw in batch:
+        for idx, pw in enumerate(batch):
             if _handler_generation != gen:
-                _log.warning("[Coalescer] handler 已替换，丢弃剩余 pending (%d 项)", len(batch) - batch.index(pw))
+                # handler 已替换，剩余未处理项重新入队
+                remaining = batch[idx:]
+                for rpw in remaining:
+                    _merge_pending(_target_key(rpw), rpw)
+                _log.warning(
+                    "[Coalescer] handler 已替换，重新入队 %d 项 pending",
+                    len(remaining),
+                )
                 break
             if not _handler:
                 continue
@@ -150,6 +157,24 @@ async def _drain_pending() -> None:
                 result = await _handler(pw)
             except Exception as e:
                 _log.error("[Coalescer] handler 异常 [%s]: %s", pw.session_key[:12], e)
+                # 重试入队
+                key = _target_key(pw)
+                retries = _retry_count.get(key, 0) + 1
+                if retries > MAX_RETRY_COUNT:
+                    _log.warning(
+                        "[Coalescer] handler 重试超限: key=%s retries=%d → 丢弃",
+                        key[:24], retries - 1,
+                    )
+                    _retry_count.pop(key, None)
+                else:
+                    _retry_count[key] = retries
+                    pw.timestamp = time.time()
+                    _merge_pending(key, pw)
+                    _log.info(
+                        "[Coalescer] handler 异常重试: key=%s retry=%d/%d → 1000ms 后",
+                        key[:24], retries, MAX_RETRY_COUNT,
+                    )
+                    _schedule(DEFAULT_RETRY_MS)
                 continue
             if result.status == "skipped" and result.skip_reason in RETRYABLE_SKIP_REASONS:
                 key = _target_key(pw)

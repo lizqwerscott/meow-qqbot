@@ -52,9 +52,11 @@ class ModelCooldownManager:
             if state is None:
                 return False
             if state.failure_count < self._failure_threshold:
+                self._state.pop(name, None)
                 return False
             now = time.time()
             if now >= state.cooldown_until:
+                self._state.pop(name, None)
                 return False
             remaining = state.cooldown_until - now
             _log.info(
@@ -85,13 +87,11 @@ class ModelCooldownManager:
             state = self._state.get(name)
             if state is None or state.failure_count == 0:
                 return
-            old_count = state.failure_count
-            state.failure_count = 0
-            state.cooldown_until = 0.0
             _log.info(
                 f"模型 [{name}] 调用成功，重置冷却 "
-                f"(此前连续失败 {old_count} 次)"
+                f"(此前连续失败 {state.failure_count} 次)"
             )
+            self._state.pop(name, None)
 
     async def reset(self, name: Optional[str] = None):
         async with self._lock:

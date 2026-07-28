@@ -255,24 +255,32 @@ class BackgroundTaskRunner:
                 task.id, TaskStatus.FAILED, error=f"命令被拒绝: {reason}",
             )
 
-        await self._task_manager.start_task(task.id)
+        started = await self._task_manager.start_task(task.id)
+        if started is None:
+            return task
         effective_timeout = min(timeout, 120.0)
         _log.info(f"执行命令 [{job.name}]: {job.command[:100]}")
 
+        proc: Optional[asyncio.subprocess.Process] = None
         try:
-            proc = await asyncio.wait_for(
-                asyncio.to_thread(
-                    subprocess.run,
-                    shlex.split(job.command),
-                    shell=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=effective_timeout,
-                ),
-                timeout=effective_timeout + 5,
+            parts = shlex.split(job.command)
+            proc = await asyncio.create_subprocess_exec(
+                *parts,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            stdout = (proc.stdout or "")[-10000:]
-            stderr = (proc.stderr or "")[-5000:]
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(), timeout=effective_timeout,
+                )
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                if proc and proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+                raise
+
+            stdout = (stdout_bytes or b"")[-10000:].decode("utf-8", errors="replace")
+            stderr = (stderr_bytes or b"")[-5000:].decode("utf-8", errors="replace")
 
             if proc.returncode == 0:
                 result = stdout if stdout else "命令执行成功（无输出）"

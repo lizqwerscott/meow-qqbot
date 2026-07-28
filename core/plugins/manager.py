@@ -185,11 +185,6 @@ class PluginManager:
         if name in self._loaded:
             self.unload_plugin(name)
 
-        module_name = f"plugins.{name}"
-        for m in list(sys.modules.keys()):
-            if m == module_name or m.startswith(f"{module_name}."):
-                del sys.modules[m]
-
         from core.command_handlers.base import _HANDLER_REGISTRY
         from core.plugins.base import _PLUGIN_REGISTRY
 
@@ -201,6 +196,11 @@ class PluginManager:
         old_keys = [k for k, v in _PLUGIN_REGISTRY.items() if v.name == name]
         for k in old_keys:
             del _PLUGIN_REGISTRY[k]
+
+        module_name = f"plugins.{name}"
+        for m in list(sys.modules.keys()):
+            if m == module_name or m.startswith(f"{module_name}."):
+                del sys.modules[m]
 
         return self.load_plugin(name, **self._deps)
 

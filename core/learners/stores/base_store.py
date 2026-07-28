@@ -9,8 +9,9 @@
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 _log = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ class JsonStore:
             if key not in items:
                 return False
             items[key].update(kwargs)
-            items[key]["updated_at"] = Path(self._path).name
+            items[key]["updated_at"] = time.time()
             await self._flush_async()
             return True
 

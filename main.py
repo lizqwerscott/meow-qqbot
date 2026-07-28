@@ -3,7 +3,7 @@ import logging
 from colorlog import ColoredFormatter
 
 from core.bootstrap import ServiceGraph
-from core.config_loader import ConfigLoader
+from core.config_loader import ConfigLoader, ConfigError
 
 
 def setup_logging() -> logging.Logger:
@@ -30,11 +30,18 @@ def setup_logging() -> logging.Logger:
 
 
 async def main() -> None:
-    setup_logging()
+    log = setup_logging()
 
-    services = ServiceGraph(ConfigLoader())
-    await services.build()
-    await services.start()
+    try:
+        services = ServiceGraph(ConfigLoader())
+        await services.build()
+        await services.start()
+    except ConfigError as exc:
+        log.critical(str(exc))
+        return
+    except Exception:
+        log.critical("启动失败", exc_info=True)
+        return
 
     try:
         await asyncio.Event().wait()

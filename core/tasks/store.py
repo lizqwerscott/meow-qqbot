@@ -94,14 +94,21 @@ class TaskStore:
             f"TaskStore 已加载: {len(self._tasks)} 条任务, {len(self._jobs)} 个定时任务"
         )
 
+    async def _save_tasks_internal(self) -> None:
+        """将内存中的 tasks 写回 JSON（需要在 _lock 内调用）。"""
+        tasks = sorted(self._tasks.values(), key=lambda t: t.created_at, reverse=True)
+        if len(tasks) > self._max_tasks:
+            tasks = tasks[: self._max_tasks]
+        data = [t.to_dict() for t in tasks]
+        await asyncio.to_thread(self._save_json, self._tasks_path, data)
+
     async def save_tasks(self) -> None:
-        """将内存中的 tasks 写回 JSON 文件。"""
+        """公开接口：将内存中的 tasks 写回 JSON 文件。
+
+        注意：此方法会获取 _lock，调用方不可在持有 _lock 时调用，否则死锁。
+        在已持有 _lock 的上下文中应使用 _save_tasks_internal()。"""
         async with self._lock:
-            tasks = sorted(self._tasks.values(), key=lambda t: t.created_at, reverse=True)
-            if len(tasks) > self._max_tasks:
-                tasks = tasks[: self._max_tasks]
-            data = [t.to_dict() for t in tasks]
-            await asyncio.to_thread(self._save_json, self._tasks_path, data)
+            await self._save_tasks_internal()
 
     async def save_jobs(self) -> None:
         """将内存中的 cron_jobs 写回 JSON 文件。"""
@@ -118,12 +125,12 @@ class TaskStore:
     async def add_task(self, task: TaskRecord) -> None:
         async with self._lock:
             self._tasks[task.id] = task
-        await self.save_tasks()
+            await self._save_tasks_internal()
 
     async def update_task(self, task: TaskRecord) -> None:
         async with self._lock:
             self._tasks[task.id] = task
-        await self.save_tasks()
+            await self._save_tasks_internal()
 
     def get_task(self, task_id: str) -> Optional[TaskRecord]:
         return self._tasks.get(task_id)
@@ -143,14 +150,12 @@ class TaskStore:
         return results[:limit]
 
     async def delete_task(self, task_id: str) -> bool:
-        found = False
         async with self._lock:
             if task_id in self._tasks:
                 del self._tasks[task_id]
-                found = True
-        if found:
-            await self.save_tasks()
-        return found
+                await self._save_tasks_internal()
+                return True
+            return False
 
     async def cleanup_old_tasks(self) -> int:
         """按差异 TTL 清理过期任务记录。返回清理数量。

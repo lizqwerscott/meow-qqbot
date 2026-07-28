@@ -93,8 +93,7 @@ class ServiceGraph:
             _log.info("模型注册表已初始化: %d 个模型, %d 个组", n_models, len(groups_config))
 
         if not self.model_registry or not self.model_registry.default_service:
-            _log.critical("未配置模型注册表（缺少 [providers] 或 [groups]），无法启动")
-            sys.exit(1)
+            raise RuntimeError("未配置模型注册表（缺少 [providers] 或 [groups]），无法启动")
         self.ai_service = self.model_registry.default_service
 
         # ── 多模态 ──
@@ -193,6 +192,7 @@ class ServiceGraph:
             _log.info("Hindsight 记忆系统未启用")
 
         # ── 后台任务系统 ──
+        self.context_cleanup_task = None
         tasks_config = self.cfg.tasks
         self.task_manager = None
         self.cron_job_manager = None
@@ -475,7 +475,6 @@ class ServiceGraph:
         )
         self.wake_dispatcher = WakeDispatcher(
             system_events=self.system_events,
-            agent_engine=self.agent_engine,
         )
         # BackgroundTaskRunner 需保留 wake_dispatcher 引用用于 NOW 模式
         if self.background_task_runner:
@@ -660,6 +659,21 @@ class ServiceGraph:
         if self.task_manager:
             self._start_task_cleanup()
 
+        self._start_context_cleanup()
+
+    def _start_context_cleanup(self):
+        async def _periodic_cleanup():
+            while True:
+                await asyncio.sleep(3600)
+                try:
+                    removed = self.context_manager.cleanup_inactive_contexts(max_inactivity=7200)
+                    if removed:
+                        _log.info("上下文清理: 移除了 %d 个不活跃会话", len(removed))
+                except Exception as e:
+                    _log.warning("上下文清理异常: %s", e)
+        self.context_cleanup_task = asyncio.create_task(_periodic_cleanup())
+        _log.info("定期上下文清理任务已启动 (周期 3600s)")
+
     def _start_task_cleanup(self):
         tasks_config = self._tasks_config
         lost_detection_minutes = tasks_config.get("lost_detection_minutes", 30)
@@ -698,6 +712,8 @@ class ServiceGraph:
             await self.heartbeat_manager.stop()
         if self.task_cleanup_task:
             self.task_cleanup_task.cancel()
+        if self.context_cleanup_task:
+            self.context_cleanup_task.cancel()
         if self.tts_service:
             await self.tts_service.close()
         await self.bot_engine.stop()

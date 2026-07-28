@@ -114,6 +114,11 @@ class PermissionManager:
 
         raw = command.strip()
 
+        # ── 命令替换检查 ($(...) / ``) ──
+        if self._get_config("security.deny_substitution", True):
+            if re.search(r'\$[({]|`[^`]*`', raw):
+                return "禁止使用命令替换 ($(…) / ``)"
+
         # ── 命令串联检查 (; && || &) ──
         if self._get_config("security.deny_chaining", True):
             # 用管道符 | 分割后，再看各分段内是否有串联符

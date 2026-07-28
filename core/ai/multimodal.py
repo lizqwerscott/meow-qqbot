@@ -56,13 +56,13 @@ class MultimodalService:
         )
 
     async def analyze_image(self, image_path: str) -> str:
-        cache_key = self._get_cache_key(image_path, "image")
+        cache_key = await self._get_cache_key(image_path, "image")
         if cache_key in self._cache:
             _log.debug(f"分析图片命中缓存: {image_path}")
             self._cache.move_to_end(cache_key)
             return self._cache[cache_key][0]
 
-        base64_data = self._encode_image(image_path)
+        base64_data = await self._encode_image(image_path)
         prompt = (
             "请用一句话简要描述这张图片中的主要内容。"
             "只返回描述，不要附加其他文字。"
@@ -75,14 +75,14 @@ class MultimodalService:
         return result
 
     async def analyze_emoji(self, image_path: str, is_gif: bool = False) -> Tuple[str, str, List[str]]:
-        cache_key = self._get_cache_key(image_path, "emoji")
+        cache_key = await self._get_cache_key(image_path, "emoji")
         if cache_key in self._cache:
             _log.debug(f"分析表情命中缓存: {image_path}")
             self._cache.move_to_end(cache_key)
             cached = self._cache[cache_key]
             return cached[0], cached[1], cached[2]
 
-        base64_data = self._encode_image(image_path)
+        base64_data = await self._encode_image(image_path)
 
         prompt = self._build_emoji_prompt(is_gif)
 
@@ -132,13 +132,13 @@ class MultimodalService:
             '其中 emotions 给出 1-3 个情绪标签。'
         )
 
-    def _encode_image(self, image_path: str) -> str:
+    async def _encode_image(self, image_path: str) -> str:
         path = Path(image_path)
         if not path.exists():
             raise FileNotFoundError(f"图片文件不存在: {image_path}")
 
-        with open(path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("ascii")
+        image_bytes = await asyncio.to_thread(path.read_bytes)
+        b64 = base64.b64encode(image_bytes).decode("ascii")
 
         ext = path.suffix.lower()
         mime_map = {
@@ -254,15 +254,19 @@ class MultimodalService:
             )
             return "", "", []
 
-    def _get_cache_key(self, image_path: str, mode: str) -> str:
+    async def _get_cache_key(self, image_path: str, mode: str) -> str:
         try:
-            with open(image_path, "rb") as f:
-                head = f.read(8192)
+            head = await asyncio.to_thread(self._read_file_head, image_path)
             h = hashlib.md5(head).hexdigest()
             return f"{h}:{mode}"
         except Exception as e:
             _log.debug(f"计算图片缓存键失败 [{image_path}]: {e}")
             return f"{image_path}:{mode}"
+
+    @staticmethod
+    def _read_file_head(path: str, n: int = 8192) -> bytes:
+        with open(path, "rb") as f:
+            return f.read(n)
 
     def _set_cache(self, key: str, summary: str, description: str, tags: List[str]) -> None:
         if len(self._cache) >= self._cache_max:

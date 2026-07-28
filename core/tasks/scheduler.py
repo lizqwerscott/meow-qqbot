@@ -14,7 +14,7 @@ import logging
 import time
 from typing import Callable, Optional
 
-from .models import CronJob, TaskRecord, TaskStatus, recalculate_next_run
+from .models import CronJob, recalculate_next_run
 
 _log = logging.getLogger(__name__)
 
@@ -148,17 +148,29 @@ class CronJobScheduler:
 
     async def _poll_loop(self) -> None:
         """主轮询循环。"""
-        # 启动时：重新计算所有 job 的 next_run_at
+        # 启动时补跑（recalculate_next_run 之前，否则 next_run_at 已前移）
+        missed_ids = {job.id for job in await self._recover_missed_jobs()}
+
+        # 重新计算所有 job 的 next_run_at（跳过已触发的恢复任务）
         if self._get_jobs:
             for job in self._get_jobs():
+                if job.id in missed_ids:
+                    continue
                 recalculate_next_run(job)
                 if self._update_job:
                     await self._update_job(job)
 
-        # 启动时补跑（fire-and-forget）
-        missed = await self._recover_missed_jobs()
-        for job in missed:
-            self._schedule_trigger(job)
+        # 触发补跑任务
+        for job in self._get_jobs() if self._get_jobs else []:
+            if job.id in missed_ids:
+                self._schedule_trigger(job)
+                # 标记已触发，防止 tick 再次触发
+                if job.is_one_shot:
+                    job.next_run_at = None
+                else:
+                    recalculate_next_run(job)
+                if self._update_job:
+                    await self._update_job(job)
 
         # 轮询循环
         while self._running:
@@ -188,9 +200,13 @@ class CronJobScheduler:
                 )
 
                 if job.is_one_shot:
-                    # 一次性任务：删除后执行（防止后续重复触发）
+                    # 一次性任务：标记已触发，防止后续重复触发
                     if job.delete_after_run and self._delete_job:
                         await self._delete_job(job.id)
+                    else:
+                        job.next_run_at = None
+                        if self._update_job:
+                            await self._update_job(job)
                 else:
                     # 周期任务：计算下一次，先更新再执行，防止重复触发
                     recalculate_next_run(job)

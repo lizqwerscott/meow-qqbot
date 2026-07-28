@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from typing import Any, Dict, List
@@ -49,8 +50,7 @@ class ApprovalTestCommand:
 
         # 注册到审批管理器（以便按钮回调能识别 session_key）
         if self.bot_engine and self.bot_engine.approval_manager:
-            from asyncio import get_event_loop
-            future = get_event_loop().create_future()
+            future = asyncio.get_running_loop().create_future()
             self.bot_engine.approval_manager._pending[session_key] = future
 
         approval_sender = ApprovalSender(self.api, log_tag="ApprovalTest")
@@ -100,11 +100,12 @@ class ApprovalTestCommand:
             )
         )
 
-        await self.bot_engine.send_reply(
-            chat_id, "📋 请选择一个选项：",
-            message_id=input_message.id,
-            is_group=input_message.is_group,
-            keyboard=keyboard,
-        )
+        if self.bot_engine:
+            await self.bot_engine.send_reply(
+                chat_id, "📋 请选择一个选项：",
+                message_id=input_message.id,
+                is_group=input_message.is_group,
+                keyboard=keyboard,
+            )
 
         return make_reply(input_message, "✅ 已发送审批消息和自定义键盘测试，请在聊天中查看并点击按钮")

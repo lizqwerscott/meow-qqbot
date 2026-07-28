@@ -35,7 +35,7 @@ async def jargon_list(
     templates = request.app.state.templates
     orchestrator = managers.get("learning_orchestrator")
 
-    items = _get_learner_data(orchestrator.jargon.store if orchestrator else None)
+    items = _get_learner_data(orchestrator.jargon.store if orchestrator and orchestrator.jargon else None)
 
     if q:
         q_lower = q.lower()
@@ -62,3 +62,17 @@ async def jargon_delete(request: Request, term: str):
         await orchestrator.jargon.store.delete(term)
 
     return _make_flash_redirect("/learners/jargons", "success", f"已删除词条: {term}")
+
+
+# 以下路由尚未实现，重定向到 jargons 页面
+@router.get("/learners/behaviors", response_class=RedirectResponse)
+async def behaviors_placeholder():
+    return _make_flash_redirect("/learners/jargons", "info", "行为模式功能尚未实现")
+
+@router.get("/learners/expressions", response_class=RedirectResponse)
+async def expressions_placeholder():
+    return _make_flash_redirect("/learners/jargons", "info", "表情映射功能尚未实现")
+
+@router.get("/learners/scenes", response_class=RedirectResponse)
+async def scenes_placeholder():
+    return _make_flash_redirect("/learners/jargons", "info", "场景聚类功能尚未实现")

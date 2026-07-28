@@ -54,12 +54,15 @@ class Router:
         command_messages = await self.command_manager.process_message(input_message)
         if command_messages:
             for msg in command_messages:
-                await reply_callback(
-                    chat_id=msg["chat_id"],
-                    content=msg["content"],
-                    message_id=msg["message_id"],
-                    is_group=msg["is_group"],
-                )
+                try:
+                    await reply_callback(
+                        chat_id=msg["chat_id"],
+                        content=msg["content"],
+                        message_id=msg["message_id"],
+                        is_group=msg["is_group"],
+                    )
+                except Exception as cb_err:
+                    _log.warning("命令回复发送失败 [%s..]: %s", msg["chat_id"][:12], cb_err)
             _log.debug(f"命令已处理: {input_message.content[:30]}")
             return
 

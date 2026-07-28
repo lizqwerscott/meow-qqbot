@@ -10,7 +10,7 @@ import asyncio
 import itertools
 import json
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, List, Optional
 
 from core.message import InputMessage, MessageType
 
@@ -164,7 +164,10 @@ class ToolLoop:
                 _log.info(f"工具循环预解析模型: [{resolved_model_name}]")
             else:
                 _log.warning(f"模型链全部冷却/无效: {model_chain}")
-                await reply_callback(chat_id, "所有模型均不可用，请稍后重试", reply_to, is_group)
+                try:
+                    await reply_callback(chat_id, "所有模型均不可用，请稍后重试", reply_to, is_group)
+                except Exception as cb_err:
+                    _log.warning("回复 callback 失败 [%s]: %s", chat_id[:12], cb_err)
                 return False, True
 
         for round_idx in _rounds:
@@ -214,10 +217,13 @@ class ToolLoop:
 
                 if not remaining:
                     # 链中所有模型都已尝试并失败
-                    await reply_callback(
-                        chat_id, "所有模型均不可用", reply_to, is_group,
-                    )
-                    return False, True
+                    try:
+                        await reply_callback(
+                            chat_id, "所有模型均不可用", reply_to, is_group,
+                        )
+                    except Exception as cb_err:
+                        _log.warning("回复 callback 失败 [%s]: %s", chat_id[:12], cb_err)
+                    return sent_emoji, True
 
                 _log.warning(
                     f"模型 [{resolved_model_name}] 失败，从剩余链重新解析: {remaining}"
@@ -242,7 +248,10 @@ class ToolLoop:
                 self.cost_tracker.record_turn(chat_id, model_for_cost, usage)
 
             if message is None:
-                await reply_callback(chat_id, "AI 服务异常", reply_to, is_group)
+                try:
+                    await reply_callback(chat_id, "AI 服务异常", reply_to, is_group)
+                except Exception as cb_err:
+                    _log.warning("回复 callback 失败 [%s]: %s", chat_id[:12], cb_err)
                 text_was_sent = True
                 break
 
@@ -295,12 +304,15 @@ class ToolLoop:
                         f"[工具循环 第{round_idx + 1}轮] 静默回复，跳过发送"
                     )
                 else:
-                    await reply_callback(
-                        chat_id=chat_id,
-                        content=response_text,
-                        message_id=reply_to,
-                        is_group=is_group,
-                    )
+                    try:
+                        await reply_callback(
+                            chat_id=chat_id,
+                            content=response_text,
+                            message_id=reply_to,
+                            is_group=is_group,
+                        )
+                    except Exception as cb_err:
+                        _log.warning("回复 callback 失败 [%s]: %s", chat_id[:12], cb_err)
                     text_was_sent = True
 
             if response_text or tool_calls:
@@ -336,12 +348,24 @@ class ToolLoop:
                 try:
                     args = json.loads(tc.function.arguments)
                 except json.JSONDecodeError:
-                    _log.warning(f"工具参数解析失败: {tc.function.arguments}")
+                    _log.warning(
+                        "工具参数解析失败: %s", tc.function.arguments,
+                    )
+                    content = json.dumps({"error": "参数解析失败"})
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
-                        "content": json.dumps({"error": "参数解析失败"}),
+                        "content": content,
                     })
+                    try:
+                        await self.context_manager.add_tool_result_async(
+                            chat_id, tc.function.name, content, tc.id,
+                        )
+                    except Exception as persist_err:
+                        _log.warning(
+                            "持久化参数解析失败结果 [%s]: %s",
+                            tc.function.name, persist_err,
+                        )
                     continue
 
                 try:
@@ -354,20 +378,28 @@ class ToolLoop:
                         message_delivered = True
                     if result.no_reply:
                         suppress_reply = True
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
-                    _log.error(f"工具 [{tc.function.name}] 执行异常: {e}")
+                    _log.error(
+                        "工具 [%s] 执行异常: %s",
+                        tc.function.name, e, exc_info=True,
+                    )
                     content = json.dumps({"error": f"执行异常: {e}"}, ensure_ascii=False)
-                    # 先记录 tool 响应再传播，避免历史中留下孤立 tool_calls
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "content": content,
                     })
-                    await self.context_manager.add_tool_result_async(
-                        chat_id, tc.function.name, content, tc.id,
-                    )
-                    if isinstance(e, asyncio.CancelledError):
-                        raise
+                    try:
+                        await self.context_manager.add_tool_result_async(
+                            chat_id, tc.function.name, content, tc.id,
+                        )
+                    except Exception as persist_err:
+                        _log.warning(
+                            "持久化工具结果失败 [%s]: %s",
+                            tc.function.name, persist_err,
+                        )
                     continue
 
                 messages.append({
@@ -435,13 +467,19 @@ class ToolLoop:
             )
 
             if self.hindsight and msg.msg_type != MessageType.CARD:
-                await self.hindsight.add_message(
+                task = asyncio.ensure_future(self.hindsight.add_message(
                     session_id=chat_id,
                     sender_id=msg.sender_id,
                     content=content,
                     context=self.hindsight.msg_type_to_context(msg.msg_type),
                     timestamp=msg.timestamp,
                     resources=msg.resources,
+                ))
+                task.add_done_callback(
+                    lambda t: _log.warning(
+                        "记录到 Hindsight 失败 [%s..]: %s",
+                        chat_id[:12], t.exception(),
+                    ) if t.exception() else None
                 )
 
             if msg.sender_id != current_sender_id and self.hindsight and self.prompt_builder:

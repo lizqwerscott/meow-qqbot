@@ -144,6 +144,16 @@ class ChatContext:
             return self.history[-1]
         return None
 
+    def remove_last_message_if(self, role: str, message_id: str) -> bool:
+        if not self.history:
+            return False
+        last = self.history[-1]
+        if last.role == role and last.message_id == message_id:
+            self.history.pop()
+            self.last_activity = time.time()
+            return True
+        return False
+
     # ── 状态查询 ──
 
     def estimate_tokens_for_history(self) -> int:
@@ -186,11 +196,29 @@ class ChatContext:
         data = self.store.load(self.chat_id)
         if data is None:
             return False
+        self._restore_from_data(data)
+        return True
+
+    async def restore_from_store_async(self) -> bool:
+        data = await self.store.load_async(self.chat_id)
+        if data is None:
+            return False
+        self._restore_from_data(data)
+        return True
+
+    def _restore_from_data(self, data: List[dict]) -> None:
         for item in data:
             try:
                 self.history.append(ChatMessage.from_dict(item))
             except Exception as e:
                 _log.warning("跳过损坏的历史条目 [%s..]: %s", self.chat_id[:12], e)
+
+        removed = self.remove_orphaned_tool_calls()
+        if removed:
+            _log.info(
+                "恢复后清理了 %d 条孤立 tool_calls/tool 消息 [%s..]",
+                removed, self.chat_id[:12],
+            )
 
         if self._is_expired():
             _log.info(
@@ -198,13 +226,12 @@ class ChatContext:
                 self.chat_id[:12],
             )
             self.last_activity = self.history[-1].timestamp if self.history else time.time()
-            return False
-        self.last_activity = time.time()
-        _log.info(
-            "从缓存恢复会话 [%s..] (%d 条)",
-            self.chat_id[:12], len(self.history),
-        )
-        return True
+        else:
+            self.last_activity = time.time()
+            _log.info(
+                "从缓存恢复会话 [%s..] (%d 条)",
+                self.chat_id[:12], len(self.history),
+            )
 
     def _is_expired(self, max_age: float = 86400) -> bool:
         if not self.history:
@@ -217,16 +244,19 @@ class ChatContext:
     def _try_schedule_save(self) -> None:
         try:
             asyncio.get_running_loop()
-            asyncio.ensure_future(self._schedule_save())
         except RuntimeError:
-            pass
-
-    async def _schedule_save(self) -> None:
+            return
         if self._save_task and not self._save_task.done():
             return
         messages = [m.to_dict() for m in self.history]
-        self._save_task = asyncio.create_task(
+        self._save_task = asyncio.ensure_future(
             asyncio.to_thread(self.store.flush, self.chat_id, messages)
+        )
+        self._save_task.add_done_callback(
+            lambda t: _log.error(
+                "持久化到存储失败 [%s..]: %s",
+                self.chat_id[:12], t.exception(),
+            ) if t.exception() else None
         )
 
     # ── 异步消息添加（带锁） ──

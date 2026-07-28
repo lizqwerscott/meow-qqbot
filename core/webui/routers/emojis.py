@@ -38,7 +38,7 @@ async def emoji_list(
         total = len(all_items)
         total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     else:
-        result = emoji_manager.list_emojis(page=page, page_size=PAGE_SIZE, sort_by=sort_by, sort_order=sort_order)
+        result = emoji_manager.list_emojis(page=page, page_size=PAGE_SIZE, sort_by=sort_by, sort_order=sort_order) if emoji_manager else {"emojis": [], "total": 0}
         all_items = result.get("emojis", [])
         total = result.get("total", 0)
         total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)

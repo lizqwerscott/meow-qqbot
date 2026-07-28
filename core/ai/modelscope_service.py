@@ -58,7 +58,8 @@ class ModelScopeService(AIService):
         )
 
     def _on_response(self, response: httpx.Response):
-        self._rate_limit = ModelScopeRateLimit.from_headers(response.headers)
+        if response.is_success:
+            self._rate_limit = ModelScopeRateLimit.from_headers(response.headers)
 
     @property
     def rate_limit(self) -> ModelScopeRateLimit:

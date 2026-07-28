@@ -193,6 +193,20 @@ class SubAgentManager:
             r = self._records.get(sub_id)
             return self._record_to_dict(r) if r else None
 
+    async def cancel_all(self):
+        """取消所有运行中的子智能体，用于引擎关闭时清理。"""
+        async with self._lock:
+            for sub_id, r in self._records.items():
+                if r.status == "running":
+                    r.status = "cancelled"
+                    r.error = "引擎关闭"
+                    r.finished_at = time.time()
+            tasks = list(self._tasks.values())
+            self._tasks.clear()
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+
     async def cleanup_stale(self, max_age: float = 3600):
         async with self._lock:
             now = time.time()

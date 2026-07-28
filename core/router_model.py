@@ -88,7 +88,7 @@ class RouterModel:
             api_key=config.get("api_key", "not-needed"),
             base_url=config.get("base_url", "http://localhost:11434/v1"),
             timeout=timeout,
-            max_retries=0,
+            max_retries=1,
         )
         card_info = " [有角色卡]" if character_card else ""
         _log.info(
@@ -127,8 +127,9 @@ class RouterModel:
             latency = (time.monotonic() - start) * 1000
             text = (resp.choices[0].message.content or "").strip()
 
-            if text.startswith("[ESCALATE]"):
-                reformulated = text[len("[ESCALATE]"):].strip()
+            escalate_prefix = "[ESCALATE]"
+            if text.upper().startswith(escalate_prefix):
+                reformulated = text[len(escalate_prefix):].strip()
                 if not reformulated:
                     reformulated = content
                 _log.info(

@@ -8,10 +8,11 @@
 """
 
 import asyncio
+import json
 import logging
 import re
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from typing import Any, Dict, List, Optional, Set
 
 from core.learners.stores.jargon_store import JargonEntry, JargonStore
@@ -123,12 +124,16 @@ class JargonMiner:
         self._cross_group_min: int = cfg.get("cross_group_min", 2)
         self._max_per_room: int = cfg.get("max_jargon_per_room", 500)
 
-        # 频率追踪: {(term, chat_id): count}
-        self._freq: Dict[tuple, int] = defaultdict(int)
+        # 并发锁（保护共享内存状态）
+        self._lock = asyncio.Lock()
+        # 频率追踪: LRU，上限 10000 条目
+        self._freq: OrderedDict = OrderedDict()
+        self._max_freq = 10000
         # 上下文缓存: {term: [context_msg, ...]}
         self._contexts: Dict[str, List[str]] = defaultdict(list)
-        # 去重缓存：避免同一消息重复触发
-        self._seen_terms: Set[tuple] = set()
+        # 去重缓存：LRU，避免同一消息重复触发
+        self._seen_terms: OrderedDict = OrderedDict()
+        self._max_seen = 10000
 
         _log.info(
             "JargonMiner 已初始化 "
@@ -157,23 +162,37 @@ class JargonMiner:
 
         now = time.time()
 
+        async with self._lock:
+            for term in set(tokens):
+                if len(term) > 20:
+                    continue
+
+                # 去重 (LRU)
+                dedup_key = (term, chat_id, message_text[:50])
+                if dedup_key in self._seen_terms:
+                    continue
+                self._seen_terms[dedup_key] = None
+                self._seen_terms.move_to_end(dedup_key)
+                if len(self._seen_terms) > self._max_seen:
+                    self._seen_terms.popitem(last=False)
+
+                # 递增 per-chat 频率 (LRU)
+                freq_key = (term, chat_id)
+                current = self._freq.get(freq_key, 0)
+                self._freq[freq_key] = current + 1
+                self._freq.move_to_end(freq_key)
+                if len(self._freq) > self._max_freq:
+                    self._freq.popitem(last=False)
+                chat_count = self._freq[freq_key]
+
+        # 锁外进行 store/AI 调用（不阻塞并发）
         for term in set(tokens):
             if len(term) > 20:
                 continue
-
-            # 去重
-            dedup_key = (term, chat_id, message_text[:50])
-            if dedup_key in self._seen_terms:
-                continue
-            self._seen_terms.add(dedup_key)
-
-            # 递增 per-chat 频率
             freq_key = (term, chat_id)
-            self._freq[freq_key] += 1
-            chat_count = self._freq[freq_key]
-
+            async with self._lock:
+                chat_count = self._freq.get(freq_key, 0)
             existing = self._store.get(term)
-
             if existing:
                 await self._update_entry(existing, chat_id, message_text, chat_count, now)
             else:
@@ -218,6 +237,8 @@ class JargonMiner:
 
         if context not in entry.examples:
             entry.examples.append(context)
+            if len(entry.examples) > 50:
+                entry.examples = entry.examples[-50:]
             changed = True
 
         entry.frequency += 1
@@ -249,10 +270,20 @@ class JargonMiner:
         if entry.inference_level >= 2:
             return False
 
-        await self._infer_meaning(entry)
-        entry.inference_level = 2
-        _log.info(f"JargonMiner Level 2 晋升: {entry.term} (rooms={source_rooms})")
+        llm_entry = entry  # 保存引用供异步推理使用
+        asyncio.create_task(self._delayed_promote(llm_entry))
         return True
+
+    async def _delayed_promote(self, entry: JargonEntry) -> None:
+        """异步执行 LLM 推理和晋升，不阻塞消息热路径。"""
+        try:
+            await self._infer_meaning(entry)
+            entry.inference_level = 2
+            source_rooms = set(entry.origin_sessions)
+            _log.info(f"JargonMiner Level 2 晋升: {entry.term} (rooms={source_rooms})")
+            await self._store.save(entry)
+        except Exception as e:
+            _log.warning(f"JargonMiner 异步晋升失败 [{entry.term}]: {e}")
 
     # ── LLM 推理 ──
 
@@ -285,8 +316,10 @@ class JargonMiner:
                 max_tokens=300,
             )
             if response_text:
-                import json
-                parsed = json.loads(response_text)
+                cleaned = response_text.strip()
+                if cleaned.startswith("```"):
+                    cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                parsed = json.loads(cleaned)
                 entry.definition = parsed.get("definition", "").strip()
                 _log.info(
                     f"JargonMiner 推理 [{entry.term}]: {entry.definition}"

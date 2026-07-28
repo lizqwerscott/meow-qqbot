@@ -178,7 +178,7 @@ class ModelRegistry:
 
     async def chat_with_fallback(
         self,
-        model_chain: List[str],
+        model_chain: Optional[List[str]],
         messages: Iterable[ChatCompletionMessageParam],
         tools: Optional[List[Dict[str, Any]]] = None,
         max_tokens: Optional[int] = None,
@@ -188,6 +188,10 @@ class ModelRegistry:
         Returns:
             (ChatCompletionMessage | None, usage_dict | None, model_name_used | None)
         """
+        if not model_chain:
+            _log.error("chat_with_fallback 收到空的模型链")
+            return None, None, None
+
         # 预检并记录所有模型的额度状态
         _log.warning(f"[fallback] 模型链额度状态: chain={model_chain}")
         for qualified_name in model_chain:
@@ -240,7 +244,7 @@ class ModelRegistry:
                     return result, usage, qualified_name
 
                 last_error = "返回空结果"
-                # 空结果不写入全局冷却（由会话局部追踪）
+                await self._cooldown.record_failure(qualified_name)
                 if hasattr(svc, "quota_info") and svc.quota_info["exhausted"]:
                     _log.warning(
                         f"模型 [{qualified_name}] 额度已耗尽，尝试 fallback..."
@@ -308,8 +312,6 @@ class ModelRegistry:
             )
             if result is not None:
                 await self._cooldown.record_success(qualified_name)
-            else:
-                pass  # 空结果不写入全局冷却
             return result
         except Exception as e:
             if isinstance(e, asyncio.CancelledError):
@@ -319,6 +321,11 @@ class ModelRegistry:
             return None
 
     async def close(self):
-        for name, svc in self._services.items():
-            await svc.close()
+        results = await asyncio.gather(
+            *[svc.close() for svc in self._services.values()],
+            return_exceptions=True,
+        )
+        for name, result in zip(self._services, results):
+            if isinstance(result, Exception):
+                _log.warning("关闭模型服务失败 [%s]: %s", name, result)
         _log.info("ModelRegistry 已关闭")

@@ -1,7 +1,10 @@
 """SessionTaskManager — 每会话队列 + 锁，实现会话级隔离。"""
 
 import asyncio
+import logging
 from typing import Dict, Set
+
+_log = logging.getLogger(__name__)
 
 
 class SessionTaskManager:
@@ -34,6 +37,12 @@ class SessionTaskManager:
 
     async def mark_consumer_done(self, chat_id: str):
         async with self._lock:
+            queue = self._queues.get(chat_id)
+            if queue and not queue.empty():
+                _log.warning(
+                    "mark_consumer_done 时队列仍非空 [%s..]: %d 条消息残留",
+                    chat_id[:12], queue.qsize(),
+                )
             self._running.discard(chat_id)
 
     def get_queue_sizes(self) -> Dict[str, int]:

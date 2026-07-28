@@ -123,9 +123,17 @@ class MessageParser:
         else:
             stripped = event.content.strip()
             if not stripped:
+                _log.debug(
+                    "跳过硬解消息: event_type=%s, sender=%s",
+                    event_type, event.author_id[:12] if event.author_id else "?",
+                )
                 return None
             cleaned = re.sub(r'<faceType=\d+,[^>]+>', '', stripped).strip()
             if not cleaned:
+                _log.debug(
+                    "消息仅含表情面: event_type=%s, content=%s",
+                    event_type, stripped[:80],
+                )
                 return None
 
         mentioned_ids = []

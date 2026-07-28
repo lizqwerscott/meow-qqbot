@@ -45,7 +45,7 @@ class InputMessage:
     replied_content: str = ""
     replied_author: str = ""
     msg_type: MessageType = MessageType.TEXT
-    timestamp: float = None
+    timestamp: Optional[float] = None
     model_chain: Optional[List[str]] = None
     resources: List[ResourceMeta] = field(default_factory=list)
 

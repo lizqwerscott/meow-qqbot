@@ -18,9 +18,8 @@ def strip_heartbeat_token(text: str, ack_max_chars: int = ACK_MAX_CHARS_DEFAULT)
     if not text or not text.strip():
         return "", True
 
-    # 剥离 HTML/Markdown 包裹
-    cleaned = re.sub(r'<[^>]*>', ' ', text)
-    cleaned = cleaned.strip().strip("*`~_").strip()
+    # 剥离 HTML tags 并修整空白
+    cleaned = re.sub(r'<[^>]*>', ' ', text).strip()
 
     token, alt_token = "HEARTBEAT_OK", "NO_REPLY"
     cleaned_upper = cleaned.upper()
@@ -29,6 +28,10 @@ def strip_heartbeat_token(text: str, ack_max_chars: int = ACK_MAX_CHARS_DEFAULT)
     # 无 token → 不跳过，不剥离（openclaw 规则）
     if not has_token:
         return cleaned, False
+
+    # 有 token：先剥离可能的 markdown 包裹，防止 **HEARTBEAT_OK** 无法识别
+    cleaned = cleaned.strip("*`~_")
+    cleaned_upper = cleaned.upper()
 
     # 循环剥离首尾 token（大小写不敏感）
     changed = True

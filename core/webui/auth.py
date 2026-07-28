@@ -12,8 +12,6 @@ def verify_token(request: Request, token: str) -> bool:
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer ") and auth[7:] == token:
         return True
-    if request.query_params.get("token") == token:
-        return True
     cookie_token = request.cookies.get("webui_token")
     if cookie_token == token:
         return True

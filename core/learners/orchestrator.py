@@ -55,7 +55,10 @@ class LearningOrchestrator:
         """轻量消息观察，dispatch() 中调用。"""
         if not self._cfg.enabled:
             return
-        await self.jargon.observe(message_text, chat_id)
+        try:
+            await self.jargon.observe(message_text, chat_id)
+        except Exception as e:
+            _log.warning("学习系统观察消息失败 [%s..]: %s", chat_id[:12], e)
 
     # ── Prompt 注入 ──
 

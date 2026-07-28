@@ -5,7 +5,6 @@
 新代码应直接调用 wake_coalescer.request_wake()。
 """
 
-import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -30,16 +29,6 @@ INTENT_SCHEDULED = _coalescer.INTENT_SCHEDULED
 
 
 @dataclass
-class PendingWake:
-    source: str = _coalescer.SOURCE_INTERVAL
-    intent: str = _coalescer.INTENT_SCHEDULED
-    reason: str = ""
-    session_key: str = ""
-    extra_prompt: str = ""
-    timestamp: float = field(default_factory=__import__("time").time)
-
-
-@dataclass
 class WakeResult:
     """保留给现有调用者。新代码应使用 WakeRunResult。"""
     should_notify: bool = False
@@ -54,10 +43,8 @@ class WakeDispatcher:
     def __init__(
         self,
         system_events: Any = None,
-        agent_engine: Any = None,
     ):
         self._events = system_events
-        self._agent = agent_engine
 
     async def request(
         self,

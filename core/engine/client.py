@@ -407,7 +407,7 @@ class BotEngine:
 
     async def stop(self) -> None:
         await self.nickname_manager.flush_save()
-        self.nickname_manager.save_auto()
+        await self.nickname_manager.save_auto()
         await self.agent_engine.stop()
         if self.ws:
             await self.ws.async_stop()
@@ -423,11 +423,11 @@ class BotEngine:
         _log.info(f"[{parsed.chat_scope}][({event_type})] {parsed.sender_id}: {parsed.content}")
 
         # 采集昵称（副作用）
-        self.nickname_manager.collect(parsed.author_id, parsed.author_username)
+        await self.nickname_manager.collect(parsed.author_id, parsed.author_username)
         for uid, name in parsed.mention_entries:
-            self.nickname_manager.collect(uid, name)
+            await self.nickname_manager.collect(uid, name)
         for uid, name in parsed.reply_author_entries:
-            self.nickname_manager.collect(uid, name)
+            await self.nickname_manager.collect(uid, name)
 
         input_message = InputMessage(
             id=parsed.id,

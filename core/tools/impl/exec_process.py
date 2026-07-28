@@ -32,6 +32,20 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
         delivery_channel = args.get("delivery_channel")
         role = perm.get_user_role(ctx.sender_id) if perm else "admin"
 
+        if workdir and role != "admin":
+            ws_mgr = deps.workspace_manager.value
+            if ws_mgr:
+                try:
+                    safe_path = ws_mgr.resolve_safe_path(ctx.is_group, ctx.chat_id, workdir)
+                    workdir = str(safe_path)
+                except ValueError:
+                    return ToolResult(content=json.dumps(
+                        {"error": f"工作目录不在允许范围内: {workdir}"},
+                        ensure_ascii=False,
+                    ))
+            else:
+                workdir = None
+
         parts = parse_command_safe(command)
         if parts is None:
             _log.warning("exec 命令格式无效: %s", command[:80])

@@ -3,7 +3,7 @@
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 
 # ── 学习系统文本清洗 ──
@@ -11,7 +11,7 @@ from typing import Dict, List, Optional
 _REPLY_PREFIX = re.compile(r'^\[正在回复[^\]]*\]\n?')
 _EMOJI_MARKER = re.compile(r'\[表情:[^\]]*\]')
 _EMOTION_MARKER = re.compile(r'\[情绪:[^\]]*\]')
-_AT_MENTION = re.compile(r'@[a-zA-Z0-9_]+')
+_AT_MENTION = re.compile(r'@\S+')
 _JSON_LIKE = re.compile(r'^\s*[\{\[].*[\}\]]\s*$', re.DOTALL)
 
 
@@ -48,6 +48,8 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
     """两个向量的余弦相似度。"""
     if not a or not b:
         return 0.0
+    if len(a) != len(b):
+        raise ValueError(f"向量维度不匹配: {len(a)} vs {len(b)}")
     dot = sum(x * y for x, y in zip(a, b))
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(y * y for y in b))

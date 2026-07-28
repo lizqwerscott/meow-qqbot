@@ -89,7 +89,7 @@ def filter_heartbeat_artifact_spans(
                 ):
                     # 静默 span → 全部丢弃，跳过随后的 tool 结果
                     in_span = False
-                    skip_tool_count = 2  # 跳过最多 2 条 tool 结果
+                    skip_tool_count = 10  # 跳过 tool 结果（覆盖并行工具调用）
                     continue
                 content = str(msg.get("content", ""))
                 if content.strip():

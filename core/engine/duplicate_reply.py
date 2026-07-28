@@ -31,9 +31,9 @@ class DuplicateReplyDetector:
         if len(user_msgs) < 2:
             return False
 
-        last_content = user_msgs[-1].content
-        prev_content = user_msgs[-2].content
-        if not last_content.strip():
+        last_content = user_msgs[-1].content.strip()
+        prev_content = user_msgs[-2].content.strip()
+        if not last_content:
             return False
         if last_content != prev_content:
             return False
@@ -41,19 +41,30 @@ class DuplicateReplyDetector:
         async with self._lock:
             if self._replied.get(input_message.chat_id) == last_content:
                 return False
+
+        _log.info(
+            "检测到重复消息 [%s..]，自动复读: %s",
+            input_message.chat_id[:12], last_content[:30],
+        )
+        reply_id = f"dupe_{input_message.id}"
+        try:
+            await reply_callback(
+                chat_id=input_message.chat_id,
+                content=last_content,
+                message_id=input_message.id,
+                is_group=True,
+            )
+        except Exception as cb_err:
+            _log.warning("复读发送失败 [%s..]: %s", input_message.chat_id[:12], cb_err)
+            return False
+
+        async with self._lock:
             self._replied[input_message.chat_id] = last_content
             self._replied.move_to_end(input_message.chat_id)
             if len(self._replied) > _MAX_CACHED_CHATS:
                 self._replied.popitem(last=False)
 
-        _log.info(f"检测到重复消息 [{input_message.chat_id}]，自动复读: {last_content[:30]}")
-        await reply_callback(
-            chat_id=input_message.chat_id,
-            content=last_content,
-            message_id=input_message.id,
-            is_group=True,
-        )
         await self._cm.add_assistant_message_async(
-            input_message.chat_id, last_content, input_message.id,
+            input_message.chat_id, last_content, reply_id,
         )
         return True

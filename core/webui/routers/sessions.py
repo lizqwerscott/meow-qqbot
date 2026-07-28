@@ -1,15 +1,25 @@
+import asyncio
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from starlette.status import HTTP_303_SEE_OTHER
+from starlette.status import HTTP_303_SEE_OTHER, HTTP_400_BAD_REQUEST
 
 _log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["sessions"])
+
+# chat_id 必须仅含字母数字、下划线、冒号、横线、点（避免路径遍历）
+_CHAT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_:\-\.]+$")
+
+
+def _validate_chat_id(chat_id: str) -> None:
+    if not _CHAT_ID_PATTERN.match(chat_id):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="无效的 chat_id")
 
 
 def _make_flash_redirect(url: str, category: str, message: str):
@@ -111,8 +121,9 @@ async def archived_list(
 async def archived_detail(
     request: Request,
     chat_id: str,
-    tab: str = "messages",
+    tab: Optional[str] = Query(None),
 ):
+    _validate_chat_id(chat_id)
     managers = request.app.state.managers
     templates = request.app.state.templates
     context_manager = managers.get("context_manager")
@@ -160,6 +171,7 @@ async def archived_detail(
     "/sessions/archived/{chat_id}/messages/{timestamp}", response_class=HTMLResponse
 )
 async def archived_messages_full(request: Request, chat_id: str, timestamp: str):
+    _validate_chat_id(chat_id)
     managers = request.app.state.managers
     templates = request.app.state.templates
     context_manager = managers.get("context_manager")
@@ -192,6 +204,7 @@ async def archived_messages_full(request: Request, chat_id: str, timestamp: str)
 
 @router.get("/sessions/archived/{chat_id}/summary/{date}", response_class=HTMLResponse)
 async def archived_summary_view(request: Request, chat_id: str, date: str):
+    _validate_chat_id(chat_id)
     managers = request.app.state.managers
     templates = request.app.state.templates
     archive_manager = managers.get("archive_manager")
@@ -204,7 +217,7 @@ async def archived_summary_view(request: Request, chat_id: str, date: str):
     summary_path = memory_dir / chat_id / f"{date}.md"
     content = ""
     if summary_path.exists():
-        content = summary_path.read_text(encoding="utf-8")
+        content = await asyncio.to_thread(summary_path.read_text, encoding="utf-8")
 
     return templates.TemplateResponse(
         request,
@@ -220,6 +233,7 @@ async def archived_summary_view(request: Request, chat_id: str, date: str):
 
 @router.post("/sessions/archived/{chat_id}/delete/{timestamp}")
 async def archived_delete(request: Request, chat_id: str, timestamp: str):
+    _validate_chat_id(chat_id)
     managers = request.app.state.managers
     context_manager = managers.get("context_manager")
     archive_manager = managers.get("archive_manager")
@@ -256,6 +270,7 @@ async def archived_delete(request: Request, chat_id: str, timestamp: str):
 
 @router.get("/sessions/{chat_id}", response_class=HTMLResponse)
 async def session_detail(request: Request, chat_id: str):
+    _validate_chat_id(chat_id)
     managers = request.app.state.managers
     templates = request.app.state.templates
     context_manager = managers.get("context_manager")
@@ -280,6 +295,7 @@ async def session_detail(request: Request, chat_id: str):
 
 @router.post("/sessions/{chat_id}/clear")
 async def session_clear(request: Request, chat_id: str):
+    _validate_chat_id(chat_id)
     managers = request.app.state.managers
     context_manager = managers.get("context_manager")
 

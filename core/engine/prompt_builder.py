@@ -8,6 +8,7 @@
 
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, List, Optional, Tuple
@@ -61,6 +62,20 @@ _DIRTY_PATTERNS = (
     "--- 技能系统 ---", "工具配合原则",
 )
 
+_DIRTY_REGEX = re.compile(
+    r"(?:\b\d{17}[\dXx]\b)"        # 中国身份证
+    r"|(?:\b1[3-9]\d{9}\b)"        # 手机号
+    r"|(?:\b[\w.-]+@[\w.-]+\.\w{2,}\b)",  # 邮箱
+)
+
+
+def _is_dirty(text: str) -> bool:
+    """检查文本是否包含脏数据（内部模式或 PII）。"""
+    for p in _DIRTY_PATTERNS:
+        if p in text:
+            return True
+    return bool(_DIRTY_REGEX.search(text))
+
 
 class PromptBuilder:
     """AI 请求消息组装器。
@@ -110,11 +125,15 @@ class PromptBuilder:
             - tools_to_use: 本次可用的工具定义列表，或 None
         """
         # ── 1. Token 阈值触发 compaction ──
-        _, compact_usage, ctx = await self.context_manager.compact_history_if_needed(
-            chat_id, self.ai_service
-        )
-        if compact_usage and cost_tracker:
-            cost_tracker.record_turn(chat_id, self.ai_service.model, compact_usage)
+        try:
+            _, compact_usage, ctx = await self.context_manager.compact_history_if_needed(
+                chat_id, self.ai_service
+            )
+            if compact_usage and cost_tracker:
+                cost_tracker.record_turn(chat_id, self.ai_service.model, compact_usage)
+        except Exception as e:
+            _log.warning("历史压缩失败 [%s..]: %s", chat_id[:12], e)
+            ctx = await self.context_manager.get_context_async(chat_id)
 
         # ── 1b. 防御：清理 context 历史中孤立的 tool_calls ──
         cleaned = ctx.remove_orphaned_tool_calls()
@@ -224,17 +243,24 @@ class PromptBuilder:
 
         # 学习上下文（社群俚语词典）
         if self.learners:
-            learning_ctx = await self.learners.enrich_prompt_context(
-                chat_id=chat_id,
-                sender_id=sender_id,
-                message_text=input_message.content,
-            )
-            if learning_ctx:
-                dynamic_parts.append(learning_ctx)
+            try:
+                learning_ctx = await self.learners.enrich_prompt_context(
+                    chat_id=chat_id,
+                    sender_id=sender_id,
+                    message_text=input_message.content,
+                )
+                if learning_ctx:
+                    dynamic_parts.append(learning_ctx)
+            except Exception as e:
+                _log.warning("学习上下文注入失败 [%s..]: %s", chat_id[:12], e)
 
         # 归档摘要注入（归档后首次 build 时仅注入一次）
         if self._archive_manager:
-            summary_text = self._archive_manager.consume_summary(chat_id)
+            try:
+                summary_text = self._archive_manager.consume_summary(chat_id)
+            except Exception as e:
+                _log.warning("归档摘要注入失败 [%s..]: %s", chat_id[:12], e)
+                summary_text = None
             if summary_text:
                 _log.info(
                     "注入归档摘要 [%s..] (%d 字符)",
@@ -254,9 +280,9 @@ class PromptBuilder:
         dynamic_parts.append("注意：创建定时任务时请使用北京时间 (CST/UTC+8)，不要使用 UTC。")
 
         # 工作区上下文
+        _admin_chat = False
         if self._workspace_manager:
             ws_type = "群聊" if is_group else "私聊"
-            _admin_chat = False
             if not is_group:
                 if self._perm:
                     role = self._perm.get_user_role(sender_id)
@@ -302,9 +328,12 @@ class PromptBuilder:
 
         # 表情标签列表
         if has_emojis and self.emoji_manager:
-            tags = self.emoji_manager.get_all_tags()
-            if tags:
-                dynamic_parts.append("可用表情标签：" + "、".join(tags))
+            try:
+                tags = self.emoji_manager.get_all_tags()
+                if tags:
+                    dynamic_parts.append("可用表情标签：" + "、".join(tags))
+            except Exception as e:
+                _log.warning("表情标签获取失败: %s", e)
 
         # 自身 ID 映射
         if is_group and self._bot_id:
@@ -312,17 +341,27 @@ class PromptBuilder:
 
         # 群友列表
         if has_users and self._nm:
-            lines = ["【群友列表】"]
-            for uid, aliases in sorted(self._nm.iter_users(), key=lambda x: "，".join(x[1])):
-                alias_str = "，".join(aliases)
-                lines.append(f"- {uid}（{alias_str}）")
-            if lines:
-                dynamic_parts.append("\n".join(lines))
+            try:
+                user_lines = ["【群友列表】"]
+                for uid, aliases in sorted(self._nm.iter_users(), key=lambda x: "，".join(x[1])):
+                    alias_str = "，".join(aliases)
+                    user_lines.append(f"- {uid}（{alias_str}）")
+                if user_lines:
+                    dynamic_parts.append("\n".join(user_lines))
+            except Exception as e:
+                _log.warning("群友列表构建失败 [%s..]: %s", chat_id[:12], e)
 
         if dynamic_parts:
+            dynamic_text = "\n\n".join(dynamic_parts)
+            if len(dynamic_text) > 4000:
+                _log.warning(
+                    "动态 system prompt 过长 [%s..]: %d 字符，已截断",
+                    chat_id[:12], len(dynamic_text),
+                )
+                dynamic_text = dynamic_text[:4000]
             messages.append({
                 "role": "system",
-                "content": "\n\n".join(dynamic_parts),
+                "content": dynamic_text,
             })
 
         # ── 6. 防御：清理孤立的 tool_calls（防止 compaction 拆散配对） ──
@@ -524,7 +563,7 @@ class PromptBuilder:
             result = await self.hindsight.search(
                 user_id=sender_id,
                 query=query,
-                top_k=5,
+                top_k=self._search_top_k,
                 include_profile=True,
             )
 
@@ -541,7 +580,7 @@ class PromptBuilder:
                     pd = p.get("profile_data", {})
                     if isinstance(pd, dict):
                         for k, v in pd.items():
-                            if isinstance(v, str) and any(p in v for p in _DIRTY_PATTERNS):
+                            if isinstance(v, str) and _is_dirty(v):
                                 continue
                             parts.append(f"- [{k}]: {str(v)[:150]}")
 
@@ -553,7 +592,7 @@ class PromptBuilder:
                     summary = (e.get("summary", "") or e.get("episode", "")).strip()
                     if not summary:
                         continue
-                    if any(p in summary for p in _DIRTY_PATTERNS):
+                    if _is_dirty(summary):
                         continue
                     parts.append(f"- {summary[:150]}")
                     count += 1

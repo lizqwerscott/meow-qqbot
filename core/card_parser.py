@@ -8,7 +8,7 @@ _log = logging.getLogger(__name__)
 
 def _find_kv(kv_list: List[Dict[str, Any]], key: str) -> Optional[Dict[str, Any]]:
     for item in kv_list:
-        if item.get("key") == key:
+        if isinstance(item, dict) and item.get("key") == key:
             return item
     return None
 

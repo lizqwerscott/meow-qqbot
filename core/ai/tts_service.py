@@ -8,6 +8,7 @@
    - voice_mode=preset 使用克隆音色，voice_mode=creative 自由创造
 """
 
+import asyncio
 import base64
 import logging
 import time
@@ -143,15 +144,15 @@ class TtsService:
         path.write_bytes(data)
         return str(path)
 
-    def cleanup_temp(self, age_hours: int = 1) -> int:
+    async def cleanup_temp(self, age_hours: int = 1) -> int:
         """清理过期的临时文件"""
         now = time.time()
         count = 0
         for f in self._temp_dir.glob("tts_*.wav"):
             if now - f.stat().st_mtime > age_hours * 3600:
-                f.unlink(missing_ok=True)
+                await asyncio.to_thread(f.unlink, missing_ok=True)
                 count += 1
         return count
 
     async def close(self) -> None:
-        self.cleanup_temp(0)
+        await self.cleanup_temp(0)

@@ -7,6 +7,7 @@
 4. 首次 build() 时注入归档摘要（仅一次，后续不再重复）
 """
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timedelta
@@ -32,9 +33,13 @@ def _format_archive_timestamp(t: Optional[float] = None) -> str:
 
 
 def _daily_reset_at(hour: int, t: Optional[float] = None) -> float:
-    dt = datetime.fromtimestamp(t or time.time())
-    today_reset = dt.replace(hour=hour, minute=0, second=0, microsecond=0)
-    if today_reset.timestamp() > (t or time.time()):
+    ts = t or time.time()
+    dt = datetime.fromtimestamp(ts)
+    try:
+        today_reset = dt.replace(hour=hour, minute=0, second=0, microsecond=0)
+    except ValueError:
+        today_reset = dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=hour)
+    if today_reset.timestamp() > ts:
         today_reset -= timedelta(days=1)
     return today_reset.timestamp()
 
@@ -118,7 +123,7 @@ class ArchiveManager:
             if ctx.last_activity >= today_reset:
                 return None
 
-            return self._do_archive(ctx, chat_id, is_group, "daily")
+            return await self._do_archive(ctx, chat_id, is_group, "daily")
 
         return await self._cm.with_chat_lock(chat_id, _do)
 
@@ -154,7 +159,7 @@ class ArchiveManager:
     async def archive_manual(self, chat_id: str, is_group: bool) -> ArchiveResult:
         async def _do():
             ctx = self._cm.get_context(chat_id)
-            return self._do_archive(ctx, chat_id, is_group, "manual")
+            return await self._do_archive(ctx, chat_id, is_group, "manual")
         return await self._cm.with_chat_lock(chat_id, _do)
 
     def cleanup_old_archives(self) -> int:
@@ -186,7 +191,7 @@ class ArchiveManager:
 
     # ── 内部方法（需在 per-chat 锁内调用） ──
 
-    def _do_archive(
+    async def _do_archive(
         self, ctx: Any, chat_id: str, is_group: bool, reason: str
     ) -> ArchiveResult:
         store = self._store
@@ -194,8 +199,10 @@ class ArchiveManager:
         ts = _format_archive_timestamp(now)
         date = _date_str(now)
 
-        # 1. 确保数据落盘
-        store.flush(chat_id, [m.to_dict() for m in ctx.get_history()])
+        # 1. 确保数据落盘（后台线程）
+        await asyncio.to_thread(
+            store.flush, chat_id, [m.to_dict() for m in ctx.get_history()],
+        )
 
         # 2. 收集消息
         all_msgs = ctx.get_history()
@@ -205,23 +212,25 @@ class ArchiveManager:
 
         # 4. 生成摘要文本
         summary_text = self._format_summary_text(
-            all_msgs, self._summary_count, is_group, chat_id, date
+            all_msgs, self._summary_count, is_group, chat_id, date,
         )
 
-        # 5. 归档（重命名 JSONL）
-        archive_path = store.archive(chat_id, ts)
+        # 5. 归档（后台线程）
+        archive_path = await asyncio.to_thread(store.archive, chat_id, ts)
 
-        # 6. 写入摘要 .md
+        # 6. 写入摘要 .md（后台线程）
         summary_path: Optional[str] = None
         if summary_text:
-            summary_path = self._write_memory_file(chat_id, date, summary_text)
+            summary_path = await self._write_memory_file(chat_id, date, summary_text)
 
         # 7. 清空 + 回放新历史
         ctx.set_messages(replay_msgs)
         ctx.last_activity = time.time()
 
-        # 8. 写入新数据（含回放消息）
-        store.flush(chat_id, [m.to_dict() for m in replay_msgs])
+        # 8. 写入新数据（后台线程）
+        await asyncio.to_thread(
+            store.flush, chat_id, [m.to_dict() for m in replay_msgs],
+        )
 
         _log.info(
             "归档完成 [%s..]: reason=%s replay=%d summary=%s",
@@ -273,6 +282,10 @@ class ArchiveManager:
                 message_id=msg.message_id,
                 sender_id=msg.sender_id,
                 name=msg.name,
+                tool_call_id=msg.tool_call_id,
+                tool_name=msg.tool_name,
+                tool_calls=msg.tool_calls,
+                reasoning_content=msg.reasoning_content,
             )
             result.append(cleaned)
 
@@ -345,14 +358,14 @@ class ArchiveManager:
         parts.extend(lines)
         return "\n".join(parts)
 
-    def _write_memory_file(
+    async def _write_memory_file(
         self, chat_id: str, date: str, text: str
     ) -> Optional[str]:
         mem_dir = _get_memory_dir(self._memory_dir, chat_id)
         try:
             mem_dir.mkdir(parents=True, exist_ok=True)
             file_path = mem_dir / f"{date}.md"
-            file_path.write_text(text, encoding="utf-8")
+            await asyncio.to_thread(file_path.write_text, text, encoding="utf-8")
             _log.info(
                 "归档摘要已写入 [%s..] %s (%d 字符)",
                 chat_id[:12], file_path.name, len(text),

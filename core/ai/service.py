@@ -95,7 +95,15 @@ class AIService:
             else:
                 return None, usage
         except Exception as e:
-            _log.error(f"AI 请求失败: {e}")
+            err_str = str(e)
+            if "429" in err_str or "rate_limit" in err_str.lower():
+                _log.warning("AI 请求被限流: %s", err_str)
+            elif "502" in err_str or "503" in err_str or "service_unavailable" in err_str.lower():
+                _log.error("AI 服务不可用: %s", err_str)
+            elif "timeout" in err_str.lower():
+                _log.warning("AI 请求超时: %s", err_str)
+            else:
+                _log.error("AI 请求失败: %s", err_str)
             return None, None
 
     def _is_reasoning_model(self, model: str) -> bool:
@@ -153,5 +161,13 @@ class AIService:
                 return response.choices[0].message, usage
             return None, usage
         except Exception as e:
-            _log.error(f"AI 请求失败（带工具）: {e}")
+            err_str = str(e)
+            if "429" in err_str or "rate_limit" in err_str.lower():
+                _log.warning("AI 请求被限流（带工具）: %s", err_str)
+            elif "502" in err_str or "503" in err_str or "service_unavailable" in err_str.lower():
+                _log.error("AI 服务不可用（带工具）: %s", err_str)
+            elif "timeout" in err_str.lower():
+                _log.warning("AI 请求超时（带工具）: %s", err_str)
+            else:
+                _log.error("AI 请求失败（带工具）: %s", err_str)
             return None, None

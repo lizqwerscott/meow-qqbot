@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import json
 import logging
 import threading
@@ -19,6 +20,12 @@ class ContextStore(ABC):
     @abstractmethod
     def load(self, chat_id: str) -> Optional[List[dict]]:
         """加载已持久化的消息。从未保存过的返回 None。"""
+
+    async def load_async(self, chat_id: str) -> Optional[List[dict]]:
+        """异步加载已持久化的消息。默认委托给同步 load()，子类可覆盖。"""
+        return await asyncio.to_thread(
+            functools.partial(self.load, chat_id),
+        )
 
     @abstractmethod
     def delete(self, chat_id: str) -> None:

@@ -25,6 +25,13 @@ dependencies = [
     "pydantic>=2.12.5",
 ]
 
+[dependency-groups]
+test = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
 [tool.uv.sources]
 qqbot-agent-sdk = { git = "https://github.com/lizqwerscott/qqbot-agent-sdk", branch = "group-message-add" }
 

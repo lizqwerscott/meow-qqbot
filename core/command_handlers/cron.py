@@ -17,7 +17,6 @@ class CronCommand:
         self._cron_mgr = cron_job_manager
         self._runner = background_task_runner
         self._task_mgr = task_manager
-        self._agent_engine = agent_engine
 
     @staticmethod
     def _parse_flags(tokens: list[str]) -> tuple[dict[str, str], list[str]]:

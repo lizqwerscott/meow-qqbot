@@ -28,7 +28,11 @@ def strip_content_prefix(content: str) -> str:
 def _estimate_tokens(text: Optional[str]) -> int:
     if not text:
         return 0
-    return len(ds_token.encode(text))
+    try:
+        return len(ds_token.encode(text))
+    except Exception as e:
+        _log.warning("token 估算失败: %s", e)
+        return 0
 
 
 @dataclass

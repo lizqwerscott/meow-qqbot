@@ -44,7 +44,6 @@ class TasksCommand:
     def __init__(self, task_manager=None, background_task_runner=None, agent_engine=None):
         self._task_manager = task_manager
         self._runner = background_task_runner
-        self._agent_engine = agent_engine
 
     async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
         if self._task_manager is None:

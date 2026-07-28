@@ -83,6 +83,9 @@ class AgentEngine:
         # ── 消费者管理 ──
         self._consumer_tasks: Set[asyncio.Task] = set()
 
+        # ── 工具依赖容器（由 bootstrap 注入） ──
+        self._deps = None
+
         # ── 路由模型 / 活跃追踪 ──
         self.router_model = None
         self.last_active_chat: str = ""
@@ -99,7 +102,7 @@ class AgentEngine:
 
     def set_media_uploader(self, media_uploader: Any):
         self.media_uploader = media_uploader
-        if hasattr(self, '_deps') and self._deps:
+        if self._deps:
             self._deps.media_uploader.value = media_uploader
         _log.info("AgentEngine: MediaUploader 已注入")
 
@@ -114,7 +117,7 @@ class AgentEngine:
 
     def set_api_client(self, api_client: Any):
         self._api_client = api_client
-        if hasattr(self, '_deps') and self._deps:
+        if self._deps:
             self._deps.api_client.value = api_client
         _log.info("AgentEngine: QQApiClient 已注入")
 
@@ -124,13 +127,13 @@ class AgentEngine:
     def set_tts_service(self, tts_service: Any):
         self._tts_service = tts_service
         self.prompt_builder._tts_service = tts_service
-        if hasattr(self, '_deps') and self._deps:
+        if self._deps:
             self._deps.tts_service.value = tts_service
 
     def set_emoji_manager(self, emoji_manager: EmojiManager):
         self.emoji_manager = emoji_manager
         self.prompt_builder.emoji_manager = emoji_manager
-        if hasattr(self, '_deps') and self._deps:
+        if self._deps:
             self._deps.emoji_manager = emoji_manager
 
     # ── 消息钩子系统 ──
@@ -378,7 +381,10 @@ class AgentEngine:
                         queue.get(), timeout=2.0
                     )
                 except asyncio.TimeoutError:
-                    break
+                    queue = await self.session_manager.get_queue(chat_id)
+                    if queue.empty():
+                        break
+                    continue
 
                 try:
                     await self._process_message(
@@ -387,7 +393,19 @@ class AgentEngine:
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    _log.error(f"消费者处理消息 {input_message.id} 时出错: {e}")
+                    _log.error(
+                        "消费者处理消息 %s 时出错: %s",
+                        input_message.id, e, exc_info=True,
+                    )
+                    try:
+                        await self.context_manager.remove_last_user_message_if_async(
+                            input_message.chat_id, input_message.id,
+                        )
+                    except Exception as rollback_err:
+                        _log.warning(
+                            "回滚上下文失败 [%s..]: %s",
+                            input_message.chat_id[:12], rollback_err,
+                        )
                     try:
                         await reply_callback(
                             chat_id=chat_id,
@@ -395,8 +413,11 @@ class AgentEngine:
                             message_id=input_message.id,
                             is_group=input_message.is_group,
                         )
-                    except Exception as e:
-                        _log.warning(f"向用户发送错误回复失败 [{chat_id}]: {e}")
+                    except Exception as reply_err:
+                        _log.warning(
+                            "向用户发送错误回复失败 [%s..]: %s",
+                            chat_id[:12], reply_err,
+                        )
 
         await self.session_manager.mark_consumer_done(chat_id)
 
@@ -486,9 +507,6 @@ class AgentEngine:
         ) -> None:
             captured_replies.append(content)
 
-        # 确保会话上下文存在
-        import time
-
         # 创建合成 InputMessage
         msg = InputMessage(
             id=f"bg_{chat_id}_{int(time.time())}",
@@ -519,18 +537,21 @@ class AgentEngine:
                 tools_allow=tools_allow,
             )
 
-            # 执行工具循环
-            await self.tool_loop.run(
-                messages=messages,
-                tools=tools_to_use,
-                chat_id=chat_id,
-                is_group=is_group,
-                reply_to=msg.id,
-                reply_callback=capturing_reply_callback,
-                sender_id=sender_id,
-                delivery_channel=delivery_channel,
-                reply_to_message_id=reply_to_message_id,
-                model_chain=model_chain,
+            # 执行工具循环（带超时）
+            await asyncio.wait_for(
+                self.tool_loop.run(
+                    messages=messages,
+                    tools=tools_to_use,
+                    chat_id=chat_id,
+                    is_group=is_group,
+                    reply_to=msg.id,
+                    reply_callback=capturing_reply_callback,
+                    sender_id=sender_id,
+                    delivery_channel=delivery_channel,
+                    reply_to_message_id=reply_to_message_id,
+                    model_chain=model_chain,
+                ),
+                timeout=300,
             )
 
             result = "\n".join(captured_replies) if captured_replies else None
@@ -747,10 +768,15 @@ class AgentEngine:
     # ── 生命周期 ──
 
     async def stop(self):
+        if self._sub_agent_manager:
+            await self._sub_agent_manager.cancel_all()
+
         if self._consumer_tasks:
             for task in list(self._consumer_tasks):
                 task.cancel()
-            await asyncio.wait(self._consumer_tasks, timeout=5.0)
+            _, pending = await asyncio.wait(self._consumer_tasks, timeout=5.0)
+            if pending:
+                _log.warning("尚有 %d 个消费者任务未在超时内完成", len(pending))
             self._consumer_tasks.clear()
         await self.session_manager.cleanup_all()
 

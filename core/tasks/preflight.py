@@ -84,7 +84,7 @@ def run_preflight(ctx: PreflightContext) -> PreflightResult:
 
     # Step 02: 活跃时段
     if not ctx.source_is_manual:
-        start, end, tz = ctx.active_hours
+        start, end, tz = (ctx.active_hours + (None, None, None))[:3]
         if start and end:
             if not is_in_active_hours_ts(time.time(), start, end, tz or "Asia/Shanghai"):
                 _log.info("[Preflight] step=02 active_hours: SKIP → quiet-hours")
@@ -93,7 +93,9 @@ def run_preflight(ctx: PreflightContext) -> PreflightResult:
     _log.debug("[Preflight] step=02 active_hours: pass")
 
     # Step 03: Cron 运行中 (retryable)
-    if ctx.has_cron_jobs:
+    # has_cron_jobs 表示系统存在定时任务定义，不代表正在执行
+    # 只有同时且主 lane 忙时才跳过（防止与 cron 重叠）
+    if ctx.has_cron_jobs and ctx.is_main_lane_busy:
         _log.info("[Preflight] step=03 cron_in_progress: SKIP → cron-in-progress")
         result.skip_reason = "cron-in-progress"
         return result

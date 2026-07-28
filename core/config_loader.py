@@ -3,14 +3,17 @@
 使用 Pydantic 运行时校验，捕获 config.toml 的拼写错误和类型错误。
 """
 
-import sys
 import tomllib
 
-from pydantic import BaseModel, ConfigDict, SecretStr
+from pydantic import BaseModel, ConfigDict, SecretStr, ValidationError
+
+
+class ConfigError(Exception):
+    """配置加载相关的错误。"""
 
 
 class AppConfig(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     appid: SecretStr
     secret: SecretStr
@@ -40,23 +43,22 @@ class ConfigLoader:
         try:
             with open(path, "rb") as f:
                 raw = tomllib.load(f)
-        except FileNotFoundError:
-            print(f"错误: 配置文件不存在: {path}")
-            print("请复制 config.toml 并填写 QQ bot 凭证与 API key 后重试")
-            sys.exit(1)
+        except FileNotFoundError as exc:
+            raise ConfigError(
+                f"配置文件不存在: {path}\n"
+                "请复制 config.toml 并填写 QQ bot 凭证与 API key 后重试"
+            ) from exc
 
         try:
             self._cfg = AppConfig(**raw)
+        except ValidationError as exc:
+            lines = ["config.toml 校验失败:"]
+            for err in exc.errors():
+                loc = ".".join(str(x) for x in err["loc"])
+                lines.append(f"  [{loc}] {err['msg']} (got: {err.get('input', '?')})")
+            raise ConfigError("\n".join(lines)) from exc
         except Exception as exc:
-            from pydantic import ValidationError
-            if isinstance(exc, ValidationError):
-                print("config.toml 校验失败:")
-                for err in exc.errors():
-                    loc = ".".join(str(x) for x in err["loc"])
-                    print(f"  [{loc}] {err['msg']} (got: {err.get('input', '?')})")
-            else:
-                print(f"config.toml 加载失败: {exc}")
-            sys.exit(1)
+            raise ConfigError(f"config.toml 加载失败: {exc}") from exc
 
     # ── 顶层标量 ──
 

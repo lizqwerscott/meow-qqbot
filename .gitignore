@@ -24,6 +24,9 @@ plugins/*
 # 配置文件（含 API 密钥，勿提交）
 config/
 
+# 代码审查产物（应由审查工具自行管理，不进入版本控制）
+docs/chat-*.md
+
 # 自动生成的锁文件
 skills-lock.json
 

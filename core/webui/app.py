@@ -4,15 +4,42 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import uvicorn
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import RedirectResponse as StarletteRedirectResponse
-from starlette.status import HTTP_303_SEE_OTHER
+from starlette.status import HTTP_303_SEE_OTHER, HTTP_429_TOO_MANY_REQUESTS
 
 from core.webui.auth import AuthMiddleware, verify_token
+
+
+# 登录速率限制（内存中，每 IP 5 次/分钟）
+_LOGIN_ATTEMPTS: Dict[str, list] = {}
+_LOGIN_WINDOW = 60
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_MAX_IPS = 1000
+
+
+def _check_login_rate(client_ip: str) -> None:
+    now = time.time()
+    attempts = _LOGIN_ATTEMPTS.setdefault(client_ip, [])
+    # 清理过期的记录
+    attempts[:] = [t for t in attempts if now - t < _LOGIN_WINDOW]
+    if len(attempts) >= _LOGIN_MAX_ATTEMPTS:
+        raise HTTPException(
+            status_code=HTTP_429_TOO_MANY_REQUESTS,
+            detail="登录尝试过于频繁，请稍后再试",
+        )
+    attempts.append(now)
+    # 控制 IP 表上限，防止内存无限增长
+    if len(_LOGIN_ATTEMPTS) > _LOGIN_MAX_IPS:
+        for ip in list(_LOGIN_ATTEMPTS.keys()):
+            if not _LOGIN_ATTEMPTS[ip]:
+                del _LOGIN_ATTEMPTS[ip]
+            if len(_LOGIN_ATTEMPTS) <= _LOGIN_MAX_IPS:
+                break
 from core.webui.routers import status, emojis, nicknames, sessions, learners, tasks
 
 _log = logging.getLogger(__name__)
@@ -65,10 +92,12 @@ def create_app(managers: Dict[str, Any], webui_config: Dict[str, Any]) -> FastAP
 
     @app.post("/login")
     async def login_post(request: Request, token: str = Form(...)):
+        client_ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown").split(",")[0].strip()
+        _check_login_rate(client_ip)
         expected = webui_config.get("token", "")
         if token == expected:
             resp = RedirectResponse(url="/status", status_code=HTTP_303_SEE_OTHER)
-            resp.set_cookie(key="webui_token", value=token, httponly=True, max_age=86400 * 7)
+            resp.set_cookie(key="webui_token", value=token, httponly=True, max_age=86400 * 7, samesite="lax")
             return resp
         return templates.TemplateResponse(request, "login.html", {"request": request, "error": "Token 无效"})
 

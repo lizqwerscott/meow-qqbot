@@ -144,13 +144,11 @@ class WakeRunner:
                 cost_tracker=self._agent.cost_tracker,
             )
 
-        # ── 3. 记录 cooldown ──
-        if self._cooldown:
-            self._cooldown.record_run_start()
-
-        # ── 4. 执行 AI turn ──
+        # ── 3. 执行 AI turn ──
         turn_ok = False
         try:
+            if self._cooldown:
+                self._cooldown.record_run_start()
             result = await self._agent.run_wake_turn(
                 source=pw.source,
                 intent=pw.intent,

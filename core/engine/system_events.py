@@ -119,6 +119,7 @@ class SystemEventQueue:
         sq.queue.clear()
         sq._seen.clear()
         self._queues.pop(session_key, None)
+        self._snapshots.pop(session_key, None)
         _log.debug("drained %d system events [%s..]", len(out), session_key[:12])
         return out
 
@@ -134,10 +135,7 @@ class SystemEventQueue:
         return bool(sq and sq.queue)
 
     def drain_non_heartbeat(self, session_key: str) -> list[SystemEvent]:
-        """只取出并清除非 heartbeat_only 的事件，保留 heartbeat_only 事件。
-        
-        同时清理该 session_key 的 stale snapshot 记录。
-        """
+        """只取出并清除非 heartbeat_only 的事件，保留 heartbeat_only 事件。"""
         sq = self._queues.get(session_key)
         if not sq:
             self._snapshots.pop(session_key, None)
@@ -148,7 +146,7 @@ class SystemEventQueue:
         sq._seen = {(e.text, e.context_key) for e in kept}
         if not sq.queue:
             self._queues.pop(session_key, None)
-        self._snapshots.pop(session_key, None)
+            self._snapshots.pop(session_key, None)
         _log.debug("drained %d non-heartbeat events [%s..]", len(removed), session_key[:12])
         return removed
 
@@ -184,8 +182,7 @@ class SystemEventQueue:
                     return False
                 remove_key = (event.text, event.context_key)
                 sq._seen.discard(remove_key)
-                sq.queue[i].text = text
-                sq.queue[i].ts = time.time()
+                sq.queue[i] = SystemEvent(text=text, ts=time.time(), context_key=context_key, heartbeat_only=heartbeat_only)
                 sq._seen.add((text, context_key))
                 return True
 

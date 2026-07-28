@@ -52,6 +52,8 @@ class ChatContextManager:
             return self._chat_locks[chat_id]
 
     def get_context(self, chat_id: str) -> ChatContext:
+        if chat_id in self.contexts:
+            return self.contexts[chat_id]
         with self._ctx_sync_lock:
             if chat_id not in self.contexts:
                 ctx = ChatContext(
@@ -67,7 +69,21 @@ class ChatContextManager:
             return self.contexts[chat_id]
 
     async def get_context_async(self, chat_id: str) -> ChatContext:
-        return self.get_context(chat_id)
+        if chat_id in self.contexts:
+            return self.contexts[chat_id]
+        async with self._ctx_lock:
+            if chat_id not in self.contexts:
+                ctx = ChatContext(
+                    chat_id=chat_id,
+                    store=self._store,
+                    max_history=self.max_history_per_chat,
+                    compact_threshold_tokens=self.compact_threshold_tokens,
+                    keep_recent_tokens=self.keep_recent_tokens,
+                    merge_window_seconds=self.merge_window_seconds,
+                )
+                await ctx.restore_from_store_async()
+                self.contexts[chat_id] = ctx
+            return self.contexts[chat_id]
 
     # ── 聊天类型 ──
 
@@ -124,9 +140,8 @@ class ChatContextManager:
     ) -> None:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
-            self.add_user_message(
-                chat_id, content, message_id, sender_id=sender_id, name=name
-            )
+            context = await self.get_context_async(chat_id)
+            context.add_user_message(content, message_id, sender_id=sender_id, name=name)
 
     async def add_assistant_message_async(
         self,
@@ -138,8 +153,9 @@ class ChatContextManager:
     ) -> None:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
-            self.add_assistant_message(
-                chat_id, content, message_id, tool_calls=tool_calls,
+            context = await self.get_context_async(chat_id)
+            context.add_assistant_message(
+                content, message_id, tool_calls=tool_calls,
                 reasoning_content=reasoning_content,
             )
 
@@ -152,7 +168,8 @@ class ChatContextManager:
     ) -> None:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
-            self.add_tool_result(chat_id, tool_name, content, tool_call_id)
+            context = await self.get_context_async(chat_id)
+            context.add_tool_result(tool_name, content, tool_call_id)
 
     # ── 历史读取 ──
 
@@ -214,6 +231,15 @@ class ChatContextManager:
         async with lock:
             self.clear_chat_history(chat_id)
 
+    async def remove_last_user_message_if_async(
+        self, chat_id: str, message_id: str
+    ) -> bool:
+        lock = await self._get_chat_lock(chat_id)
+        async with lock:
+            if chat_id not in self.contexts:
+                return False
+            return self.contexts[chat_id].remove_last_message_if("user", message_id)
+
     async def with_chat_lock(self, chat_id: str, func):
         lock = await self._get_chat_lock(chat_id)
         async with lock:
@@ -224,7 +250,7 @@ class ChatContextManager:
     ) -> tuple[bool, Optional[Dict], "ChatContext"]:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
-            context = self.get_context(chat_id)
+            context = await self.get_context_async(chat_id)
             compacted, usage = await context.compact_history_if_needed(
                 ai_service, force=force
             )

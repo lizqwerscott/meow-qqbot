@@ -23,6 +23,8 @@ class TaskManager:
         self._store = store
         # 运行中任务的 asyncio.Task 集合（用于取消）
         self._running_tasks: dict[str, asyncio.Task] = {}
+        # 状态转换锁（防止 cancel_task / finish_task 竞态）
+        self._status_lock = asyncio.Lock()
 
     # ── 创建 ──
 
@@ -76,17 +78,22 @@ class TaskManager:
         error: Optional[str] = None,
     ) -> Optional[TaskRecord]:
         """完成任务。"""
-        task = self._store.get_task(task_id)
-        if task is None:
-            return None
-        task.status = status
-        task.finished_at = time.time()
-        if result is not None:
-            task.result = result
-        if error is not None:
-            task.error = error
-        await self._store.update_task(task)
-        self._running_tasks.pop(task_id, None)
+        async with self._status_lock:
+            task = self._store.get_task(task_id)
+            if task is None:
+                return None
+            # 已被 cancel_task 取消，不覆写
+            if task.status == TaskStatus.CANCELLED:
+                self._running_tasks.pop(task_id, None)
+                return task
+            task.status = status
+            task.finished_at = time.time()
+            if result is not None:
+                task.result = result
+            if error is not None:
+                task.error = error
+            await self._store.update_task(task)
+            self._running_tasks.pop(task_id, None)
         _log.info(
             f"任务完成: id={task_id[:12]}.. status={status.value} "
             f"result_len={len(result or '')}"
@@ -113,15 +120,21 @@ class TaskManager:
 
     async def cancel_task(self, task_id: str) -> bool:
         """取消一个 pending 或 running 的任务。"""
-        task = self._store.get_task(task_id)
-        if task is None:
-            return False
-        if task.status not in TaskStatus.active():
-            _log.warning(f"任务 {task_id[:12]}.. 当前状态 {task.status.value} 不可取消")
-            return False
+        runner = None
+        async with self._status_lock:
+            task = self._store.get_task(task_id)
+            if task is None:
+                return False
+            if task.status not in TaskStatus.active():
+                _log.warning(f"任务 {task_id[:12]}.. 当前状态 {task.status.value} 不可取消")
+                return False
 
-        # 如果有 asyncio.Task 在运行，取消它
-        runner = self._running_tasks.pop(task_id, None)
+            runner = self._running_tasks.pop(task_id, None)
+            task.status = TaskStatus.CANCELLED
+            task.finished_at = time.time()
+            task.error = "用户取消"
+            await self._store.update_task(task)
+
         if runner is not None and not runner.done():
             runner.cancel()
             try:
@@ -129,10 +142,6 @@ class TaskManager:
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
 
-        task.status = TaskStatus.CANCELLED
-        task.finished_at = time.time()
-        task.error = "用户取消"
-        await self._store.update_task(task)
         _log.info(f"任务已取消: id={task_id[:12]}..")
         return True
 
@@ -151,30 +160,31 @@ class TaskManager:
         cutoff = now - lost_detection_minutes * 60
         count = 0
 
-        for tid, t in self._store.all_tasks().items():
-            if t.status not in TaskStatus.active():
-                continue
+        async with self._status_lock:
+            for tid, t in self._store.all_tasks().items():
+                if t.status not in TaskStatus.active():
+                    continue
 
-            # 跳过仍在本进程运行的任务
-            runner = self._running_tasks.get(tid)
-            if runner is not None and not runner.done():
-                continue
+                # 跳过仍在本进程运行的任务
+                runner = self._running_tasks.get(tid)
+                if runner is not None and not runner.done():
+                    continue
 
-            # RUNNING：用 started_at，PENDING：用 created_at
-            ts = t.started_at if t.status == TaskStatus.RUNNING else t.created_at
-            if ts is None or ts > cutoff:
-                continue
+                # RUNNING：用 started_at，PENDING：用 created_at
+                ts = t.started_at if t.status == TaskStatus.RUNNING else t.created_at
+                if ts is None or ts > cutoff:
+                    continue
 
-            old_status = t.status.value
-            t.status = TaskStatus.LOST
-            t.finished_at = now
-            t.error = "任务丢失（进程崩溃或重启导致）"
-            await self._store.update_task(t)
-            count += 1
-            _log.warning(
-                f"任务标记为丢失: id={tid[:12]}.. "
-                f"之前状态={old_status} 检测阈值={lost_detection_minutes}分钟"
-            )
+                old_status = t.status.value
+                t.status = TaskStatus.LOST
+                t.finished_at = now
+                t.error = "任务丢失（进程崩溃或重启导致）"
+                await self._store.update_task(t)
+                count += 1
+                _log.warning(
+                    f"任务标记为丢失: id={tid[:12]}.. "
+                    f"之前状态={old_status} 检测阈值={lost_detection_minutes}分钟"
+                )
 
         if count:
             _log.info(f"本次检测到 {count} 个丢失任务")
@@ -250,6 +260,10 @@ class CronJobManager:
             tools_allow=tools_allow,
         )
         recalculate_next_run(job)
+        if job.next_run_at is None:
+            raise ValueError(
+                f"定时任务 {name} 调度表达式无效: cron={cron_expression!r} at={at}"
+            )
         await self._store.add_job(job)
         schedule_desc = f"at={at}" if at is not None else f"cron={cron_expression}"
         _log.info(

@@ -38,14 +38,21 @@ class ApprovalManager:
         )
 
     def check_whitelist(self, tool_name: str, target: str) -> bool:
+        if not target:
+            return False
         if tool_name in ("read_file", "write_file", "edit_file", "apply_patch"):
             for entry in self._whitelist.get("file_paths", []):
                 p = entry["path"]
+                if not p:
+                    continue
                 if target == p or target.startswith(p + "/"):
                     return True
             return False
         if tool_name == "exec":
-            cmd_name = os.path.basename(target.split()[0])
+            parts = target.split()
+            if not parts:
+                return False
+            cmd_name = os.path.basename(parts[0])
             for entry in self._whitelist.get("exec_commands", []):
                 if cmd_name == entry["command"]:
                     return True
@@ -53,17 +60,27 @@ class ApprovalManager:
         return False
 
     def add_to_whitelist(self, tool_name: str, target: str):
+        if not target:
+            _log.warning("add_to_whitelist 收到空 target: tool=%s", tool_name)
+            return
         now = time.strftime("%Y-%m-%dT%H:%M:%S")
         if tool_name in ("read_file", "write_file", "edit_file", "apply_patch"):
             self._whitelist.setdefault("file_paths", [])
             if not any(e["path"] == target for e in self._whitelist["file_paths"]):
                 self._whitelist["file_paths"].append({"path": target, "approved_at": now})
         elif tool_name == "exec":
-            cmd_name = os.path.basename(target.split()[0])
+            parts = target.split()
+            if not parts:
+                _log.warning("add_to_whitelist exec 命令为空: target=%s", target)
+                return
+            cmd_name = os.path.basename(parts[0])
             self._whitelist.setdefault("exec_commands", [])
             if not any(e["command"] == cmd_name for e in self._whitelist["exec_commands"]):
                 self._whitelist["exec_commands"].append({"command": cmd_name, "approved_at": now})
-        self._save_whitelist()
+        try:
+            self._save_whitelist()
+        except Exception as e:
+            _log.error("保存审批白名单失败: %s", e)
 
     # ── Approval flow ──
 
@@ -78,7 +95,7 @@ class ApprovalManager:
         if not self._admin_ids:
             return "deny"
 
-        admin_id = chat_id
+        admin_id = next(iter(self._admin_ids))
         session_key = f"approval:{chat_id}:{tool_name}:{uuid.uuid4().hex[:8]}"
         future = asyncio.get_running_loop().create_future()
         self._pending[session_key] = future

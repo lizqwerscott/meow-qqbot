@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -44,10 +45,10 @@ class NicknameManager:
         )
 
     async def flush_save(self) -> None:
-        pass
+        await self._save_auto_nicknames()
 
-    def save_auto(self) -> None:
-        self._save_auto_nicknames()
+    async def save_auto(self) -> None:
+        await self._save_auto_nicknames()
 
     # ── 核心 API ──
 
@@ -92,7 +93,7 @@ class NicknameManager:
                 merged[uid] = aliases[-1] if aliases else uid
         return merged
 
-    def collect(self, user_id: str, username: str) -> None:
+    async def collect(self, user_id: str, username: str) -> None:
         if not user_id or not username:
             return
         if user_id == self.bot_id:
@@ -105,12 +106,12 @@ class NicknameManager:
             aliases.append(username)
             self.auto_nicknames[user_id] = {"aliases": aliases, "updated_at": time.time()}
             _log.debug(f"已采集昵称: {username} ({user_id[:12]}..)")
-            self._save_auto_nicknames()
+            await self._save_auto_nicknames()
         elif aliases and aliases[-1] != username:
             aliases.remove(username)
             aliases.append(username)
             self.auto_nicknames[user_id] = {"aliases": aliases, "updated_at": time.time()}
-            self._save_auto_nicknames()
+            await self._save_auto_nicknames()
 
     # ── 内部文件操作 ──
 
@@ -143,13 +144,18 @@ class NicknameManager:
                 _log.error(f"加载自动昵称文件失败: {e}")
         return {}
 
-    def _save_auto_nicknames(self) -> None:
+    async def _save_auto_nicknames(self) -> None:
         path = "data/nicknames.json"
+        data = json.dumps(self.auto_nicknames, ensure_ascii=False, indent=2)
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(self.auto_nicknames, f, ensure_ascii=False, indent=2)
+            await asyncio.to_thread(self._write_file, path, data)
         except Exception as e:
             _log.error(f"保存自动昵称失败: {e}")
+
+    @staticmethod
+    def _write_file(path: str, data: str) -> None:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(data)
 
 

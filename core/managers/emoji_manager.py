@@ -22,8 +22,6 @@ import hashlib
 import json
 import logging
 import re
-import time
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -184,29 +182,29 @@ class EmojiManager:
         is_gif = ext == ".gif"
 
         file_path = self._emoji_dir / f"{emoji_hash}{ext}"
-        file_path.write_bytes(image_bytes)
+        await asyncio.to_thread(file_path.write_bytes, image_bytes)
 
-        auto_summary, auto_desc, auto_tags = "", "", []
+        auto_summary, auto_desc, auto_tags = "", "", ""
+        temp_paths: list = []
         if self._multimodal:
             try:
                 if is_gif:
-                    # GIF: 用静态帧做 VLM 分析
                     static_bytes = ImageUtils.gif_2_static_image(image_bytes)
                     analysis_path = file_path.with_suffix(".analysis.jpg")
-                    analysis_path.write_bytes(static_bytes)
+                    await asyncio.to_thread(analysis_path.write_bytes, static_bytes)
                     processed_path = self._maybe_normalize_image(analysis_path)
+                    temp_paths = [analysis_path, processed_path]
                 else:
                     processed_path = self._maybe_normalize_image(file_path)
+                    temp_paths = [processed_path]
 
                 auto_summary, auto_desc, auto_tags = await self._multimodal.analyze_emoji(
                     str(processed_path), is_gif=is_gif
                 )
 
-                # 清理 GIF 分析产生的临时文件
-                if is_gif:
-                    for p in [analysis_path, processed_path]:
-                        if p != file_path and p.exists():
-                            p.unlink()
+                for p in temp_paths:
+                    if p != file_path and p.exists():
+                        p.unlink()
 
                 _log.info(
                     f"VLM 表情分析完成 [{emoji_hash[:12]}..]: "
@@ -307,10 +305,10 @@ class EmojiManager:
 
         try:
             if is_gif:
-                image_bytes = file_path.read_bytes()
+                image_bytes = await asyncio.to_thread(file_path.read_bytes)
                 static_bytes = ImageUtils.gif_2_static_image(image_bytes)
                 analysis_path = file_path.with_suffix(".analysis.jpg")
-                analysis_path.write_bytes(static_bytes)
+                await asyncio.to_thread(analysis_path.write_bytes, static_bytes)
                 processed_path = self._maybe_normalize_image(analysis_path)
                 self._multimodal.invalidate_cache(str(processed_path), "emoji")
                 auto_summary, auto_desc, auto_tags = await self._multimodal.analyze_emoji(
@@ -394,6 +392,8 @@ class EmojiManager:
         }
 
     def find_by_hash(self, partial_hash: str) -> Optional[dict]:
+        if not partial_hash:
+            return None
         records = self._storage.list_all()
         for e in records:
             if e["hash"] == partial_hash:
