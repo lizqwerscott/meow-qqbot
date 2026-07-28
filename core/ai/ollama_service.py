@@ -4,6 +4,8 @@
 支持工具调用、多模态视觉、自定义 host 和 api_key。
 """
 
+import asyncio
+import json
 import logging
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -87,7 +89,9 @@ class OllamaService:
             usage = self._build_usage(response)
             return content, usage
         except Exception as e:
-            _log.error(f"Ollama 请求失败: {e}")
+            if isinstance(e, asyncio.CancelledError):
+                raise
+            _log.error(f"Ollama 请求失败 [{model_to_use}]: {e}")
             return None, None
 
     @staticmethod
@@ -131,11 +135,14 @@ class OllamaService:
         model_to_use = model or self.model
         try:
             from core.tools.tool_loop import ensure_messages_consistent
-            ensure_messages_consistent(messages)
+
+            msgs = list(messages)
+            self._normalize_vision_messages(msgs)
+            ensure_messages_consistent(msgs)
 
             kwargs: Dict[str, Any] = dict(
                 model=model_to_use,
-                messages=list(messages),
+                messages=msgs,
                 options={
                     "temperature": temperature if temperature is not None else self.temperature,
                     "num_predict": max_tokens if max_tokens is not None else self.max_tokens,
@@ -145,17 +152,30 @@ class OllamaService:
             if tools:
                 kwargs["tools"] = tools
 
-            response = await self._client.chat(**kwargs)
-            message = response.get("message", {})
+            body = dict(kwargs)
+            raw_resp = await self._client._request_raw("POST", "/api/chat", json=body)
+            data: dict = raw_resp.json()
+            message = data.get("message", {})
             content = message.get("content")
             raw_tool_calls = message.get("tool_calls")
+            if raw_tool_calls:
+                for tc in raw_tool_calls:
+                    fn = tc.get("function", {})
+                    args = fn.get("arguments")
+                    if isinstance(args, str):
+                        try:
+                            fn["arguments"] = json.loads(args)
+                        except json.JSONDecodeError:
+                            fn["arguments"] = {}
 
-            usage = self._build_usage(response)
+            usage = self._build_usage(data)
 
             result = _ChatMessage(content=content, raw_tool_calls=raw_tool_calls)
             return result, usage
         except Exception as e:
-            _log.error(f"Ollama 请求失败（带工具）: {e}")
+            if isinstance(e, asyncio.CancelledError):
+                raise
+            _log.error(f"Ollama 请求失败（带工具） [{model_to_use}]: {e}")
             return None, None
 
     def _build_usage(self, response: dict) -> Optional[Dict[str, int]]:
@@ -196,22 +216,22 @@ class _ChatMessage:
         result = []
         for i, tc in enumerate(self._raw_tool_calls):
             fn = tc.get("function", {})
-            args = fn.get("arguments", {})
+            args = fn.get("arguments")
+            if args is None:
+                args = {}
             if isinstance(args, dict):
-                import json
-                args = json.dumps(args, ensure_ascii=False)
+                try:
+                    args = json.dumps(args, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    args = "{}"
+            elif not isinstance(args, str):
+                args = str(args)
             result.append(
                 ChatCompletionMessageToolCall(
                     id=tc.get("id", f"call_{i}"),
                     type="function",
-                    function=Function(name=fn.get("name", ""), arguments=args),
+                    function=Function(name=fn.get("name", "") or "unknown_tool", arguments=args),
                 )
             )
         self._cached = result
         return self._cached
-
-    def model_dump(self) -> dict:
-        return {
-            "content": self.content,
-            "tool_calls": [tc.model_dump() for tc in self.tool_calls] if self.tool_calls else None,
-        }

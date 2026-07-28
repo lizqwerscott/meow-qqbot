@@ -5,6 +5,7 @@
 - 复杂任务：标记 [ESCALATE] 后转发主模型
 """
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -143,6 +144,8 @@ class RouterModel:
                 return RouteDecision("direct", text, latency)
 
         except Exception as e:
+            if isinstance(e, asyncio.CancelledError):
+                raise
             _log.warning(f"路由模型请求失败，fallback 主模型: {e}")
             return RouteDecision("escalate", content, 0.0)
 
@@ -173,5 +176,7 @@ class RouterModel:
             )
             return (resp.choices[0].message.content or "").strip()
         except Exception as e:
+            if isinstance(e, asyncio.CancelledError):
+                raise
             _log.warning(f"RouterModel simple_chat 失败: {e}")
             return ""

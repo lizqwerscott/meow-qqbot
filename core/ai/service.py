@@ -95,15 +95,17 @@ class AIService:
             else:
                 return None, usage
         except Exception as e:
+            if isinstance(e, asyncio.CancelledError):
+                raise
             err_str = str(e)
             if "429" in err_str or "rate_limit" in err_str.lower():
-                _log.warning("AI 请求被限流: %s", err_str)
+                _log.warning("AI 请求被限流 [%s]: %s", model_to_use, err_str)
             elif "502" in err_str or "503" in err_str or "service_unavailable" in err_str.lower():
-                _log.error("AI 服务不可用: %s", err_str)
+                _log.error("AI 服务不可用 [%s]: %s", model_to_use, err_str)
             elif "timeout" in err_str.lower():
-                _log.warning("AI 请求超时: %s", err_str)
+                _log.warning("AI 请求超时 [%s]: %s", model_to_use, err_str)
             else:
-                _log.error("AI 请求失败: %s", err_str)
+                _log.error("AI 请求失败 [%s]: %s", model_to_use, err_str)
             return None, None
 
     def _is_reasoning_model(self, model: str) -> bool:
@@ -129,10 +131,12 @@ class AIService:
         try:
             # 最终防线：清理孤立的 tool_calls，防止重启恢复后历史不完整导致 API 400
             from core.tools.tool_loop import ensure_messages_consistent
-            ensure_messages_consistent(messages)
+
+            msgs = list(messages)
+            ensure_messages_consistent(msgs)
 
             kwargs: Dict[str, Any] = dict(
-                messages=messages,
+                messages=msgs,
                 model=model_to_use,
                 max_tokens=max_tokens_to_use,
             )
@@ -161,13 +165,15 @@ class AIService:
                 return response.choices[0].message, usage
             return None, usage
         except Exception as e:
+            if isinstance(e, asyncio.CancelledError):
+                raise
             err_str = str(e)
             if "429" in err_str or "rate_limit" in err_str.lower():
-                _log.warning("AI 请求被限流（带工具）: %s", err_str)
+                _log.warning("AI 请求被限流（带工具） [%s]: %s", model_to_use, err_str)
             elif "502" in err_str or "503" in err_str or "service_unavailable" in err_str.lower():
-                _log.error("AI 服务不可用（带工具）: %s", err_str)
+                _log.error("AI 服务不可用（带工具） [%s]: %s", model_to_use, err_str)
             elif "timeout" in err_str.lower():
-                _log.warning("AI 请求超时（带工具）: %s", err_str)
+                _log.warning("AI 请求超时（带工具） [%s]: %s", model_to_use, err_str)
             else:
-                _log.error("AI 请求失败（带工具）: %s", err_str)
+                _log.error("AI 请求失败（带工具） [%s]: %s", model_to_use, err_str)
             return None, None
