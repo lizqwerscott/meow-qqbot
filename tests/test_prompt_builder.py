@@ -4,16 +4,7 @@
 这是少数情况下测试私有函数是合理的，因为它是纯 PII 过滤逻辑。
 """
 
-import re
-
-from core.engine.prompt_builder import _DIRTY_PATTERNS, _DIRTY_REGEX
-
-
-def _is_dirty(text: str) -> bool:
-    for p in _DIRTY_PATTERNS:
-        if p in text:
-            return True
-    return bool(_DIRTY_REGEX.search(text))
+from core.engine.dynamic_context.memory import _DIRTY_PATTERNS, _DIRTY_REGEX, _is_dirty
 
 
 # ── 内部模式 ──

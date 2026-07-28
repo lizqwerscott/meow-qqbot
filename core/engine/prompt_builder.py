@@ -8,13 +8,14 @@
 
 import json
 import logging
-import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, List, Optional, Tuple
 
 from core.message import InputMessage
 from core.tools.policy import build_tools, ChatContext, format_task_tool_descriptions
+
+from .dynamic_context import DynamicContextBuilder
 
 _log = logging.getLogger(__name__)
 
@@ -56,27 +57,6 @@ HEARTBEAT_BEHAVIOR_BLOCK = (
     "- 如果没有需要关注的事项，调用 heartbeat_respond(notify=false) 静默结束"
 )
 
-_DIRTY_PATTERNS = (
-    "<available_skills", "<skill>", "<description>",
-    "<name>", "【工具配合原则】", "【记忆系统】",
-    "--- 技能系统 ---", "工具配合原则",
-)
-
-_DIRTY_REGEX = re.compile(
-    r"(?:\b\d{17}[\dXx]\b)"        # 中国身份证
-    r"|(?:\b1[3-9]\d{9}\b)"        # 手机号
-    r"|(?:\b[\w.-]+@[\w.-]+\.\w{2,}\b)",  # 邮箱
-)
-
-
-def _is_dirty(text: str) -> bool:
-    """检查文本是否包含脏数据（内部模式或 PII）。"""
-    for p in _DIRTY_PATTERNS:
-        if p in text:
-            return True
-    return bool(_DIRTY_REGEX.search(text))
-
-
 class PromptBuilder:
     """AI 请求消息组装器。
 
@@ -107,6 +87,20 @@ class PromptBuilder:
         self._system_events = ctx.mgmt.system_events
         self._tts_service = None
         self._deps = deps
+        self._dynamic_ctx_builder = DynamicContextBuilder(
+            hindsight=self.hindsight,
+            search_top_k=self._search_top_k,
+            learners=self.learners,
+            archive_manager=self._archive_manager,
+            system_events=self._system_events,
+            skill_managers=self._skill_managers,
+            workspace_manager=self._workspace_manager,
+            perm=self._perm,
+            admin_ids=self._admin_ids,
+            nm=self._nm,
+            bot_id=self._bot_id,
+            emoji_manager=self.emoji_manager,
+        )
 
     async def build(
         self,
@@ -206,159 +200,16 @@ class PromptBuilder:
         messages: List[dict] = [{"role": "system", "content": static_prompt}]
         messages.extend(history)
 
-        # ── 5. 动态上下文（末尾单独一个 system 消息） ──
-        dynamic_parts: List[str] = []
-
-        # 系统事件（会话外部感知上下文，最优先显示）
-        if self._system_events:
-            events = self._system_events.peek_and_snapshot(chat_id)
-            if events:
-                lines = []
-                for e in events:
-                    ts = time.strftime("%H:%M:%S", time.localtime(e.ts))
-                    lines.append(f"System: [{ts}] {e.text}")
-                lines.append("")
-                lines.append("处理完成后，如果没有需要关注的事项，使用 heartbeat_respond(notify=false) 或回复 NO_REPLY 静默结束。如果有需要通知用户的事项，使用 heartbeat_respond(notify=true, notification_text=\"...\")。仅回复文本时，非 NO_REPLY 的内容会被转发给用户。")
-                dynamic_parts.append("【系统事件】\n" + "\n".join(lines))
-
-        # send_message 工具投递提示
-        dynamic_parts.append(
-            "【消息投递】你的工具调用之间的文本正常展示给用户。"
-            "如果需要在最终回复中使用 send_message 工具，send_message 投递后你的后续文本将不再自动发送。"
-        )
-
-        # 技能条目列表
-        if self._skill_managers and self._skill_managers.has_skills:
-            entries = self._skill_managers.get_skill_entries_block()
-            if entries:
-                dynamic_parts.append(entries)
-
-        # 记忆上下文
-        memory_text = await self._build_memory_context(
+        # ── 5. 动态上下文（委托给 DynamicContextBuilder） ──
+        dynamic_text = await self._dynamic_ctx_builder.build(
+            chat_id=chat_id,
+            is_group=is_group,
             sender_id=sender_id,
             input_message=input_message,
+            has_emojis=has_emojis,
+            has_users=has_users,
         )
-        if memory_text:
-            dynamic_parts.append(memory_text)
-
-        # 学习上下文（社群俚语词典）
-        if self.learners:
-            try:
-                learning_ctx = await self.learners.enrich_prompt_context(
-                    chat_id=chat_id,
-                    sender_id=sender_id,
-                    message_text=input_message.content,
-                )
-                if learning_ctx:
-                    dynamic_parts.append(learning_ctx)
-            except Exception as e:
-                _log.warning("学习上下文注入失败 [%s..]: %s", chat_id[:12], e)
-
-        # 归档摘要注入（归档后首次 build 时仅注入一次）
-        if self._archive_manager:
-            try:
-                summary_text = self._archive_manager.consume_summary(chat_id)
-            except Exception as e:
-                _log.warning("归档摘要注入失败 [%s..]: %s", chat_id[:12], e)
-                summary_text = None
-            if summary_text:
-                _log.info(
-                    "注入归档摘要 [%s..] (%d 字符)",
-                    chat_id[:12], len(summary_text),
-                )
-                dynamic_parts.append(
-                    "以下内容来自过去几天的对话记录，"
-                    "帮助你了解之前聊过什么：\n" + summary_text
-                )
-
-        # 当前时间
-        _tz = timezone(timedelta(hours=8))
-        now = datetime.now(_tz)
-        weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-        time_info = now.strftime(f"%Y-%m-%d %H:%M:%S ({weekday_names[now.weekday()]})")
-        dynamic_parts.append(f"当前时间: {time_info} (CST/UTC+8)")
-        dynamic_parts.append("注意：创建定时任务时请使用北京时间 (CST/UTC+8)，不要使用 UTC。")
-
-        # 工作区上下文
-        _admin_chat = False
-        if self._workspace_manager:
-            ws_type = "群聊" if is_group else "私聊"
-            if not is_group:
-                if self._perm:
-                    role = self._perm.get_user_role(sender_id)
-                    _admin_chat = self._perm.is_admin_role(role)
-                else:
-                    _admin_chat = sender_id in self._admin_ids
-            if _admin_chat:
-                ws_root = str(self._workspace_manager.root_dir())
-                dynamic_parts.append(
-                    f"管理员工作区: {ws_root}/\n"
-                    "目录：HEARTBEAT.md（可选）| groups/{群聊ID}/files/ | private/{私聊ID}/files/\n"
-                    "\n"
-                    "你处于管理员模式，文件/搜索工具可访问整个 workspaces/ 目录。\n"
-                    "路径使用相对于工作区根目录的相对路径（如 'HEARTBEAT.md'、'groups/xxx/files/note.txt'）。\n"
-                    "访问 workspaces/ 外的文件用 .. 路径越界，系统会发送审批请求。\n"
-                    "使用 list_dir 可浏览 groups/ 和 private/ 查看其他会话的工作区。"
-                )
-            else:
-                sandbox = str(self._workspace_manager.sandbox_dir(is_group, chat_id))
-                dynamic_parts.append(f"当前{ws_type}工作区: {sandbox}/")
-                dynamic_parts.append(
-                    "你的文件工作区位于上述 files/ 目录下。"
-                    "文件工具 (read_file / write_file / edit_file / apply_patch / list_dir) 和搜索工具 (search_content / find_files) 均限当前工作区内使用。"
-                    "文件路径请使用相对于工作区的相对路径（例如 'memo.txt'），不要使用绝对路径。"
-                )
-
-        # HEARTBEAT.md（管理员的私聊专属）
-        if self._workspace_manager and _admin_chat:
-            hb_path = self._workspace_manager.heartbeat_path()
-            if hb_path.exists():
-                dynamic_parts.append(
-                    "【心跳配置 (HEARTBEAT.md)】\n"
-                    "心跳配置文件存在于 workspaces/HEARTBEAT.md，"
-                    "你可以使用 read_file 工具查看和 write_file 工具修改。"
-                    "心跳执行时 AI 会自主读取此文件。"
-                )
-            else:
-                dynamic_parts.append(
-                    "【心跳配置 (HEARTBEAT.md)】\n"
-                    "你可以在 workspaces/ 根目录创建 HEARTBEAT.md 来定义心跳检查清单，"
-                    "文件不存在时心跳自动跳过。使用 write_file 工具写入 HEARTBEAT.md 即可。"
-                )
-
-        # 表情标签列表
-        if has_emojis and self.emoji_manager:
-            try:
-                tags = self.emoji_manager.get_all_tags()
-                if tags:
-                    dynamic_parts.append("可用表情标签：" + "、".join(tags))
-            except Exception as e:
-                _log.warning("表情标签获取失败: %s", e)
-
-        # 自身 ID 映射
-        if is_group and self._bot_id:
-            dynamic_parts.append(f"你的 ID: {self._bot_id}（群友 @ 你时显示为 @{self._bot_id}）")
-
-        # 群友列表
-        if has_users and self._nm:
-            try:
-                user_lines = ["【群友列表】"]
-                for uid, aliases in sorted(self._nm.iter_users(), key=lambda x: "，".join(x[1])):
-                    alias_str = "，".join(aliases)
-                    user_lines.append(f"- {uid}（{alias_str}）")
-                if user_lines:
-                    dynamic_parts.append("\n".join(user_lines))
-            except Exception as e:
-                _log.warning("群友列表构建失败 [%s..]: %s", chat_id[:12], e)
-
-        if dynamic_parts:
-            dynamic_text = "\n\n".join(dynamic_parts)
-            if len(dynamic_text) > 4000:
-                _log.warning(
-                    "动态 system prompt 过长 [%s..]: %d 字符，已截断",
-                    chat_id[:12], len(dynamic_text),
-                )
-                dynamic_text = dynamic_text[:4000]
+        if dynamic_text:
             messages.append({
                 "role": "system",
                 "content": dynamic_text,
@@ -544,69 +395,6 @@ class PromptBuilder:
 
     async def build_memory_context(self, sender_id: str, input_message: InputMessage) -> str:
         """构建记忆上下文字符串（公开，供 ToolLoop Queue Steering 使用）。"""
-        return await self._build_memory_context(sender_id, input_message)
-
-    async def _build_memory_context(
-        self,
-        sender_id: str,
-        input_message: InputMessage,
-    ) -> str:
-        """查询 Hindsight 记忆，返回格式化的上下文字符串，或空字符串。"""
-        if not self.hindsight:
-            return ""
-
-        query = input_message.content.strip()
-        if not query:
-            return ""
-
-        try:
-            result = await self.hindsight.search(
-                user_id=sender_id,
-                query=query,
-                top_k=self._search_top_k,
-                include_profile=True,
-            )
-
-            episodes = result.get("episodes", [])
-            profiles = result.get("profiles", [])
-
-            if not episodes and not profiles:
-                return ""
-
-            parts = ["--- 相关记忆 ---"]
-
-            if profiles:
-                for p in profiles[:1]:
-                    pd = p.get("profile_data", {})
-                    if isinstance(pd, dict):
-                        for k, v in pd.items():
-                            if isinstance(v, str) and _is_dirty(v):
-                                continue
-                            parts.append(f"- [{k}]: {str(v)[:150]}")
-
-            if episodes:
-                count = 0
-                for e in episodes:
-                    if count >= 3:
-                        break
-                    summary = (e.get("summary", "") or e.get("episode", "")).strip()
-                    if not summary:
-                        continue
-                    if _is_dirty(summary):
-                        continue
-                    parts.append(f"- {summary[:150]}")
-                    count += 1
-
-            if len(parts) == 1:
-                return ""
-
-            parts.append("--- 相关记忆结束 ---")
-
-            _log.info(
-                f"自动记忆注入: sender={sender_id[:16]}.. "
-                f"注入{len(episodes)}条经历, {len(profiles)}条画像"
-            )
-            return "\n".join(parts)
-        except Exception as e:
-            _log.warning(f"自动记忆注入失败: {e!r}")
-            return ""
+        return await self._dynamic_ctx_builder.memory_builder.build_memory_context(
+            sender_id, input_message,
+        )
