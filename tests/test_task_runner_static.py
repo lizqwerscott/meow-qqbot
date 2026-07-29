@@ -3,7 +3,6 @@
 from core.tasks.models import CronJob, SessionMode
 from core.tasks.runner import BackgroundTaskRunner
 
-
 # ── _resolve_session_id ──
 
 
@@ -14,13 +13,19 @@ def test_session_id_isolated_default():
 
 
 def test_session_id_custom_with_id():
-    job = CronJob(name="test", session_mode=SessionMode.CUSTOM.value, custom_session_id="my_session")
+    job = CronJob(
+        name="test",
+        session_mode=SessionMode.CUSTOM.value,
+        custom_session_id="my_session",
+    )
     result = BackgroundTaskRunner._resolve_session_id(job, "task_001")
     assert result == "cron:my_session"
 
 
 def test_session_id_custom_without_id():
-    job = CronJob(name="test", session_mode=SessionMode.CUSTOM.value, custom_session_id=None)
+    job = CronJob(
+        name="test", session_mode=SessionMode.CUSTOM.value, custom_session_id=None
+    )
     result = BackgroundTaskRunner._resolve_session_id(job, "task_001")
     assert result == "task:task_001"
 
@@ -87,3 +92,46 @@ def test_event_target_fallback_isolated():
     job = CronJob(name="test")
     result = BackgroundTaskRunner._resolve_event_target(job, "task_002")
     assert result == "task:task_002"
+
+
+# ── session_target ──
+
+
+def test_session_target_defaults_to_session_mode():
+    """session_target 为空时继承 session_mode。"""
+    job = CronJob(name="test", session_mode="main", session_target="")
+    assert job.session_target == "main"
+
+
+def test_session_target_explicit():
+    """显式设置 session_target 独立于 session_mode。"""
+    job = CronJob(name="test", session_mode="isolated", session_target="main")
+    assert job.session_target == "main"
+
+
+def test_session_target_from_dict_missing_key():
+    """旧数据（无 session_target key）向下兼容。"""
+    d = {"name": "test", "session_mode": "main"}
+    job = CronJob.from_dict(d)
+    assert job.session_target == "main"
+
+
+def test_session_target_from_dict_explicit():
+    """新数据保留 session_target。"""
+    d = {"name": "test", "session_mode": "isolated", "session_target": "main"}
+    job = CronJob.from_dict(d)
+    assert job.session_target == "main"
+
+
+def test_session_target_from_dict_isolated_default():
+    """默认 isolated。"""
+    d = {"name": "test"}
+    job = CronJob.from_dict(d)
+    assert job.session_target == "isolated"
+
+
+def test_session_target_in_to_dict():
+    """to_dict 包含 session_target。"""
+    job = CronJob(name="test", session_target="main")
+    d = job.to_dict()
+    assert d.get("session_target") == "main"

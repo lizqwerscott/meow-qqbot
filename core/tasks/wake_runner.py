@@ -14,15 +14,19 @@ import logging
 import time
 from typing import Any, Callable, Optional
 
-from .wake_coalescer import (
-    PendingWake, WakeRunResult,
-    SOURCE_INTERVAL, SOURCE_MANUAL,
-    SOURCE_EXEC, SOURCE_CRON, SOURCE_TASK,
-    WakeTurnResult,
-)
+from .delivery_strategy import DeliveryStrategy
 from .preflight import PreflightContext, PreflightResult, run_preflight
 from .system_event_prompt import build_system_events_prompt
-from .delivery_strategy import DeliveryStrategy
+from .wake_coalescer import (
+    SOURCE_CRON,
+    SOURCE_EXEC,
+    SOURCE_INTERVAL,
+    SOURCE_MANUAL,
+    SOURCE_TASK,
+    PendingWake,
+    WakeRunResult,
+    WakeTurnResult,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -36,7 +40,11 @@ class WakeRunner:
         system_events: Any,
         cooldown: Any,
         delivery_strategies: Optional[dict[str, DeliveryStrategy]] = None,
-        active_hours: tuple[Optional[str], Optional[str], Optional[str]] = (None, None, None),
+        active_hours: tuple[Optional[str], Optional[str], Optional[str]] = (
+            None,
+            None,
+            None,
+        ),
         session_active_check: Optional[Callable[[str], bool]] = None,
         has_cron_check: Optional[Callable[[], bool]] = None,
         # C2: 新增跳过检查
@@ -96,14 +104,20 @@ class WakeRunner:
         if pf_result.skip_reason:
             _log.info(
                 "[WakeRunner] wake 跳过: source=%s intent=%s reason=%s",
-                pw.source, pw.intent, pf_result.skip_reason,
+                pw.source,
+                pw.intent,
+                pf_result.skip_reason,
             )
             return WakeRunResult(
                 status="skipped",
                 skip_reason=pf_result.skip_reason,
                 duration_ms=(time.time() - started) * 1000,
             )
-        _log.info("[WakeRunner] 预检通过: source=%s intent=%s → run_wake_turn()", pw.source, pw.intent)
+        _log.info(
+            "[WakeRunner] 预检通过: source=%s intent=%s → run_wake_turn()",
+            pw.source,
+            pw.intent,
+        )
 
         # ── 2. 系统事件注入 ──
 
@@ -119,14 +133,37 @@ class WakeRunner:
                 chat_id=chat_id,
                 system_event_key=event_key,
             )
+        elif pw.source == SOURCE_CRON and pw.session_key == "heartbeat:events":
+            # Main-session cron → system event path: 不加载聊天历史
+            messages, tools = (
+                await self._agent.prompt_builder.build_system_event_messages(
+                    prompt=pw.extra_prompt or "[系统事件]",
+                    system_event_key=event_key,
+                )
+            )
+        elif pw.source in (SOURCE_EXEC, SOURCE_TASK):
+            # exec/background → system event path: 不加载聊天历史
+            # AI 使用 heartbeat_respond(notify=true/false, deliver_to_user=...) 回应
+            messages, tools = (
+                await self._agent.prompt_builder.build_system_event_messages(
+                    prompt=pw.extra_prompt or "[系统事件]",
+                    system_event_key=event_key,
+                )
+            )
         else:
             event_text = build_system_events_prompt(self._events, event_key) or ""
             base_prompt = pw.extra_prompt
             if event_text:
-                base_prompt = f"{base_prompt}\n\n{event_text}" if base_prompt else event_text
-            is_group = (self._agent.context_manager.get_chat_type(pw.session_key)
-                        if self._agent.context_manager else False) or False
+                base_prompt = (
+                    f"{base_prompt}\n\n{event_text}" if base_prompt else event_text
+                )
+            is_group = (
+                self._agent.context_manager.get_chat_type(pw.session_key)
+                if self._agent.context_manager
+                else False
+            ) or False
             from core.message import InputMessage
+
             msg = InputMessage(
                 id=f"wake_{pw.session_key}_{int(time.time())}",
                 sender_id="system",
@@ -174,18 +211,30 @@ class WakeRunner:
 
         # ── 6. Delivery ──
         if turn_ok:
-            strategy = self._delivery.get(pw.source)
+            strategy_key = pw.source
+            if pw.source == SOURCE_CRON and pw.session_key == "heartbeat:events":
+                strategy_key = "cron-heartbeat"
+            elif pw.source in (SOURCE_EXEC, SOURCE_TASK):
+                strategy_key = "cron-heartbeat"
+            strategy = self._delivery.get(strategy_key)
             if strategy:
                 try:
                     await strategy.deliver(result, delivery_target=pw.delivery_target)
                 except Exception as e:
-                    _log.error("[WakeRunner] delivery 异常: source=%s strategy=%s err=%s", pw.source, type(strategy).__name__, e)
+                    _log.error(
+                        "[WakeRunner] delivery 异常: source=%s strategy=%s err=%s",
+                        pw.source,
+                        type(strategy).__name__,
+                        e,
+                    )
 
         duration = (time.time() - started) * 1000
         status = "ran" if turn_ok else "failed"
         _log.info(
             "[WakeRunner] wake 完成: source=%s status=%s duration=%.0fms",
-            pw.source, status, duration,
+            pw.source,
+            status,
+            duration,
         )
         return WakeRunResult(
             status=status,

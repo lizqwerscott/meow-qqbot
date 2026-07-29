@@ -7,6 +7,13 @@ uv sync               # install deps (Python 3.11+)
 uv run python main.py # run the bot
 uv add <package>      # add a dependency
 uv run <script.py>    # run any script in the venv
+
+## Formatting
+
+```bash
+uv run isort <file>   # sort imports
+uv run black <file>   # format code
+```
 ```
 
 ## Entrypoint & Architecture

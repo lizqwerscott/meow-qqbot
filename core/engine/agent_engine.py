@@ -15,14 +15,13 @@ import time
 from collections import OrderedDict
 from typing import Any, Callable, List, Optional, Set
 
-from core.managers.cost_tracker import CostTracker
-from core.managers.emoji_manager import EmojiManager
-from core.message import InputMessage, MessageType
-from core.learners.base import sanitize_for_learners
-
 from core.engine.context import EngineContext
 from core.engine.prompt_builder import PromptBuilder
+from core.learners.base import sanitize_for_learners
+from core.managers.cost_tracker import CostTracker
+from core.managers.emoji_manager import EmojiManager
 from core.managers.session_manager import SessionTaskManager
+from core.message import InputMessage, MessageType
 from core.tasks.wake_coalescer import WakeTurnResult
 from core.tools.tool_loop import ToolLoop
 
@@ -77,6 +76,7 @@ class AgentEngine:
 
         # ── Session 模型绑定 ──
         from core.managers.session_binding import SessionBindingManager
+
         self._session_binding = SessionBindingManager()
 
         # ── 消息去重 ──
@@ -145,20 +145,27 @@ class AgentEngine:
     def add_message_hook(self, hook, priority: int = 100) -> None:
         self._message_hooks.append((priority, hook))
         self._message_hooks.sort(key=lambda x: x[0])
-        _log.debug(f"消息钩子已注册 (priority={priority}, 共 {len(self._message_hooks)} 个)")
+        _log.debug(
+            f"消息钩子已注册 (priority={priority}, 共 {len(self._message_hooks)} 个)"
+        )
 
     def remove_message_hook(self, hook) -> None:
         before = len(self._message_hooks)
-        self._message_hooks[:] = [(p, h) for p, h in self._message_hooks if h is not hook]
+        self._message_hooks[:] = [
+            (p, h) for p, h in self._message_hooks if h is not hook
+        ]
         if len(self._message_hooks) < before:
             _log.debug(f"消息钩子已注销 ({len(self._message_hooks)} 个)")
 
     def _register_builtin_hooks(self) -> None:
         from core.engine.duplicate_reply import DuplicateReplyDetector
+
         self._duplicate_reply = DuplicateReplyDetector(self.context_manager)
         self.add_message_hook(self._duplicate_reply.handle_message, priority=100)
 
-    async def _run_hooks(self, input_message, reply_callback, get_user_nickname) -> None:
+    async def _run_hooks(
+        self, input_message, reply_callback, get_user_nickname
+    ) -> None:
         for _, hook in list(self._message_hooks):
             try:
                 if await hook(input_message, reply_callback, get_user_nickname):
@@ -254,14 +261,14 @@ class AgentEngine:
                     lines = text_for_learners.split("\n", 1)
                     for prefix in ("猫猫", f"@{self._bot_id}"):
                         if len(lines) == 2 and lines[1].strip().startswith(prefix):
-                            lines[1] = lines[1].strip()[len(prefix):].lstrip()
+                            lines[1] = lines[1].strip()[len(prefix) :].lstrip()
                             text_for_learners = "\n".join(lines)
                             break
                 else:
                     text_stripped = text_for_learners.strip()
                     for prefix in ("猫猫", f"@{self._bot_id}"):
                         if text_stripped.startswith(prefix):
-                            text_for_learners = text_stripped[len(prefix):].lstrip()
+                            text_for_learners = text_stripped[len(prefix) :].lstrip()
                             break
 
                 await self.learners.on_message(
@@ -285,6 +292,7 @@ class AgentEngine:
             input_message.model_chain = model_chain or None
 
             from core.rule_router import is_simple_enough_for_direct
+
             if tier == "simple" and is_simple_enough_for_direct(input_message.content):
                 _log.info(
                     f"规则路由直接回复 (tier={tier}): "
@@ -293,6 +301,7 @@ class AgentEngine:
                 simple_model = model_chain[0] if model_chain else None
                 if simple_model:
                     from core.rule_router import SIMPLE_SYSTEM_PROMPT as _simple_prompt
+
                     reply = await self.model_registry.simple_chat(
                         model_name=simple_model,
                         messages=[
@@ -303,8 +312,10 @@ class AgentEngine:
                     )
                     if reply:
                         await reply_callback(
-                            chat_id, reply,
-                            input_message.id, input_message.is_group,
+                            chat_id,
+                            reply,
+                            input_message.id,
+                            input_message.is_group,
                         )
                         return
                 # fallback: 走 ToolLoop
@@ -320,8 +331,10 @@ class AgentEngine:
                     f"content={input_message.content[:30]}"
                 )
                 await reply_callback(
-                    chat_id, decision.response,
-                    input_message.id, input_message.is_group,
+                    chat_id,
+                    decision.response,
+                    input_message.id,
+                    input_message.is_group,
                 )
                 return
             if decision.response != input_message.content:
@@ -355,7 +368,9 @@ class AgentEngine:
     # ── 辅助方法 ──
 
     @staticmethod
-    def _format_hindsight_content(content: str, sender_id: str, mentioned_ids: list, nm=None) -> str:
+    def _format_hindsight_content(
+        content: str, sender_id: str, mentioned_ids: list, nm=None
+    ) -> str:
         """将 ID 格式的消息格式化为 Hindsight 的 [ID(别名)] 格式。"""
         aliases = nm.get_aliases(sender_id) if nm else []
         alias_str = "，".join(aliases) if aliases else sender_id
@@ -382,9 +397,7 @@ class AgentEngine:
             while True:
                 try:
                     queue = await self.session_manager.get_queue(chat_id)
-                    input_message = await asyncio.wait_for(
-                        queue.get(), timeout=2.0
-                    )
+                    input_message = await asyncio.wait_for(queue.get(), timeout=2.0)
                 except asyncio.TimeoutError:
                     queue = await self.session_manager.get_queue(chat_id)
                     if queue.empty():
@@ -400,16 +413,20 @@ class AgentEngine:
                 except Exception as e:
                     _log.error(
                         "消费者处理消息 %s 时出错: %s",
-                        input_message.id, e, exc_info=True,
+                        input_message.id,
+                        e,
+                        exc_info=True,
                     )
                     try:
                         await self.context_manager.remove_last_user_message_if_async(
-                            input_message.chat_id, input_message.id,
+                            input_message.chat_id,
+                            input_message.id,
                         )
                     except Exception as rollback_err:
                         _log.warning(
                             "回滚上下文失败 [%s..]: %s",
-                            input_message.chat_id[:12], rollback_err,
+                            input_message.chat_id[:12],
+                            rollback_err,
                         )
                     try:
                         await reply_callback(
@@ -421,7 +438,8 @@ class AgentEngine:
                     except Exception as reply_err:
                         _log.warning(
                             "向用户发送错误回复失败 [%s..]: %s",
-                            chat_id[:12], reply_err,
+                            chat_id[:12],
+                            reply_err,
                         )
 
         await self.session_manager.mark_consumer_done(chat_id)
@@ -499,9 +517,7 @@ class AgentEngine:
         Returns:
             (result_text, error_text)
         """
-        _log.info(
-            f"开始后台任务: chat_id={chat_id[:20]}.. prompt={prompt[:60]}"
-        )
+        _log.info(f"开始后台任务: chat_id={chat_id[:20]}.. prompt={prompt[:60]}")
 
         # 用于捕获回复的容器
         captured_replies: list[str] = []
@@ -527,8 +543,11 @@ class AgentEngine:
         try:
             # 写入用户消息到上下文（便于查阅，但不作为历史注入）
             await self.context_manager.add_user_message_async(
-                chat_id, prompt, msg.id,
-                sender_id=sender_id, name="system",
+                chat_id,
+                prompt,
+                msg.id,
+                sender_id=sender_id,
+                name="system",
             )
 
             # 规则路由分级（同 _process_message 风格）
@@ -609,9 +628,10 @@ class AgentEngine:
             tools: 预制工具列表（由 WakeRunner 传入）
             system_event_key: 系统事件队列 key
         """
+        import time as _time
+
         from core.tools.impl.heartbeat import heartbeat_response as _heartbeat_response
         from core.tools.tool_loop import _is_silent_reply_text as _check_silent
-        import time as _time
 
         result = WakeTurnResult()
 
@@ -619,8 +639,11 @@ class AgentEngine:
             _log.warning("reply_callback 未注入，无法投递 AI 回应")
             return result
 
-        is_group = (self.context_manager.get_chat_type(session_key)
-                    if self.context_manager else False) or False
+        is_group = (
+            self.context_manager.get_chat_type(session_key)
+            if self.context_manager
+            else False
+        ) or False
 
         chat_id = session_key
         if source in ("interval", "manual") and not chat_id.startswith("heartbeat:"):
@@ -643,13 +666,17 @@ class AgentEngine:
             # 向后兼容：无预制 messages 时自己构建
             if messages is None:
                 if source in ("interval", "manual"):
-                    messages, tools = await self.prompt_builder.build_heartbeat_messages(
-                        prompt=extra_prompt,
-                        system_prompt_mode="minimal" if source == "interval" else "normal",
-                        session_mode="isolated",
-                        admin_chat_id=self._admin_id[0] if self._admin_id else "",
-                        chat_id=chat_id,
-                        system_event_key=system_event_key or "heartbeat:events",
+                    messages, tools = (
+                        await self.prompt_builder.build_heartbeat_messages(
+                            prompt=extra_prompt,
+                            system_prompt_mode=(
+                                "minimal" if source == "interval" else "normal"
+                            ),
+                            session_mode="isolated",
+                            admin_chat_id=self._admin_id[0] if self._admin_id else "",
+                            chat_id=chat_id,
+                            system_event_key=system_event_key or "heartbeat:events",
+                        )
                     )
                 else:
                     messages, tools = await self.prompt_builder.build(
@@ -669,10 +696,13 @@ class AgentEngine:
 
             async def _capture(chat_id, content, message_id, is_group):
                 captured.append(content)
+
             await asyncio.wait_for(
                 self.tool_loop.run(
-                    messages=messages, tools=tools or [],
-                    chat_id=chat_id, is_group=is_group,
+                    messages=messages,
+                    tools=tools or [],
+                    chat_id=chat_id,
+                    is_group=is_group,
                     reply_to=msg.id,
                     reply_callback=_capture,
                     sender_id="system",
@@ -689,6 +719,7 @@ class AgentEngine:
                 if text:
                     result.notification_text = text
                     result.should_notify = True
+                    result.deliver_to_user = wake_resp.get("deliver_to_user", "")
             else:
                 for reply in captured:
                     if not _check_silent(reply):
@@ -714,7 +745,8 @@ class AgentEngine:
     async def trigger_event_response(self, chat_id: str) -> None:
         """保留：由 WakeManager 调用，转向 run_wake_turn。"""
         await self.run_wake_turn(
-            source="system", intent="event",
+            source="system",
+            intent="event",
             session_key=chat_id,
         )
 
@@ -731,6 +763,7 @@ class AgentEngine:
         """保留兼容接口，转向 run_wake_turn。"""
         if chat_id is None:
             import time as _t
+
             chat_id = f"heartbeat:{int(_t.time())}"
 
         result = await self.run_wake_turn(

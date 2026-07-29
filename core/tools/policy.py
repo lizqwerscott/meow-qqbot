@@ -3,9 +3,9 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from core.tools.catalog import SECTIONS, PROFILES, CRON_ALLOWED, FEATURE_SECTION_MAP
-from core.tools.impl import registry
+from core.tools.catalog import CRON_ALLOWED, FEATURE_SECTION_MAP, PROFILES, SECTIONS
 from core.tools.deps import ToolDeps
+from core.tools.impl import registry
 
 
 @dataclass
@@ -32,7 +32,7 @@ def build_tools(
     """声明式工具选择管线。
 
     Args:
-        profile: 工具集模板名 ("normal" | "heartbeat" | "task")
+        profile: 工具集模板名 ("normal" | "heartbeat" | "cron" | "task")
         ctx: 聊天的功能存在性上下文
         role: 用户角色（从 PermissionManager 获取），用于权限过滤
         tools_allow: task 模式专用的工具白名单
@@ -92,11 +92,21 @@ def format_task_tool_descriptions(names: set[str]) -> str:
     """为 task profile 格式化工具描述文本"""
     lines = ["可用工具："]
     DEFAULT_ORDER = [
-        "announce", "search_user",
-        "memory", "mark_important",
-        "read_file", "write_file", "edit_file", "apply_patch", "list_dir",
-        "search_content", "find_files",
-        "exec", "view_skill", "execute_skill", "rescan_skills",
+        "announce",
+        "search_user",
+        "memory",
+        "mark_important",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "apply_patch",
+        "list_dir",
+        "search_content",
+        "find_files",
+        "exec",
+        "view_skill",
+        "execute_skill",
+        "rescan_skills",
     ]
     for name in DEFAULT_ORDER:
         if name in names:

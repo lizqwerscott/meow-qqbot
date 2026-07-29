@@ -22,21 +22,54 @@ import time
 from typing import Any, Callable, List, Optional
 
 from .models import CronJob, SessionMode, TaskRecord, TaskStatus
-from .wake_mode import WakeMode
+import core.tasks.wake_coalescer as _wake_coalescer
 
 # 安全黑名单（复用 SkillManagers 的配置）
-_DENIED_COMMANDS: frozenset = frozenset({
-    "rm", "chmod", "chown", "sudo", "su", "doas",
-    "dd", "mkfs", "fdisk", "parted", "mkswap",
-    "shutdown", "reboot", "poweroff", "halt", "init", "systemctl",
-    "useradd", "usermod", "groupadd", "userdel", "groupdel",
-    "setuid", "setgid", "chattr", "lsattr",
-    "tcpdump", "nmap", "tshark",
-    "pkill", "killall", "kill", "passwd",
-    "service", "grub-install", "grub-mkconfig",
-    "modprobe", "insmod", "rmmod",
-    "iptables", "ufw",
-})
+_DENIED_COMMANDS: frozenset = frozenset(
+    {
+        "rm",
+        "chmod",
+        "chown",
+        "sudo",
+        "su",
+        "doas",
+        "dd",
+        "mkfs",
+        "fdisk",
+        "parted",
+        "mkswap",
+        "shutdown",
+        "reboot",
+        "poweroff",
+        "halt",
+        "init",
+        "systemctl",
+        "useradd",
+        "usermod",
+        "groupadd",
+        "userdel",
+        "groupdel",
+        "setuid",
+        "setgid",
+        "chattr",
+        "lsattr",
+        "tcpdump",
+        "nmap",
+        "tshark",
+        "pkill",
+        "killall",
+        "kill",
+        "passwd",
+        "service",
+        "grub-install",
+        "grub-mkconfig",
+        "modprobe",
+        "insmod",
+        "rmmod",
+        "iptables",
+        "ufw",
+    }
+)
 
 _log = logging.getLogger(__name__)
 
@@ -172,9 +205,7 @@ class BackgroundTaskRunner:
                 error="任务被取消",
             )
         except Exception as e:
-            _log.error(
-                f"后台任务异常: id={task.id[:12]}.. error={e}", exc_info=True
-            )
+            _log.error(f"后台任务异常: id={task.id[:12]}.. error={e}", exc_info=True)
             task = await self._task_manager.finish_task(
                 task.id,
                 status=TaskStatus.FAILED,
@@ -182,8 +213,12 @@ class BackgroundTaskRunner:
             )
 
         # ── 手动后台任务完成后：唤醒目标会话 ──
-        if task and task.status in (TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.TIMEOUT) \
-           and task.type == "manual":
+        if (
+            task
+            and task.status
+            in (TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.TIMEOUT)
+            and task.type == "manual"
+        ):
             status_text = {
                 TaskStatus.SUCCESS: "已完成",
                 TaskStatus.FAILED: "执行失败",
@@ -192,7 +227,8 @@ class BackgroundTaskRunner:
             target = task.delivery_channel or f"task:{task.id}"
             if self._wake_dispatcher and task.delivery_channel:
                 await self._wake_dispatcher.request(
-                    source="background-task", intent="event",
+                    source="background-task",
+                    intent="immediate",
                     session_key=target,
                     event_text=f"后台任务{status_text}",
                     event_context_key=f"task:{task.id}",
@@ -244,7 +280,9 @@ class BackgroundTaskRunner:
         """执行 command 载荷（shell 命令），捕获 stdout/stderr。"""
         if not job.command:
             return await self._task_manager.finish_task(
-                task.id, TaskStatus.FAILED, error="command 为空",
+                task.id,
+                TaskStatus.FAILED,
+                error="command 为空",
             )
 
         # 安全检查
@@ -252,7 +290,9 @@ class BackgroundTaskRunner:
         if reason:
             _log.warning(f"命令被拒绝 [{job.name}]: {reason}")
             return await self._task_manager.finish_task(
-                task.id, TaskStatus.FAILED, error=f"命令被拒绝: {reason}",
+                task.id,
+                TaskStatus.FAILED,
+                error=f"命令被拒绝: {reason}",
             )
 
         started = await self._task_manager.start_task(task.id)
@@ -271,7 +311,8 @@ class BackgroundTaskRunner:
             )
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=effective_timeout,
+                    proc.communicate(),
+                    timeout=effective_timeout,
                 )
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 if proc and proc.returncode is None:
@@ -285,7 +326,9 @@ class BackgroundTaskRunner:
             if proc.returncode == 0:
                 result = stdout if stdout else "命令执行成功（无输出）"
                 return await self._task_manager.finish_task(
-                    task.id, TaskStatus.SUCCESS, result=result,
+                    task.id,
+                    TaskStatus.SUCCESS,
+                    result=result,
                 )
             else:
                 error_msg = f"退出码 {proc.returncode}"
@@ -294,15 +337,21 @@ class BackgroundTaskRunner:
                 if stdout:
                     error_msg += f"\nstdout: {stdout}"
                 return await self._task_manager.finish_task(
-                    task.id, TaskStatus.FAILED, error=error_msg,
+                    task.id,
+                    TaskStatus.FAILED,
+                    error=error_msg,
                 )
         except asyncio.TimeoutError:
             return await self._task_manager.finish_task(
-                task.id, TaskStatus.TIMEOUT, error=f"命令超时 ({effective_timeout}s)",
+                task.id,
+                TaskStatus.TIMEOUT,
+                error=f"命令超时 ({effective_timeout}s)",
             )
         except Exception as e:
             return await self._task_manager.finish_task(
-                task.id, TaskStatus.FAILED, error=f"命令执行异常: {e}",
+                task.id,
+                TaskStatus.FAILED,
+                error=f"命令执行异常: {e}",
             )
 
     @staticmethod
@@ -312,7 +361,9 @@ class BackgroundTaskRunner:
         delivery_channel 优先（由 /cron create 保证设置），
         降级到该 cron 的 AI 执行 session。
         """
-        return job.delivery_channel or BackgroundTaskRunner._resolve_session_id(job, task_id)
+        return job.delivery_channel or BackgroundTaskRunner._resolve_session_id(
+            job, task_id
+        )
 
     async def _enqueue_events(
         self,
@@ -323,15 +374,7 @@ class BackgroundTaskRunner:
         *,
         replace: bool = False,
     ) -> None:
-        """向目标 session 入队系统事件。如果 session_mode=main 同时投递心跳。
-
-        Args:
-            job: cron job 定义
-            task_id: 当前任务 ID，用于降级路由
-            text: 事件文本
-            context_key: 去重/replace 键
-            replace: replace=True 时同 context_key 覆盖旧事件
-        """
+        """向目标 session 入队系统事件。"""
         if not self._system_events:
             return
         target = self._resolve_event_target(job, task_id)
@@ -342,15 +385,6 @@ class BackgroundTaskRunner:
             replace=replace,
         )
         _log.info("系统事件入队 [%s] → %s: %s", job.name, target[:24], text[:60])
-        # main 模式额外投递心跳 session，让 HeartbeatManager 也能消费
-        if job.session_mode == "main":
-            self._system_events.enqueue(
-                session_key="heartbeat:events",
-                text=text,
-                context_key=context_key,
-                replace=replace,
-            )
-            _log.debug("系统事件额外入队 → heartbeat:events [%s]: %s", job.name, text[:60])
 
     async def _execute_system_event_payload(
         self,
@@ -358,25 +392,14 @@ class BackgroundTaskRunner:
         task: TaskRecord,
     ) -> TaskRecord:
         """执行 system_event 载荷：推入对应 session 的系统事件队列。"""
-        await self._task_manager.start_task(task.id)
+        started = await self._task_manager.start_task(task.id)
+        if started is None:
+            return task
         text = job.prompt or f"定时任务 [{job.name}] 触发"
 
-        if getattr(job, 'wake_mode', 'now') == WakeMode.NEXT_HEARTBEAT:
-            # openclaw 规则：NEXT_HEARTBEAT + 有明确 delivery_channel → collapse 为 immediate
-            # 因为定时心跳只消费 heartbeat:events，不会消费特定 chat 的事件队列
-            if job.delivery_channel and job.delivery_channel != "heartbeat:events":
-                if self._wake_dispatcher:
-                    await self._wake_dispatcher.request(
-                        source="cron", intent="immediate",
-                        session_key=job.delivery_channel,
-                        event_text=text,
-                        event_context_key=f"cron:{job.id}",
-                        event_replace=True,
-                    )
-                return await self._task_manager.finish_task(
-                    task.id, TaskStatus.SUCCESS,
-                    result=f"[已通知] {text}",
-                )
+        session_target = job.session_target
+        if session_target == "main":
+            # Main session: 入队到 heartbeat:events，由心跳系统消费
             if self._system_events:
                 self._system_events.enqueue(
                     session_key="heartbeat:events",
@@ -385,27 +408,38 @@ class BackgroundTaskRunner:
                     replace=True,
                     heartbeat_only=True,
                 )
+            if job.wake_mode == "now":
+                _wake_coalescer.request_wake(
+                    source="cron",
+                    intent="immediate",
+                    session_key="heartbeat:events",
+                    reason=f"cron:{job.id}",
+                )
             return await self._task_manager.finish_task(
-                task.id, TaskStatus.SUCCESS,
-                result=f"[排队中] {text}",
+                task.id,
+                TaskStatus.SUCCESS,
+                result=f"[已排队到心跳] {text}",
             )
 
-        if self._wake_dispatcher and job.delivery_channel:
-            await self._wake_dispatcher.request(
-                source="cron", intent="event",
+        # Isolated/custom: 入队到 delivery_channel（不 wake AI，等待下次用户消息）
+        if self._system_events and job.delivery_channel:
+            self._system_events.enqueue(
                 session_key=job.delivery_channel,
-                event_text=text,
-                event_context_key=f"cron:{job.id}",
-                event_replace=True,
+                text=text,
+                context_key=f"cron:{job.id}",
+                replace=True,
             )
         elif self._system_events:
             await self._enqueue_events(
-                job, task.id, text,
+                job,
+                task.id,
+                text,
                 context_key=f"cron:{job.id}",
                 replace=True,
             )
         return await self._task_manager.finish_task(
-            task.id, TaskStatus.SUCCESS,
+            task.id,
+            TaskStatus.SUCCESS,
             result=f"[已通知] {text}",
         )
 
@@ -446,7 +480,8 @@ class BackgroundTaskRunner:
             task = await self._execute_system_event_payload(job, task)
         else:  # message（默认）
             task = await self.run_task(
-                task, timeout=timeout,
+                task,
+                timeout=timeout,
                 is_group=job.is_group,
                 tools_allow=job.tools_allow,
             )
@@ -472,44 +507,52 @@ class BackgroundTaskRunner:
 
         # 系统事件：message/command 任务完成后通知目标 session
         # system_event 类型由 _execute_system_event_payload 自行入队，不重复
-        if task and task.status in (TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.TIMEOUT) \
-           and job.payload_type != "system_event":
+        if (
+            task
+            and task.status
+            in (TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.TIMEOUT)
+            and job.payload_type != "system_event"
+        ):
             status_text = {
                 TaskStatus.SUCCESS: "已完成",
                 TaskStatus.FAILED: "执行失败",
                 TaskStatus.TIMEOUT: "执行超时",
             }.get(task.status, "已完成")
-            if getattr(job, 'wake_mode', 'now') == WakeMode.NEXT_HEARTBEAT:
-                if job.delivery_channel and job.delivery_channel != "heartbeat:events":
-                    # collapse to immediate（同 _execute_system_event_payload 逻辑）
-                    if self._wake_dispatcher:
-                        await self._wake_dispatcher.request(
-                            source="cron", intent="immediate",
-                            session_key=job.delivery_channel,
-                            event_text=f"任务 '{job.name}'{status_text}",
-                            event_context_key=f"task:{task.id}",
-                        )
-                elif self._system_events:
+            session_target = job.session_target
+            if session_target == "main":
+                # Main session: 入队到 heartbeat:events，wake 心跳系统
+                if self._system_events:
                     self._system_events.enqueue(
                         session_key="heartbeat:events",
                         text=f"任务 '{job.name}'{status_text}",
                         context_key=f"task:{task.id}",
                         heartbeat_only=True,
                     )
+                if job.wake_mode == "now":
+                    _wake_coalescer.request_wake(
+                        source="cron",
+                        intent="immediate",
+                        session_key="heartbeat:events",
+                        reason=f"task:{task.id}",
+                    )
+            elif job.payload_type == "command":
+                # Command 类型：不 wake 任何会话（通知已由 enable_notify 处理）
+                pass
             elif self._wake_dispatcher and job.delivery_channel:
+                # Message 类型 (isolated)：保留现有行为，wake delivery_channel
                 await self._wake_dispatcher.request(
-                    source="cron", intent="event",
+                    source="cron",
+                    intent="event",
                     session_key=job.delivery_channel,
                     event_text=f"任务 '{job.name}'{status_text}",
                     event_context_key=f"task:{task.id}",
                 )
             elif self._system_events:
                 await self._enqueue_events(
-                    job, task.id,
+                    job,
+                    task.id,
                     text=f"任务 '{job.name}'{status_text}",
                     context_key=f"task:{task.id}",
                 )
 
         return task
-
-

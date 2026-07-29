@@ -2,12 +2,14 @@ import json
 import logging
 from contextvars import ContextVar
 
-from core.tools._types import ToolEntry, ToolResult, ToolContext
+from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
 
 _log = logging.getLogger(__name__)
 
-heartbeat_response: ContextVar[dict | None] = ContextVar("heartbeat_response", default=None)
+heartbeat_response: ContextVar[dict | None] = ContextVar(
+    "heartbeat_response", default=None
+)
 
 
 def create_heartbeat_entries(deps: ToolDeps) -> list[ToolEntry]:
@@ -22,6 +24,10 @@ def create_heartbeat_entries(deps: ToolDeps) -> list[ToolEntry]:
             "notification_text": {
                 "type": "string",
                 "description": "通知文本，不超过 300 字。仅在 notify=true 时需要",
+            },
+            "deliver_to_user": {
+                "type": "string",
+                "description": "投递目标 chat_id。设置后通知发到该用户的聊天而不是管理员 DM。仅当 notify=true 时生效",
             },
             "outcome": {
                 "type": "string",
@@ -53,11 +59,14 @@ def create_heartbeat_entries(deps: ToolDeps) -> list[ToolEntry]:
             if hb_resp.get("recorded"):
                 _log.warning("heartbeat_respond 在同一轮中被重复调用，忽略")
                 return ToolResult(
-                    content=json.dumps({"success": False, "error": "already recorded for this turn"}),
+                    content=json.dumps(
+                        {"success": False, "error": "already recorded for this turn"}
+                    ),
                     no_reply=not notify,
                 )
             hb_resp["notify"] = notify
             hb_resp["notification_text"] = notification_text
+            hb_resp["deliver_to_user"] = args.get("deliver_to_user", "")
             hb_resp["outcome"] = args.get("outcome", "")
             hb_resp["summary"] = args.get("summary", "")
             hb_resp["priority"] = args.get("priority", "normal")
@@ -70,11 +79,15 @@ def create_heartbeat_entries(deps: ToolDeps) -> list[ToolEntry]:
             )
         _log.info(
             "心跳响应: notify=%s outcome=%s priority=%s text=%s",
-            notify, args.get("outcome", ""), args.get("priority", "normal"),
+            notify,
+            args.get("outcome", ""),
+            args.get("priority", "normal"),
             notification_text[:80],
         )
         return ToolResult(
-            content=json.dumps({"success": True, "acknowledged": True}, ensure_ascii=False),
+            content=json.dumps(
+                {"success": True, "acknowledged": True}, ensure_ascii=False
+            ),
             no_reply=not notify,
         )
 
@@ -82,7 +95,7 @@ def create_heartbeat_entries(deps: ToolDeps) -> list[ToolEntry]:
         ToolEntry(
             name="heartbeat_respond",
             section="heartbeat",
-            description="回应心跳检查。notify=false 表示本次心跳无需要关注的事项；notify=true 时附带提醒内容。",
+            description="回应心跳/系统事件检查。notify=false 表示无需关注；notify=true 时附带提醒内容。如需将结果直接告知用户，设置 deliver_to_user 为目标 chat_id。",
             parameters=HEARTBEAT_PARAMS,
             handler=_heartbeat_respond,
         ),

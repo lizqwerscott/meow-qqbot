@@ -9,11 +9,11 @@
 import json
 import logging
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional, Tuple
 
 from core.message import InputMessage
-from core.tools.policy import build_tools, ChatContext, format_task_tool_descriptions
+from core.tools.policy import ChatContext, build_tools, format_task_tool_descriptions
 
 from .dynamic_context import DynamicContextBuilder
 
@@ -39,7 +39,7 @@ HEARTBEAT_MINIMAL_SYSTEM_PROMPT = (
     "文件路径均相对于 workspaces/ 根目录，例如 read_file(file_path='HEARTBEAT.md')。\n\n"
     "回应方式：\n"
     "- 如果没有任何需要关注的事项，调用 heartbeat_respond(notify=false)\n"
-    "- 如果有需要提醒的事项，调用 heartbeat_respond(notify=true, notification_text=\"...\")\n"
+    '- 如果有需要提醒的事项，调用 heartbeat_respond(notify=true, notification_text="...")\n'
     "  提醒文本简洁明了，不要超过 200 字\n"
     "- 不要闲聊或回复额外内容\n\n"
     "规则：\n"
@@ -51,11 +51,28 @@ HEARTBEAT_MINIMAL_SYSTEM_PROMPT = (
 HEARTBEAT_BEHAVIOR_BLOCK = (
     "\n\n【心跳检查模式】\n"
     "你当前处于定期心跳检查，这不是正常对话，请严格遵守以下规则：\n"
-    "- 使用 heartbeat_respond(notify=true/false, notification_text=\"...\") 工具回应，不要直接输出文本聊天\n"
+    '- 使用 heartbeat_respond(notify=true/false, notification_text="...") 工具回应，不要直接输出文本聊天\n'
     "- 不要闲聊、不要使用猫娘语气卖萌、不要加表情符号\n"
     "- 只汇报需要提醒管理员的事项\n"
     "- 如果没有需要关注的事项，调用 heartbeat_respond(notify=false) 静默结束"
 )
+
+SYSTEM_EVENT_SYSTEM_PROMPT = (
+    "你是一个群聊助手的系统事件处理器，运行在独立的 System Event Session 中。\n\n"
+    "你收到一个系统事件通知。请判断是否需要管理员或用户关注，并相应回应。\n\n"
+    "可用工具：read_file / write_file / edit_file / apply_patch / list_dir / search_content / find_files、记忆工具、exec、heartbeat_respond。\n"
+    "文件路径均相对于 workspaces/ 根目录。\n\n"
+    "回应方式：\n"
+    "- 如果无需关注，调用 heartbeat_respond(notify=false)\n"
+    '- 如果需通知管理员，调用 heartbeat_respond(notify=true, notification_text="...")\n'
+    '- 如果该事件的结果需要告知用户，调用 heartbeat_respond(notify=true, notification_text="...", deliver_to_user="用户的chat_id")\n'
+    "- 不要闲聊或回复额外内容\n\n"
+    "规则：\n"
+    "1. 不要凭印象回答，不确定的先查记忆或文件\n"
+    "2. 不要编造事实\n"
+    "3. 只汇报真正需要关注的事项，不要过度打扰管理员"
+)
+
 
 class PromptBuilder:
     """AI 请求消息组装器。
@@ -120,8 +137,10 @@ class PromptBuilder:
         """
         # ── 1. Token 阈值触发 compaction ──
         try:
-            _, compact_usage, ctx = await self.context_manager.compact_history_if_needed(
-                chat_id, self.ai_service
+            _, compact_usage, ctx = (
+                await self.context_manager.compact_history_if_needed(
+                    chat_id, self.ai_service
+                )
             )
             if compact_usage and cost_tracker:
                 cost_tracker.record_turn(chat_id, self.ai_service.model, compact_usage)
@@ -136,37 +155,39 @@ class PromptBuilder:
 
         # ── 2. 确定可用工具 / 能力状态 ──
         has_emojis = (
-            self.emoji_manager is not None
-            and self.emoji_manager.count_emojis() > 0
+            self.emoji_manager is not None and self.emoji_manager.count_emojis() > 0
         )
         has_tts = bool(self._tts_service)
         if is_group and self._nm:
-            has_users = any(
-                k != self._bot_id for k in self._nm.nicknames
-            ) or any(
+            has_users = any(k != self._bot_id for k in self._nm.nicknames) or any(
                 k != self._bot_id for k in self._nm.auto_nicknames
             )
         else:
             has_users = False
 
         role = self._perm.get_user_role(sender_id) if self._perm else None
-        tools_to_use: Optional[List[dict]] = build_tools(
-            "normal",
-            ChatContext(
-                has_emojis=has_emojis,
-                has_hindsight=bool(self.hindsight),
-                has_users=has_users,
-                is_group=is_group,
-                has_skills=bool(self._skill_managers and self._skill_managers.has_skills),
-                has_workspace=bool(self._workspace_manager),
-                has_tasks=self._has_tasks,
-                has_tts=has_tts,
-                has_sub_agents=self._has_sub_agents,
-                has_learners=bool(self.learners),
-            ),
-            deps=self._deps,
-            role=role,
-        ) or None
+        tools_to_use: Optional[List[dict]] = (
+            build_tools(
+                "normal",
+                ChatContext(
+                    has_emojis=has_emojis,
+                    has_hindsight=bool(self.hindsight),
+                    has_users=has_users,
+                    is_group=is_group,
+                    has_skills=bool(
+                        self._skill_managers and self._skill_managers.has_skills
+                    ),
+                    has_workspace=bool(self._workspace_manager),
+                    has_tasks=self._has_tasks,
+                    has_tts=has_tts,
+                    has_sub_agents=self._has_sub_agents,
+                    has_learners=bool(self.learners),
+                ),
+                deps=self._deps,
+                role=role,
+            )
+            or None
+        )
 
         # ── 3. 静态 system prompt ──
         skill_intro = (
@@ -210,13 +231,16 @@ class PromptBuilder:
             has_users=has_users,
         )
         if dynamic_text:
-            messages.append({
-                "role": "system",
-                "content": dynamic_text,
-            })
+            messages.append(
+                {
+                    "role": "system",
+                    "content": dynamic_text,
+                }
+            )
 
         # ── 6. 防御：清理孤立的 tool_calls（防止 compaction 拆散配对） ──
         from core.tools.tool_loop import ensure_messages_consistent
+
         ensure_messages_consistent(messages)
 
         _log.debug(
@@ -239,7 +263,9 @@ class PromptBuilder:
             has_workspace=bool(self._workspace_manager),
             has_skills=bool(self._skill_managers and self._skill_managers.has_skills),
         )
-        tools_defs = build_tools("task", ctx, deps=self._deps, tools_allow=tools_allow) or []
+        tools_defs = (
+            build_tools("task", ctx, deps=self._deps, tools_allow=tools_allow) or []
+        )
         names = {t["function"]["name"] for t in tools_defs}
         desc_text = format_task_tool_descriptions(names)
         return tools_defs or None, desc_text
@@ -259,7 +285,8 @@ class PromptBuilder:
         tools_to_use, tool_descriptions = self._resolve_task_tools(tools_allow)
 
         # 渲染 task prompt
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
+
         _tz = timezone(timedelta(hours=8))
         now = datetime.now(_tz)
         system_prompt = self.template_manager.get_task_chat_prompt(
@@ -296,15 +323,18 @@ class PromptBuilder:
         Returns:
             (messages, tools_to_use)
         """
-        tools_to_use = build_tools(
-            "heartbeat",
-            ChatContext(
-                has_hindsight=bool(self.hindsight),
-                has_workspace=bool(self._workspace_manager),
-                has_tasks=self._has_tasks,
-            ),
-            deps=self._deps,
-        ) or None
+        tools_to_use = (
+            build_tools(
+                "heartbeat",
+                ChatContext(
+                    has_hindsight=bool(self.hindsight),
+                    has_workspace=bool(self._workspace_manager),
+                    has_tasks=self._has_tasks,
+                ),
+                deps=self._deps,
+            )
+            or None
+        )
 
         # ── system message ──
         if system_prompt_mode == "normal":
@@ -324,28 +354,36 @@ class PromptBuilder:
                     ts = time.strftime("%H:%M:%S", time.localtime(e.ts))
                     lines.append(f"System: [{ts}] {e.text}")
                 lines.append("")
-                lines.append("处理完成后，如果没有需要关注的事项，使用 heartbeat_respond(notify=false) 静默结束。如果有需要通知用户的事项，使用 heartbeat_respond(notify=true, notification_text=\"...\")。")
-                messages.insert(1, {
-                    "role": "system",
-                    "content": "【系统事件（本次心跳触发）】\n" + "\n".join(lines),
-                })
+                lines.append(
+                    '处理完成后，如果没有需要关注的事项，使用 heartbeat_respond(notify=false) 静默结束。如果有需要通知用户的事项，使用 heartbeat_respond(notify=true, notification_text="...")。'
+                )
+                messages.insert(
+                    1,
+                    {
+                        "role": "system",
+                        "content": "【系统事件（本次心跳触发）】\n" + "\n".join(lines),
+                    },
+                )
 
         # ── 聊天历史（作为独立消息对，仅 session=main） ──
         if session_mode == "main" and admin_chat_id:
             try:
                 recent = await self.context_manager.get_chat_history_async(
-                    admin_chat_id, max_messages=20,
+                    admin_chat_id,
+                    max_messages=20,
                 )
                 inserted = 0
                 for msg in recent[-15:]:
                     role = msg.get("role")
                     if role in ("user", "assistant"):
-                        content = (msg.get("content") or "")
+                        content = msg.get("content") or ""
                         if content:
                             messages.append({"role": role, "content": content[:300]})
                             inserted += 1
                 if inserted:
-                    _log.info(f"心跳历史注入: {inserted} 条消息（来自 {admin_chat_id[:12]}..）")
+                    _log.info(
+                        f"心跳历史注入: {inserted} 条消息（来自 {admin_chat_id[:12]}..）"
+                    )
             except Exception as e:
                 _log.warning(f"心跳读取历史失败，回退隔离模式: {e}")
 
@@ -377,7 +415,15 @@ class PromptBuilder:
 
         _tz = timezone(timedelta(hours=8))
         now = datetime.now(_tz)
-        weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+        weekday_names = [
+            "星期一",
+            "星期二",
+            "星期三",
+            "星期四",
+            "星期五",
+            "星期六",
+            "星期日",
+        ]
         dynamic_parts.append(
             f"当前时间: {now.strftime(f'%Y-%m-%d %H:%M:%S ({weekday_names[now.weekday()]})')} (CST/UTC+8)"
         )
@@ -393,8 +439,63 @@ class PromptBuilder:
 
         return static_prompt + "\n\n" + "\n\n".join(dynamic_parts)
 
-    async def build_memory_context(self, sender_id: str, input_message: InputMessage) -> str:
+    async def build_system_event_messages(
+        self,
+        prompt: str,
+        *,
+        system_event_key: str = "system:events",
+    ) -> Tuple[List[dict], Optional[List[dict]]]:
+        """组装系统事件通知的 messages 列表。
+
+        通用方法：cron/exec/background 等所有非人类事件都走此路径。
+        工具集：heartbeat_respond + 记忆 + 文件 + exec，不加载聊天历史。
+        """
+        tools_to_use = (
+            build_tools(
+                "cron",
+                ChatContext(
+                    has_hindsight=bool(self.hindsight),
+                    has_workspace=bool(self._workspace_manager),
+                    has_tasks=self._has_tasks,
+                ),
+                deps=self._deps,
+            )
+            or None
+        )
+
+        messages: List[dict] = [
+            {"role": "system", "content": SYSTEM_EVENT_SYSTEM_PROMPT},
+        ]
+
+        # 系统事件注入
+        if self._system_events:
+            events = self._system_events.peek_and_snapshot(system_event_key)
+            if events:
+                lines = []
+                for e in events:
+                    ts = time.strftime("%H:%M:%S", time.localtime(e.ts))
+                    lines.append(f"System: [{ts}] {e.text}")
+                lines.append("")
+                lines.append(
+                    "处理完成后，如果没有需要关注的事项，使用 heartbeat_respond(notify=false) 静默结束。"
+                )
+                messages.insert(
+                    1,
+                    {
+                        "role": "system",
+                        "content": "【系统事件（本次触发）】\n" + "\n".join(lines),
+                    },
+                )
+
+        messages.append({"role": "user", "content": prompt or "[系统事件] 事件通知。"})
+
+        return messages, tools_to_use
+
+    async def build_memory_context(
+        self, sender_id: str, input_message: InputMessage
+    ) -> str:
         """构建记忆上下文字符串（公开，供 ToolLoop Queue Steering 使用）。"""
         return await self._dynamic_ctx_builder.memory_builder.build_memory_context(
-            sender_id, input_message,
+            sender_id,
+            input_message,
         )

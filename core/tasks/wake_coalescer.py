@@ -20,20 +20,20 @@ _log = logging.getLogger(__name__)
 
 # ── 常量 ──
 
-SOURCE_INTERVAL   = "interval"
-SOURCE_MANUAL     = "manual"
-SOURCE_EXEC       = "exec-event"
-SOURCE_CRON       = "cron"
-SOURCE_TASK       = "background-task"
-SOURCE_SYSTEM     = "system"
-SOURCE_RETRY      = "retry"
+SOURCE_INTERVAL = "interval"
+SOURCE_MANUAL = "manual"
+SOURCE_EXEC = "exec-event"
+SOURCE_CRON = "cron"
+SOURCE_TASK = "background-task"
+SOURCE_SYSTEM = "system"
+SOURCE_RETRY = "retry"
 
 WakeSource = str
 
-INTENT_MANUAL     = "manual"      # priority 0 — 最高
-INTENT_IMMEDIATE  = "immediate"   # priority 1
-INTENT_EVENT      = "event"       # priority 2
-INTENT_SCHEDULED  = "scheduled"   # priority 3 — 最低
+INTENT_MANUAL = "manual"  # priority 0 — 最高
+INTENT_IMMEDIATE = "immediate"  # priority 1
+INTENT_EVENT = "event"  # priority 2
+INTENT_SCHEDULED = "scheduled"  # priority 3 — 最低
 
 WakeIntent = str
 
@@ -44,40 +44,44 @@ _INTENT_PRIORITY = {
     INTENT_SCHEDULED: 3,
 }
 
-RETRYABLE_SKIP_REASONS = frozenset({
-    "requests-in-flight",
-    "cron-in-progress",
-    "lanes-busy",
-})
+RETRYABLE_SKIP_REASONS = frozenset(
+    {
+        "requests-in-flight",
+        "cron-in-progress",
+        "lanes-busy",
+    }
+)
 
 # ── 数据类型 ──
 
 
 @dataclass
 class PendingWake:
-    source:           WakeSource = SOURCE_SYSTEM
-    intent:           WakeIntent = INTENT_SCHEDULED
-    reason:           str = ""
-    agent_id:         str = ""
-    session_key:      str = ""
-    delivery_target:  str = ""
-    extra_prompt:     str = ""
-    timestamp:        float = field(default_factory=time.time)
+    source: WakeSource = SOURCE_SYSTEM
+    intent: WakeIntent = INTENT_SCHEDULED
+    reason: str = ""
+    agent_id: str = ""
+    session_key: str = ""
+    delivery_target: str = ""
+    extra_prompt: str = ""
+    timestamp: float = field(default_factory=time.time)
 
 
 @dataclass
 class WakeRunResult:
-    status:        str = "ran"        # "ran" | "skipped" | "failed"
-    skip_reason:   str = ""
-    duration_ms:   float = 0
-    result:        Any = None
+    status: str = "ran"  # "ran" | "skipped" | "failed"
+    skip_reason: str = ""
+    duration_ms: float = 0
+    result: Any = None
 
 
 @dataclass
 class WakeTurnResult:
     """run_wake_turn 的返回容器（AI turn 完成后的结果）。"""
+
     should_notify: bool = False
     notification_text: str = ""
+    deliver_to_user: str = ""  # 非空时投递到该 chat_id，否则 DM 管理员
     captured_replies: list = field(default_factory=list)
     error: str = ""
 
@@ -119,15 +123,26 @@ def _target_key(pw: PendingWake) -> str:
 def _merge_pending(key: str, pw: PendingWake) -> None:
     existing = _pending.get(key)
     if not existing:
-        _log.debug("[Coalescer] 新 pending: key=%s source=%s intent=%s", key[:24], pw.source, pw.intent)
+        _log.debug(
+            "[Coalescer] 新 pending: key=%s source=%s intent=%s",
+            key[:24],
+            pw.source,
+            pw.intent,
+        )
         _pending[key] = pw
         return
     new_prio = _INTENT_PRIORITY.get(pw.intent, 99)
     old_prio = _INTENT_PRIORITY.get(existing.intent, 99)
-    if new_prio < old_prio or (new_prio == old_prio and pw.timestamp >= existing.timestamp):
+    if new_prio < old_prio or (
+        new_prio == old_prio and pw.timestamp >= existing.timestamp
+    ):
         _log.debug(
             "[Coalescer] 合并覆盖: key=%s old=%s(prio=%d) new=%s(prio=%d)",
-            key[:24], existing.intent, old_prio, pw.intent, new_prio,
+            key[:24],
+            existing.intent,
+            old_prio,
+            pw.intent,
+            new_prio,
         )
         _pending[key] = pw
 
@@ -163,7 +178,8 @@ async def _drain_pending() -> None:
                 if retries > MAX_RETRY_COUNT:
                     _log.warning(
                         "[Coalescer] handler 重试超限: key=%s retries=%d → 丢弃",
-                        key[:24], retries - 1,
+                        key[:24],
+                        retries - 1,
                     )
                     _retry_count.pop(key, None)
                 else:
@@ -172,17 +188,25 @@ async def _drain_pending() -> None:
                     _merge_pending(key, pw)
                     _log.info(
                         "[Coalescer] handler 异常重试: key=%s retry=%d/%d → 1000ms 后",
-                        key[:24], retries, MAX_RETRY_COUNT,
+                        key[:24],
+                        retries,
+                        MAX_RETRY_COUNT,
                     )
                     _schedule(DEFAULT_RETRY_MS)
                 continue
-            if result.status == "skipped" and result.skip_reason in RETRYABLE_SKIP_REASONS:
+            if (
+                result.status == "skipped"
+                and result.skip_reason in RETRYABLE_SKIP_REASONS
+            ):
                 key = _target_key(pw)
                 retries = _retry_count.get(key, 0) + 1
                 if retries > MAX_RETRY_COUNT:
                     _log.warning(
                         "[Coalescer] 重试超限: key=%s source=%s intent=%s retries=%d → 丢弃",
-                        key[:24], pw.source, pw.intent, retries - 1,
+                        key[:24],
+                        pw.source,
+                        pw.intent,
+                        retries - 1,
                     )
                     _retry_count.pop(key, None)
                     continue
@@ -191,7 +215,10 @@ async def _drain_pending() -> None:
                 _merge_pending(key, pw)
                 _log.info(
                     "[Coalescer] retryable skip: key=%s reason=%s retry=%d/%d → 1000ms 后重试",
-                    key[:24], result.skip_reason, retries, MAX_RETRY_COUNT,
+                    key[:24],
+                    result.skip_reason,
+                    retries,
+                    MAX_RETRY_COUNT,
                 )
                 _schedule(DEFAULT_RETRY_MS)
             else:
@@ -200,7 +227,10 @@ async def _drain_pending() -> None:
     finally:
         _running = False
         if _pending:
-            _log.debug("[Coalescer] _drain_pending: 仍有 pending %d 项，继续调度", len(_pending))
+            _log.debug(
+                "[Coalescer] _drain_pending: 仍有 pending %d 项，继续调度",
+                len(_pending),
+            )
             _schedule(DEFAULT_COALESCE_MS)
         else:
             _log.info("[Coalescer] _drain_pending 完成: 无剩余 pending")
@@ -211,7 +241,9 @@ def _schedule(coalesce_ms: int) -> None:
     now = time.time()
     due_at = now + coalesce_ms / 1000
     if _timer and _timer_due_at <= due_at:
-        _log.debug("[Coalescer] 跳过调度: 已有更早的 timer (due_at=%.3f)", _timer_due_at)
+        _log.debug(
+            "[Coalescer] 跳过调度: 已有更早的 timer (due_at=%.3f)", _timer_due_at
+        )
         return
     if _timer:
         _log.debug("[Coalescer] 取消旧 timer, 重设为 %.0fms 后", coalesce_ms)
@@ -223,6 +255,7 @@ def _schedule(coalesce_ms: int) -> None:
         lambda: asyncio.ensure_future(_drain_pending(), loop=loop),
     )
     _log.debug("[Coalescer] 调度 _drain_pending: %dms 后", coalesce_ms)
+
 
 # ── 公开 API ──
 
@@ -242,15 +275,22 @@ def request_wake(
     if not session_key and not agent_id:
         return
     pw = PendingWake(
-        source=source, intent=intent, reason=reason,
-        agent_id=agent_id, session_key=session_key,
+        source=source,
+        intent=intent,
+        reason=reason,
+        agent_id=agent_id,
+        session_key=session_key,
         delivery_target=delivery_target or session_key,
         extra_prompt=extra_prompt,
     )
     key = _target_key(pw)
     _log.info(
         "[Coalescer] 收到 wake: source=%s intent=%s reason=%s session=%s has_prompt=%s",
-        source, intent, reason, session_key[:20], bool(extra_prompt),
+        source,
+        intent,
+        reason,
+        session_key[:20],
+        bool(extra_prompt),
     )
     _merge_pending(key, pw)
     _schedule(coalesce_ms)
@@ -270,7 +310,9 @@ async def execute_immediate(
     用于 manual/manual 场景（猫猫心跳 命令需要返回值）。
     """
     pw = PendingWake(
-        source=source, intent=intent, reason=reason,
+        source=source,
+        intent=intent,
+        reason=reason,
         session_key=session_key,
         delivery_target=delivery_target or session_key,
         extra_prompt=extra_prompt,
@@ -298,7 +340,7 @@ def set_wake_handler(handler: Optional[WakeHandler]) -> Callback:
     def dispose() -> None:
         global _handler, _handler_generation
         if _handler_generation != generation:
-            return   # stale disposer — 新 handler 已注册
+            return  # stale disposer — 新 handler 已注册
         _handler_generation += 1
         _handler = None
 

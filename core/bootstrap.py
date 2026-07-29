@@ -16,12 +16,20 @@ from core.command_handlers import register_all_commands
 from core.config_loader import ConfigLoader
 from core.engine.agent_engine import AgentEngine
 from core.engine.client import BotEngine
-from core.engine.context import AIContext, BgContext, EngineContext, MemoryContext, MgmtContext, PromptContext, SubContext, SysContext
+from core.engine.context import (
+    AIContext,
+    BgContext,
+    EngineContext,
+    MemoryContext,
+    MgmtContext,
+    PromptContext,
+    SubContext,
+    SysContext,
+)
 from core.engine.hindsight_memory import HindsightMemory
 from core.engine.router import Router
 from core.engine.system_events import SystemEventQueue
 from core.engine.wake_dispatcher import WakeDispatcher
-from core.tasks.heartbeat_cooldown import HeartbeatCooldown
 from core.learners.orchestrator import LearningOrchestrator
 from core.managers.archive_manager import ArchiveManager
 from core.managers.context_manager import ChatContextManager
@@ -42,15 +50,15 @@ from core.tasks import (
     TaskStore,
 )
 from core.tasks.heartbeat import HeartbeatManager
-from core.tools.ref import Ref
-from core.tools.deps import ToolDeps
+from core.tasks.heartbeat_cooldown import HeartbeatCooldown
 from core.tools.aggregation import create_all_tool_entries
+from core.tools.deps import ToolDeps
 from core.tools.impl import registry
 from core.tools.process_registry import ProcessRegistry
+from core.tools.ref import Ref
 from core.tools.skill_managers import SkillManagers
 from core.tools.sub_agent_manager import SubAgentManager
 from core.webui import create_app, start_webui
-
 
 _log = logging.getLogger(__name__)
 
@@ -86,14 +94,19 @@ class ServiceGraph:
         self.model_registry = None
         if _has_model_config:
             self.model_registry = ModelRegistry(
-                providers_config, groups_config,
+                providers_config,
+                groups_config,
                 cooldown_config=self.cfg.cooldown,
             )
             n_models = sum(len(p.get("models", [])) for p in providers_config.values())
-            _log.info("模型注册表已初始化: %d 个模型, %d 个组", n_models, len(groups_config))
+            _log.info(
+                "模型注册表已初始化: %d 个模型, %d 个组", n_models, len(groups_config)
+            )
 
         if not self.model_registry or not self.model_registry.default_service:
-            raise RuntimeError("未配置模型注册表（缺少 [providers] 或 [groups]），无法启动")
+            raise RuntimeError(
+                "未配置模型注册表（缺少 [providers] 或 [groups]），无法启动"
+            )
         self.ai_service = self.model_registry.default_service
 
         # ── 多模态 ──
@@ -111,9 +124,15 @@ class ServiceGraph:
                     model_names=list(model_names),
                     cooldown_manager=self.model_registry.cooldown_manager,
                 )
-                _log.info("多模态服务已启用 (组 [%s]): %s", multimodal_group, list(model_names))
+                _log.info(
+                    "多模态服务已启用 (组 [%s]): %s",
+                    multimodal_group,
+                    list(model_names),
+                )
             else:
-                _log.warning("多模态服务未启用: 组 [%s] 找不到对应模型", multimodal_group)
+                _log.warning(
+                    "多模态服务未启用: 组 [%s] 找不到对应模型", multimodal_group
+                )
         else:
             _log.info("多模态服务未启用（enabled=false），跳过 VLM 图片分析")
 
@@ -210,7 +229,9 @@ class ServiceGraph:
             )
             self.task_manager = TaskManager(store=task_store)
             self.cron_job_manager = CronJobManager(store=task_store)
-            self.background_task_runner = BackgroundTaskRunner(task_manager=self.task_manager)
+            self.background_task_runner = BackgroundTaskRunner(
+                task_manager=self.task_manager
+            )
 
             if scheduler_cfg.get("enabled", True):
                 self.cron_scheduler = CronJobScheduler(
@@ -431,7 +452,9 @@ class ServiceGraph:
                     actual = self.context_manager.get_chat_type(chat_id)
                     if actual is not None:
                         is_group = actual
-                    await self.bot_engine.send_proactive(chat_id, content, is_group=is_group)
+                    await self.bot_engine.send_proactive(
+                        chat_id, content, is_group=is_group
+                    )
                 except Exception as e:
                     _log.error("投递任务结果失败: %s", e)
 
@@ -442,9 +465,9 @@ class ServiceGraph:
             self.cron_scheduler.set_callbacks(
                 on_trigger=lambda job: self.background_task_runner.run_cron_job(
                     job=job,
-                    timeout=self.cfg.tasks
-                    .get("scheduler", {})
-                    .get("task_timeout", 300),
+                    timeout=self.cfg.tasks.get("scheduler", {}).get(
+                        "task_timeout", 300
+                    ),
                 ),
                 get_jobs=self.cron_job_manager.list_jobs,
                 update_job=self.cron_job_manager.update_job,
@@ -456,6 +479,7 @@ class ServiceGraph:
 
         # ── 审批系统 ──
         from core.approval.approval_manager import ApprovalManager
+
         self.approval_manager = ApprovalManager(
             api_client=self.bot_engine.api,
             admin_ids=self.admin_ids,
@@ -497,10 +521,16 @@ class ServiceGraph:
             )
 
         # ── WakeCoalescer + WakeRunner + Delivery ──
+        from core.tasks.delivery_strategy import (
+            ChatReplyDeliveryStrategy,
+            HeartbeatDeliveryStrategy,
+        )
         from core.tasks.wake_coalescer import set_wake_handler
         from core.tasks.wake_runner import WakeRunner
-        from core.tasks.delivery_strategy import (
-            HeartbeatDeliveryStrategy, ChatReplyDeliveryStrategy,
+
+        chat_delivery = ChatReplyDeliveryStrategy(
+            reply_callback=self.bot_engine._send_reply,
+            context_manager=self.context_manager,
         )
 
         hb_delivery = None
@@ -509,14 +539,11 @@ class ServiceGraph:
             show_alerts = self.cfg.heartbeat.get("show_alerts", True)
             hb_delivery = HeartbeatDeliveryStrategy(
                 self.heartbeat_manager,
+                reply_callback=self.bot_engine._send_reply,
+                context_manager=self.context_manager,
                 show_ok=show_ok,
                 show_alerts=show_alerts,
             )
-
-        chat_delivery = ChatReplyDeliveryStrategy(
-            reply_callback=self.bot_engine._send_reply,
-            context_manager=self.context_manager,
-        )
 
         active_hours_cfg = self.cfg.heartbeat.get("active_hours", {})
         ah = (
@@ -526,15 +553,18 @@ class ServiceGraph:
         )
 
         delivery_strategies: dict = {}
+        cron_hb_delivery = hb_delivery or chat_delivery  # 心跳禁用时回退到 chat 投递
         if hb_delivery:
             delivery_strategies["interval"] = hb_delivery
             delivery_strategies["manual"] = hb_delivery
-        delivery_strategies["exec-event"] = chat_delivery
+        delivery_strategies["cron-heartbeat"] = cron_hb_delivery
         delivery_strategies["cron"] = chat_delivery
-        delivery_strategies["background-task"] = chat_delivery
 
-        hb_isolated_key_fn = (self.heartbeat_manager.resolve_isolated_session_key
-                              if self.heartbeat_manager else None)
+        hb_isolated_key_fn = (
+            self.heartbeat_manager.resolve_isolated_session_key
+            if self.heartbeat_manager
+            else None
+        )
 
         self._wake_runner = WakeRunner(
             agent_engine=self.agent_engine,
@@ -543,16 +573,21 @@ class ServiceGraph:
             delivery_strategies=delivery_strategies,
             active_hours=ah,
             session_active_check=self.agent_engine.is_session_active,
-            has_cron_check=lambda: bool(
-                self.cron_job_manager and self.cron_job_manager.list_jobs()
-            ) if hasattr(self, 'cron_job_manager') else False,
-            main_lane_busy_check=lambda: False,    # 可扩展：从 BotEngine 获取队列状态
-            agent_busy_check=lambda: False,         # 可扩展：从 AgentEngine 获取
+            has_cron_check=lambda: (
+                bool(self.cron_job_manager and self.cron_job_manager.list_jobs())
+                if hasattr(self, "cron_job_manager")
+                else False
+            ),
+            main_lane_busy_check=lambda: False,  # 可扩展：从 BotEngine 获取队列状态
+            agent_busy_check=lambda: False,  # 可扩展：从 AgentEngine 获取
             skip_when_busy=self.cfg.heartbeat.get("skip_when_busy", False),
             session_lane_busy_check=lambda _: False,
             isolated_session_key_fn=hb_isolated_key_fn,
-            delivery_pending_check=(self.heartbeat_manager.is_delivery_pending
-                                    if self.heartbeat_manager else lambda: False),
+            delivery_pending_check=(
+                self.heartbeat_manager.is_delivery_pending
+                if self.heartbeat_manager
+                else lambda: False
+            ),
         )
         set_wake_handler(self._wake_runner)
         _log.info("WakeCoalescer + WakeRunner 已初始化")
@@ -560,11 +595,20 @@ class ServiceGraph:
         # ── exec 进程退出回调 ──
         async def _on_exec_exit(session):
             chat_id = session.delivery_channel or session.chat_id
+            exit_code = session.exit_code
+            status = "成功" if exit_code == 0 else f"失败 (exit={exit_code})"
+            stdout = "".join(session.stdout_lines[-5:]) if session.stdout_lines else ""
+            extra = f"后台进程 [{session.id[:8]}..] 已退出: {status}\n命令: {session.command[:100]}"
+            if stdout:
+                extra += f"\n最后输出:\n{stdout[:500]}"
             import core.tasks.wake_coalescer as _coalescer
+
             _coalescer.request_wake(
-                source="exec-event", intent="event",
+                source="exec-event",
+                intent="event",
                 session_key=chat_id,
                 delivery_target=chat_id,
+                extra_prompt=extra,
                 reason=f"后台进程完成: {session.command[:80]}",
             )
 
@@ -629,7 +673,9 @@ class ServiceGraph:
         if self.hindsight_memory:
             health_result = await self.hindsight_memory.health()
             if health_result.get("status") == "ok":
-                _log.info("Hindsight 健康检查通过 (%sms)", health_result.get("latency_ms"))
+                _log.info(
+                    "Hindsight 健康检查通过 (%sms)", health_result.get("latency_ms")
+                )
             else:
                 _log.warning(
                     "Hindsight 健康检查失败: %s — 记忆功能将降级运行",
@@ -666,11 +712,14 @@ class ServiceGraph:
             while True:
                 await asyncio.sleep(3600)
                 try:
-                    removed = self.context_manager.cleanup_inactive_contexts(max_inactivity=7200)
+                    removed = self.context_manager.cleanup_inactive_contexts(
+                        max_inactivity=7200
+                    )
                     if removed:
                         _log.info("上下文清理: 移除了 %d 个不活跃会话", len(removed))
                 except Exception as e:
                     _log.warning("上下文清理异常: %s", e)
+
         self.context_cleanup_task = asyncio.create_task(_periodic_cleanup())
         _log.info("定期上下文清理任务已启动 (周期 3600s)")
 
@@ -682,11 +731,15 @@ class ServiceGraph:
         async def _run_cycle():
             lost = await self.task_manager.detect_lost_tasks(lost_detection_minutes)
             cleaned = await self.task_manager.cleanup_old_tasks()
-            capped = await self.task_manager.enforce_per_job_terminal_limit(max_terminal_per_job)
+            capped = await self.task_manager.enforce_per_job_terminal_limit(
+                max_terminal_per_job
+            )
             if lost or cleaned or capped:
                 _log.info(
                     "任务清理周期: %d 丢失标记, %d TTL 清理, %d job 上限裁剪",
-                    lost, cleaned, capped,
+                    lost,
+                    cleaned,
+                    capped,
                 )
 
         async def _periodic_cleanup():

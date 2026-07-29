@@ -2,8 +2,8 @@
 
 import logging
 import uuid
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone, timedelta
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import List, Optional
 
@@ -20,6 +20,7 @@ class SessionMode(str, Enum):
     - custom:    持久化命名 session（跨执行保留上下文）
     - main:      专用 cron:main 通道（系统提醒）
     """
+
     ISOLATED = "isolated"
     CUSTOM = "custom"
     MAIN = "main"
@@ -27,6 +28,7 @@ class SessionMode(str, Enum):
 
 class TaskStatus(str, Enum):
     """任务状态枚举。"""
+
     PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
@@ -66,19 +68,20 @@ class TaskRecord:
     每次 cron 执行或手动后台任务都会创建一条 TaskRecord。
     每个 TaskRecord 拥有独立 session（session_id = 'task:<id>'）。
     """
+
     id: str = field(default_factory=_new_id)
-    type: str = "manual"            # "cron" | "manual"
+    type: str = "manual"  # "cron" | "manual"
     status: TaskStatus = TaskStatus.PENDING
-    prompt: str = ""                # AI 执行指令
-    job_id: Optional[str] = None    # 关联的 CronJob ID
-    session_id: str = ""            # 运行时填充：task:<id>
+    prompt: str = ""  # AI 执行指令
+    job_id: Optional[str] = None  # 关联的 CronJob ID
+    session_id: str = ""  # 运行时填充：task:<id>
     created_at: float = field(default_factory=_now)
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
-    result: Optional[str] = None    # AI 回复文本
+    result: Optional[str] = None  # AI 回复文本
     error: Optional[str] = None
     delivery_channel: Optional[str] = None  # 结果投递到的 chat_id
-    reply_to_message_id: str = ""           # 创建任务时的原始消息 ID（用于发消息时构造 msg_id）
+    reply_to_message_id: str = ""  # 创建任务时的原始消息 ID（用于发消息时构造 msg_id）
 
     def __post_init__(self):
         if not self.session_id:
@@ -106,39 +109,48 @@ class CronJob:
 
     持久化在 JSON 文件中，机器人重启后重新计算 next_run_at。
     """
+
     id: str = field(default_factory=_new_id)
     name: str = ""
-    cron_expression: str = ""           # 周期性 cron，如 "0 8 * * *"
-    at: Optional[float] = None          # 一次性执行时间戳（UTC），有值则优先
-    prompt: str = ""                    # AI 执行指令
+    cron_expression: str = ""  # 周期性 cron，如 "0 8 * * *"
+    at: Optional[float] = None  # 一次性执行时间戳（UTC），有值则优先
+    prompt: str = ""  # AI 执行指令
     enabled: bool = True
-    catch_up: bool = True               # 重启时是否补跑错过的任务（仅 cron 有效）
-    delete_after_run: bool = True       # 一次性任务执行后自动删除
+    catch_up: bool = True  # 重启时是否补跑错过的任务（仅 cron 有效）
+    delete_after_run: bool = True  # 一次性任务执行后自动删除
     created_at: float = field(default_factory=_now)
     next_run_at: Optional[float] = None
     delivery_channel: Optional[str] = None  # 结果投递到的 chat_id
-    is_group: bool = True  # 来源聊天是否为群聊（影响 send_emoji 等工具使用群聊还是私聊接口）
+    is_group: bool = (
+        True  # 来源聊天是否为群聊（影响 send_emoji 等工具使用群聊还是私聊接口）
+    )
     enable_notify: bool = True  # 是否投递执行结果到频道
     session_mode: str = SessionMode.ISOLATED.value  # isolated/custom/main
     custom_session_id: Optional[str] = None  # custom 模式下的命名 session ID
 
+    # 会话目标（控制 wake 路由）
+    session_target: str = "isolated"  # "main"/"isolated"/"custom"
+    # main      → 完成后 wake 心跳系统 (heartbeat:events)，不走用户会话
+    # isolated  → 完成后不 wake，只通过 delivery 投递结果
+    # custom    → 同 isolated，但使用命名 session
+
     # 唤醒策略
-    wake_mode: str = "now"                  # now / next-heartbeat
+    wake_mode: str = "now"  # now / next-heartbeat
 
     # 载荷类型
-    payload_type: str = "message"           # message / command / system_event
-    command: str = ""                       # shell 命令（command 载荷时使用）
+    payload_type: str = "message"  # message / command / system_event
+    command: str = ""  # shell 命令（command 载荷时使用）
 
     # 工具权限
     tools_allow: Optional[List[str]] = None
-    # None = 默认工具集（announce + 记忆 + 文件）
+    # None = 默认工具集（记忆 + 文件 + exec + heartbeat_respond）
     # ["*"] = 所有 cron 允许的工具
     # [工具名1, 工具名2, ...] = 指定工具列表
-    # [] = 仅 announce
+    # [] = 仅 announce（task profile 下）
 
     # AI 选项
-    model: Optional[str] = None             # 模型覆盖
-    thinking: Optional[str] = None          # 思考级别（off/low/medium/high）
+    model: Optional[str] = None  # 模型覆盖
+    thinking: Optional[str] = None  # 思考级别（off/low/medium/high）
 
     @property
     def is_one_shot(self) -> bool:
@@ -152,9 +164,16 @@ class CronJob:
     def __post_init__(self):
         if self.wake_mode not in ("now", "next-heartbeat"):
             self.wake_mode = "now"
+        # 兼容旧数据：session_target 为空时继承 session_mode
+        if not self.session_target:
+            self.session_target = self.session_mode
 
     @classmethod
     def from_dict(cls, d: dict) -> "CronJob":
+        # 旧数据兼容：从 session_mode 推导 session_target
+        if "session_target" not in d:
+            session_mode = d.get("session_mode", "isolated")
+            d["session_target"] = session_mode
         return cls(**d)
 
 
