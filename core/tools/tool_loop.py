@@ -14,6 +14,7 @@ from typing import Any, Callable, List, Optional
 
 from core.message import InputMessage, MessageType
 
+from core.ai.fallback_runner import FallbackRunner
 from core.tools._types import ToolContext
 from core.tools.impl import execute as execute_tool
 
@@ -131,12 +132,16 @@ class ToolLoop:
         delivery_channel: str = "",
         reply_to_message_id: str = "",
         model_chain: Optional[List[str]] = None,
+        binding_manager=None,
+        tier: Optional[str] = None,
     ) -> tuple[bool, bool]:
         """执行工具调用循环。
 
         Args:
             delivery_channel: 后台任务时传入真实聊天 ID，供 send_emoji 等工具使用
             model_chain: 模型链（如 ["cheap", "primary"]），启用 fallback。
+            binding_manager: SessionBindingManager（启用 session 绑定优化）
+            tier: 当前消息的 RuleRouter 分类档位（用于 session 绑定键）
 
         Returns:
             (sent_emoji, text_was_sent)
@@ -154,15 +159,12 @@ class ToolLoop:
         else:
             _rounds = range(self._max_tool_rounds)
 
-        # ── 预解析模型链：循环前一次性找出可用模型 ──
-        resolved_model_name: Optional[str] = None
-        resolved_service: Any = None
+        # ── 预解析模型链：FallbackRunner 统一编排（支持 session 绑定） ──
+        runner = None
         if model_chain and self._model_registry:
-            resolved = await self._model_registry.resolve_model_chain(model_chain)
-            if resolved:
-                resolved_model_name, resolved_service = resolved
-                _log.info(f"工具循环预解析模型: [{resolved_model_name}]")
-            else:
+            runner = FallbackRunner(self._model_registry, model_chain)
+            ok = await runner.try_acquire_with_binding(binding_manager, chat_id, tier)
+            if not ok:
                 _log.warning(f"模型链全部冷却/无效: {model_chain}")
                 try:
                     await reply_callback(chat_id, "所有模型均不可用，请稍后重试", reply_to, is_group)
@@ -174,74 +176,72 @@ class ToolLoop:
             # ── 防御：清理 messages 中孤立的 tool_calls ──
             ensure_messages_consistent(messages)
 
-            # ── AI 调用（使用预解析模型，失败则重新解析） ──
+            # ── AI 调用（FallbackRunner 统一回退编排） ──
             message = None
             usage = None
-            failed_models: set = set()
+            if runner:
+                runner.reset_failures()
+
             while True:
-                svc = resolved_service or self.ai_service
-                current_model_name = resolved_model_name or None
+                svc = runner.service() if runner else self.ai_service
+                if svc is None:
+                    _log.error("FallbackRunner: service() 返回 None，回退默认服务")
+                    svc = self.ai_service
+                current_model_name = runner.current if runner else None
 
                 was_exception = False
                 try:
                     message, usage = await svc.chat_completion_with_tools(
                         messages=messages, tools=tools,
                     )
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
-                    if isinstance(e, asyncio.CancelledError):
-                        raise
                     was_exception = True
                     _log.warning(f"模型 [{current_model_name}] 调用异常: {e}")
                     message, usage = None, None
 
                 if message is not None:
-                    if resolved_model_name and self._model_registry:
-                        await self._model_registry.cooldown_manager.record_success(
-                            resolved_model_name
+                    if runner:
+                        await runner.mark_success(
+                            mgr=binding_manager, chat_id=chat_id, tier=tier,
                         )
                     break
 
-                # ── 失败 → 累积 ──
-                if resolved_model_name:
-                    failed_models.add(resolved_model_name)
-                    # 只有服务端异常才写入全局冷却（空结果不污染其他会话）
-                    if was_exception and self._model_registry:
-                        await self._model_registry.cooldown_manager.record_failure(
-                            resolved_model_name
+                # ── 失败 → 回退 ──
+                if runner:
+                    await runner.mark_failure(record_cooldown=was_exception)
+                    if await runner.acquire():
+                        if binding_manager and tier:
+                            await binding_manager.bind(chat_id, tier, runner.current)
+                        _log.warning(
+                            f"模型链剩余模型: {runner.remaining}，继续尝试"
                         )
+                        continue
 
-                if not model_chain or not self._model_registry:
+                    # 剩余链全在冷却/失败：走兜底
+                    fallback_result = await runner.last_resort(messages, tools)
+                    if fallback_result.ok:
+                        message = fallback_result.message
+                        usage = fallback_result.usage
+                        current_model_name = fallback_result.model_name
+                        if binding_manager and tier:
+                            await binding_manager.bind(chat_id, tier, runner.current)
+                        await runner.mark_success(
+                            mgr=binding_manager, chat_id=chat_id, tier=tier,
+                        )
+                    else:
+                        try:
+                            await reply_callback(
+                                chat_id, "所有模型均不可用", reply_to, is_group,
+                            )
+                        except Exception as cb_err:
+                            _log.warning("回复 callback 失败 [%s]: %s", chat_id[:12], cb_err)
+                        return sent_emoji, True
                     break
-
-                remaining = [m for m in model_chain if m not in failed_models]
-
-                if not remaining:
-                    # 链中所有模型都已尝试并失败
-                    try:
-                        await reply_callback(
-                            chat_id, "所有模型均不可用", reply_to, is_group,
-                        )
-                    except Exception as cb_err:
-                        _log.warning("回复 callback 失败 [%s]: %s", chat_id[:12], cb_err)
-                    return sent_emoji, True
-
-                _log.warning(
-                    f"模型 [{resolved_model_name}] 失败，从剩余链重新解析: {remaining}"
-                )
-                new_resolved = await self._model_registry.resolve_model_chain(remaining)
-                if new_resolved:
-                    resolved_model_name, resolved_service = new_resolved
-                    continue
-
-                # 剩余链全在冷却：走完整 fallback 链做最后一次兜底
-                message, usage, fb_name = await self._model_registry.chat_with_fallback(
-                    remaining, messages, tools,
-                )
-                if fb_name:
-                    resolved_model_name = fb_name
-                    resolved_service = self._model_registry.get(fb_name)
-                current_model_name = fb_name
-                break
+                else:
+                    # 无模型链（使用默认 ai_service），尝试一次
+                    break
 
             model_for_cost = current_model_name or self.ai_service.model
             if usage and self.cost_tracker:

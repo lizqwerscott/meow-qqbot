@@ -47,6 +47,7 @@ class InputMessage:
     msg_type: MessageType = MessageType.TEXT
     timestamp: Optional[float] = None
     model_chain: Optional[List[str]] = None
+    tier: Optional[str] = None
     resources: List[ResourceMeta] = field(default_factory=list)
 
     def __post_init__(self):

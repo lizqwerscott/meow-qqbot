@@ -75,6 +75,10 @@ class AgentEngine:
         # ── 消息钩子 ──
         self._message_hooks: list = []
 
+        # ── Session 模型绑定 ──
+        from core.managers.session_binding import SessionBindingManager
+        self._session_binding = SessionBindingManager()
+
         # ── 消息去重 ──
         self._processed_ids: OrderedDict[str, bool] = OrderedDict()
         self._max_processed_ids = 1000
@@ -276,6 +280,7 @@ class AgentEngine:
         # ── 规则路由智能分级（ClawRouter 风格） ──
         if needs_ai and self.rule_router and self.model_registry:
             tier = self.rule_router.classify(input_message.content)
+            input_message.tier = tier
             model_chain = self.model_registry.get_chain(tier)
             input_message.model_chain = model_chain or None
 
@@ -456,6 +461,8 @@ class AgentEngine:
             sender_id=input_message.sender_id,
             get_user_nickname=get_user_nickname,
             model_chain=input_message.model_chain,
+            binding_manager=self._session_binding,
+            tier=input_message.tier,
         )
 
         if self._system_events:
@@ -526,6 +533,7 @@ class AgentEngine:
 
             # 规则路由分级（同 _process_message 风格）
             model_chain = None
+            tier = None
             if self.rule_router and self.model_registry:
                 tier = self.rule_router.classify(prompt)
                 model_chain = self.model_registry.get_chain(tier) or None
@@ -550,6 +558,8 @@ class AgentEngine:
                     delivery_channel=delivery_channel,
                     reply_to_message_id=reply_to_message_id,
                     model_chain=model_chain,
+                    binding_manager=self._session_binding,
+                    tier=tier,
                 ),
                 timeout=300,
             )
@@ -652,6 +662,7 @@ class AgentEngine:
                     )
 
             model_chain = None
+            tier = None
             if self.rule_router and self.model_registry:
                 tier = self.rule_router.classify(extra_prompt or "[系统事件]")
                 model_chain = self.model_registry.get_chain(tier) or None
@@ -666,6 +677,8 @@ class AgentEngine:
                     reply_callback=_capture,
                     sender_id="system",
                     model_chain=model_chain,
+                    binding_manager=self._session_binding,
+                    tier=tier,
                 ),
                 timeout=timeout,
             )

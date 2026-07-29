@@ -6,14 +6,22 @@
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
 from openai.types.chat import ChatCompletionMessageParam
 
 from core.ai.cooldown import ModelCooldownManager
 from core.ai.service import AIService
+from core.ai.fallback_runner import FallbackRunner
 
 _log = logging.getLogger(__name__)
+
+
+@dataclass
+class _SessionConfig:
+    budget: int = 30
+    ttl: float = 600.0
 
 
 class ModelRegistry:
@@ -37,8 +45,12 @@ class ModelRegistry:
         self._tier_map: Dict[str, str] = {}
         self._default_service: Optional[Any] = None
         self._cooldown = ModelCooldownManager(cooldown_config or {})
+        self._session_configs: Dict[str, _SessionConfig] = {}
+        self._default_session_config = _SessionConfig()
 
         for provider_name, pcfg in providers_config.items():
+            provider_budget = pcfg.get("session_budget")
+            provider_ttl = pcfg.get("session_ttl")
             provider_type = pcfg.get("type", "openai")
             api_key = pcfg.get("api_key", "")
             base_url = pcfg.get("base_url")
@@ -88,6 +100,16 @@ class ModelRegistry:
                         reasoning_effort=model_cfg.get("reasoning_effort"),
                     )
                 self._services[qualified_name] = svc
+
+                m_budget = model_cfg.get("session_budget")
+                m_ttl = model_cfg.get("session_ttl")
+                budget = (m_budget if m_budget is not None
+                          else provider_budget if provider_budget is not None
+                          else self._default_session_config.budget)
+                ttl = (m_ttl if m_ttl is not None
+                       else provider_ttl if provider_ttl is not None
+                       else self._default_session_config.ttl)
+                self._session_configs[qualified_name] = _SessionConfig(budget=budget, ttl=ttl)
 
                 _log.info(
                     f"模型 [{qualified_name}]({provider_type}): "
@@ -157,6 +179,17 @@ class ModelRegistry:
                 return [name]
         return []
 
+    def get_session_config(self, qualified_name: str) -> tuple[int, float]:
+        """获取模型的 session 绑定配置 (budget, ttl)。
+
+        三层级：model > provider > default（在 __init__ 中计算并存储）。
+        """
+        cfg = self._session_configs.get(qualified_name)
+        if cfg:
+            return cfg.budget, cfg.ttl
+        d = self._default_session_config
+        return d.budget, d.ttl
+
     async def resolve_model_chain(
         self, model_chain: List[str]
     ) -> Optional[tuple[str, Any]]:
@@ -218,54 +251,18 @@ class ModelRegistry:
                         f"模型剩余{qi['model_remaining']}/{qi['model_limit']})"
                     )
 
-        last_error = None
-        for qualified_name in model_chain:
-            # 冷却检查：跳过正在冷却的模型
-            if await self._cooldown.is_cooled_down(qualified_name):
-                _log.info(
-                    f"模型 [{qualified_name}] 处于冷却期，跳过"
-                )
-                continue
-
-            svc = self._services.get(qualified_name)
-            if svc is None:
-                _log.warning(f"模型 [{qualified_name}] 未注册，跳过")
-                continue
-
-            try:
-                result, usage = await svc.chat_completion_with_tools(
-                    messages=messages,
-                    tools=tools,
-                    max_tokens=max_tokens,
-                )
-                if result is not None:
-                    await self._cooldown.record_success(qualified_name)
-                    _log.debug(f"模型 [{qualified_name}] 调用成功")
-                    return result, usage, qualified_name
-
-                last_error = "返回空结果"
-                await self._cooldown.record_failure(qualified_name)
-                if hasattr(svc, "quota_info") and svc.quota_info["exhausted"]:
-                    _log.warning(
-                        f"模型 [{qualified_name}] 额度已耗尽，尝试 fallback..."
-                    )
-                else:
-                    _log.warning(
-                        f"模型 [{qualified_name}] 返回空结果，尝试 fallback..."
-                    )
-            except Exception as e:
-                if isinstance(e, asyncio.CancelledError):
-                    raise
-                last_error = str(e)
-                # 服务端异常写入全局冷却
-                await self._cooldown.record_failure(qualified_name)
-                _log.warning(
-                    f"模型 [{qualified_name}] 调用失败: {e}，尝试 fallback..."
-                )
-
-        _log.error(
-            f"所有模型 fallback 失败: chain={model_chain} last_error={last_error}"
+        runner = FallbackRunner(self, model_chain)
+        result = await runner.run(
+            lambda svc, name: svc.chat_completion_with_tools(
+                messages=messages,
+                tools=tools,
+                max_tokens=max_tokens,
+            ),
+            record_cooldown=True,
         )
+        if result.ok:
+            return result.message, result.usage, result.model_name
+        _log.error(f"所有模型 fallback 失败: chain={model_chain}")
         return None, None, None
 
     @property
