@@ -77,20 +77,22 @@ async def main():
 
     # ── 策略 2: 旧格式 [models.xxx] 中的 ollama 模型 ──────────
     if not services and raw.get("models"):
-        from core.ai.ollama_service import OllamaService
+        from core.ai.service import AIService
 
         for mname, mcfg in raw["models"].items():
             if mcfg.get("provider") == "ollama":
                 model = mcfg.get("model", "")
                 if not model:
                     continue
-                svc = OllamaService(
-                    api_key=mcfg.get("api_key", ""),
-                    host=mcfg.get("host", "http://localhost:11434"),
+                host = mcfg.get("host", "http://localhost:11434").rstrip("/")
+                svc = AIService(
+                    api_key=mcfg.get("api_key", "") or "not-needed",
+                    base_url=f"{host}/v1",
                     model=model,
+                    timeout=mcfg.get("timeout", 120),
+                    max_retries=0,
                     temperature=mcfg.get("temperature", 0.3),
                     max_tokens=mcfg.get("max_tokens", 4096),
-                    timeout=mcfg.get("timeout", 120),
                 )
                 _add_service(svc, f"models.{mname}")
                 print(f"  ✓  [models.{mname}]  ollama: {model}")
@@ -99,17 +101,19 @@ async def main():
     if not services:
         model = multimodal_cfg.get("model", "")
         if model:
-            from core.ai.ollama_service import OllamaService
-            svc = OllamaService(
-                api_key=multimodal_cfg.get("api_key", ""),
-                host=multimodal_cfg.get("host", "http://localhost:11434"),
+            from core.ai.service import AIService
+            host = multimodal_cfg.get("host", "http://localhost:11434").rstrip("/")
+            svc = AIService(
+                api_key=multimodal_cfg.get("api_key", "") or "not-needed",
+                base_url=f"{host}/v1",
                 model=model,
+                timeout=120,
+                max_retries=0,
                 temperature=0.3,
                 max_tokens=4096,
-                timeout=120,
             )
             _add_service(svc, model)
-            print(f"  ✓  {model} @ {multimodal_cfg.get('host', 'http://localhost:11434')}")
+            print(f"  ✓  {model} @ {host}")
 
     if not services:
         print("错误: 无法确定 VLM 模型。请配置以下任一:")

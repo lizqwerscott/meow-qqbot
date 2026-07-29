@@ -77,13 +77,15 @@ class ModelRegistry:
                         reasoning_effort=model_cfg.get("reasoning_effort"),
                     )
                 elif provider_type == "ollama":
-                    from core.ai.ollama_service import OllamaService
-                    host = pcfg.get("host", "http://localhost:11434")
-                    svc = OllamaService(
-                        api_key=api_key,
-                        host=host,
+                    from core.ai.service import AIService
+                    host = pcfg.get("host", "http://localhost:11434").rstrip("/")
+                    base_url = pcfg.get("base_url") or f"{host}/v1"
+                    svc = AIService(
+                        api_key=api_key or "not-needed",
+                        base_url=base_url,
                         model=model_cfg.get("model", "llama3.2"),
                         timeout=model_cfg.get("timeout", 120),
+                        max_retries=model_cfg.get("max_retries", 0),
                         temperature=model_cfg.get("temperature", 0.7),
                         max_tokens=model_cfg.get("max_tokens", 4096),
                         reasoning_effort=model_cfg.get("reasoning_effort"),
