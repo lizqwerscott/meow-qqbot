@@ -77,7 +77,6 @@ class ModelRegistry:
                         reasoning_effort=model_cfg.get("reasoning_effort"),
                     )
                 elif provider_type == "ollama":
-                    from core.ai.service import AIService
                     host = pcfg.get("host", "http://localhost:11434").rstrip("/")
                     base_url = pcfg.get("base_url") or f"{host}/v1"
                     svc = AIService(
