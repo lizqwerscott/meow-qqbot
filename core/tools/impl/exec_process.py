@@ -6,6 +6,7 @@ import logging
 from core.tools._types import ToolEntry, ToolResult, ToolContext
 from core.tools.deps import ToolDeps
 from core.tools.security import parse_command_safe, check_command_denied, sanitize_env
+from core.tools.impl.file import is_admin_private
 
 _log = logging.getLogger(__name__)
 
@@ -28,12 +29,21 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
 
         timeout = args.get("timeout")
         workdir = args.get("workdir")
+        user_provided_workdir = workdir is not None
         background = args.get("background", False)
         delivery_channel = args.get("delivery_channel")
         role = perm.get_user_role(ctx.sender_id) if perm else "admin"
 
-        if workdir and role != "admin":
-            ws_mgr = deps.workspace_manager.value
+        if workdir is None:
+            ws_mgr = deps.workspace_manager
+            if ws_mgr:
+                if is_admin_private(ctx, deps):
+                    workdir = str(ws_mgr.root_dir().resolve())
+                else:
+                    workdir = str(ws_mgr.sandbox_dir(ctx.is_group, ctx.chat_id).resolve())
+
+        if user_provided_workdir and not (perm and perm.is_admin_role(role)):
+            ws_mgr = deps.workspace_manager
             if ws_mgr:
                 try:
                     safe_path = ws_mgr.resolve_safe_path(ctx.is_group, ctx.chat_id, workdir)
