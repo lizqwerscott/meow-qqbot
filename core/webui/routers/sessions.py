@@ -22,6 +22,11 @@ def _validate_chat_id(chat_id: str) -> None:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="无效的 chat_id")
 
 
+def _validate_date(date: str) -> None:
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="无效的 date")
+
+
 def _make_flash_redirect(url: str, category: str, message: str):
     separator = "&" if "?" in url else "?"
     return RedirectResponse(
@@ -205,6 +210,7 @@ async def archived_messages_full(request: Request, chat_id: str, timestamp: str)
 @router.get("/sessions/archived/{chat_id}/summary/{date}", response_class=HTMLResponse)
 async def archived_summary_view(request: Request, chat_id: str, date: str):
     _validate_chat_id(chat_id)
+    _validate_date(date)
     managers = request.app.state.managers
     templates = request.app.state.templates
     archive_manager = managers.get("archive_manager")

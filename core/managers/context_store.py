@@ -294,8 +294,13 @@ class JSONLContextStore(ContextStore):
         return files
 
     def read_archive(self, file_path: str, max_messages: int = 200) -> List[dict]:
-        path = Path(file_path)
+        path = Path(file_path).resolve()
         if not path.exists():
+            return []
+        try:
+            path.relative_to(self._base_dir.resolve())
+        except ValueError:
+            _log.warning("拒绝越界读取归档: %s", file_path)
             return []
         data = []
         with open(path, "r", encoding="utf-8") as f:

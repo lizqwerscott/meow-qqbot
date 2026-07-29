@@ -152,7 +152,7 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
             return ToolResult(content=json.dumps({"error": "请提供 file_path"}, ensure_ascii=False))
         admin_override = is_admin_private(ctx, deps)
         try:
-            target = wm.resolve_safe_path(ctx.is_group, ctx.chat_id, file_path, admin_override=admin_override)
+            target = sandbox_target(ctx.is_group, ctx.chat_id, file_path, deps, admin_override=admin_override)
         except ValueError as e:
             approved = await _approve_path_access(ctx, file_path, "read_file", str(e), deps)
             if approved is not None:
@@ -195,7 +195,7 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
             return ToolResult(content=json.dumps({"error": "请提供 file_path"}, ensure_ascii=False))
         admin_override = is_admin_private(ctx, deps)
         try:
-            target = wm.resolve_safe_path(ctx.is_group, ctx.chat_id, file_path, admin_override=admin_override)
+            target = sandbox_target(ctx.is_group, ctx.chat_id, file_path, deps, admin_override=admin_override)
         except ValueError as e:
             approved = await _approve_path_access(ctx, file_path, "write_file", str(e), deps)
             if approved is not None:
@@ -222,7 +222,7 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
         admin_override = is_admin_private(ctx, deps)
         approved_outside_sandbox = False
         try:
-            target = wm.resolve_safe_path(ctx.is_group, ctx.chat_id, dir_path, admin_override=admin_override)
+            target = sandbox_target(ctx.is_group, ctx.chat_id, dir_path, deps, admin_override=admin_override)
         except ValueError as e:
             approved = await _approve_path_access(ctx, dir_path, "list_dir", str(e), deps)
             if approved is not None:
@@ -246,7 +246,7 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
             if approved_outside_sandbox:
                 rel = str(item)
             else:
-                sandbox = wm.root_dir() if admin_override else wm.sandbox_dir(ctx.is_group, ctx.chat_id)
+                sandbox = wm.root_dir().resolve() if admin_override else wm.sandbox_dir(ctx.is_group, ctx.chat_id).resolve()
                 try:
                     rel = str(item.relative_to(sandbox))
                 except ValueError:
@@ -282,7 +282,7 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
             return ToolResult(content=json.dumps({"error": "请提供 old_string"}, ensure_ascii=False))
         admin_override = is_admin_private(ctx, deps)
         try:
-            target = wm.resolve_safe_path(ctx.is_group, ctx.chat_id, file_path, admin_override=admin_override)
+            target = sandbox_target(ctx.is_group, ctx.chat_id, file_path, deps, admin_override=admin_override)
         except ValueError as e:
             approved = await _approve_path_access(ctx, file_path, "edit_file", str(e), deps)
             if approved is not None:

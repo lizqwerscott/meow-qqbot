@@ -36,10 +36,12 @@ class WorkspaceManager:
         Raises ValueError 如果路径越界。
         """
         sandbox = self._root if admin_override else self.sandbox_dir(is_group, chat_id)
+        sandbox_resolved = sandbox.resolve()
         safe = relative_path.lstrip("/").lstrip("\\")
-        target = (sandbox / safe).resolve()
-        sandbox_str = str(sandbox.resolve()) + "/"
-        if not str(target).startswith(sandbox_str):
+        target = (sandbox_resolved / safe).resolve()
+        try:
+            target.relative_to(sandbox_resolved)
+        except ValueError:
             raise ValueError(f"路径越界: {relative_path}")
         return target
 
