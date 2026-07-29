@@ -230,6 +230,7 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
                 approved_outside_sandbox = True
             else:
                 return ToolResult(content=json.dumps({"error": str(e)}, ensure_ascii=False))
+        target = target.resolve()
         if not target.exists():
             return ToolResult(content=json.dumps({"error": f"路径不存在: {dir_path}"}, ensure_ascii=False))
         if not target.is_dir():
