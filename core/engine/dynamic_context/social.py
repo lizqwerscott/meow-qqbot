@@ -17,6 +17,7 @@ class SocialBlockBuilder:
         chat_id: str,
         is_group: bool,
         has_users: bool,
+        max_users: int = 0,
     ) -> Optional[str]:
         parts = []
 
@@ -27,12 +28,17 @@ class SocialBlockBuilder:
 
         if has_users and self._nm:
             try:
-                user_lines = ["【群友列表】"]
-                for uid, aliases in sorted(
+                all_users = sorted(
                     self._nm.iter_users(), key=lambda x: "，".join(x[1])
-                ):
+                )
+                total = len(all_users)
+                user_lines = ["【群友列表】"]
+                limit = max_users if max_users > 0 else total
+                for uid, aliases in all_users[:limit]:
                     alias_str = "，".join(aliases)
                     user_lines.append(f"- {uid}（{alias_str}）")
+                if total > limit:
+                    user_lines.append(f"...以及 {total - limit} 位群友")
                 if len(user_lines) > 1:
                     parts.append("\n".join(user_lines))
             except Exception as e:

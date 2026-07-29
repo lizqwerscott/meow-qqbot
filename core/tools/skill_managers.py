@@ -57,14 +57,20 @@ class SkillManagers:
             "使用技能意味着吸收该领域的专业知识来指导行为。"
         )
 
-    def get_skill_entries_block(self) -> str:
+    def get_skill_entries_block(self, max_skills: int = 0, max_desc_chars: int = 0) -> str:
         skills = self._manager.list_skills()
         if not skills:
             return ""
+
+        if max_skills > 0:
+            skills = skills[:max_skills]
+
         lines = ["<available_skills>"]
         for s in skills:
             name = s.name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             desc = (s.description or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            if max_desc_chars > 0 and len(desc) > max_desc_chars:
+                desc = desc[:max_desc_chars] + "..."
             lines.append("  <skill>")
             lines.append(f"    <name>{name}</name>")
             lines.append(f"    <description>{desc}</description>")

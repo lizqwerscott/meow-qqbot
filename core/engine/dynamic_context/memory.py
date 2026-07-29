@@ -47,6 +47,7 @@ class MemoryBlockBuilder:
         chat_id: str,
         sender_id: str,
         input_message: InputMessage,
+        max_archive_chars: int = 0,
     ) -> Optional[str]:
         parts = []
 
@@ -77,9 +78,12 @@ class MemoryBlockBuilder:
                 )
                 summary_text = None
             if summary_text:
+                original_len = len(summary_text)
+                if max_archive_chars > 0 and original_len > max_archive_chars:
+                    summary_text = summary_text[:max_archive_chars] + "\n...(截断)"
                 _log.info(
-                    "注入归档摘要 [%s..] (%d 字符)",
-                    chat_id[:12], len(summary_text),
+                    "注入归档摘要 [%s..] (%d 字符，截断前 %d)",
+                    chat_id[:12], len(summary_text), original_len,
                 )
                 parts.append(
                     "以下内容来自过去几天的对话记录，"
