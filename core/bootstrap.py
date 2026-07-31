@@ -512,6 +512,9 @@ class ServiceGraph:
         self.bot_engine.approval_manager = self.approval_manager
         _log.info("ApprovalManager 已初始化")
 
+        # ── exec auto-reviewer（[exec].auto_reviewer 启用时，mode=auto 用）──
+        self._setup_exec_reviewer()
+
         # ── 兼容层 WakeDispatcher ──
         min_spacing = self.cfg.heartbeat.get("min_spacing_seconds", 30)
         flood_window = self.cfg.heartbeat.get("cooldown_flood_window_seconds", 60)
@@ -527,6 +530,50 @@ class ServiceGraph:
         # BackgroundTaskRunner 需保留 wake_dispatcher 引用用于 NOW 模式
         if self.background_task_runner:
             self.background_task_runner.set_wake_dispatcher(self.wake_dispatcher)
+
+    # ── exec auto-reviewer 注入（mode=auto 的生产接线）──
+
+    def _setup_exec_reviewer(self):
+        """按 [exec].auto_reviewer 配置创建 ExecAutoReviewer 并注入 tool_deps。
+
+        review_fn 用 ModelRegistry.simple_chat 走轻量模型判定（allow/ask）；
+        未启用或模型不可用时保持 exec_reviewer=None，mode=auto 降级为人工审批。
+        """
+        from core.approval.auto_reviewer import REVIEW_PROMPT, ExecAutoReviewer
+
+        ar_cfg = {}
+        if self.permission_manager:
+            ar_cfg = (
+                self.permission_manager.get_exec_policy().get("auto_reviewer") or {}
+            )
+        if not ar_cfg.get("enabled") or not self.model_registry:
+            _log.info("exec auto-reviewer 未启用（mode=auto 时降级人工审批）")
+            return
+        model_name = ar_cfg.get("model") or ""
+        if not model_name:
+            _log.warning("auto_reviewer 未配置 model，跳过注入")
+            return
+
+        async def _review_fn(plan: dict) -> str:
+            prompt = REVIEW_PROMPT.format(
+                command=plan.get("command", ""),
+                cwd=plan.get("cwd", "") or "",
+                resolved_path=plan.get("resolved_path", "") or "",
+                role=plan.get("role", ""),
+            )
+            reply = await self.model_registry.simple_chat(
+                model_name,
+                [{"role": "user", "content": prompt}],
+                max_tokens=16,
+            )
+            text = (reply or "").strip().lower()
+            if text.startswith("allow"):
+                return "allow"
+            return "ask"
+
+        self.exec_reviewer = ExecAutoReviewer(review_fn=_review_fn)
+        self.tool_deps.exec_reviewer.value = self.exec_reviewer
+        _log.info("exec auto-reviewer 已注入 (model=%s)", model_name)
 
     # ── 阶段 4: 心跳 / 命令 / 插件 / WebUI ─────────────────────────
 

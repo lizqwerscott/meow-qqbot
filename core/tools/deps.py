@@ -34,6 +34,9 @@ class ToolDeps:
     tts_service: Ref = field(default_factory=Ref)  # Ref[TtsService]
     process_registry: Ref = field(default_factory=Ref)  # Ref[ProcessRegistry]
     approval_manager: Ref = field(default_factory=Ref)  # Ref[ApprovalManager]
+    exec_reviewer: Ref = field(
+        default_factory=Ref
+    )  # Ref[ExecAutoReviewer] (mode=auto 用)
     task_manager: Ref = field(default_factory=Ref)  # Ref[TaskManager]
     cron_job_manager: Ref = field(default_factory=Ref)  # Ref[CronJobManager]
     background_task_runner: Ref = field(

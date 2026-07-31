@@ -106,7 +106,7 @@ class PermissionManager:
         Returns:
             None 表示通过，str 表示拒绝原因
         """
-        if user_role == "admin":
+        if user_role in ("admin", "system"):
             return None
 
         if not parts:
@@ -171,6 +171,10 @@ class PermissionManager:
         cmd_name = os.path.basename(parts[0])
         return cmd_name in allowed
 
+    def get_allowed_commands(self) -> list:
+        """返回 [commands].allowed 命令名列表（作为静态 allowlist 输入）。"""
+        return list(self._data.get("commands", {}).get("allowed", []))
+
     # ── 执行超时 ──
 
     def get_default_timeout(self) -> int:
@@ -195,3 +199,20 @@ class PermissionManager:
     def get_security_config(self, name: str, default=None):
         """读取 [security] 下的单项安全策略配置。"""
         return self._get_config(f"security.{name}", default)
+
+    # ── exec 审批策略（对齐 openclaw tools.exec.*）──
+
+    def get_exec_policy(self):
+        """读取 [exec] 段的 requested 策略（对齐 openclaw tools.exec.*）。
+
+        Returns:
+            dict: {"mode", "security", "ask", "ask_fallback", "strict_inline_eval", "auto_reviewer"}
+        """
+        return {
+            "mode": self._get_config("exec.mode", "ask"),
+            "security": self._get_config("exec.security", "allowlist"),
+            "ask": self._get_config("exec.ask", "on-miss"),
+            "ask_fallback": self._get_config("exec.ask_fallback", "deny"),
+            "strict_inline_eval": self._get_config("exec.strict_inline_eval", True),
+            "auto_reviewer": self._get_config("exec.auto_reviewer", None),
+        }

@@ -2,14 +2,55 @@
 
 import json
 import logging
+import os
 
+from core.approval.allowlist import AllowlistEntry, match_allowlist, merge_allowlists
+from core.approval.exec_policy import (
+    ALLOW_DECISIONS,
+    DECISION_ALLOW,
+    DECISION_ALLOW_ONCE,
+    DECISION_DENY,
+    ExecPolicy,
+    config_to_policy,
+    effective_policy,
+    policy_for_role,
+    requires_approval,
+    resolve_mode_from_policy,
+)
 from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
+from core.tools.exec_analysis import analyze_command, iter_all_segments
+from core.tools.exec_runner import build_argv, run_plan
 from core.tools.impl.file import is_admin_private
 from core.tools.security import check_command_denied, parse_command_safe
 from core.tools.shell_env import build_exec_env_for
 
 _log = logging.getLogger(__name__)
+
+
+def _build_exec_policy(perm, approval_mgr):
+    """策略面：config [exec] × host 审批文件取更严（对齐 openclaw）。
+
+    Returns:
+        (effective, host_policy) 二元组——host_policy 供 policy_for_role
+        对固定角色（trusted/default/system）继续收紧。
+    """
+    if perm:
+        config_policy = config_to_policy(perm.get_exec_policy())
+    else:
+        config_policy = ExecPolicy()
+    host_policy = approval_mgr.get_host_policy() if approval_mgr else ExecPolicy()
+    return effective_policy(config_policy, host_policy), host_policy
+
+
+def _plan_mismatch(stored: dict, current: dict) -> bool:
+    """比对审批时绑定的 plan 与当前执行计划（对齐 openclaw approval mismatch）。"""
+    for key in ("command", "cwd"):
+        if stored.get(key) != current.get(key):
+            return True
+    if stored.get("resolved_path") != current.get("resolved_path"):
+        return True
+    return False
 
 
 def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
@@ -80,60 +121,176 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
             )
 
         approval_mgr = deps.approval_manager.value
+        reviewer = deps.exec_reviewer.value if deps.exec_reviewer else None
 
-        if approval_mgr and approval_mgr.check_whitelist("exec", command):
-            _log.info("exec 命令命中审批白名单: %s", command[:80])
-        else:
-            reason = check_command_denied(parts)
-            if reason:
-                _log.warning("exec 被拒绝: %s", reason)
+        # ── 1. 策略面（OpenClaw 风格：config × host 取更严，再按角色归一）──
+        effective, host_policy = _build_exec_policy(perm, approval_mgr)
+        policy = policy_for_role(role, effective, host_policy)
+        mode = resolve_mode_from_policy(policy)
+
+        if policy.security == "deny":
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "exec 已被策略禁用 (security=deny)"},
+                    ensure_ascii=False,
+                )
+            )
+
+        # ── 2. 命令分析：切段 + 真实路径解析 + inline-eval 检测 ──
+        segments = analyze_command(command, env=os.environ, cwd=workdir)
+        if not segments:
+            _log.warning("exec 命令格式无效: %s", command[:80])
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"命令格式无效（引号不匹配等）: {command[:80]}"},
+                    ensure_ascii=False,
+                )
+            )
+
+        # 硬拦截原因（DENIED_COMMANDS 黑名单 + 危险重定向目标），穿透嵌套段：
+        # bash -c 'rm ...' 的 payload 内 rm 也计入（对齐 openclaw wrapper 分析）。
+        # allowlist 命中时保持原语义直接放行（allowlist 覆盖黑名单，如 sudo）。
+        deny_reason = check_command_denied(parts)
+        if not deny_reason:
+            for seg in iter_all_segments(segments):
+                reason = check_command_denied(seg.argv)
+                if reason:
+                    deny_reason = reason
+                    break
+
+        # ── 3. allowlist 匹配（静态 [commands] + 运行时审批白名单，逐段）──
+        static_entries = [
+            AllowlistEntry(pattern=cmd, source="manual")
+            for cmd in (perm.get_allowed_commands() if perm else [])
+            if cmd
+        ]
+        dynamic_entries = approval_mgr.get_allowlist_entries() if approval_mgr else []
+        allowlist_satisfied, _ = match_allowlist(
+            segments,
+            merge_allowlists(static_entries, dynamic_entries),
+        )
+        analysis_ok = all(
+            seg.resolution and seg.resolution.resolved_path
+            for seg in iter_all_segments(segments)
+        )
+        inline_hit = policy.strict_inline_eval and any(
+            seg.inline_eval for seg in iter_all_segments(segments)
+        )
+
+        effective_allow = allowlist_satisfied and not inline_hit and analysis_ok
+        needs_ask = requires_approval(
+            ask=policy.ask,
+            security=policy.security,
+            analysis_ok=analysis_ok,
+            allowlist_satisfied=allowlist_satisfied and not inline_hit,
+            durable_satisfied=effective_allow,
+        )
+
+        plan = {
+            "command": command,
+            "argv": parts,
+            "cwd": workdir,
+            "resolved_path": (
+                segments[0].resolution.resolved_path
+                if segments and segments[0].resolution
+                else None
+            ),
+            "role": role,
+        }
+
+        if needs_ask:
+            decision: str | None = None
+            session_key: str | None = None
+            # mode=auto：仅 admin 私聊、非 inline、非硬拦截 → 先让 reviewer 判一次
+            # （不落白名单）。群聊不放行——审批/审查均仅限 c2c。
+            if (
+                mode == "auto"
+                and not ctx.is_group
+                and not inline_hit
+                and not deny_reason
+                and reviewer
+                and reviewer.available
+            ):
+                if await reviewer.review(plan) == DECISION_ALLOW:
+                    decision = DECISION_ALLOW_ONCE
+            if decision is None:
                 if approval_mgr and role == "admin" and not ctx.is_group:
                     result = await approval_mgr.request_approval(
                         chat_id=ctx.chat_id,
                         tool_name="exec",
-                        reason=reason,
+                        reason=deny_reason or "命令不在允许列表中",
                         details=command,
+                        plan=plan,
+                        ask_fallback=policy.ask_fallback,
+                        # strictInlineEval：inline 命令的 allow-always 不落白名单
+                        persist=not inline_hit,
+                        return_session_key=True,
                     )
-                    if result == "deny":
-                        return ToolResult(
-                            content=json.dumps(
-                                {"error": f"审批已拒绝: {reason}"},
-                                ensure_ascii=False,
-                            )
-                        )
-                    if result == "timeout":
-                        return ToolResult(
-                            content=json.dumps(
-                                {"error": f"审批超时: {reason}"},
-                                ensure_ascii=False,
-                            )
-                        )
+                    decision, session_key = result
+                    if decision == DECISION_ALLOW:
+                        decision = DECISION_ALLOW_ONCE
                 else:
+                    decision = DECISION_DENY
+            if decision not in ALLOW_DECISIONS:
+                reason_text = deny_reason or "命令不在允许列表中"
+                _log.warning("exec 未获审批: %s", reason_text)
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": reason_text},
+                        ensure_ascii=False,
+                    )
+                )
+            # durable 比对（对齐 openclaw approval mismatch）：审批通过后执行前，
+            # 校验当前命令与审批时绑定的 canonical plan 一致，防止内容漂移。
+            if approval_mgr and session_key:
+                stored = approval_mgr.take_pending_plan(session_key)
+                if stored and _plan_mismatch(stored, plan):
+                    _log.warning("exec 审批计划漂移，拒绝执行: %s", command[:80])
                     return ToolResult(
                         content=json.dumps(
-                            {"error": reason},
+                            {"error": "APPROVAL_MISMATCH: 命令与已审批内容不一致"},
                             ensure_ascii=False,
                         )
                     )
+        else:
+            # 无审批路径：security=full 全放行；allowlist 模式必须命中
+            if policy.security != "full" and not effective_allow:
+                _log.warning("exec allowlist 拒绝: %s", command[:80])
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": "命令不在允许列表中"},
+                        ensure_ascii=False,
+                    )
+                )
 
-            if role != "admin" and perm:
-                reason = perm.check_command_allowed(command, parts, role)
-                if reason:
-                    _log.warning("exec 白名单拒绝: %s", reason)
-                    return ToolResult(
-                        content=json.dumps(
-                            {"error": reason},
-                            ensure_ascii=False,
-                        )
+        # ── 4. 非 admin 叠加安全策略（替换/串联/重定向/长度/命令名）──
+        if role not in ("admin", "system") and perm:
+            reason = perm.check_command_allowed(command, parts, role)
+            if reason:
+                _log.warning("exec 白名单拒绝: %s", reason)
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": reason},
+                        ensure_ascii=False,
                     )
+                )
 
         if background:
+            if len(segments) > 1:
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": "链式/管道命令暂不支持后台执行，请用前台执行"},
+                        ensure_ascii=False,
+                    )
+                )
             try:
                 effective_timeout = min(timeout or 120, 300)
                 env = await build_exec_env_for(perm)
+                # 后台同样绑定解析后的可执行路径（pin executable）
+                bg_parts = build_argv(segments[0]) if segments else parts
                 session_id = await process_registry.spawn(
                     command=command,
-                    parts=parts,
+                    parts=bg_parts,
                     workdir=workdir,
                     chat_id=ctx.chat_id,
                     delivery_channel=delivery_channel,
@@ -160,49 +317,22 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                 )
 
         import asyncio
-        import subprocess
 
+        # 前台：段级执行（分析-执行绑定，支持 && || ; | 语义）
         effective_timeout = min(timeout or 60, 120)
         try:
             env = await build_exec_env_for(perm)
             result = await asyncio.wait_for(
                 asyncio.to_thread(
-                    subprocess.run,
-                    parts,
-                    shell=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=effective_timeout,
+                    run_plan,
+                    segments,
                     env=env,
                     cwd=workdir,
+                    timeout=effective_timeout,
                 ),
                 timeout=effective_timeout + 5,
             )
-            stdout = (
-                result.stdout[-100000:]
-                if len(result.stdout) > 100000
-                else result.stdout
-            )
-            stderr = (
-                result.stderr[-100000:]
-                if len(result.stderr) > 100000
-                else result.stderr
-            )
-            return ToolResult(
-                content=json.dumps(
-                    {
-                        "success": result.returncode == 0,
-                        "exit_code": result.returncode,
-                        "stdout": stdout,
-                        "stderr": stderr,
-                        "truncated": {
-                            "stdout": len(result.stdout) > 100000,
-                            "stderr": len(result.stderr) > 100000,
-                        },
-                    },
-                    ensure_ascii=False,
-                )
-            )
+            return ToolResult(content=json.dumps(result, ensure_ascii=False))
         except asyncio.TimeoutError:
             return ToolResult(
                 content=json.dumps(
