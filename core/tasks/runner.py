@@ -21,8 +21,10 @@ import subprocess
 import time
 from typing import Any, Callable, List, Optional
 
-from .models import CronJob, SessionMode, TaskRecord, TaskStatus
 import core.tasks.wake_coalescer as _wake_coalescer
+from core.tools.shell_env import build_exec_env_for
+
+from .models import CronJob, SessionMode, TaskRecord, TaskStatus
 
 # 安全黑名单（复用 SkillManagers 的配置）
 _DENIED_COMMANDS: frozenset = frozenset(
@@ -82,6 +84,7 @@ class BackgroundTaskRunner:
 
     def __init__(self, task_manager: Any = None):
         self._task_manager = task_manager
+        self._permission_manager: Optional[Any] = None
 
         # 外部注入的回调
         self._execute_prompt_cb: Optional[Callable] = None
@@ -90,6 +93,11 @@ class BackgroundTaskRunner:
         # async (chat_id, content, message_id, is_group) -> None
         self._system_events: Optional[Any] = None
         self._wake_dispatcher: Optional[Any] = None
+
+    def set_permission_manager(self, permission_manager: Any) -> None:
+        """注入权限管理器：命令载荷的 login shell 开关与 exec 工具
+        读取同一份 allowlist.toml 安全配置。"""
+        self._permission_manager = permission_manager
 
     def set_system_events(self, system_events: Any) -> None:
         """注入系统事件队列。"""
@@ -304,10 +312,13 @@ class BackgroundTaskRunner:
         proc: Optional[asyncio.subprocess.Process] = None
         try:
             parts = shlex.split(job.command)
+
+            env = await build_exec_env_for(self._permission_manager)
             proc = await asyncio.create_subprocess_exec(
                 *parts,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(

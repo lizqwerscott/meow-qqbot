@@ -3,10 +3,11 @@
 import json
 import logging
 
-from core.tools._types import ToolEntry, ToolResult, ToolContext
+from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
-from core.tools.security import parse_command_safe, check_command_denied, sanitize_env
 from core.tools.impl.file import is_admin_private
+from core.tools.security import check_command_denied, parse_command_safe
+from core.tools.shell_env import build_exec_env_for
 
 _log = logging.getLogger(__name__)
 
@@ -17,15 +18,21 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
         process_registry = deps.process_registry.value
         perm = deps.permission_manager
         if not process_registry:
-            return ToolResult(content=json.dumps(
-                {"error": "进程系统未就绪"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "进程系统未就绪"},
+                    ensure_ascii=False,
+                )
+            )
 
         command = (args.get("command") or "").strip()
         if not command:
-            return ToolResult(content=json.dumps(
-                {"error": "请提供要执行的命令"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "请提供要执行的命令"},
+                    ensure_ascii=False,
+                )
+            )
 
         timeout = args.get("timeout")
         workdir = args.get("workdir")
@@ -40,29 +47,37 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                 if is_admin_private(ctx, deps):
                     workdir = str(ws_mgr.root_dir().resolve())
                 else:
-                    workdir = str(ws_mgr.sandbox_dir(ctx.is_group, ctx.chat_id).resolve())
+                    workdir = str(
+                        ws_mgr.sandbox_dir(ctx.is_group, ctx.chat_id).resolve()
+                    )
 
         if user_provided_workdir and not (perm and perm.is_admin_role(role)):
             ws_mgr = deps.workspace_manager
             if ws_mgr:
                 try:
-                    safe_path = ws_mgr.resolve_safe_path(ctx.is_group, ctx.chat_id, workdir)
+                    safe_path = ws_mgr.resolve_safe_path(
+                        ctx.is_group, ctx.chat_id, workdir
+                    )
                     workdir = str(safe_path)
                 except ValueError:
-                    return ToolResult(content=json.dumps(
-                        {"error": f"工作目录不在允许范围内: {workdir}"},
-                        ensure_ascii=False,
-                    ))
+                    return ToolResult(
+                        content=json.dumps(
+                            {"error": f"工作目录不在允许范围内: {workdir}"},
+                            ensure_ascii=False,
+                        )
+                    )
             else:
                 workdir = None
 
         parts = parse_command_safe(command)
         if parts is None:
             _log.warning("exec 命令格式无效: %s", command[:80])
-            return ToolResult(content=json.dumps(
-                {"error": f"命令格式无效（引号不匹配等）: {command[:80]}"},
-                ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"命令格式无效（引号不匹配等）: {command[:80]}"},
+                    ensure_ascii=False,
+                )
+            )
 
         approval_mgr = deps.approval_manager.value
 
@@ -80,29 +95,42 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                         details=command,
                     )
                     if result == "deny":
-                        return ToolResult(content=json.dumps(
-                            {"error": f"审批已拒绝: {reason}"}, ensure_ascii=False,
-                        ))
+                        return ToolResult(
+                            content=json.dumps(
+                                {"error": f"审批已拒绝: {reason}"},
+                                ensure_ascii=False,
+                            )
+                        )
                     if result == "timeout":
-                        return ToolResult(content=json.dumps(
-                            {"error": f"审批超时: {reason}"}, ensure_ascii=False,
-                        ))
+                        return ToolResult(
+                            content=json.dumps(
+                                {"error": f"审批超时: {reason}"},
+                                ensure_ascii=False,
+                            )
+                        )
                 else:
-                    return ToolResult(content=json.dumps(
-                        {"error": reason}, ensure_ascii=False,
-                    ))
+                    return ToolResult(
+                        content=json.dumps(
+                            {"error": reason},
+                            ensure_ascii=False,
+                        )
+                    )
 
             if role != "admin" and perm:
                 reason = perm.check_command_allowed(command, parts, role)
                 if reason:
                     _log.warning("exec 白名单拒绝: %s", reason)
-                    return ToolResult(content=json.dumps(
-                        {"error": reason}, ensure_ascii=False,
-                    ))
+                    return ToolResult(
+                        content=json.dumps(
+                            {"error": reason},
+                            ensure_ascii=False,
+                        )
+                    )
 
         if background:
             try:
                 effective_timeout = min(timeout or 120, 300)
+                env = await build_exec_env_for(perm)
                 session_id = await process_registry.spawn(
                     command=command,
                     parts=parts,
@@ -110,133 +138,193 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                     chat_id=ctx.chat_id,
                     delivery_channel=delivery_channel,
                     timeout=effective_timeout,
+                    env=env,
                 )
-                return ToolResult(content=json.dumps({
-                    "background": True,
-                    "session_id": session_id,
-                    "message": f"进程已在后台启动 (session_id: {session_id[:8]}..)",
-                }, ensure_ascii=False))
+                return ToolResult(
+                    content=json.dumps(
+                        {
+                            "background": True,
+                            "session_id": session_id,
+                            "message": f"进程已在后台启动 (session_id: {session_id[:8]}..)",
+                        },
+                        ensure_ascii=False,
+                    )
+                )
             except Exception as e:
                 _log.warning("后台进程启动失败: %s", e)
-                return ToolResult(content=json.dumps(
-                    {"error": f"后台进程启动失败: {e}"}, ensure_ascii=False,
-                ))
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": f"后台进程启动失败: {e}"},
+                        ensure_ascii=False,
+                    )
+                )
 
         import asyncio
         import subprocess
 
         effective_timeout = min(timeout or 60, 120)
         try:
-            env = sanitize_env()
+            env = await build_exec_env_for(perm)
             result = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        subprocess.run,
-                        parts,
-                        shell=False,
-                        capture_output=True,
-                        text=True,
-                        timeout=effective_timeout,
-                        env=env,
-                        cwd=workdir,
-                    ),
-                    timeout=effective_timeout + 5,
+                asyncio.to_thread(
+                    subprocess.run,
+                    parts,
+                    shell=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=effective_timeout,
+                    env=env,
+                    cwd=workdir,
+                ),
+                timeout=effective_timeout + 5,
+            )
+            stdout = (
+                result.stdout[-100000:]
+                if len(result.stdout) > 100000
+                else result.stdout
+            )
+            stderr = (
+                result.stderr[-100000:]
+                if len(result.stderr) > 100000
+                else result.stderr
+            )
+            return ToolResult(
+                content=json.dumps(
+                    {
+                        "success": result.returncode == 0,
+                        "exit_code": result.returncode,
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "truncated": {
+                            "stdout": len(result.stdout) > 100000,
+                            "stderr": len(result.stderr) > 100000,
+                        },
+                    },
+                    ensure_ascii=False,
                 )
-            stdout = result.stdout[-100000:] if len(result.stdout) > 100000 else result.stdout
-            stderr = result.stderr[-100000:] if len(result.stderr) > 100000 else result.stderr
-            return ToolResult(content=json.dumps({
-                "success": result.returncode == 0,
-                "exit_code": result.returncode,
-                "stdout": stdout,
-                "stderr": stderr,
-                "truncated": {
-                    "stdout": len(result.stdout) > 100000,
-                    "stderr": len(result.stderr) > 100000,
-                },
-            }, ensure_ascii=False))
+            )
         except asyncio.TimeoutError:
-            return ToolResult(content=json.dumps(
-                {"error": f"命令执行超时 ({effective_timeout}秒)"},
-                ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"命令执行超时 ({effective_timeout}秒)"},
+                    ensure_ascii=False,
+                )
+            )
         except Exception as e:
-            return ToolResult(content=json.dumps(
-                {"error": str(e)}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": str(e)},
+                    ensure_ascii=False,
+                )
+            )
 
     async def _process(args: dict, ctx: ToolContext) -> ToolResult:
         process_registry = deps.process_registry.value
         if not process_registry:
-            return ToolResult(content=json.dumps(
-                {"error": "进程系统未就绪"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "进程系统未就绪"},
+                    ensure_ascii=False,
+                )
+            )
 
         action = args.get("action", "")
         session_id = args.get("session_id", "")
 
         if action == "list":
             sessions = await process_registry.list_sessions()
-            return ToolResult(content=json.dumps({
-                "sessions": sessions,
-                "count": len(sessions),
-            }, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps(
+                    {
+                        "sessions": sessions,
+                        "count": len(sessions),
+                    },
+                    ensure_ascii=False,
+                )
+            )
 
         if not session_id:
-            return ToolResult(content=json.dumps(
-                {"error": "请提供 session_id（list 除外）"},
-                ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "请提供 session_id（list 除外）"},
+                    ensure_ascii=False,
+                )
+            )
 
         if action == "poll":
             timeout = args.get("timeout", 30.0)
             result = await process_registry.poll(session_id, timeout=timeout)
             if result is None:
-                return ToolResult(content=json.dumps(
-                    {"error": "会话不存在"}, ensure_ascii=False,
-                ))
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": "会话不存在"},
+                        ensure_ascii=False,
+                    )
+                )
             return ToolResult(content=json.dumps(result, ensure_ascii=False))
 
         if action == "log":
             offset = args.get("offset", 0)
             limit = args.get("limit", 200)
-            result = await process_registry.get_log(session_id, offset=offset, limit=limit)
+            result = await process_registry.get_log(
+                session_id, offset=offset, limit=limit
+            )
             if result is None:
-                return ToolResult(content=json.dumps(
-                    {"error": "会话不存在"}, ensure_ascii=False,
-                ))
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": "会话不存在"},
+                        ensure_ascii=False,
+                    )
+                )
             return ToolResult(content=json.dumps(result, ensure_ascii=False))
 
         if action == "write":
             data = (args.get("data") or "").strip()
             if not data:
-                return ToolResult(content=json.dumps(
-                    {"error": "请提供要写入的数据"}, ensure_ascii=False,
-                ))
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": "请提供要写入的数据"},
+                        ensure_ascii=False,
+                    )
+                )
             error = await process_registry.write_stdin(session_id, data)
             if error:
-                return ToolResult(content=json.dumps(
-                    {"error": error}, ensure_ascii=False,
-                ))
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": error},
+                        ensure_ascii=False,
+                    )
+                )
             return ToolResult(content=json.dumps({"success": True}))
 
         if action == "kill":
             error = await process_registry.kill(session_id)
             if error:
-                return ToolResult(content=json.dumps(
-                    {"error": error}, ensure_ascii=False,
-                ))
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": error},
+                        ensure_ascii=False,
+                    )
+                )
             return ToolResult(content=json.dumps({"success": True}))
 
         if action == "remove":
             error = await process_registry.remove(session_id)
             if error:
-                return ToolResult(content=json.dumps(
-                    {"error": error}, ensure_ascii=False,
-                ))
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": error},
+                        ensure_ascii=False,
+                    )
+                )
             return ToolResult(content=json.dumps({"success": True}))
 
-        return ToolResult(content=json.dumps(
-            {"error": f"未知操作: {action}"}, ensure_ascii=False,
-        ))
+        return ToolResult(
+            content=json.dumps(
+                {"error": f"未知操作: {action}"},
+                ensure_ascii=False,
+            )
+        )
 
     EXEC_PARAMS = {
         "type": "object",

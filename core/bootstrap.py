@@ -248,6 +248,9 @@ class ServiceGraph:
         # ── Permission + Workspace + Nickname ──
         self.permission_manager = PermissionManager("config/allowlist.toml")
         self.admin_ids = self.permission_manager.get_role_ids("admin")
+        if self.background_task_runner:
+            # cron 命令载荷的 login shell 开关与 exec 工具实时一致
+            self.background_task_runner.set_permission_manager(self.permission_manager)
         workspace_config = self.cfg.workspace
         self.workspace_manager = WorkspaceManager(
             root=workspace_config.get("root", "workspaces"),

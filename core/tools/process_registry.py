@@ -9,7 +9,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
 _log = logging.getLogger(__name__)
 
@@ -79,6 +79,7 @@ class ProcessRegistry:
         chat_id: str = "",
         delivery_channel: Optional[str] = None,
         timeout: Optional[int] = None,
+        env: Optional[Dict[str, str]] = None,
     ) -> str:
         session_id = uuid.uuid4().hex[:16]
         session = ProcessSession(
@@ -94,23 +95,26 @@ class ProcessRegistry:
             self._sessions[session_id] = session
 
         try:
-            from core.tools.security import sanitize_env
+            if env is None:
+                from core.tools.security import sanitize_env
+
+                env = sanitize_env()
             process = await asyncio.create_subprocess_exec(
                 *parts,
                 cwd=workdir or ".",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
-                env=sanitize_env(),
+                env=env,
             )
             session.pid = process.pid
             session.process = process
-            session._read_task = asyncio.create_task(
-                self._read_streams(session)
-            )
+            session._read_task = asyncio.create_task(self._read_streams(session))
             _log.info(
                 "后台进程已启动 [%s..]: pid=%d cmd=%s",
-                session_id[:8], process.pid, command[:80],
+                session_id[:8],
+                process.pid,
+                command[:80],
             )
         except Exception as e:
             async with self._lock:
@@ -139,7 +143,9 @@ class ProcessRegistry:
             session.exit_code = exit_code
             _log.info(
                 "后台进程已退出 [%s..]: pid=%d exit=%d",
-                session.id[:8], session.pid, exit_code,
+                session.id[:8],
+                session.pid,
+                exit_code,
             )
             for cb in self._exit_callbacks:
                 try:
@@ -224,7 +230,7 @@ class ProcessRegistry:
             start = max(total_stdout - limit, 0)
             stdout_slice = session.stdout_lines[start:]
         else:
-            stdout_slice = session.stdout_lines[offset:offset + limit]
+            stdout_slice = session.stdout_lines[offset : offset + limit]
 
         tail_note = ""
         if limit and total_stdout > limit and offset == 0:
@@ -242,9 +248,7 @@ class ProcessRegistry:
             "limit": limit or total_stdout,
         }
 
-    async def poll(
-        self, session_id: str, timeout: float = 30.0
-    ) -> Optional[dict]:
+    async def poll(self, session_id: str, timeout: float = 30.0) -> Optional[dict]:
         session = await self._get(session_id)
         if not session:
             return None
@@ -280,7 +284,8 @@ class ProcessRegistry:
             now = time.time()
             async with self._lock:
                 expired = [
-                    sid for sid, s in list(self._sessions.items())
+                    sid
+                    for sid, s in list(self._sessions.items())
                     if s.exited and (now - s.created_at) > self._ttl
                 ]
                 for sid in expired:

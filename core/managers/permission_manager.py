@@ -116,7 +116,7 @@ class PermissionManager:
 
         # ── 命令替换检查 ($(...) / ``) ──
         if self._get_config("security.deny_substitution", True):
-            if re.search(r'\$[({]|`[^`]*`', raw):
+            if re.search(r"\$[({]|`[^`]*`", raw):
                 return "禁止使用命令替换 ($(…) / ``)"
 
         # ── 命令串联检查 (; && || &) ──
@@ -127,7 +127,7 @@ class PermissionManager:
                 seg = seg.strip()
                 if not seg:
                     continue
-                if re.search(r'(?<!\|)[;&]|&&|\|\|(?<!\|)', seg):
+                if re.search(r"(?<!\|)[;&]|&&|\|\|(?<!\|)", seg):
                     return "禁止使用命令串联符 (; && || &)"
 
         # ── 管道检查 ──
@@ -148,7 +148,7 @@ class PermissionManager:
 
         # ── 重定向检查 ──
         if self._get_config("security.deny_redirect", True):
-            if re.search(r'(?:^|[^<>])>+[^<>]', raw):
+            if re.search(r"(?:^|[^<>])>+[^<>]", raw):
                 return "禁止使用输出重定向 (> / >>)"
 
         # ── 命令长度 ──
@@ -191,3 +191,7 @@ class PermissionManager:
             return val
         except (KeyError, TypeError):
             return default
+
+    def get_security_config(self, name: str, default=None):
+        """读取 [security] 下的单项安全策略配置。"""
+        return self._get_config(f"security.{name}", default)
