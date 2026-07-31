@@ -22,7 +22,19 @@ TRUSTED = "TEST_TRUSTED_ID"
 
 
 @pytest.fixture
-def deps():
+def deps(tmp_path):
+    # 审批文件指向临时目录，防止 allow-always 测试污染真实 config/
+    import core.approval.approval_manager as am
+
+    original_path = am.WHITELIST_PATH
+    am.WHITELIST_PATH = str(tmp_path / "approval_whitelist.json")
+    try:
+        yield _build_deps()
+    finally:
+        am.WHITELIST_PATH = original_path
+
+
+def _build_deps():
     pm = PermissionManager(path="nonexistent-allowlist.toml")
     pm._data = {
         "roles": {"admin": [ADMIN], "system": ["system"], "trusted": [TRUSTED]},
