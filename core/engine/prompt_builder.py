@@ -182,6 +182,7 @@ class PromptBuilder:
                     has_tts=has_tts,
                     has_sub_agents=self._has_sub_agents,
                     has_learners=bool(self.learners),
+                    has_web=bool(getattr(self._deps, "web", None)),
                 ),
                 deps=self._deps,
                 role=role,
@@ -262,6 +263,7 @@ class PromptBuilder:
             has_hindsight=bool(self.hindsight),
             has_workspace=bool(self._workspace_manager),
             has_skills=bool(self._skill_managers and self._skill_managers.has_skills),
+            has_web=bool(getattr(self._deps, "web", None)),
         )
         tools_defs = (
             build_tools("task", ctx, deps=self._deps, tools_allow=tools_allow) or []
@@ -330,6 +332,7 @@ class PromptBuilder:
                     has_hindsight=bool(self.hindsight),
                     has_workspace=bool(self._workspace_manager),
                     has_tasks=self._has_tasks,
+                    has_web=bool(getattr(self._deps, "web", None)),
                 ),
                 deps=self._deps,
             )
@@ -457,6 +460,7 @@ class PromptBuilder:
                     has_hindsight=bool(self.hindsight),
                     has_workspace=bool(self._workspace_manager),
                     has_tasks=self._has_tasks,
+                    has_web=bool(getattr(self._deps, "web", None)),
                 ),
                 deps=self._deps,
             )

@@ -16,6 +16,7 @@ class ChatContext:
     is_group: bool = False
     has_skills: bool = False
     has_workspace: bool = False
+    has_web: bool = False
     has_tasks: bool = False
     has_tts: bool = False
     has_sub_agents: bool = False

@@ -22,17 +22,20 @@ class ToolDeps:
     workspace_manager: Any = None
     sub_agent_manager: Any = None
     system_events: Any = None
+    web: Any = None
     search_top_k: int = 5
     admin_ids: list = field(default_factory=list)
     bot_id: str = ""
 
     # ── Mutable deps (Ref containers, updated after construction) ──
-    media_uploader: Ref = field(default_factory=Ref)      # Ref[MediaUploader]
-    bot_engine: Ref = field(default_factory=Ref)          # Ref[BotEngine]
-    api_client: Ref = field(default_factory=Ref)          # Ref[QQApiClient]
-    tts_service: Ref = field(default_factory=Ref)         # Ref[TtsService]
-    process_registry: Ref = field(default_factory=Ref)    # Ref[ProcessRegistry]
-    approval_manager: Ref = field(default_factory=Ref)    # Ref[ApprovalManager]
-    task_manager: Ref = field(default_factory=Ref)        # Ref[TaskManager]
-    cron_job_manager: Ref = field(default_factory=Ref)    # Ref[CronJobManager]
-    background_task_runner: Ref = field(default_factory=Ref)  # Ref[BackgroundTaskRunner]
+    media_uploader: Ref = field(default_factory=Ref)  # Ref[MediaUploader]
+    bot_engine: Ref = field(default_factory=Ref)  # Ref[BotEngine]
+    api_client: Ref = field(default_factory=Ref)  # Ref[QQApiClient]
+    tts_service: Ref = field(default_factory=Ref)  # Ref[TtsService]
+    process_registry: Ref = field(default_factory=Ref)  # Ref[ProcessRegistry]
+    approval_manager: Ref = field(default_factory=Ref)  # Ref[ApprovalManager]
+    task_manager: Ref = field(default_factory=Ref)  # Ref[TaskManager]
+    cron_job_manager: Ref = field(default_factory=Ref)  # Ref[CronJobManager]
+    background_task_runner: Ref = field(
+        default_factory=Ref
+    )  # Ref[BackgroundTaskRunner]

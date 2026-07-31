@@ -58,6 +58,8 @@ from core.tools.process_registry import ProcessRegistry
 from core.tools.ref import Ref
 from core.tools.skill_managers import SkillManagers
 from core.tools.sub_agent_manager import SubAgentManager
+from core.web_search.config import WebFetchConfig, WebSearchConfig
+from core.web_search.service import WebService
 from core.webui import create_app, start_webui
 
 _log = logging.getLogger(__name__)
@@ -285,6 +287,24 @@ class ServiceGraph:
         self.system_events = SystemEventQueue()
         _log.info("SystemEventQueue 已初始化")
 
+        # ── 网页搜索 / 抓取 ──
+        self.web_service = None
+        web_search_cfg = WebSearchConfig.from_dict(self.cfg.web_search)
+        web_fetch_cfg = WebFetchConfig.from_dict(self.cfg.web_fetch)
+        if web_search_cfg.enabled or web_fetch_cfg.enabled:
+            self.web_service = WebService(
+                search_cfg=web_search_cfg,
+                fetch_cfg=web_fetch_cfg,
+                http_client=self.http_client,
+            )
+            _log.info(
+                "WebService 已初始化: search链=%s, fetch链=%s",
+                web_search_cfg.providers if web_search_cfg.enabled else "(disabled)",
+                web_fetch_cfg.providers if web_fetch_cfg.enabled else "(disabled)",
+            )
+        else:
+            _log.info("网页搜索/抓取未启用（[web_search]/[web_fetch] 均未开启）")
+
         # ── 后台进程注册表 ──
         self.process_registry = ProcessRegistry()
         _log.info("ProcessRegistry 已初始化")
@@ -388,6 +408,7 @@ class ServiceGraph:
             search_top_k=hindsight_config.get("search_top_k", 5),
             admin_ids=list(self.admin_ids),
             bot_id=self.bot_id,
+            web=self.web_service,
             media_uploader=Ref(),
             bot_engine=Ref(),
             api_client=Ref(),

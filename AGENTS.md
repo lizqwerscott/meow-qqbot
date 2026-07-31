@@ -38,6 +38,7 @@ uv run black <file>   # format code
 - `core/message.py` — Unified message model (`MessageType`, `ResourceMeta`) for all resource types (emoji/image/voice/video/file)
 - `core/card_parser.py` — QQ card message parser (ARK/EMBED → unified share text format)
 - `core/image_utils.py` — Image preprocessing utilities (normalize, resize, format conversion for VLM consumption)
+- `core/web_search/` — Web search/fetch service: `config.py` (config parse), `providers.py` (Ollama/Tavily/DuckDuckGo impls), `service.py` (`WebService`: provider chain + fallback + cache + SSRF)
 - `core/approval/` — `ApprovalManager`: operation approval system with file-path/exec-command whitelist, persisted to `config/approval_whitelist.json`
 - `core/tasks/` — background task system (`TaskManager`, `CronJobManager`, `CronJobScheduler`)
 - `core/webui/` — FastAPI + Jinja2 management panel (optional, enabled via config)
@@ -52,6 +53,7 @@ uv run black <file>   # format code
 
 ## Architecture Notes
 
+- **Web search/fetch** (optional, `[web_search]`/`[web_fetch]` config sections): two tools — `web_search` (query/count/region/freshness, 1-10 results) and `web_fetch` (URL → title/content/links, SSRF-guarded). Providers: Ollama (`OLLAMA_API_KEY`/`OLLAMA_BASE_URL`; local host免 key, fallback链 experimental→local→hosted), Tavily (`TAVILY_API_KEY`), DuckDuckGo (key-free, HTML parse). `providers` list is the explicit fallback chain (single entry = locked provider); `strict_credential_skip=true` skips uncredentialed providers; `fallback_on_empty=false` means only failures (not empty results) trigger fallback. 15-min in-memory cache, results tagged with `provider`. `web_fetch` chain is local-first (`local` → ollama → tavily). `block_private_ip` SSRF guard with `allow_fake_ip_range` (default true) for Clash/Surge fake-ip DNS (`198.18.0.0/15`, `fc00::/7`).
 - **Per-session isolation**: `SessionTaskManager` creates separate `asyncio.Queue` + `asyncio.Lock` per `chat_id`. Messages within the same session are processed serially.
 - **Message dedup**: `AgentEngine._processed_ids` (OrderedDict, LRU cap 1000) prevents WS reconnect double-processing.
 - **Tool loop**: `ToolLoop` runs up to N rounds of AI → tool_calls → execute → feed back (configurable via `max_tool_rounds`, default unlimited = -1). Every text response is sent immediately via `reply_callback`.

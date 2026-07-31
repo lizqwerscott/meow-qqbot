@@ -38,3 +38,6 @@ testpaths = ["tests"]
 [tool.uv.sources]
 qqbot-agent-sdk = { git = "https://github.com/lizqwerscott/qqbot-agent-sdk", branch = "group-message-add" }
 
+[tool.isort]
+profile = "black"  # 与 black 的 88 列行宽对齐，避免 import 换行冲突
+

@@ -22,6 +22,7 @@ class AppConfig(BaseModel):
     character_card: str = "characters/default.md"
     providers: dict = {}
     groups: dict = {}
+    models: dict = {}
     cooldown: dict = {}
     multimodal: dict = {}
     context_management: dict = {}
@@ -36,6 +37,8 @@ class AppConfig(BaseModel):
     tts: dict = {}
     webui: dict = {}
     heartbeat: dict = {}
+    web_search: dict = {}
+    web_fetch: dict = {}
 
 
 class ConfigLoader:
@@ -91,6 +94,10 @@ class ConfigLoader:
     @property
     def groups(self) -> dict:
         return self._cfg.groups
+
+    @property
+    def models(self) -> dict:
+        return self._cfg.models
 
     @property
     def cooldown(self) -> dict:
@@ -149,3 +156,11 @@ class ConfigLoader:
     @property
     def heartbeat(self) -> dict:
         return self._cfg.heartbeat
+
+    @property
+    def web_search(self) -> dict:
+        return self._cfg.web_search
+
+    @property
+    def web_fetch(self) -> dict:
+        return self._cfg.web_fetch
