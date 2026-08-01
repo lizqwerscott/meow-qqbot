@@ -28,6 +28,21 @@ from core.tools.tool_loop import ToolLoop
 _log = logging.getLogger(__name__)
 
 
+def pick_final_notification_reply(
+    captured: list[str], is_silent: Callable[[str], bool]
+) -> str:
+    """从工具循环捕获的回复中挑选收尾通知文本。
+
+    取最后一轮非静默回复（AI 的收尾输出）而非第一轮：
+    多轮工具循环中首轮往往是"我去查一下"之类的中间话，
+    真正要投递的结果在最后（回归修复：见 run_wake_turn 通知决策）。
+    """
+    for reply in reversed(captured):
+        if not is_silent(reply):
+            return reply
+    return ""
+
+
 class AgentEngine:
     """核心业务引擎 (Facade)。"""
 
@@ -721,11 +736,10 @@ class AgentEngine:
                     result.should_notify = True
                     result.deliver_to_user = wake_resp.get("deliver_to_user", "")
             else:
-                for reply in captured:
-                    if not _check_silent(reply):
-                        result.notification_text = reply
-                        result.should_notify = True
-                        break
+                reply = pick_final_notification_reply(captured, _check_silent)
+                if reply:
+                    result.notification_text = reply
+                    result.should_notify = True
 
             result.captured_replies = captured
         except Exception as e:
