@@ -1,11 +1,14 @@
 """声明式工具选择管线 — 替代 _factory.py"""
 
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
 from core.tools.catalog import CRON_ALLOWED, FEATURE_SECTION_MAP, PROFILES, SECTIONS
 from core.tools.deps import ToolDeps
 from core.tools.impl import registry
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -86,6 +89,12 @@ def _filter_task_allow(
     if tools_allow == ["*"]:
         return names
     allowed = {n for n in tools_allow if n in CRON_ALLOWED}
+    unknown = set(tools_allow) - CRON_ALLOWED
+    if unknown:
+        _log.warning(
+            "task tools_allow 含未知工具名（已忽略）: %s；可用: %s",
+            sorted(unknown), sorted(CRON_ALLOWED),
+        )
     return names & allowed
 
 
