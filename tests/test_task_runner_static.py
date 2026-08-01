@@ -135,3 +135,34 @@ def test_session_target_in_to_dict():
     job = CronJob(name="test", session_target="main")
     d = job.to_dict()
     assert d.get("session_target") == "main"
+
+
+# ── _format_result_event_text ──
+
+
+def _mk_task(result=None, error=None):
+    from core.tasks.models import TaskRecord
+    return TaskRecord(id="t", prompt="", result=result, error=error)
+
+
+def test_format_result_event_text_with_result():
+    text = BackgroundTaskRunner._format_result_event_text("任务 '早安'已完成", _mk_task(result="头条1\n头条2"))
+    assert text == "任务 '早安'已完成\n\n执行结果:\n头条1\n头条2"
+
+
+def test_format_result_event_text_with_error():
+    text = BackgroundTaskRunner._format_result_event_text("任务 '早安'执行失败", _mk_task(error="exit 1"))
+    assert text == "任务 '早安'执行失败\n\n执行结果:\nexit 1"
+
+
+def test_format_result_event_text_empty_body_keeps_prefix():
+    text = BackgroundTaskRunner._format_result_event_text("任务 '早安'已完成", _mk_task())
+    assert text == "任务 '早安'已完成"
+
+
+def test_format_result_event_text_truncates_long_body():
+    text = BackgroundTaskRunner._format_result_event_text("P", _mk_task(result="x" * 3000))
+    assert text.endswith("…[已截断]")
+    # 结果体本身不超过上限（split 后含一个前导换行）
+    body = text.split("执行结果:", 1)[1]
+    assert len(body) <= 1 + 2000 + len("…[已截断]")

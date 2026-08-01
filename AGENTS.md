@@ -94,7 +94,7 @@ uv run black <file>   # format code
 - 角色归一（`policy_for_role`）：`system` → full；`trusted/default` → allowlist+off（miss 直接拒，不弹卡）；`admin` → 用 `[exec]` 配置（默认 on-miss，可审批）。
 - 命令分析：**tree-sitter-bash CST 切段**（`core/tools/bash_cst.py`），按 `&& || ; | &` 切段（尾随重定向不塌缩链），每段独立 PATH 解析 + allowlist 匹配（bare name 只匹配 PATH 解析结果，路径 glob 支持 `**`/`~`，`arg_pattern` 正则约束参数）；`$(...)`/反引号/`<(...)`/`bash -c` payload 内部命令递归分析（深度 2），内部命令也要命中 allowlist 且黑名单穿透；语法错误 fail-closed 拒绝。
 - `strict_inline_eval`: `python -c` / `node -e` / `osascript -e` 等内联求值即使二进制在白名单也强制审批，且 allow-always 不落白名单（`persist=False`）。
-- allowlist 命中直跑（含审批白名单里的黑名单命令，如 `sudo`）；miss 时 admin 私聊弹审批卡（`ask_fallback` 默认 deny），其余拒绝。
+- allowlist 命中直跑（含审批白名单里的黑名单命令，如 `sudo`）；miss 时 admin 私聊弹审批卡（`ask_fallback` 默认 deny），其余拒绝。前台群聊不弹卡（审批/审查仅限 c2c）；**后台执行（`background=true`）例外**——对齐 OpenClaw：interactive chat 中的 background exec 走同一审批流，审批卡投递 admin c2c，通过后才 spawn，避免"审批不到直接失败"；auto-reviewer 是模型判定不依赖聊天面，同样放行。
 - 非 admin 仍叠加 `PermissionManager.check_command_allowed`（替换/串联/管道/重定向/长度/`[commands].allowed`）。
 - `mode=auto` 可接 `ExecAutoReviewer`（`core/approval/auto_reviewer.py`，通过 `deps.exec_reviewer` 注入），miss 先 LLM 审查再转人工。
 - **段级执行**（`core/tools/exec_runner.py`）：前台执行按分析结果逐段跑（shell=False），`&&`/`||` 短路、`;` 顺序、`|` 管道（PIPE 级联），argv[0] 用解析后真实路径（pin executable）；链式命令不再把 `&&` 当参数；后台模式不支持链式（明确报错）。

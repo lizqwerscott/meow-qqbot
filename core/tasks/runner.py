@@ -26,6 +26,9 @@ from core.tools.shell_env import build_exec_env_for
 
 from .models import CronJob, SessionMode, TaskRecord, TaskStatus
 
+# 系统事件注入的任务结果上限（防 prompt 膨胀，对齐 OpenClaw Child result 注入）
+_RESULT_EVENT_MAX_CHARS = 2000
+
 # 安全黑名单（复用 SkillManagers 的配置）
 _DENIED_COMMANDS: frozenset = frozenset(
     {
@@ -233,18 +236,19 @@ class BackgroundTaskRunner:
                 TaskStatus.TIMEOUT: "执行超时",
             }.get(task.status, "已完成")
             target = task.delivery_channel or f"task:{task.id}"
+            event_prefix = f"后台任务{status_text}"
             if self._wake_dispatcher and task.delivery_channel:
                 await self._wake_dispatcher.request(
                     source="background-task",
                     intent="immediate",
                     session_key=target,
-                    event_text=f"后台任务{status_text}",
+                    event_text=self._format_result_event_text(event_prefix, task),
                     event_context_key=f"task:{task.id}",
                 )
             elif self._system_events:
                 self._system_events.enqueue(
                     session_key=target,
-                    text=f"后台任务{status_text}",
+                    text=self._format_result_event_text(event_prefix, task),
                     context_key=f"task:{task.id}",
                 )
 
@@ -264,6 +268,24 @@ class BackgroundTaskRunner:
             return "cron:main"
         else:  # isolated（默认）
             return f"task:{task_id}"
+
+    @staticmethod
+    def _format_result_event_text(
+        prefix: str,
+        task: TaskRecord,
+        max_chars: int = _RESULT_EVENT_MAX_CHARS,
+    ) -> str:
+        """构造系统事件文本：前缀 + 任务执行结果全文（对齐 OpenClaw Child result）。
+
+        结果为空时只返回状态前缀；非空时截断到 max_chars，
+        避免长输出（如 exec 结果）撑爆注入的 prompt。
+        """
+        body = (task.result or task.error or "").strip()
+        if not body:
+            return prefix
+        if len(body) > max_chars:
+            body = body[:max_chars] + "…[已截断]"
+        return f"{prefix}\n\n执行结果:\n{body}"
 
     @staticmethod
     def _check_command_safe(command: str) -> Optional[str]:
@@ -530,12 +552,13 @@ class BackgroundTaskRunner:
                 TaskStatus.TIMEOUT: "执行超时",
             }.get(task.status, "已完成")
             session_target = job.session_target
+            event_prefix = f"任务 '{job.name}'{status_text}"
             if session_target == "main":
                 # Main session: 入队到 heartbeat:events，wake 心跳系统
                 if self._system_events:
                     self._system_events.enqueue(
                         session_key="heartbeat:events",
-                        text=f"任务 '{job.name}'{status_text}",
+                        text=self._format_result_event_text(event_prefix, task),
                         context_key=f"task:{task.id}",
                         heartbeat_only=True,
                     )
@@ -555,14 +578,14 @@ class BackgroundTaskRunner:
                     source="cron",
                     intent="event",
                     session_key=job.delivery_channel,
-                    event_text=f"任务 '{job.name}'{status_text}",
+                    event_text=self._format_result_event_text(event_prefix, task),
                     event_context_key=f"task:{task.id}",
                 )
             elif self._system_events:
                 await self._enqueue_events(
                     job,
                     task.id,
-                    text=f"任务 '{job.name}'{status_text}",
+                    text=self._format_result_event_text(event_prefix, task),
                     context_key=f"task:{task.id}",
                 )
 
