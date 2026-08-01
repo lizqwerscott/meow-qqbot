@@ -201,11 +201,14 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
         if needs_ask:
             decision: str | None = None
             session_key: str | None = None
-            # mode=auto：仅 admin 私聊、非 inline、非硬拦截 → 先让 reviewer 判一次
-            # （不落白名单）。群聊不放行——审批/审查均仅限 c2c。
+            # 审批可达性：前台仅 admin 私聊弹卡（群聊前台不放行）；
+            # 后台执行（background=true）对齐 OpenClaw——interactive chat 中的
+            # background exec 走同一审批流，审批卡投递 admin c2c，通过后才 spawn，
+            # 避免"审批不到直接失败"。reviewer 是模型判定，不依赖聊天面，同样放行。
+            can_approve_in_ctx = not ctx.is_group or background
             if (
                 mode == "auto"
-                and not ctx.is_group
+                and can_approve_in_ctx
                 and not inline_hit
                 and not deny_reason
                 and reviewer
@@ -214,7 +217,7 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                 if await reviewer.review(plan) == DECISION_ALLOW:
                     decision = DECISION_ALLOW_ONCE
             if decision is None:
-                if approval_mgr and role == "admin" and not ctx.is_group:
+                if approval_mgr and role == "admin" and can_approve_in_ctx:
                     result = await approval_mgr.request_approval(
                         chat_id=ctx.chat_id,
                         tool_name="exec",

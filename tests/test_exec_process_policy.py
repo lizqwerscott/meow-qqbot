@@ -93,11 +93,11 @@ def _ctx(sender, is_group=False):
     )
 
 
-async def _exec(deps, command, sender, is_group=False):
+async def _exec(deps, command, sender, is_group=False, background=True):
     entries = create_exec_process_entries(deps)
     exec_entry = next(e for e in entries if e.name == "exec")
     result = await exec_entry.handler(
-        {"command": command, "background": True}, _ctx(sender, is_group)
+        {"command": command, "background": background}, _ctx(sender, is_group)
     )
     return json.loads(result.content)
 
@@ -181,8 +181,30 @@ async def test_inline_eval_allow_always_downgraded(deps):
 # ── 审批仅限 admin 私聊 ──
 
 
-async def test_admin_group_miss_rejected(deps):
-    # 群聊不弹审批（审批卡片仅 c2c）
+async def test_admin_group_foreground_miss_rejected(deps):
+    # 群聊前台不弹审批（审批卡片仅 c2c）→ miss 直接拒绝
+    r = await _exec(deps, "vim x.txt", ADMIN, is_group=True, background=False)
+    assert "error" in r
+
+
+async def test_admin_group_background_approval_requested(deps):
+    # 后台执行（background=true）对齐 OpenClaw：群聊也走审批流，
+    # 审批卡投递 admin c2c，通过后 spawn，不再"审批不到直接失败"。
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-once", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(deps, "vim x.txt", ADMIN, is_group=True)
+    assert "error" not in r
+    assert r.get("background") is True
+
+
+async def test_admin_group_background_approval_denied(deps):
+    # 后台 + 群聊：审批卡投递失败 → ask_fallback=deny → 拒绝（不真跑）
     r = await _exec(deps, "vim x.txt", ADMIN, is_group=True)
     assert "error" in r
 
@@ -324,10 +346,29 @@ async def test_mode_auto_group_chat_never_reviewed(deps):
     deps.exec_reviewer = Ref()
     deps.exec_reviewer.value = ExecAutoReviewer(review_fn=review_fn)
 
-    # 群聊：reviewer 被跳过（审批/审查仅限 c2c）→ 直接拒绝
-    r = await _exec(deps, "vim x.txt", ADMIN, is_group=True)
+    # 群聊前台：reviewer 被跳过（审批/审查仅限 c2c）→ 直接拒绝
+    r = await _exec(deps, "vim x.txt", ADMIN, is_group=True, background=False)
     assert "error" in r
     assert reviewed == []
+
+
+async def test_mode_auto_group_background_reviewed(deps):
+    # 后台执行对齐 OpenClaw：群聊也走 auto-review（模型判定，不依赖聊天面）
+    deps.permission_manager._data["exec"]["mode"] = "auto"
+    from core.approval.auto_reviewer import ExecAutoReviewer
+
+    reviewed = []
+
+    async def review_fn(plan):
+        reviewed.append(plan["command"])
+        return "allow"
+
+    deps.exec_reviewer = Ref()
+    deps.exec_reviewer.value = ExecAutoReviewer(review_fn=review_fn)
+
+    r = await _exec(deps, "vim x.txt", ADMIN, is_group=True)
+    assert "error" not in r
+    assert reviewed == ["vim x.txt"]
 
 
 # ── durable plan 绑定（审批通过后执行前比对）──
