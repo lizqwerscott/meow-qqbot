@@ -30,3 +30,13 @@ docs/chat-*.md
 # 自动生成的锁文件
 skills-lock.json
 
+
+# 参考/工具目录（不进入版本控制）
+# 参考/工具/技能目录（不进入版本控制）
+libs/
+.agents/
+.claude/
+.pi-subagents/
+
+# 审查产物
+/docs/architecture-review-*.html

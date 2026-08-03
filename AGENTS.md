@@ -92,9 +92,13 @@ uv run black <file>   # format code
 - 三层模型：`core/approval/exec_policy.py`（策略面 + `requires_approval` 判定）→ `core/tools/exec_analysis.py`（shell 链切段 + 真实路径解析 + inline-eval 检测）→ `core/approval/allowlist.py`（路径 glob + argPattern 匹配）。
 - 策略面：`[exec]` 段（config/allowlist.toml）为 requested policy，`config/approval_whitelist.json` 的 `defaults` 为 host policy，`effective_policy` 取更严。`mode`: `deny | allowlist | ask | auto | full`。
 - 角色归一（`policy_for_role`）：`system` → full；`trusted/default` → allowlist+off（miss 直接拒，不弹卡）；`admin` → 用 `[exec]` 配置（默认 on-miss，可审批）。
-- 命令分析：**tree-sitter-bash CST 切段**（`core/tools/bash_cst.py`），按 `&& || ; | &` 切段（尾随重定向不塌缩链），每段独立 PATH 解析 + allowlist 匹配（bare name 只匹配 PATH 解析结果，路径 glob 支持 `**`/`~`，`arg_pattern` 正则约束参数）；`$(...)`/反引号/`<(...)`/`bash -c` payload 内部命令递归分析（深度 2），内部命令也要命中 allowlist 且黑名单穿透；语法错误 fail-closed 拒绝。
+- 命令分析：**tree-sitter-bash CST 切段**（`core/tools/bash_cst.py`），按 `&& || ; | &` 切段（尾随重定向不塌缩链），每段独立 PATH 解析 + allowlist 匹配（bare name 只匹配 PATH 解析结果，路径 glob 支持 `**`/`~`，`arg_pattern` 正则约束参数）；`$(...)`/反引号/`<(...)`/`bash -c` payload 内部命令递归分析（深度 2），内部命令也要命中 allowlist；语法错误 fail-closed 拒绝。**无命令黑名单**（对齐 OpenClaw）：危险命令由 allowlist 覆盖率 + 审批 + auto-review 承担，不在准入层硬编码命令名。
+- **heredoc 检测**（对齐 openclaw `reason: "heredoc"`）：段内含 `<<EOF`（CST `heredoc_redirect` 节点）即使 allowlist 命中也要走审批——heredoc 可嵌入任意多行脚本内容，且 shell=False 下本就不生效（token 当参数）。
+- **与 openclaw 的剩余差距与修改方案**：见 `docs/exec-review-gap.md`（包装器解包 / 解释器绑定精度 / 审批文本兜底+转发 / 审批管理命令 / 全量 shell 语义远期）。
+- **safe bins**（`[exec]` 段 `safe_bins`，对齐 openclaw `tools.exec.safeBins`）：预信任窄 stdin 过滤器（内置默认 profiles：head/tail/wc/tr；`safe_bin_profiles` 可覆盖），命中且 argv 满足 profile（`max_positional`/`allowed_value_flags`/`allowed_flags`/`denied_flags`）的段视为 allowlist 满足，管道场景（`ls | head -5`）无需白名单条目。
+- **审批超时 followup**：`[exec]` 段 `approval_timeout`（默认 300s，对齐 openclaw pending 过期）；后台执行审批超时/拒绝时向 delivery_channel 投递 followup 通知（对齐 openclaw "命令未运行" 会话恢复）。
 - `strict_inline_eval`: `python -c` / `node -e` / `osascript -e` 等内联求值即使二进制在白名单也强制审批，且 allow-always 不落白名单（`persist=False`）。
-- allowlist 命中直跑（含审批白名单里的黑名单命令，如 `sudo`）；miss 时 admin 私聊弹审批卡（`ask_fallback` 默认 deny），其余拒绝。前台群聊不弹卡（审批/审查仅限 c2c）；**后台执行（`background=true`）例外**——对齐 OpenClaw：interactive chat 中的 background exec 走同一审批流，审批卡投递 admin c2c，通过后才 spawn，避免"审批不到直接失败"；auto-reviewer 是模型判定不依赖聊天面，同样放行。
+- allowlist 命中直跑；miss 时 admin 私聊弹审批卡（`ask_fallback` 默认 deny），其余拒绝。前台群聊不弹卡（审批/审查仅限 c2c）；**后台执行（`background=true`）例外**——对齐 OpenClaw：interactive chat 中的 background exec 走同一审批流，审批卡投递 admin c2c，通过后才 spawn，避免"审批不到直接失败"；auto-reviewer 是模型判定不依赖聊天面，同样放行。
 - 非 admin 仍叠加 `PermissionManager.check_command_allowed`（替换/串联/管道/重定向/长度/`[commands].allowed`）。
 - `mode=auto` 可接 `ExecAutoReviewer`（`core/approval/auto_reviewer.py`，通过 `deps.exec_reviewer` 注入），miss 先 LLM 审查再转人工。
 - **段级执行**（`core/tools/exec_runner.py`）：前台执行按分析结果逐段跑（shell=False），`&&`/`||` 短路、`;` 顺序、`|` 管道（PIPE 级联），argv[0] 用解析后真实路径（pin executable）；链式命令不再把 `&&` 当参数；后台模式不支持链式（明确报错）。

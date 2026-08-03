@@ -215,4 +215,7 @@ class PermissionManager:
             "ask_fallback": self._get_config("exec.ask_fallback", "deny"),
             "strict_inline_eval": self._get_config("exec.strict_inline_eval", True),
             "auto_reviewer": self._get_config("exec.auto_reviewer", None),
+            "safe_bins": self._get_config("exec.safe_bins", None),
+            "safe_bin_profiles": self._get_config("exec.safe_bin_profiles", None),
+            "approval_timeout": self._get_config("exec.approval_timeout", 300),
         }

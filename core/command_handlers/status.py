@@ -28,8 +28,9 @@ def _hindsight_status_line(health: dict) -> str:
 
 @command(name="状态", aliases=["status"], permission="admin", description="查看系统状态（管理员专用）")
 class StatusCommand:
-    def __init__(self, agent_engine: AgentEngine):
+    def __init__(self, agent_engine: AgentEngine, approval_manager=None):
         self.agent_engine = agent_engine
+        self.approval_manager = approval_manager  # 2.4：审批白名单状态行
 
     @staticmethod
     def _plugin_count() -> int:
@@ -85,6 +86,7 @@ class StatusCommand:
                 f"- 活跃聊天: `{active_chats}` 个",
                 f"- 技能: `{skill_count}` 个",
                 f"- 插件: `{self._plugin_count()}` 个",
+                *self._approval_line(),
                 "",
                 "**记忆系统**",
                 f"- Hindsight: {_hindsight_status_line(hindsight_health)}",
@@ -103,3 +105,12 @@ class StatusCommand:
         except Exception as e:
             _log.error(f"状态命令处理失败: {e}")
             return []
+
+    def _approval_line(self) -> List[str]:
+        """2.4：审批白名单规模 + 最近一次 allow-always 时间（未注入时为空）。"""
+        if self.approval_manager is None:
+            return []
+        wl = self.approval_manager.whitelist_stats()
+        last = wl.get("last_allow_always_at") or ""
+        last_text = f"（最近: {last[:16].replace('T', ' ')}） " if last else ""
+        return [f"- 审批白名单: `{wl.get('count', 0)}` 条 {last_text}"]

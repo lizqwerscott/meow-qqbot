@@ -408,6 +408,12 @@ class BotEngine:
     async def stop(self) -> None:
         await self.nickname_manager.flush_save()
         await self.nickname_manager.save_auto()
+        # 审批白名单使用计数落盘（防抖窗口内最后一次，避免关机丢失）
+        if self.approval_manager is not None:
+            try:
+                self.approval_manager.flush()
+            except Exception as e:
+                _log.warning("审批白名单 flush 失败: %s", e)
         await self.agent_engine.stop()
         if self.ws:
             await self.ws.async_stop()

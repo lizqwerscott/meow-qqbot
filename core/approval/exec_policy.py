@@ -14,7 +14,7 @@ OpenClaw 风格核心：
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 SECURITY_LEVEL: Dict[str, int] = {"deny": 0, "allowlist": 1, "full": 2}
@@ -48,6 +48,9 @@ class ExecPolicy:
 
     mode 为 config 显式声明的模式（"" = 未声明，由 security/ask 推导）；
     auto 模式仅在基础策略为 allowlist+on-miss 时由 resolve_mode_from_policy 产出。
+    safe_bins：预信任的窄过滤器工具（对齐 openclaw tools.exec.safeBins），
+    命中且满足 profile 的段视为 allowlist 满足，无需白名单条目。
+    approval_timeout：审批卡超时秒数（对齐 openclaw pending exec approval 过期）。
     """
 
     security: str = "allowlist"
@@ -55,6 +58,12 @@ class ExecPolicy:
     ask_fallback: str = "deny"
     strict_inline_eval: bool = True
     mode: str = ""
+    safe_bins: tuple = ()  # 预信任窄过滤器工具名（如 head/tail/wc/tr）
+    safe_bin_profiles: dict = field(default_factory=dict)  # 工具名 → profile
+    # 审批卡超时（秒）。None = 未声明（host 侧），effective 时由 requested 兜底，
+    # 消费方用 ``policy.approval_timeout or 300``；None 消除"显式 300 vs 未配置"
+    # 的魔法数字哨兵（对齐 openclaw pending exec approval 过期）
+    approval_timeout: Optional[int] = None
 
     def __post_init__(self):
         if self.security not in _VALID_SECURITY:
@@ -75,6 +84,9 @@ def config_to_policy(cfg: dict) -> ExecPolicy:
         ask_fallback=cfg.get("ask_fallback", "deny"),
         strict_inline_eval=cfg.get("strict_inline_eval", True),
         mode=cfg.get("mode", ""),
+        safe_bins=tuple(cfg.get("safe_bins") or ()),
+        safe_bin_profiles=dict(cfg.get("safe_bin_profiles") or {}),
+        approval_timeout=cfg.get("approval_timeout"),
     )
 
 
@@ -138,7 +150,19 @@ def effective_policy(requested: ExecPolicy, host: ExecPolicy) -> ExecPolicy:
     security / ask_fallback 取更严（deny 最严）；ask 取更严（always 最严）。
     mode 仅来自 config（host defaults 不声明 mode）；host 收紧后 auto 会因
     security/ask 条件不满足而在 resolve_mode_from_policy 中自然退化。
+    safe_bins / safe_bin_profiles / approval_timeout 是非收紧性配置：
+    host 显式定义了才覆盖（host 是收紧方，未定义时沿用 requested）。
     """
+    safe_bins = (
+        host.safe_bins
+        if host.safe_bins is not None and len(host.safe_bins) > 0
+        else requested.safe_bins
+    )
+    safe_bin_profiles = (
+        host.safe_bin_profiles
+        if host.safe_bin_profiles
+        else requested.safe_bin_profiles
+    )
     return ExecPolicy(
         security=_stricter(requested.security, host.security, SECURITY_LEVEL, "low"),
         ask=_stricter(requested.ask, host.ask, ASK_LEVEL, "high"),
@@ -147,6 +171,13 @@ def effective_policy(requested: ExecPolicy, host: ExecPolicy) -> ExecPolicy:
         ),
         strict_inline_eval=requested.strict_inline_eval or host.strict_inline_eval,
         mode=requested.mode,
+        safe_bins=safe_bins,
+        safe_bin_profiles=safe_bin_profiles,
+        approval_timeout=(
+            host.approval_timeout
+            if host.approval_timeout is not None
+            else requested.approval_timeout
+        ),
     )
 
 
@@ -170,6 +201,10 @@ def policy_for_role(
         ask_fallback=fixed.get("ask_fallback", "deny"),
         strict_inline_eval=effective_config.strict_inline_eval,
         mode=effective_config.mode if fixed["ask"] == "on-miss" else "",
+        # 非收紧性配置：固定角色沿用 config×host 合并结果
+        safe_bins=effective_config.safe_bins,
+        safe_bin_profiles=effective_config.safe_bin_profiles,
+        approval_timeout=effective_config.approval_timeout,
     )
     if host is not None:
         base = effective_policy(base, host)

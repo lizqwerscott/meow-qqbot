@@ -191,3 +191,117 @@ def test_shell_payload_inner_requires_allowlist():
     segments = analyze_command("bash -c 'rm -rf /'", env=None, cwd="/")
     satisfied, _ = match_allowlist(segments, entries)
     assert satisfied is False  # payload 内 rm 无条目
+
+
+# ── 包装器段（2.1：内层命令参与 allowlist 匹配）──
+
+
+def seg_wrapped(argv, inner, resolved_outer, resolved_inner, found_in_path=True):
+    return ExecSegment(
+        raw=" ".join(argv),
+        argv=argv,
+        resolution=ExecutableResolution(
+            resolved_path=resolved_outer, found_in_path=found_in_path
+        ),
+        inner_argv=inner,
+        inner_resolution=ExecutableResolution(
+            resolved_path=resolved_inner, found_in_path=found_in_path
+        ),
+    )
+
+
+def test_wrapper_segment_matches_inner_bare_name():
+    # timeout 外层无条目，但内层 python3 命中 → 整段满足
+    entries = [AllowlistEntry(pattern="python3")]
+    segments = [
+        seg_wrapped(
+            ["timeout", "5", "python3", "x.py"],
+            ["python3", "x.py"],
+            "/usr/bin/timeout",
+            "/usr/bin/python3",
+        )
+    ]
+    satisfied, matches = match_allowlist(segments, entries)
+    assert satisfied is True
+    assert matches[0] is not None
+
+
+def test_wrapper_segment_miss_when_inner_unlisted():
+    # 只有外层 timeout 的条目 → 内层 python3 无条目 → miss
+    entries = [AllowlistEntry(pattern="timeout")]
+    segments = [
+        seg_wrapped(
+            ["timeout", "5", "python3", "x.py"],
+            ["python3", "x.py"],
+            "/usr/bin/timeout",
+            "/usr/bin/python3",
+        )
+    ]
+    satisfied, _ = match_allowlist(segments, entries)
+    assert satisfied is False
+
+
+def test_wrapper_arg_pattern_applies_to_inner_args():
+    entries = [AllowlistEntry(pattern="python3", arg_pattern=r"^x\.py$")]
+    segments = [
+        seg_wrapped(
+            ["timeout", "5", "python3", "x.py"],
+            ["python3", "x.py"],
+            "/usr/bin/timeout",
+            "/usr/bin/python3",
+        )
+    ]
+    satisfied, _ = match_allowlist(segments, entries)
+    assert satisfied is True
+    # 内层参数变成 y.py → miss
+    segs2 = [
+        seg_wrapped(
+            ["timeout", "5", "python3", "y.py"],
+            ["python3", "y.py"],
+            "/usr/bin/timeout",
+            "/usr/bin/python3",
+        )
+    ]
+    satisfied2, _ = match_allowlist(segs2, entries)
+    assert satisfied2 is False
+
+
+def test_analyzed_wrapper_matches_inner_entry():
+    from core.tools.exec_analysis import analyze_command
+
+    segments = analyze_command("timeout 5 ls -la", env={"PATH": "/bin:/usr/bin"}, cwd="/")
+    entries = [AllowlistEntry(pattern="ls")]
+    satisfied, _ = match_allowlist(segments, entries)
+    assert satisfied is True
+
+
+def test_wrapper_inner_misses_safe_bin_outer_only():
+    """safe-bin 也应看内层：timeout 5 head -5 命中 head profile。"""
+    from core.approval.allowlist import match_safe_bins
+
+    segments = [
+        seg_wrapped(
+            ["timeout", "5", "head", "-5"],
+            ["head", "-5"],
+            "/usr/bin/timeout",
+            "/usr/bin/head",
+        )
+    ]
+    satisfied, matches = match_safe_bins(segments, ("head",))
+    assert satisfied is True
+    assert matches[0]["bin"] == "head"
+
+
+def test_wrapper_inner_not_safe_bin_miss():
+    from core.approval.allowlist import match_safe_bins
+
+    segments = [
+        seg_wrapped(
+            ["timeout", "5", "vim", "x.txt"],
+            ["vim", "x.txt"],
+            "/usr/bin/timeout",
+            "/usr/bin/vim",
+        )
+    ]
+    satisfied, _ = match_safe_bins(segments, ("head",))
+    assert satisfied is False

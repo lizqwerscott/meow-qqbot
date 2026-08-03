@@ -39,6 +39,7 @@ class AppConfig(BaseModel):
     heartbeat: dict = {}
     web_search: dict = {}
     web_fetch: dict = {}
+    approval: dict = {}  # [approval]：审批卡转发目标等
 
 
 class ConfigLoader:

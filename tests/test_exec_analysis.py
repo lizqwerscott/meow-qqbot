@@ -1,5 +1,6 @@
 """命令分析器测试（切段 / 真实路径解析 / inline-eval 检测）。"""
 
+import json
 import os
 
 import pytest
@@ -8,7 +9,9 @@ from core.tools.exec_analysis import (
     analyze_command,
     detect_inline_eval,
     resolve_executable,
+    resolve_interpreter_target,
     split_shell_segments,
+    unwrap_wrapper,
 )
 
 # ── split_shell_segments ──
@@ -225,3 +228,284 @@ def test_trailing_redirect_chain_segments():
     segments = analyze_command("echo hi | rm -rf / > /dev/null", env=os.environ)
     assert len(segments) == 2
     assert segments[1].argv[0] == "rm"  # rm 段参与 allowlist
+
+
+# ── 包装器解包（2.1：allow-always 持久化内层可执行路径）──
+
+
+def test_unwrap_timeout_skips_duration():
+    assert unwrap_wrapper(["timeout", "10", "python3", "x.py"]) == [
+        "python3",
+        "x.py",
+    ]
+
+
+def test_unwrap_timeout_with_flags():
+    assert unwrap_wrapper(["timeout", "-s", "KILL", "10", "python3", "x.py"]) == [
+        "python3",
+        "x.py",
+    ]
+
+
+def test_unwrap_env_skips_assignments_and_flags():
+    assert unwrap_wrapper(["env", "FOO=1", "BAR=2", "ls", "-la"]) == ["ls", "-la"]
+    assert unwrap_wrapper(["env", "-u", "HOME", "ls"]) == ["ls"]
+
+
+def test_unwrap_flock_skips_lockfile():
+    assert unwrap_wrapper(["flock", "/tmp/lock", "python3", "x.py"]) == [
+        "python3",
+        "x.py",
+    ]
+
+
+def test_unwrap_nice_nohup_stdbuf():
+    assert unwrap_wrapper(["nice", "-n", "5", "ls"]) == ["ls"]
+    assert unwrap_wrapper(["nohup", "python3", "x.py"]) == ["python3", "x.py"]
+    assert unwrap_wrapper(["stdbuf", "-oL", "grep", "x"]) == ["grep", "x"]
+
+
+def test_unwrap_busybox_applet():
+    assert unwrap_wrapper(["busybox", "rm", "-rf", "/"]) == ["rm", "-rf", "/"]
+    # busybox 元操作不解包
+    assert unwrap_wrapper(["busybox", "--list"]) is None
+
+
+def test_unwrap_nested_recursive():
+    assert unwrap_wrapper(["timeout", "5", "nohup", "python3", "x.py"]) == [
+        "python3",
+        "x.py",
+    ]
+
+
+def test_unwrap_not_wrapper_returns_none():
+    assert unwrap_wrapper(["ls", "-la"]) is None
+    assert unwrap_wrapper(["python3", "x.py"]) is None
+    assert unwrap_wrapper([]) is None
+
+
+def test_unwrap_fail_closed():
+    # 无内层命令（只有时长/锁文件）→ 不解包
+    assert unwrap_wrapper(["timeout"]) is None
+    assert unwrap_wrapper(["timeout", "5"]) is None
+    assert unwrap_wrapper(["flock", "/tmp/lock"]) is None
+    # flock -c 形态（命令是 flag 值）不解包，payload 另走嵌套分析
+    assert unwrap_wrapper(["flock", "/tmp/lock", "-c", "echo hi"]) is None
+
+
+def test_analyze_wrapper_sets_inner_fields():
+    segments = analyze_command("timeout 5 python3 x.py", env=os.environ)
+    seg = segments[0]
+    assert seg.inner_argv == ["python3", "x.py"]
+    assert seg.inner_resolution.resolved_path is not None
+    assert seg.inner_resolution.found_in_path is True
+
+
+def test_analyze_wrapper_inline_penetration():
+    # timeout 包 python3 -c：内层 inline 必须被检测（strictInlineEval 纵深防御）
+    segments = analyze_command("timeout 5 python3 -c 'print(1)'", env=os.environ)
+    assert segments[0].inline_eval is True
+
+
+def test_analyze_wrapper_shell_payload_nested():
+    # timeout 5 bash -c 'rm ...'：payload 内 rm 进嵌套段（黑名单穿透）
+    segments = analyze_command("timeout 5 bash -c 'rm -rf /tmp/x'", env=os.environ)
+    nested = segments[0].nested_segments
+    assert any(s.argv[0] == "rm" for s in nested)
+
+
+def test_analyze_flock_c_payload_nested():
+    # flock -c 'cmd'：command 字符串与 shell wrapper -c payload 同构
+    segments = analyze_command("flock /tmp/l -c 'python3 x.py'", env=os.environ)
+    nested = segments[0].nested_segments
+    assert any(s.argv == ["python3", "x.py"] for s in nested)
+
+
+def test_analyze_wrapped_flock_c_payload_nested():
+    # 包装 flock -c：timeout 5 flock /tmp/l -c 'rm ...' → payload 内 rm 进嵌套段
+    # （黑名单已移除，rm 必须参与 allowlist 匹配，否则 flock 命中即直跑）
+    segments = analyze_command(
+        "timeout 5 flock /tmp/l -c 'rm -rf /tmp/x'", env=os.environ
+    )
+    nested = segments[0].nested_segments
+    assert any(s.argv[0] == "rm" for s in nested)
+
+
+# ── 2.2 解释器/runtime 绑定（唯一具体文件，否则不声称覆盖）──
+
+
+def test_interp_python_script_bound(tmp_path):
+    f = tmp_path / "script.py"
+    f.write_text("print(1)")
+    target, unique = resolve_interpreter_target(["python3", str(f)], cwd=str(tmp_path))
+    assert unique is True
+    assert target == os.path.realpath(str(f))
+
+
+def test_interp_python_relative_script_bound(tmp_path):
+    f = tmp_path / "script.py"
+    f.write_text("print(1)")
+    target, unique = resolve_interpreter_target(
+        ["python3", "script.py"], cwd=str(tmp_path)
+    )
+    assert unique is True
+    assert target == os.path.realpath(str(f))
+
+
+def test_interp_python_skips_boolean_flags(tmp_path):
+    f = tmp_path / "script.py"
+    f.write_text("x")
+    target, unique = resolve_interpreter_target(
+        ["python3", "-O", "-B", "script.py"], cwd=str(tmp_path)
+    )
+    assert unique is True
+    assert target == os.path.realpath(str(f))
+
+
+def test_interp_python_c_inline_not_bound(tmp_path):
+    target, unique = resolve_interpreter_target(
+        ["python3", "-c", "print(1)"], cwd=str(tmp_path)
+    )
+    assert unique is False
+    assert target is None
+
+
+def test_interp_python_m_module_not_bound(tmp_path):
+    target, unique = resolve_interpreter_target(
+        ["python3", "-m", "http.server"], cwd=str(tmp_path)
+    )
+    assert unique is False
+
+
+def test_interp_python_missing_file_not_bound(tmp_path):
+    target, unique = resolve_interpreter_target(
+        ["python3", "nope.py"], cwd=str(tmp_path)
+    )
+    assert unique is False
+
+
+# ── 元命令形态（--version/-h 等：不执行用户代码，无需绑定即可放行）──
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["python3", "--version"],
+        ["python3", "-V"],
+        ["python3", "--help"],
+        ["node", "--version"],
+        ["node", "-v"],
+        ["node", "-h"],
+        ["npm", "--version"],
+        ["npm", "-v"],
+        ["pnpm", "--version"],
+        ["npx", "-h"],
+    ],
+)
+def test_interp_meta_command_ok_to_run(argv):
+    # 元命令：可放行（unique=True，无绑定文件）——不再强制审批
+    target, unique = resolve_interpreter_target(argv, cwd="/tmp")
+    assert unique is True
+    assert target is None
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["python3", "-c", "print(1)"],  # inline 仍强制审批
+        ["node", "-e", "1"],
+        ["python3", "-m", "http.server"],
+        ["npm", "install"],  # 非 exec 非 meta → 不覆盖
+        ["pnpm", "exec", "eslint"],  # exec 无本地 bin → 不覆盖
+        ["node", "--require", "./dep.js", "app.js"],
+        ["python3", "--version", "extra"],  # 混合形态 → fail-closed
+    ],
+)
+def test_interp_not_meta_keeps_behavior(argv):
+    target, unique = resolve_interpreter_target(argv, cwd="/tmp")
+    assert unique is False
+    assert target is None
+
+
+def test_interp_node_script_bound(tmp_path):
+    f = tmp_path / "app.js"
+    f.write_text("console.log(1)")
+    target, unique = resolve_interpreter_target(["node", "app.js"], cwd=str(tmp_path))
+    assert unique is True
+    assert target == os.path.realpath(str(f))
+
+
+def test_interp_node_eval_not_bound(tmp_path):
+    target, unique = resolve_interpreter_target(["node", "-e", "1"], cwd=str(tmp_path))
+    assert unique is False
+
+
+def test_interp_node_multi_file_form_not_bound(tmp_path):
+    # --require/--loader 等多文件形态：不声称覆盖
+    target, unique = resolve_interpreter_target(
+        ["node", "--require", "./dep.js", "app.js"], cwd=str(tmp_path)
+    )
+    assert unique is False
+
+
+def test_interp_non_interpreter_not_bound(tmp_path):
+    target, unique = resolve_interpreter_target(["ls", "-la"], cwd=str(tmp_path))
+    assert unique is False
+    assert target is None
+
+
+def test_interp_pnpm_exec_binds_local_bin(tmp_path):
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    shim = bin_dir / "eslint"
+    shim.write_text("#!/bin/sh\necho eslint")
+    target, unique = resolve_interpreter_target(
+        ["pnpm", "exec", "eslint"], cwd=str(tmp_path)
+    )
+    assert unique is True
+    assert target == os.path.realpath(str(shim))
+
+
+def test_interp_pnpm_exec_missing_bin_not_bound(tmp_path):
+    target, unique = resolve_interpreter_target(
+        ["pnpm", "exec", "eslint"], cwd=str(tmp_path)
+    )
+    assert unique is False
+
+
+def test_interp_npm_exec_ddash_binds_bin(tmp_path):
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    shim = bin_dir / "prettier"
+    shim.write_text("#!/bin/sh\n# shim")
+    target, unique = resolve_interpreter_target(
+        ["npm", "exec", "--", "prettier"], cwd=str(tmp_path)
+    )
+    assert unique is True
+    assert target == os.path.realpath(str(shim))
+
+
+def test_interp_npx_binds_local_bin(tmp_path):
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    shim = bin_dir / "tsc"
+    shim.write_text("#!/bin/sh\n# shim")
+    target, unique = resolve_interpreter_target(["npx", "tsc"], cwd=str(tmp_path))
+    assert unique is True
+    assert target == os.path.realpath(str(shim))
+
+
+def test_interp_npx_flag_fail_closed(tmp_path):
+    # npx -y 等 flags：不声称覆盖 → 审批
+    target, unique = resolve_interpreter_target(["npx", "-y", "eslint"], cwd=str(tmp_path))
+    assert unique is False
+
+
+def test_interp_package_json_bin_fallback(tmp_path):
+    (tmp_path / "package.json").write_text(json.dumps({"bin": "./bin/cli.js"}))
+    cli = tmp_path / "bin" / "cli.js"
+    cli.parent.mkdir()
+    cli.write_text("#!/usr/bin/env node\n")
+    target, unique = resolve_interpreter_target(["npx", "cli"], cwd=str(tmp_path))
+    assert unique is True
+    assert target == os.path.realpath(str(cli))

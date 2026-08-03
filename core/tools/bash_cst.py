@@ -94,6 +94,7 @@ class CstSegment:
         default_factory=list
     )  # $(...) / `...` / <(...) 内部文本
     is_compound: bool = False  # 复合命令（for/if/...）
+    has_heredoc: bool = False  # 段内含 heredoc（<<EOF，审批触发点）
 
 
 def _extract_substitutions(node: Node, out: List[str], depth: int = 0) -> None:
@@ -114,6 +115,16 @@ def _extract_substitutions(node: Node, out: List[str], depth: int = 0) -> None:
         return
     for child in node.children:
         _extract_substitutions(child, out, depth + 1)
+
+
+def _contains_heredoc(node: Node) -> bool:
+    """递归检测节点内是否含 heredoc 重定向（<<EOF / <<< 等）。"""
+    if node.type == "heredoc_redirect":
+        return True
+    for child in node.children:
+        if _contains_heredoc(child):
+            return True
+    return False
 
 
 def _collect_chain(node: Node, segments: List[CstSegment], cur_op: str) -> str:
@@ -144,6 +155,9 @@ def _collect_chain(node: Node, segments: List[CstSegment], cur_op: str) -> str:
             segments[-1].text = (
                 segments[-1].text + " " + " ".join(redirect_parts)
             ).strip()
+        # heredoc（<<EOF）在 redirected_statement 里，标记到最后一段
+        if _contains_heredoc(node) and segments:
+            segments[-1].has_heredoc = True
         return op
     if node.type in _COMPOUND_NODES:
         text = node.text.decode("utf-8", errors="replace").strip()
@@ -159,7 +173,14 @@ def _collect_chain(node: Node, segments: List[CstSegment], cur_op: str) -> str:
         if text:
             subs = []
             _extract_substitutions(node, subs)
-            segments.append(CstSegment(op=cur_op, text=text, substitutions=subs))
+            segments.append(
+                CstSegment(
+                    op=cur_op,
+                    text=text,
+                    substitutions=subs,
+                    has_heredoc=_contains_heredoc(node),
+                )
+            )
         return ""
     # 其他节点：递归找命令
     op = cur_op

@@ -9,6 +9,8 @@ import core.command_handlers.emoji_reset
 import core.command_handlers.history
 import core.command_handlers.skills
 import core.command_handlers.approval_test
+import core.command_handlers.approval_resolve
+import core.command_handlers.approval_whitelist
 import core.command_handlers.plugin_mgmt
 import core.command_handlers.cost
 import core.command_handlers.jargon

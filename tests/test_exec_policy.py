@@ -187,3 +187,58 @@ def test_admin_mode_propagates_through_host():
     p = policy_for_role("admin", cfg, ExecPolicy())
     assert p.mode == "auto"
     assert resolve_mode_from_policy(p) == "auto"
+
+
+# ── safe_bins / approval_timeout 透传（修复回归：effective_policy 丢弃新字段）──
+
+
+def test_effective_policy_preserves_safe_bins():
+    requested = ExecPolicy(
+        security="allowlist",
+        safe_bins=("head", "tail"),
+        safe_bin_profiles={"head": {"max_positional": 0}},
+        approval_timeout=600,
+    )
+    host = ExecPolicy()  # host 未声明 → 沿用 requested
+    eff = effective_policy(requested, host)
+    assert eff.safe_bins == ("head", "tail")
+    assert eff.safe_bin_profiles == {"head": {"max_positional": 0}}
+    assert eff.approval_timeout == 600
+
+
+def test_effective_policy_host_overrides_safe_bins():
+    requested = ExecPolicy(security="allowlist", safe_bins=("head",))
+    host = ExecPolicy(security="allowlist", safe_bins=("wc",), approval_timeout=60)
+    eff = effective_policy(requested, host)
+    # host 是收紧方：显式定义了就覆盖
+    assert eff.safe_bins == ("wc",)
+    assert eff.approval_timeout == 60
+
+
+def test_policy_for_role_preserves_safe_bins():
+    eff = ExecPolicy(
+        security="allowlist",
+        safe_bins=("head", "tail", "wc", "tr"),
+        approval_timeout=300,
+    )
+    # trusted/default 固定角色也沿用非收紧性配置
+    for role in ("trusted", "default"):
+        p = policy_for_role(role, eff, None)
+        assert p.safe_bins == ("head", "tail", "wc", "tr")
+        assert p.approval_timeout == 300
+    # system（security=full）同样
+    p = policy_for_role("system", eff, None)
+    assert p.safe_bins == ("head", "tail", "wc", "tr")
+    # admin 直接返回合并结果
+    assert policy_for_role("admin", eff, None) is eff
+
+
+def test_config_to_policy_safe_bins():
+    p = ExecPolicy(
+        safe_bins=("head",),
+        safe_bin_profiles={"head": {"max_positional": 1}},
+        approval_timeout=120,
+    )
+    assert p.safe_bins == ("head",)
+    assert p.safe_bin_profiles == {"head": {"max_positional": 1}}
+    assert p.approval_timeout == 120

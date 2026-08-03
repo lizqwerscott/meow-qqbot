@@ -6,6 +6,7 @@ strictInlineEval 强制审批、security=deny 等核心行为。
 """
 
 import json
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -93,20 +94,22 @@ def _ctx(sender, is_group=False):
     )
 
 
-async def _exec(deps, command, sender, is_group=False, background=True):
+async def _exec(deps, command, sender, is_group=False, background=True, workdir=None):
     entries = create_exec_process_entries(deps)
     exec_entry = next(e for e in entries if e.name == "exec")
-    result = await exec_entry.handler(
-        {"command": command, "background": background}, _ctx(sender, is_group)
-    )
+    args = {"command": command, "background": background}
+    if workdir is not None:
+        args["workdir"] = workdir
+    result = await exec_entry.handler(args, _ctx(sender, is_group))
     return json.loads(result.content)
 
 
 # ── 角色策略归一 ──
 
 
-async def test_system_full_allows_blocked_command(deps):
-    # system 固定 full：黑名单命令直接执行
+async def test_system_full_allows_dangerous_command(deps):
+    # system 固定 full：无命令黑名单（对齐 OpenClaw），危险命令直接执行，
+    # 安全性由 allowlist/审批层之外的系统信任边界承担
     r = await _exec(deps, "sudo whoami", "system")
     assert "error" not in r
 
@@ -232,14 +235,274 @@ async def test_allow_always_persists_entry(deps):
         FakeSender.return_value.send = fake_send
         r = await _exec(deps, "vim x.txt", ADMIN)
         assert "error" not in r
-        # vim 落白名单（bare-name）
+        # vim 落白名单（持久化解析后的二进制 basename，对齐 openclaw resolved 路径；
+        # 如 vim → vim.basic 的机器写 vim.basic，保证条目真正可命中）
+        from core.tools.exec_analysis import resolve_executable
+
+        resolved = resolve_executable(["vim"], env=os.environ)
+        assert resolved.resolved_path is not None
         patterns = [
             e["pattern"] for e in deps.approval_manager.value._whitelist["allowlist"]
         ]
-        assert "vim" in patterns
+        assert os.path.basename(resolved.resolved_path) in patterns
         # 下次直接命中，无需审批
         r2 = await _exec(deps, "vim x.txt", ADMIN)
         assert "error" not in r2
+
+
+# ── 包装器解包（2.1）──
+
+
+async def test_allow_always_wrapper_persists_inner(deps):
+    """timeout 5 head -5 的 allow-always 记内层 head，不记 timeout。"""
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-always", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(deps, "timeout 5 head -5", ADMIN)
+        assert "error" not in r
+        patterns = [
+            e["pattern"] for e in deps.approval_manager.value._whitelist["allowlist"]
+        ]
+        assert "head" in patterns
+        assert "timeout" not in patterns
+
+
+async def test_allow_always_chain_persists_all_segments(deps):
+    """链式命令 allow-always 持久化所有顶层段（不再只记第一条）。"""
+    from core.tools.exec_analysis import resolve_executable
+
+    # 前台执行（后台不支持链式）。两段都 miss：
+    # 绝对路径 /usr/bin/ls 不匹配 bare-name 静态条目；head 不在白名单。
+    # 都立即退出（不读 stdin 阻塞），且非 inline（inline 段会禁用持久化）
+    ls_path = resolve_executable(["ls"], env=os.environ).resolved_path
+    assert ls_path is not None
+    cmd = f"{ls_path} && head -5"
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-always", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(deps, cmd, ADMIN, background=False)
+        assert "error" not in r
+        patterns = [
+            e["pattern"] for e in deps.approval_manager.value._whitelist["allowlist"]
+        ]
+        assert ls_path in patterns  # 绝对路径条目（非 PATH 解析）
+        assert "head" in patterns
+        # 下次整条链直接命中，无需审批（前台直跑）
+        with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender2:
+            r2 = await _exec(deps, cmd, ADMIN, background=False)
+            FakeSender2.assert_not_called()  # allowlist 命中 → 不弹审批
+        assert "error" not in r2
+
+
+async def test_wrapper_inner_allowlist_hit_runs_without_approval(deps):
+    # 白名单已有 ls（bare-name），timeout 包一层直接命中，不弹审批
+    deps.approval_manager.value._whitelist["allowlist"].append(
+        {"pattern": "ls", "source": "allow-always"}
+    )
+    r = await _exec(deps, "timeout 5 ls -la", ADMIN)
+    assert "error" not in r
+
+
+async def test_wrapper_inner_miss_rejected(deps):
+    # timeout 5 rm -rf /tmp/x：rm 不在 allowlist → miss → 拒绝（群聊前台不弹卡）
+    r = await _exec(deps, "timeout 5 rm -rf /tmp/x", ADMIN, is_group=True)
+    assert "error" in r
+
+
+async def test_wrapper_inline_eval_requires_approval(deps):
+    # timeout 包 python3 -c：内层 inline → 强制审批（strictInlineEval）
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-once", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(deps, "timeout 5 python3 -c 'print(1)'", ADMIN)
+        assert "error" not in r
+        # inline 的 allow-once 不落白名单
+        patterns = [
+            e["pattern"] for e in deps.approval_manager.value._whitelist["allowlist"]
+        ]
+        assert "python3" not in patterns
+        assert "timeout" not in patterns
+
+
+# ── 2.2 解释器/runtime 绑定（plan 绑定精确 argv + 唯一文件）──
+
+
+async def test_interp_approval_binds_inner_file(deps, tmp_path):
+    """node app.js 审批时绑定脚本 realpath 到 plan。"""
+    app = tmp_path / "app.js"
+    app.write_text("console.log(1)")
+    plans = []
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                plans.append(deps.approval_manager.value._pending_plans[key])
+                deps.approval_manager.value.resolve(key, "allow-once", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(deps, f"node {app}", ADMIN, workdir=str(tmp_path))
+        assert "error" not in r
+    assert len(plans) == 1
+    assert plans[0]["inner_file"] == os.path.realpath(str(app))
+    assert plans[0]["interp_unbound"] is False
+
+
+async def test_interp_unbound_allow_always_not_persisted(deps, tmp_path):
+    """node missing.js：无法绑定唯一文件 → 审批通过也不落白名单。"""
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-always", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(deps, "node missing.js", ADMIN, workdir=str(tmp_path))
+        assert "error" not in r
+        patterns = [
+            e["pattern"] for e in deps.approval_manager.value._whitelist["allowlist"]
+        ]
+        assert "node" not in patterns
+
+
+async def test_interp_pnpm_exec_binds_local_bin(deps, tmp_path):
+    """pnpm exec eslint 解包到 node_modules/.bin/eslint。"""
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    shim = bin_dir / "eslint"
+    shim.write_text("#!/bin/sh\n# shim")
+    plans = []
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                plans.append(deps.approval_manager.value._pending_plans[key])
+                deps.approval_manager.value.resolve(key, "allow-once", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(deps, "pnpm exec eslint", ADMIN, workdir=str(tmp_path))
+        assert "error" not in r
+    assert len(plans) == 1
+    assert plans[0]["inner_file"] == os.path.realpath(str(shim))
+    assert plans[0]["interp_unbound"] is False
+
+
+async def test_interp_pnpm_exec_missing_bin_requires_approval(deps, tmp_path):
+    """pnpm exec 无本地 bin：interp_unbound → 审批（allow-always 不落盘）。"""
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-always", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(deps, "pnpm exec eslint", ADMIN, workdir=str(tmp_path))
+        assert "error" not in r
+        patterns = [
+            e["pattern"] for e in deps.approval_manager.value._whitelist["allowlist"]
+        ]
+        assert "pnpm" not in patterns
+        assert "eslint" not in patterns
+
+
+async def test_interp_wrapper_inner_bound(deps, tmp_path):
+    """timeout 包 node app.js：解释器绑定看内层（2.1 × 2.2 组合）。"""
+    app = tmp_path / "app.js"
+    app.write_text("console.log(1)")
+    plans = []
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                plans.append(deps.approval_manager.value._pending_plans[key])
+                deps.approval_manager.value.resolve(key, "allow-once", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(
+            deps, f"timeout 5 node {app}", ADMIN, workdir=str(tmp_path)
+        )
+        assert "error" not in r
+    assert plans[0]["inner_file"] == os.path.realpath(str(app))
+    assert plans[0]["interp_unbound"] is False
+
+
+async def test_interp_argv_mismatch_rejected(deps):
+    """审批期间 argv 被篡改 → APPROVAL_MISMATCH（2.2 绑定精确 argv 快照）。"""
+    from core.approval.exec_policy import DECISION_ALLOW_ONCE
+
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                # 模拟审批期间执行方重新构造了不同 argv 的 plan（内容漂移）
+                drifted = dict(deps.approval_manager.value._pending_plans[key])
+                drifted["argv"] = ["rm", "-rf", "/"]  # 仅篡改 argv
+                deps.approval_manager.value._pending_plans[key] = drifted
+                deps.approval_manager.value.resolve(key, DECISION_ALLOW_ONCE, ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(deps, "vim x.txt", ADMIN)
+        assert "error" in r
+        assert "APPROVAL_MISMATCH" in r["error"]
+
+
+async def test_interp_meta_command_allowlist_hit_runs(deps):
+    """python3 --version 是元命令：白名单命中直跑，不发起审批。"""
+    from core.tools.exec_analysis import resolve_executable
+
+    # 静态 [commands].allowed 的 python3 是输入名；本机 realpath 后可能是
+    # python3.11——用解析后的 basename 写入动态白名单（机器无关）
+    resolved = resolve_executable(["python3"], env=os.environ)
+    assert resolved.resolved_path is not None
+    deps.approval_manager.value._whitelist["allowlist"].append(
+        {
+            "pattern": os.path.basename(resolved.resolved_path),
+            "source": "allow-always",
+        }
+    )
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+        r = await _exec(deps, "python3 --version", ADMIN)
+        FakeSender.assert_not_called()  # 元命令 + allowlist 命中 → 不弹审批
+    assert "error" not in r
+
+
+async def test_interp_meta_command_no_unbound(deps):
+    """node --version（不在白名单）走正常审批，不再因 interp_unbound 强制。"""
+    plans = []
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                plans.append(deps.approval_manager.value._pending_plans[key])
+                deps.approval_manager.value.resolve(key, "allow-once", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(deps, "node --version", ADMIN)
+        assert "error" not in r  # 审批通过（元命令可放行）
+    assert len(plans) == 1
+    assert plans[0]["interp_unbound"] is False
+    assert plans[0]["inner_file"] is None
 
 
 # ── mode=auto（auto-reviewer）──
@@ -466,27 +729,27 @@ async def test_nested_substitution_miss_goes_to_approval(deps):
         assert r["success"] is False  # 文件不存在 → cat 退出非 0
 
 
-async def test_shell_payload_inner_blocked(deps):
-    # bash -c 'rm -rf /'：bash 不在白名单且 payload 内 rm 是黑名单 → 拒绝
+async def test_shell_payload_inner_miss_rejected(deps):
+    # bash -c 'rm -rf /'：bash 不在白名单 → miss → 拒绝（无黑名单，纯 allowlist 语义）
     r = await _exec(deps, "bash -c 'rm -rf /'", ADMIN, is_group=True)
     assert "error" in r
 
 
-async def test_payload_denied_reason_penetrates_nested(deps):
-    """黑名单穿透嵌套段：bash -c 的 payload 内 rm 计入 deny_reason。"""
-    # bash 在白名单（先 allow-always 一次），但 payload 内 rm 是黑名单 → 拒绝
+async def test_payload_inner_miss_blocks_allowlisted_outer(deps):
+    """嵌套 miss 阻断外层：bash 已 allowlist，但 payload 内 rm 无条目 → 整段 miss。"""
+    # bash 先 allow-always 一次，payload 内 rm 仍无条目 → 嵌套 miss → 拒绝
     deps.approval_manager.value._whitelist["allowlist"].append(
         {"pattern": "bash", "source": "allow-always"}
     )
     with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
 
         async def fake_send(**kw):
-            return True  # 不 resolve，模拟等待（但 deny 分支不应触发审批）
+            return True  # 不 resolve，模拟等待（但 miss 分支不应触发审批）
 
         FakeSender.return_value.send = fake_send
         entries = create_exec_process_entries(deps)
         exec_entry = next(e for e in entries if e.name == "exec")
-        # 顶层 bash 命中 allowlist 但 deny_reason（payload rm）存在：
+        # 顶层 bash 命中 allowlist 但嵌套 rm miss：
         # admin 群聊 → 不审批 → 拒绝
         result = await exec_entry.handler(
             {"command": "bash -c 'rm -rf /'"}, _ctx(ADMIN, is_group=True)

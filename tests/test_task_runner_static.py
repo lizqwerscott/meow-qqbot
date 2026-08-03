@@ -48,12 +48,8 @@ def test_session_id_current_fallback():
 
 def test_command_safe_allowed():
     assert BackgroundTaskRunner._check_command_safe("ls -la") is None
-
-
-def test_command_safe_denied():
-    result = BackgroundTaskRunner._check_command_safe("shutdown -h now")
-    assert result is not None
-    assert "禁止" in result
+    # 无命令黑名单（对齐 OpenClaw）：危险命令只做格式校验，合理性由创建者负责
+    assert BackgroundTaskRunner._check_command_safe("shutdown -h now") is None
 
 
 def test_command_safe_empty():

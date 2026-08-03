@@ -1,74 +1,18 @@
-"""共享安全逻辑 — 命令黑名单、解析检查、重定向检测、环境变量过滤。
+"""共享安全逻辑 — 命令解析检查、环境变量过滤。
 
 从 SkillManagers 提取，供 exec 工具和后台任务执行器共用。
+
+安全模型（对齐 OpenClaw）：**无命令黑名单**——exec 防线是逐段 allowlist
+（真实路径解析）+ safe-bin + 审批；命令是否危险由 allowlist 覆盖率决定，
+不在准入层硬编码命令名。
 """
 
 import logging
 import os
-import re
 import shlex
 from typing import Dict, List, Optional
 
 _log = logging.getLogger(__name__)
-
-DENIED_COMMANDS: frozenset = frozenset(
-    {
-        "rm",
-        "chmod",
-        "chown",
-        "sudo",
-        "su",
-        "doas",
-        "dd",
-        "mkfs",
-        "fdisk",
-        "parted",
-        "mkswap",
-        "shutdown",
-        "reboot",
-        "poweroff",
-        "halt",
-        "init",
-        "systemctl",
-        "useradd",
-        "usermod",
-        "groupadd",
-        "userdel",
-        "groupdel",
-        "setuid",
-        "setgid",
-        "chattr",
-        "lsattr",
-        "tcpdump",
-        "nmap",
-        "tshark",
-        "pkill",
-        "killall",
-        "kill",
-        "passwd",
-        "service",
-        "grub-install",
-        "grub-mkconfig",
-        "modprobe",
-        "insmod",
-        "rmmod",
-        "iptables",
-        "ufw",
-        "docker",
-        "podman",
-        "crontab",
-        "at",
-        "mount",
-        "umount",
-        "swapon",
-        "swapoff",
-        "sysctl",
-        "unshare",
-        "nsenter",
-    }
-)
-
-DANGEROUS_TARGET_PATTERNS = re.compile(r">(?:/[^/\s]+){1,4}(?:/[^/\s]+)?")
 
 
 def parse_command_safe(raw_command: str) -> Optional[List[str]]:
@@ -80,17 +24,6 @@ def parse_command_safe(raw_command: str) -> Optional[List[str]]:
     if not parts:
         return None
     return parts
-
-
-def check_command_denied(parts: List[str]) -> Optional[str]:
-    """检查命令是否命中黑名单或危险重定向。返回 None 表示通过，否则返回拒绝原因。"""
-    cmd_name = os.path.basename(parts[0])
-    if cmd_name in DENIED_COMMANDS:
-        return f"命令 '{cmd_name}' 被禁止执行"
-    for arg in parts[1:]:
-        if DANGEROUS_TARGET_PATTERNS.search(arg):
-            return f"参数包含危险的重定向目标: {arg[:60]}"
-    return None
 
 
 _BLOCKED_ENV_PREFIXES = frozenset(

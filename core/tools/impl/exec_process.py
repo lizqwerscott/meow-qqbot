@@ -3,8 +3,14 @@
 import json
 import logging
 import os
+from typing import Optional
 
-from core.approval.allowlist import AllowlistEntry, match_allowlist, merge_allowlists
+from core.approval.allowlist import (
+    AllowlistEntry,
+    match_allowlist,
+    match_safe_bins,
+    merge_allowlists,
+)
 from core.approval.exec_policy import (
     ALLOW_DECISIONS,
     DECISION_ALLOW,
@@ -19,10 +25,15 @@ from core.approval.exec_policy import (
 )
 from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
-from core.tools.exec_analysis import analyze_command, iter_all_segments
+from core.tools.exec_analysis import (
+    INTERPRETER_BINS,
+    analyze_command,
+    iter_all_segments,
+    resolve_interpreter_target,
+)
 from core.tools.exec_runner import build_argv, run_plan
 from core.tools.impl.file import is_admin_private
-from core.tools.security import check_command_denied, parse_command_safe
+from core.tools.security import parse_command_safe
 from core.tools.shell_env import build_exec_env_for
 
 _log = logging.getLogger(__name__)
@@ -50,7 +61,28 @@ def _plan_mismatch(stored: dict, current: dict) -> bool:
             return True
     if stored.get("resolved_path") != current.get("resolved_path"):
         return True
+    # 2.2：绑定精确 argv 快照 + 解释器目标文件（防内容漂移）
+    if stored.get("argv") != current.get("argv"):
+        return True
+    if stored.get("inner_file") != current.get("inner_file"):
+        return True
     return False
+
+
+def _persist_target(seg) -> str:
+    """allow-always 持久化目标（2.1 包装器解包）。
+
+    优先取内层（最内层）可执行：PATH 解析命中 → bare-name；非 PATH 解析
+    → 绝对路径条目（路径 glob 分支命中）。内层无法解析 / 非包装器 →
+    回退现状（外层命令 basename）。
+    """
+    inner = seg.inner_resolution if seg.inner_argv else None
+    res = inner if (inner and inner.resolved_path) else seg.resolution
+    if res and res.resolved_path:
+        if res.found_in_path:
+            return os.path.basename(res.resolved_path)
+        return res.resolved_path
+    return os.path.basename(seg.argv[0])
 
 
 def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
@@ -147,16 +179,9 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                 )
             )
 
-        # 硬拦截原因（DENIED_COMMANDS 黑名单 + 危险重定向目标），穿透嵌套段：
-        # bash -c 'rm ...' 的 payload 内 rm 也计入（对齐 openclaw wrapper 分析）。
-        # allowlist 命中时保持原语义直接放行（allowlist 覆盖黑名单，如 sudo）。
-        deny_reason = check_command_denied(parts)
-        if not deny_reason:
-            for seg in iter_all_segments(segments):
-                reason = check_command_denied(seg.argv)
-                if reason:
-                    deny_reason = reason
-                    break
+        # 无命令黑名单（对齐 OpenClaw）：危险命令由 allowlist 覆盖率决定——
+        # rm 等不在 allowlist → miss → 审批/拒绝。auto-reviewer 的审查 prompt
+        # 将 rm/mv/docker 等列为高风险，不会自动放行。
 
         # ── 3. allowlist 匹配（静态 [commands] + 运行时审批白名单，逐段）──
         static_entries = [
@@ -165,24 +190,65 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
             if cmd
         ]
         dynamic_entries = approval_mgr.get_allowlist_entries() if approval_mgr else []
-        allowlist_satisfied, _ = match_allowlist(
+        _, allow_matches = match_allowlist(
             segments,
             merge_allowlists(static_entries, dynamic_entries),
+        )
+        # 2.4 使用计数：动态条目（allow-always/legacy）命中时记录（manual 静态条目不记）
+        if approval_mgr:
+            for m in allow_matches:
+                if m and m.source != "manual":
+                    approval_mgr.record_use(m.pattern)
+        # safe bins：窄过滤器自动放行（对齐 openclaw tools.exec.safeBins）
+        _, safe_matches = match_safe_bins(
+            segments, policy.safe_bins, policy.safe_bin_profiles
+        )
+        # 逐段语义：每段命中 allowlist **或** safe-bin 即视为满足
+        # （对齐 openclaw：shell chaining 时每个顶层段满足 allowlist 即可，
+        # 混合链如 `ls | head -5` 由 ls 命中 allowlist + head 命中 safe-bin 组合满足）
+        per_segment_ok = bool(segments) and all(
+            (allow_matches[i] is not None) or (safe_matches[i] is not None)
+            for i in range(len(segments))
         )
         analysis_ok = all(
             seg.resolution and seg.resolution.resolved_path
             for seg in iter_all_segments(segments)
         )
+        # 2.2 解释器绑定：解释器/runtime 命令（python3/node/pnpm/npm/npx）必须能
+        # 绑定到唯一具体本地文件；无法唯一确定（eval/模块/多文件形态、bin 缺失）
+        # → analysis_ok=False 强制审批，且 allow-always 不落盘（不声称覆盖）。
+        # 包装器段（timeout 5 node app.js）看内层（2.1 × 2.2 组合）。
+        inner_file: Optional[str] = None
+        interp_unbound = False
+        for seg in iter_all_segments(segments):
+            target_argv = seg.inner_argv or seg.argv
+            if target_argv and os.path.basename(target_argv[0]) in INTERPRETER_BINS:
+                target, unique = resolve_interpreter_target(target_argv, cwd=workdir)
+                if unique:
+                    if inner_file is None:
+                        inner_file = target
+                else:
+                    interp_unbound = True
+        analysis_ok = analysis_ok and not interp_unbound
         inline_hit = policy.strict_inline_eval and any(
             seg.inline_eval for seg in iter_all_segments(segments)
         )
+        # heredoc（<<EOF）：对齐 openclaw reason: "heredoc" 独立审批触发点。
+        # shell=False 下 heredoc 本就不生效（token 当参数），且可嵌入任意多行
+        # 脚本内容，因此即使 allowlist 命中也要走审批。
+        heredoc_hit = any(seg.heredoc for seg in iter_all_segments(segments))
 
-        effective_allow = allowlist_satisfied and not inline_hit and analysis_ok
+        effective_allow = (
+            per_segment_ok
+            and not inline_hit
+            and not heredoc_hit
+            and analysis_ok
+        )
         needs_ask = requires_approval(
             ask=policy.ask,
             security=policy.security,
             analysis_ok=analysis_ok,
-            allowlist_satisfied=allowlist_satisfied and not inline_hit,
+            allowlist_satisfied=per_segment_ok and not inline_hit and not heredoc_hit,
             durable_satisfied=effective_allow,
         )
 
@@ -196,6 +262,16 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                 else None
             ),
             "role": role,
+            # 2.1 包装器解包：allow-always 持久化内层可执行路径；
+            # 链式命令持久化所有顶层段（每段独立解析）
+            "persist_pattern": [
+                _persist_target(seg) for seg in segments
+            ]
+            if segments
+            else None,
+            # 2.2 解释器绑定：目标脚本文件（唯一确定时）+ 是否无法声称覆盖
+            "inner_file": inner_file,
+            "interp_unbound": interp_unbound,
         }
 
         if needs_ask:
@@ -210,7 +286,7 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                 mode == "auto"
                 and can_approve_in_ctx
                 and not inline_hit
-                and not deny_reason
+                and not interp_unbound  # 2.2：无法绑定的解释器直接转人工，不自动审查
                 and reviewer
                 and reviewer.available
             ):
@@ -221,12 +297,14 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                     result = await approval_mgr.request_approval(
                         chat_id=ctx.chat_id,
                         tool_name="exec",
-                        reason=deny_reason or "命令不在允许列表中",
+                        reason="命令不在允许列表中",
                         details=command,
                         plan=plan,
                         ask_fallback=policy.ask_fallback,
-                        # strictInlineEval：inline 命令的 allow-always 不落白名单
-                        persist=not inline_hit,
+                        # strictInlineEval：inline 命令的 allow-always 不落白名单；
+                        # 2.2：interp_unbound（无法绑定唯一文件）同样不落白名单
+                        persist=not inline_hit and not interp_unbound,
+                        timeout=policy.approval_timeout or 300,
                         return_session_key=True,
                     )
                     decision, session_key = result
@@ -235,8 +313,27 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                 else:
                     decision = DECISION_DENY
             if decision not in ALLOW_DECISIONS:
-                reason_text = deny_reason or "命令不在允许列表中"
+                reason_text = "命令不在允许列表中"
                 _log.warning("exec 未获审批: %s", reason_text)
+                if background and delivery_channel:
+                    # 对齐 openclaw：审批超时/拒绝后回主会话 followup，
+                    # 避免后台任务以为命令已在运行。
+                    try:
+                        import core.tasks.wake_coalescer as _coalescer
+
+                        _coalescer.request_wake(
+                            source="exec-event",
+                            intent="event",
+                            session_key=delivery_channel,
+                            delivery_target=delivery_channel,
+                            extra_prompt=(
+                                f"后台命令未执行（审批未通过/超时）：{command[:100]}\n"
+                                f"原因: {reason_text}"
+                            ),
+                            reason=f"exec 审批未通过: {command[:80]}",
+                        )
+                    except Exception as e:
+                        _log.warning("exec 审批 followup 通知失败: %s", e)
                 return ToolResult(
                     content=json.dumps(
                         {"error": reason_text},

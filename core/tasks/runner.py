@@ -15,7 +15,6 @@
 
 import asyncio
 import logging
-import os
 import shlex
 import subprocess
 import time
@@ -29,53 +28,6 @@ from .wake_mode import WakeMode
 
 # 系统事件注入的任务结果上限（防 prompt 膨胀，对齐 OpenClaw Child result 注入）
 _RESULT_EVENT_MAX_CHARS = 2000
-
-# 安全黑名单（复用 SkillManagers 的配置）
-_DENIED_COMMANDS: frozenset = frozenset(
-    {
-        "rm",
-        "chmod",
-        "chown",
-        "sudo",
-        "su",
-        "doas",
-        "dd",
-        "mkfs",
-        "fdisk",
-        "parted",
-        "mkswap",
-        "shutdown",
-        "reboot",
-        "poweroff",
-        "halt",
-        "init",
-        "systemctl",
-        "useradd",
-        "usermod",
-        "groupadd",
-        "userdel",
-        "groupdel",
-        "setuid",
-        "setgid",
-        "chattr",
-        "lsattr",
-        "tcpdump",
-        "nmap",
-        "tshark",
-        "pkill",
-        "killall",
-        "kill",
-        "passwd",
-        "service",
-        "grub-install",
-        "grub-mkconfig",
-        "modprobe",
-        "insmod",
-        "rmmod",
-        "iptables",
-        "ufw",
-    }
-)
 
 _log = logging.getLogger(__name__)
 
@@ -290,16 +242,17 @@ class BackgroundTaskRunner:
 
     @staticmethod
     def _check_command_safe(command: str) -> Optional[str]:
-        """检查 shell 命令是否安全。返回 None 表示通过，否则返回拒绝原因。"""
+        """检查 shell 命令格式。返回 None 表示通过，否则返回拒绝原因。
+
+        无命令黑名单（对齐 OpenClaw）：cron 任务命令由创建它的 AI 负责
+        合理性，执行层只做格式校验。
+        """
         try:
             parts = shlex.split(command)
         except ValueError:
             return "命令格式无效（引号不匹配等）"
         if not parts:
             return "命令为空"
-        cmd_name = os.path.basename(parts[0])
-        if cmd_name in _DENIED_COMMANDS:
-            return f"命令 '{cmd_name}' 被禁止执行"
         return None
 
     async def _execute_command_payload(

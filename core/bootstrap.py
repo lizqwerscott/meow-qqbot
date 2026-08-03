@@ -504,9 +504,12 @@ class ServiceGraph:
         # ── 审批系统 ──
         from core.approval.approval_manager import ApprovalManager
 
+        # 2.3：审批卡可转发到其他会话（[approval].forward_to，格式 c2c:<id>/group:<id>）
+        approval_cfg = getattr(self.cfg, "approval", {}) or {}
         self.approval_manager = ApprovalManager(
             api_client=self.bot_engine.api,
             admin_ids=self.admin_ids,
+            forward_to=list(approval_cfg.get("forward_to") or ()),
         )
         self.tool_deps.approval_manager.value = self.approval_manager
         self.bot_engine.approval_manager = self.approval_manager
@@ -702,6 +705,7 @@ class ServiceGraph:
             heartbeat_manager=self.heartbeat_manager,
             archive_manager=self.archive_manager,
             tts_service=self.tts_service,
+            approval_manager=self.approval_manager,
         )
 
         # ── 插件加载 ──
