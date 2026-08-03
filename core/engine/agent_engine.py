@@ -105,8 +105,7 @@ class AgentEngine:
         # ── 工具依赖容器（由 bootstrap 注入） ──
         self._deps = None
 
-        # ── 路由模型 / 活跃追踪 ──
-        self.router_model = None
+        # ── 活跃追踪 ──
         self.last_active_chat: str = ""
         self.last_active_time: float = 0.0
 
@@ -129,10 +128,6 @@ class AgentEngine:
         """注入真实消息投递回调（由 BotEngine 提供）。"""
         self._reply_callback = callback
         _log.info("AgentEngine: reply_callback 已注入")
-
-    def set_router_model(self, router_model: Any):
-        self.router_model = router_model
-        _log.info("AgentEngine: RouterModel 已注入")
 
     def set_api_client(self, api_client: Any):
         self._api_client = api_client
@@ -334,30 +329,6 @@ class AgentEngine:
                         )
                         return
                 # fallback: 走 ToolLoop
-        elif needs_ai and self.router_model:
-            # 旧路由模型兼容（无 rule_router 时）
-            decision = await self.router_model.route(
-                content=input_message.content,
-                chat_id=chat_id,
-            )
-            if decision.action == "direct":
-                _log.info(
-                    f"路由模型直接回复: chat={chat_id[:12]}.. "
-                    f"content={input_message.content[:30]}"
-                )
-                await reply_callback(
-                    chat_id,
-                    decision.response,
-                    input_message.id,
-                    input_message.is_group,
-                )
-                return
-            if decision.response != input_message.content:
-                _log.info(
-                    f"路由 escalate: {input_message.content[:30]} -> {decision.response[:50]}"
-                )
-                input_message.content = decision.response
-
         if needs_ai:
             queue = await self.session_manager.get_queue(chat_id)
             try:

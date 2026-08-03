@@ -25,6 +25,7 @@ import core.tasks.wake_coalescer as _wake_coalescer
 from core.tools.shell_env import build_exec_env_for
 
 from .models import CronJob, SessionMode, TaskRecord, TaskStatus
+from .wake_mode import WakeMode
 
 # 系统事件注入的任务结果上限（防 prompt 膨胀，对齐 OpenClaw Child result 注入）
 _RESULT_EVENT_MAX_CHARS = 2000
@@ -441,7 +442,7 @@ class BackgroundTaskRunner:
                     replace=True,
                     heartbeat_only=True,
                 )
-            if job.wake_mode == "now":
+            if job.wake_mode == WakeMode.NOW:
                 _wake_coalescer.request_wake(
                     source="cron",
                     intent="immediate",
@@ -562,7 +563,7 @@ class BackgroundTaskRunner:
                         context_key=f"task:{task.id}",
                         heartbeat_only=True,
                     )
-                if job.wake_mode == "now":
+                if job.wake_mode == WakeMode.NOW:
                     _wake_coalescer.request_wake(
                         source="cron",
                         intent="immediate",

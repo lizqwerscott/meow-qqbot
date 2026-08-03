@@ -36,6 +36,7 @@ from .heartbeat_schedule import (
 from .heartbeat_wake import WakeIntent
 from .manager import TaskManager, CronJobManager
 from .models import TaskRecord, TaskStatus, CronJob, SessionMode
+from .wake_mode import WakeMode
 from .preflight import run_preflight, PreflightContext, PreflightResult
 from .runner import BackgroundTaskRunner
 from .scheduler import CronJobScheduler

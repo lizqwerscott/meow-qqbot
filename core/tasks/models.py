@@ -9,6 +9,8 @@ from typing import List, Optional
 
 from croniter import croniter
 
+from .wake_mode import WakeMode
+
 _log = logging.getLogger(__name__)
 
 
@@ -135,7 +137,7 @@ class CronJob:
     # custom    → 同 isolated，但使用命名 session
 
     # 唤醒策略
-    wake_mode: str = "now"  # now / next-heartbeat
+    wake_mode: WakeMode = WakeMode.NOW
 
     # 载荷类型
     payload_type: str = "message"  # message / command / system_event
@@ -162,8 +164,12 @@ class CronJob:
         return d
 
     def __post_init__(self):
-        if self.wake_mode not in ("now", "next-heartbeat"):
-            self.wake_mode = "now"
+        # 兼容旧数据/外部传入的裸字符串（"now"/"next-heartbeat"）
+        if isinstance(self.wake_mode, str):
+            try:
+                self.wake_mode = WakeMode(self.wake_mode)
+            except ValueError:
+                self.wake_mode = WakeMode.NOW
         # 兼容旧数据：session_target 为空时继承 session_mode
         if not self.session_target:
             self.session_target = self.session_mode
