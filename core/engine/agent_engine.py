@@ -301,34 +301,6 @@ class AgentEngine:
             model_chain = self.model_registry.get_chain(tier)
             input_message.model_chain = model_chain or None
 
-            from core.rule_router import is_simple_enough_for_direct
-
-            if tier == "simple" and is_simple_enough_for_direct(input_message.content):
-                _log.info(
-                    f"规则路由直接回复 (tier={tier}): "
-                    f"chat={chat_id[:12]}.. content={input_message.content[:30]}"
-                )
-                simple_model = model_chain[0] if model_chain else None
-                if simple_model:
-                    from core.rule_router import SIMPLE_SYSTEM_PROMPT as _simple_prompt
-
-                    reply = await self.model_registry.simple_chat(
-                        model_name=simple_model,
-                        messages=[
-                            {"role": "system", "content": _simple_prompt},
-                            {"role": "user", "content": input_message.content},
-                        ],
-                        max_tokens=200,
-                    )
-                    if reply:
-                        await reply_callback(
-                            chat_id,
-                            reply,
-                            input_message.id,
-                            input_message.is_group,
-                        )
-                        return
-                # fallback: 走 ToolLoop
         if needs_ai:
             queue = await self.session_manager.get_queue(chat_id)
             try:
