@@ -59,7 +59,7 @@ uv run black <file>   # format code
 - **Tool loop**: `ToolLoop` runs up to N rounds of AI → tool_calls → execute → feed back (configurable via `max_tool_rounds`, default unlimited = -1). Every text response is sent immediately via `reply_callback`.
 - **Auto memory injection**: `_build_memory_context` fetches relevant Hindsight episodes/profiles and injects into the dynamic system prompt (invisible to user). Up to 3 episodes (150 chars each) + 1 profile; dirty data filtered.
 - **Prompt structure**: Static prompt (role + character card + skill intro + memory desc + tool coop + emoji guide) rendered once from Jinja2 templates (`prompts/`). Dynamic block (skill entries + memory context + learning context + time + emoji tags + users list + workspace info) appended as a separate system message each turn.
-- **Multi-model routing** (optional): `RuleRouter` scores messages on 15 dimensions (code, complexity, reasoning, etc.) and assigns SIMPLE / MEDIUM / COMPLEX / REASONING tiers. Each tier has a fallback chain of models from `[models]` config. Routing disabled by default (`[routing].enabled = false`).
+- **Multi-model routing** (optional): `RuleRouter` scores messages on 16 dimensions (code, complexity, reasoning, etc.) and assigns SIMPLE / MEDIUM / COMPLEX / REASONING tiers. Each tier has a fallback chain of models from `[models]` config. Routing disabled by default (`[routing].enabled = false`).
 - **Keyword flush**: Certain keywords (`"我喜欢"`, `"记住"`, etc.) trigger an immediate Hindsight `flush` for the current session.
 
 ## Bot Commands

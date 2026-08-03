@@ -1,7 +1,10 @@
-"""RuleRouter — 15维规则评分引擎（ClawRouter 风格）。
+"""RuleRouter — 16维规则评分引擎（对齐 ClawRouter）。
 
 纯正则匹配 + 计数，无 LLM 调用，<1ms 完成分类。
 基于规则评分将消息归入四档：SIMPLE / MEDIUM / COMPLEX / REASONING。
+对齐点：
+- tokenCount 短消息负分（原版 tokenCount: short → -1.0）
+- 贴分档边界不硬判（原版 sigmoid 置信度 < 阈值 → ambiguous → 默认 MEDIUM）
 """
 
 import re
@@ -9,6 +12,12 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 _log = __import__("logging").getLogger(__name__)
+
+# 短消息负分阈值（字）。对齐原版 tokenCountThresholds.simple=50 tokens，中文 1 字≈1 token，取 30 字保守。
+SHORT_MESSAGE_THRESHOLD = 30
+# ambiguous 模糊带宽度。对齐原版：sigmoid(12×d)<0.7 → d<0.0706，
+# 原版边界间距 0.3 → 模糊带占比 0.0706/0.3 ≈ 23.5%；本项目边界间距 2.0 → 0.47，取 0.5。
+AMBIGUOUS_BAND = 0.5
 
 
 # ── 评分维度定义 ──
@@ -27,15 +36,15 @@ class Dimension:
             total = sum(len(re.findall(p, text)) for p in self.patterns)
             return min(total / 3.0, 1.0)
         if self.fn == "length_reward":
-            words = len(text)
-            return min(words / 200.0, 1.0)
+            chars = len(text)
+            return min(chars / 200.0, 1.0)
         if self.fn == "length_penalty":
-            words = len(text)
-            return 1.0 if words < 20 else 0.0
+            chars = len(text)
+            return 1.0 if chars < SHORT_MESSAGE_THRESHOLD else 0.0
         return 0.0
 
 
-# 15 个评分维度
+# 16 个评分维度
 DIMENSIONS: List[Dimension] = [
     # 代码与技术
     Dimension("code_presence", 3.0, [
@@ -112,6 +121,8 @@ DIMENSIONS: List[Dimension] = [
     ]),
     # 其他
     Dimension("token_count", 1.5, fn="length_reward"),
+    # 对齐 ClawRouter tokenCount：短消息负分（原版 short → -1.0）
+    Dimension("short_message", -2.0, fn="length_penalty"),
     Dimension("question_complexity", 2.0, [
         r".*[？?]+\s*.*[？?]+",  # 多个问号
         r"(什么|哪里|谁|怎么|为什么|如何).*(什么|哪里|谁|怎么|为什么|如何)",  # 复合疑问
@@ -148,12 +159,8 @@ TIER_BOUNDS = [
     ("reasoning", 8.0,           float("inf")),
 ]
 
-SIMPLE_SYSTEM_PROMPT = """你是一个友好的群聊助手。请简短自然地回复用户消息。
-不要使用工具，不要搜索记忆，直接回复即可。保持语气亲切，符合你的角色设定。"""
-
-
 class RuleRouter:
-    """15 维规则评分路由引擎。纯本地计算，<1ms。
+    """16 维规则评分路由引擎。纯本地计算，<1ms。
 
     用法:
         router = RuleRouter()
@@ -166,7 +173,7 @@ class RuleRouter:
         self._bounds = TIER_BOUNDS
 
     def score(self, text: str) -> dict:
-        """对文本进行 15 维评分，返回维度得分明细。"""
+        """对文本进行 16 维评分，返回维度得分明细。"""
         results = {}
         total = 0.0
         for dim in self._dimensions:
@@ -178,13 +185,24 @@ class RuleRouter:
         return results
 
     def classify(self, text: str) -> str:
-        """评分 → 返回 tier 名称: simple / medium / complex / reasoning。"""
+        """评分 → 返回 tier 名称: simple / medium / complex / reasoning。
+
+        对齐 ClawRouter 置信度机制：总分贴分档边界（距离 < AMBIGUOUS_BAND）
+        视为 ambiguous，不硬判，默认返回 medium（原版 ambiguousDefaultTier）。
+        """
         total = 0.0
         for dim in self._dimensions:
             total += dim.score(text) * dim.weight
 
         for name, lo, hi in self._bounds:
             if lo <= total < hi:
+                near_lo = lo != float("-inf") and (total - lo) < AMBIGUOUS_BAND
+                near_hi = hi != float("inf") and (hi - total) < AMBIGUOUS_BAND
+                if near_lo or near_hi:
+                    # 贴边界不硬判，统一回退默认档 medium
+                    # （对齐原版 ambiguousDefaultTier=MEDIUM：simple 上边界升档，
+                    #  complex/reasoning 贴边同样回退 medium）
+                    return "medium"
                 return name
         return "medium"
 
@@ -193,17 +211,3 @@ class RuleRouter:
         scores = self.score(text)
         tier = self.classify(text)
         return {"tier": tier, "total": scores.pop("total"), "dimensions": scores}
-
-
-def is_simple_enough_for_direct(text: str) -> bool:
-    """判断是否适合不走 ToolLoop 直接回复。
-
-    条件：长度短 (< 50 字)、无代码、无技术术语、无复杂要求。
-    """
-    if len(text) > 50:
-        return False
-    if re.search(r"`[^`]+`|def\s+\w+|class\s+\w+", text):
-        return False
-    if re.search(r"为什么|怎么|如何|分析|解释|比较|区别|证明|推理|对比", text):
-        return False
-    return True
