@@ -92,13 +92,18 @@ def log_llm_error(
 ) -> None:
     """统一 LLM 请求错误分类日志（各 provider 服务共用一份判定）。
 
-    分类：429/rate_limit → warning（限流），502/503/service_unavailable → error
-    （服务不可用），timeout → warning，其余 → error。
+    优先读 openai/httpx 异常自带的 status_code（429→限流、502/503→不可用），
+    无 status_code 的异常（网络层/自定义）回退到字符串子串判定。
     tag 形如「（流式）」「（带工具）」插在动作词后，service 区分实现。
     """
     err_str = str(e)
     low = err_str.lower()
-    if "429" in err_str or "rate_limit" in low:
+    status = getattr(e, "status_code", None)
+    if status == 429:
+        _log.warning("%s 请求被限流%s [%s]: %s", service, tag, model, err_str)
+    elif status in (502, 503):
+        _log.error("%s 服务不可用%s [%s]: %s", service, tag, model, err_str)
+    elif "429" in err_str or "rate_limit" in low:
         _log.warning("%s 请求被限流%s [%s]: %s", service, tag, model, err_str)
     elif "502" in err_str or "503" in err_str or "service_unavailable" in low:
         _log.error("%s 服务不可用%s [%s]: %s", service, tag, model, err_str)

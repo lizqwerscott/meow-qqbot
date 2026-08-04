@@ -17,6 +17,7 @@ import pytest
 
 from core.ai.protocol import AssistantMessage, StreamAbortedError
 from core.markdown_split import (
+    TrailingState,
     markdown_safe_cut,
     pending_starts_incomplete,
     trailing_structure,
@@ -141,22 +142,21 @@ class TestMarkdownSafeCut:
     def test_table_continuation_cuts_at_row_end(self):
         """延续表格（initial_in_table）：数据行尾可切，半截行被切掉。"""
         tail = "| 数据01 | 7 | 完整行 |\n| 数据02 | 14 | 半截"
-        cut = markdown_safe_cut(tail, 100, initial_in_table=True)
+        cut = markdown_safe_cut(tail, 100, initial=TrailingState(in_table=True))
         assert cut == len("| 数据01 | 7 | 完整行 |\n")
 
     def test_fence_continuation(self):
         """围栏延续（initial_in_fence）：围栏体内不可切，结束行后可切。"""
         fence_cont = "print('y')\nprint('z')\n```\n普通文本继续。\n"
         cut = markdown_safe_cut(
-            fence_cont, 100, initial_in_fence=True, initial_fence_marker="```"
+            fence_cont, 100, initial=TrailingState(in_fence=True, fence_marker="```")
         )
         assert cut >= len("print('y')\nprint('z')\n```\n")
         assert (
             markdown_safe_cut(
                 "print('y')\nprint('z')\n",
                 100,
-                initial_in_fence=True,
-                initial_fence_marker="```",
+                initial=TrailingState(in_fence=True, fence_marker="```"),
             )
             == 0
         )
@@ -165,21 +165,18 @@ class TestMarkdownSafeCut:
 class TestTrailingStructure:
     def test_table_state(self):
         """已发文本末尾状态：表内 / 围栏内（含 marker）。"""
-        assert trailing_structure("表头\n| --- | --- |\n| 数据 | 值 |\n") == (
-            True,
-            False,
-            None,
-        )
-        # 末尾换行不重置表内状态（修复：rstrip 后再 split）
-        assert trailing_structure("| 数据 | 值 |\n") == (True, False, None)
-        assert trailing_structure("普通文本\n```python\n") == (False, True, "```")
-        assert trailing_structure("```python\nprint(1)\n```\n") == (False, False, None)
         assert trailing_structure(
-            "表头\n| --- | --- |\n| 数据 | 值 |\n\n普通文本\n"
-        ) == (
-            False,
-            False,
-            None,
+            "表头\n| --- | --- |\n| 数据 | 值 |\n"
+        ) == TrailingState(in_table=True)
+        # 末尾换行不重置表内状态（修复：rstrip 后再 split）
+        assert trailing_structure("| 数据 | 值 |\n") == TrailingState(in_table=True)
+        assert trailing_structure("普通文本\n```python\n") == TrailingState(
+            in_fence=True, fence_marker="```"
+        )
+        assert trailing_structure("```python\nprint(1)\n```\n") == TrailingState()
+        assert (
+            trailing_structure("表头\n| --- | --- |\n| 数据 | 值 |\n\n普通文本\n")
+            == TrailingState()
         )
 
 

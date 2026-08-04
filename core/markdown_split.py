@@ -13,6 +13,7 @@ is_table_row）是两份状态机的公共基础，改动只需在本模块内�
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 # QQ 单条消息的 markdown 安全字节上限（_split_markdown 的默认块大小）。
 MARKDOWN_SAFE_CHUNK_BYTE_LIMIT = 3600
@@ -263,7 +264,19 @@ def split_markdown(
 # ── 流式转发安全切点（tool_loop block 投递） ──
 
 
-def trailing_structure(text: str) -> tuple[bool, bool, str | None]:
+@dataclass(frozen=True)
+class TrailingState:
+    """已发文本的末尾结构状态（表格内 / 围栏内 + 围栏 marker）。
+
+    trailing_structure 产出、markdown_safe_cut 消费，捆绑传递避免三参数拆包。
+    """
+
+    in_table: bool = False
+    in_fence: bool = False
+    fence_marker: str | None = None
+
+
+def trailing_structure(text: str) -> TrailingState:
     """扫描已发文本末尾状态：是否处于表格内 / 代码围栏内（含围栏 marker）。
 
     供 markdown_safe_cut 作为 initial 状态，使跨块的表格/围栏延续正确。
@@ -289,15 +302,15 @@ def trailing_structure(text: str) -> tuple[bool, bool, str | None]:
                 in_table = True  # 表头行后（未遇分隔行）也视为表内延续
         else:
             in_table = False
-    return in_table, in_fence, fence_marker
+    return TrailingState(
+        in_table=in_table, in_fence=in_fence, fence_marker=fence_marker
+    )
 
 
 def markdown_safe_cut(
     text: str,
     limit: int,
-    initial_in_table: bool = False,
-    initial_in_fence: bool = False,
-    initial_fence_marker: str | None = None,
+    initial: TrailingState | None = None,
 ) -> int:
     """在 text 的 limit 字符内找安全的块切点：不切断代码围栏与 markdown 表格。
 
@@ -305,16 +318,16 @@ def markdown_safe_cut(
     调用方按原样切（超长表格由 split_markdown 兜底拆块）。
     状态机与 split_markdown 保持一致：表内/围栏体内不可切，
     普通行行尾即安全切点（表格或围栏整体留在块内，宁小勿断）。
-    initial_* 由调用方传入已发文本的末尾状态，使跨块的表格/围栏延续正确
-    （pending 开头是数据行时行尾可切）。
+    initial 由调用方传入已发文本的末尾状态（trailing_structure 产出），
+    使跨块的表格/围栏延续正确（pending 开头是数据行时行尾可切）。
     """
     if limit <= 0:
         return 0
     safe = 0
     pos = 0
-    in_fence = initial_in_fence
-    fence_marker = initial_fence_marker if initial_in_fence else None
-    in_table = initial_in_table
+    in_fence = initial.in_fence if initial else False
+    fence_marker = initial.fence_marker if initial and initial.in_fence else None
+    in_table = initial.in_table if initial else False
     pending_header = False
     for line in text.split("\n"):
         if pos >= limit:

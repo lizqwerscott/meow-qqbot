@@ -132,12 +132,12 @@ class ToolLoop:
                 按自然边界分片实时转发；未传入则只聚合不转发，行为与非流式一致。
 
         Returns:
-            (sent_emoji, text_was_sent)
+            (sent_emoji, text_committed)
             - sent_emoji: 是否在循环中发送了表情
-            - text_was_sent: 是否通过 reply_callback 发送了文本
+            - text_committed: 文本是否已投递/承诺投递（含发送失败但已承诺的部分，防重复）
         """
         sent_emoji = False
-        text_was_sent = False
+        text_committed = False
         message_delivered = False
         current_model_name: Optional[str] = None
         suppress_reply = False
@@ -192,7 +192,7 @@ class ToolLoop:
                     先承诺后发送：取消竞态下（await 中注入 CancelledError）消息可能已
                     送达，sent 先递增可防止收尾补发把同一段再发一遍。
                     """
-                    nonlocal text_was_sent
+                    nonlocal text_committed
                     pending = st.text[st.sent :]
                     if not pending or message_delivered:
                         # message_delivered: send_message 等工具已投递过消息，
@@ -205,15 +205,10 @@ class ToolLoop:
                     # 统一找安全切点：达块大小按 limit 切；空闲 flush/首块按当前全文
                     # 扫描（末尾是半截表头/半截行时切回结构前，宁可少发）
                     limit = self._stream_block_chars if allow_partial else len(pending)
-                    in_table, in_fence, fence_marker = trailing_structure(
-                        st.text[: st.sent]
-                    )
                     cut = markdown_safe_cut(
                         pending,
                         limit,
-                        initial_in_table=in_table,
-                        initial_in_fence=in_fence,
-                        initial_fence_marker=fence_marker,
+                        initial=trailing_structure(st.text[: st.sent]),
                     )
                     if 0 < cut < len(pending):
                         pending = pending[:cut]
@@ -231,7 +226,7 @@ class ToolLoop:
                         # 一遍（重复投递），且已承诺的文本无法撤回。
                         _log.warning("流式块发送失败 [%s]: %s", chat_id[:12], e)
                     st.sent += len(pending)
-                    text_was_sent = True
+                    text_committed = True
 
                 async def _idle_flush_task(delay: float) -> None:
                     try:
@@ -397,7 +392,7 @@ class ToolLoop:
                     await reply_callback(chat_id, "AI 服务异常", reply_to, is_group)
                 except Exception as cb_err:
                     _log.warning("回复 callback 失败 [%s]: %s", chat_id[:12], cb_err)
-                text_was_sent = True
+                text_committed = True
                 break
 
             response_text = message.content or ""
@@ -460,7 +455,7 @@ class ToolLoop:
                     # 同步 sent：即使补发走了 reply_callback，也标记已投递，
                     # 防止残留定时器 flush 再次发送同段文本
                     st.sent = len(response_text)
-                    text_was_sent = True
+                    text_committed = True
 
             if response_text or tool_calls:
                 await self.context_manager.add_assistant_message_async(
@@ -523,7 +518,7 @@ class ToolLoop:
                     if result.sent_emoji:
                         sent_emoji = True
                     if result.sent_text:
-                        text_was_sent = True
+                        text_committed = True
                         message_delivered = True
                     if result.no_reply:
                         suppress_reply = True
@@ -595,7 +590,7 @@ class ToolLoop:
                     message_delivered = False
                 messages.extend(steer_msgs)
 
-        return sent_emoji, text_was_sent
+        return sent_emoji, text_committed
 
     async def _drain_steering_messages(
         self,

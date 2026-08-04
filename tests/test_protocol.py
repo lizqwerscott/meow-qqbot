@@ -197,3 +197,24 @@ class TestLogLlmError:
         assert any(
             "DeepSeek 请求被限流（流式） [m1]" in r.getMessage() for r in caplog.records
         )
+
+    def test_status_code_takes_priority(self, caplog):
+        """openai 风格异常自带 status_code 时优先于字符串子串判定。"""
+
+        class _StatusErr(Exception):
+            def __init__(self, status, msg):
+                super().__init__(msg)
+                self.status_code = status
+
+        # 429 但消息里没有任何限流关键词：status 判定必须生效
+        with caplog.at_level("WARNING", logger="core.ai.protocol"):
+            log_llm_error(_StatusErr(429, "weird upstream response"), "m1")
+        assert any("请求被限流" in r.getMessage() for r in caplog.records)
+        # 503 同理
+        with caplog.at_level("WARNING", logger="core.ai.protocol"):
+            log_llm_error(_StatusErr(503, "weird upstream response"), "m1")
+        assert any("服务不可用" in r.getMessage() for r in caplog.records)
+        # 无 status_code 的异常回退子串判定（既有行为不变）
+        with caplog.at_level("WARNING", logger="core.ai.protocol"):
+            log_llm_error(RuntimeError("502 Bad Gateway"), "m1")
+        assert any("服务不可用" in r.getMessage() for r in caplog.records)
