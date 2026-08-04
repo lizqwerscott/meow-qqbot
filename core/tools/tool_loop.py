@@ -269,13 +269,28 @@ class ToolLoop:
                     else:
                         _schedule_idle_flush()
 
+                async def _on_stream_reset() -> None:
+                    """服务内部降级重试（全新生成）：转发状态归零。
+
+                    首尝试的增量可能已流过 on_text，st.sent 停在旧文本偏移上；
+                    不归零的话新文本会从错误偏移切片（开头被跳过或整条被吞）。
+                    注意：不重置 st.forwarded——旧尝试已转发的块无法撤回，
+                    后续若再断流仍需按「已转发」终止而非回退（防双回复）。
+                    """
+                    st.cancel_timer()
+                    st.sent = 0
+                    st.text = ""
+
                 was_exception = False
                 try:
                     # 协议已声明 chat_completion_stream，直接调用（不防御式探测）
                     if self._stream_reply:
                         cb = None
                         if stream_callback is not None:
-                            cb = StreamCallbacks(on_text=_on_stream_text)
+                            cb = StreamCallbacks(
+                                on_text=_on_stream_text,
+                                on_reset=_on_stream_reset,
+                            )
                         message, usage = await svc.chat_completion_stream(
                             messages=messages,
                             tools=tools,

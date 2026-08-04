@@ -11,10 +11,11 @@
 
 import asyncio
 from types import SimpleNamespace as NS
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from core.ai.protocol import AssistantMessage
+from core.ai.protocol import AssistantMessage, StreamAbortedError
 from core.markdown_split import (
     markdown_safe_cut,
     pending_starts_incomplete,
@@ -381,3 +382,162 @@ class TestStreamBlockIntegration:
         )
         assert "".join(streamed) + "".join(sent) == text
         assert len(streamed) == 2 and sent == []
+
+
+# ── c1 主契约：模型链下断流回退决策（零转发→回退 / 已转发→终止） ──
+
+
+class _AbortSvc:
+    """流式调用立即抛 StreamAbortedError（零转发）。"""
+
+    @property
+    def model(self):
+        return "mock"
+
+    async def chat_completion_stream(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        temperature=None,
+        max_tokens=None,
+        callbacks=None,
+    ):
+        raise StreamAbortedError("connection reset")
+
+
+class _ResetSvc:
+    """模拟服务内部降级重试：先流半截 → on_reset → 从零开始新生成。"""
+
+    @property
+    def model(self):
+        return "mock"
+
+    async def chat_completion_stream(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        temperature=None,
+        max_tokens=None,
+        callbacks=None,
+    ):
+        # 第一次生成：半截（流中途失败前已触发回调）
+        buf = ""
+        for ch in "半截内容会被丢弃":
+            buf += ch
+            if callbacks and callbacks.on_text:
+                await callbacks.on_text(buf)
+        # 服务内部重试
+        if callbacks and callbacks.on_reset:
+            await callbacks.on_reset()
+        # 第二次生成（全新）
+        buf = ""
+        full = "这是重试后的完整回复内容，长度足以越过静默探测期。" * 3
+        for ch in full:
+            buf += ch
+            if callbacks and callbacks.on_text:
+                await callbacks.on_text(buf)
+        return AssistantMessage(content=buf), {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+        }
+
+
+class TestToolLoopAbortFallback:
+    """模型链下断流的回退决策（c1 主契约，此前只有服务层测试）。"""
+
+    def _make_registry(self, resolves):
+        reg = MagicMock()
+        reg.resolve_model_chain = AsyncMock(side_effect=resolves)
+        reg.get = MagicMock(return_value=resolves[-1][1])
+        reg.get_session_config = MagicMock(return_value=(30, 600))
+        reg.cooldown_manager = MagicMock(
+            is_cooled_down=AsyncMock(return_value=False),
+            record_success=AsyncMock(),
+            record_failure=AsyncMock(),
+        )
+        return reg
+
+    def _run_chain(self, svc_a, svc_b, sent, streamed):
+        reg = self._make_registry([("a", svc_a), ("b", svc_b)])
+        ctx = NS(
+            ai=NS(
+                ai_service=svc_a,
+                model_registry=reg,
+                max_tool_rounds=5,
+                stream_reply=True,
+                stream_block_chars=800,
+                stream_block_idle_ms=1000,
+            ),
+            mgmt=NS(
+                permission_manager=None,
+                cost_tracker=_MockCost(),
+                context_manager=_MockCtx(),
+            ),
+            memory=NS(hindsight_memory=None),
+        )
+        loop = ToolLoop(ctx)
+
+        async def reply_cb(chat_id, content, message_id, is_group):
+            sent.append(content)
+
+        async def stream_cb(chunk):
+            streamed.append(chunk)
+
+        async def run():
+            return await loop.run(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=None,
+                chat_id="c1",
+                is_group=True,
+                reply_to="m1",
+                reply_callback=reply_cb,
+                stream_callback=stream_cb,
+                model_chain=["a", "b"],
+            )
+
+        return asyncio.run(run()), reg
+
+    def test_abort_before_forward_falls_back_in_chain(self):
+        """零转发断流 → 回退下一模型：兜底回复投递，失败模型记冷却。"""
+        svc_a, svc_b = _AbortSvc(), _MockSvc(text="兜底模型的完整回复内容")
+        sent, streamed = [], []
+        ret, _ = self._run_chain(svc_a, svc_b, sent, streamed)
+        assert streamed == []
+        assert sent == ["兜底模型的完整回复内容"], "回退模型必须完成投递"
+        assert ret == (False, True)
+
+    def test_abort_before_forward_records_cooldown(self):
+        """断流（异常）→ record_cooldown=True：失败模型写入冷却。"""
+        svc_a, svc_b = _AbortSvc(), _MockSvc(text="x" * 20)
+        sent, streamed = [], []
+        _, reg = self._run_chain(svc_a, svc_b, sent, streamed)
+        reg.cooldown_manager.record_failure.assert_awaited_once_with("a")
+        reg.cooldown_manager.record_success.assert_awaited_once_with("b")
+
+    def test_abort_after_forward_terminates_no_fallback(self):
+        """已转发部分文本后断流 → 终止：不回退、尾巴补发、记冷却。"""
+        text = "这是一段会在探测期之后被打断的文本内容，流式转发此时已经开始工作。" * 5
+        svc_a = _MockSvc(text=text, throw_after=130)
+        svc_b = _MockSvc(text="不应被调用的模型B")
+        sent, streamed = [], []
+        _, reg = self._run_chain(svc_a, svc_b, sent, streamed)
+        # 只 acquire 过一次（首模型），回退模型从未被触碰
+        reg.resolve_model_chain.assert_awaited_once()
+        reg.cooldown_manager.record_failure.assert_awaited_once_with("a")
+        reg.cooldown_manager.record_success.assert_not_awaited()
+        # 已发前缀 + 补发尾巴 = 已生成部分
+        delivered = "".join(streamed) + "".join(sent)
+        assert delivered == text[:131], "尾巴必须补发，且无重复"
+
+
+class TestToolLoopStreamReset:
+    """服务内部重试（on_reset）：新文本从 0 偏移转发，半截旧文本不混入。"""
+
+    def test_retry_restarts_forward_offset(self):
+        ret, sent, streamed = asyncio.run(_run_case(_ResetSvc()))
+        delivered = "".join(streamed) + "".join(sent)
+        full = "这是重试后的完整回复内容，长度足以越过静默探测期。" * 3
+        assert delivered == full, "重试文本必须从 0 偏移完整投递"
+        assert "半截内容" not in delivered

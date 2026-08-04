@@ -114,10 +114,14 @@ class StreamCallbacks:
 
     传累计文本而非原始 delta，是为了让调用方（如 ToolLoop 分片发送）
     无需自己拼接，直接按累计长度切片即可。
+
+    on_reset：服务内部降级重试（全新生成）前触发，累计文本将从零重新开始；
+    调用方须归零自己的转发偏移（如 st.sent），否则新文本会从旧偏移切片。
     """
 
     on_text: Callable[[str], Awaitable[None]] | None = None
     on_reasoning: Callable[[str], Awaitable[None]] | None = None
+    on_reset: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass

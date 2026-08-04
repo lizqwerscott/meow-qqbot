@@ -240,6 +240,10 @@ class AIService:
                 # （防御：网关在流中途才拒绝该参数时，缓冲里已有半截内容）。
                 buffer.reset()
                 usage = None
+                # 通知调用方同样归零转发偏移：首尝试的增量可能已流过 on_text，
+                # ToolLoop 的 st.sent 还停在旧文本上，新文本会从错误偏移切片。
+                if callbacks and callbacks.on_reset:
+                    await callbacks.on_reset()
                 try:
                     stream = await self.client.chat.completions.create(**kwargs)
                     try:

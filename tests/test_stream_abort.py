@@ -11,7 +11,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 from core.ai.deepseek_service import DeepSeekResponsesService
-from core.ai.protocol import StreamAbortedError
+from core.ai.protocol import StreamAbortedError, StreamCallbacks
 from core.ai.service import AIService
 
 
@@ -159,6 +159,32 @@ class TestAIServiceStreamAbort:
         assert (
             message is not None and message.content == "重试后的完整内容"
         ), "重试结果不得混入首流半截内容"
+
+    def test_retry_emits_on_reset(self):
+        """降级重试前触发 on_reset：调用方归零转发偏移（新生成从 0 开始）。"""
+        calls = {"n": 0, "resets": 0}
+
+        async def on_reset():
+            calls["resets"] += 1
+
+        async def create(**kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _FailingStream(
+                    [_chunk(text="首流半截")],
+                    RuntimeError("stream_options unsupported"),
+                )
+            return _OkStream([_chunk(text="重试后的内容")])
+
+        svc = _make_ai_service(create)
+        message, usage = asyncio_run(
+            svc.chat_completion_stream(
+                messages=[{"role": "user", "content": "hi"}],
+                callbacks=StreamCallbacks(on_reset=on_reset),
+            )
+        )
+        assert calls["n"] == 2 and calls["resets"] == 1
+        assert message is not None and message.content == "重试后的内容"
 
     def test_retry_failure_raises(self):
         """降级重试也失败 → 抛 StreamAbortedError（不再静默返回半截聚合）。"""
