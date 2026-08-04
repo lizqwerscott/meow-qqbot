@@ -261,7 +261,12 @@ def _make_loop(svc, block_chars=800, idle_ms=1000):
     return ToolLoop(ctx)
 
 
-async def _run_case(svc, block_chars=800, idle_ms=1000):
+async def _run_case(svc, block_chars=800, idle_ms=1000, cb_sleep=0.0):
+    """跑一轮 ToolLoop 并收集投递内容。
+
+    cb_sleep>0 时 stream_callback 模拟 QQ API 发送延迟（发送在途窗口），
+    用于复现 flush 在途期间的并发竞态。
+    """
     loop = _make_loop(svc, block_chars, idle_ms)
     sent, streamed = [], []
 
@@ -269,6 +274,8 @@ async def _run_case(svc, block_chars=800, idle_ms=1000):
         sent.append(content)
 
     async def stream_cb(chunk):
+        if cb_sleep:
+            await asyncio.sleep(cb_sleep)  # 发送在途窗口
         streamed.append(chunk)
 
     ret = await loop.run(
@@ -598,8 +605,8 @@ class TestToolLoopStreamReset:
 # ── 重复气泡回归（18:59 线上事故）：flush 发送在途时的并发捕获 ──
 
 
-class _SlowCbSvc:
-    """逐字符流式服务（可指定字符步进间隔），配合慢 stream_callback
+class _SteppedStreamSvc:
+    """逐字符流式服务（可指定字符步进间隔），配合 _run_case 的 cb_sleep
     复现「发送在途时 on_text / on_reset 并发」的竞态窗口。
     """
 
@@ -632,8 +639,12 @@ class _SlowCbSvc:
         }
 
 
-class _SlowCbReviseSvc(_SlowCbSvc):
+class _SteppedReviseSvc(_SteppedStreamSvc):
     """长草稿流式到一半（flush 发送在途）触发修订 → 终稿从零重流。"""
+
+    def __init__(self, draft: str, final: str, step: float = 0.002):
+        super().__init__(draft, step)
+        self.final = final
 
     async def chat_completion_stream(
         self,
@@ -645,7 +656,7 @@ class _SlowCbReviseSvc(_SlowCbSvc):
         callbacks=None,
     ):
         buf = ""
-        for ch in self.draft:
+        for ch in self.text:  # 草稿（基类 text）
             await asyncio.sleep(self.step)
             buf += ch
             if callbacks and callbacks.on_text:
@@ -662,33 +673,6 @@ class _SlowCbReviseSvc(_SlowCbSvc):
             "prompt_tokens": 1,
             "completion_tokens": 1,
         }
-
-
-def _run_slow_case(svc, *, cb_sleep, block_chars=800, idle_ms=50):
-    """与 _run_case 相同，但 stream_callback 模拟 QQ API 延迟（发送在途）。"""
-    loop = _make_loop(svc, block_chars, idle_ms)
-    sent, streamed = [], []
-
-    async def reply_cb(chat_id, content, message_id, is_group):
-        sent.append(content)
-
-    async def stream_cb(chunk):
-        await asyncio.sleep(cb_sleep)  # 发送在途窗口
-        streamed.append(chunk)
-
-    async def run():
-        return await loop.run(
-            messages=[{"role": "user", "content": "hi"}],
-            tools=None,
-            chat_id="c1",
-            is_group=True,
-            reply_to="m1",
-            reply_callback=reply_cb,
-            stream_callback=stream_cb,
-        )
-
-    ret = asyncio.run(run())
-    return ret, sent, streamed
 
 
 class _PauseFlushSvc:
@@ -716,7 +700,7 @@ class _PauseFlushSvc:
             buf += ch
             if callbacks and callbacks.on_text:
                 await callbacks.on_text(buf)
-        # 停顿：首块 flush 的发送（0.12s）在途期间，空闲定时器（50ms）
+        # 停顿：首块 flush 的发送（0.2s）在途期间，空闲定时器（50ms）
         # 必然触发第二次 flush —— 旧实现以旧偏移二次捕获同一段文本
         await asyncio.sleep(0.3)
         rest = "第二段收尾内容，猫猫陪你休息。\n"
@@ -746,7 +730,7 @@ class TestToolLoopFlushRace:
         """
         line = "这是第一段完整内容，主人下班辛苦啦。\n"
         svc = _PauseFlushSvc()
-        ret, sent, streamed = _run_slow_case(svc, cb_sleep=0.12, idle_ms=50)
+        ret, sent, streamed = asyncio.run(_run_case(svc, idle_ms=50, cb_sleep=0.2))
         delivered = "".join(streamed) + "".join(sent)
         assert streamed, "长文本应先被转发"
         assert delivered.count(line) == 18, (
@@ -760,14 +744,11 @@ class TestToolLoopFlushRace:
         旧实现发送后才推进 st.sent，on_reset 把 sent 清零后再 += 在途块
         长度（0 + len(pending)）→ 偏移损坏 → 终稿开头被跳过/整条被吞。
         """
-        draft = "这是草稿内容。" * 17  # 119 字符 > 112 探测期，会触发首块 flush
+        draft = "这是草稿内容。" * 23  # 161 字符：跨过 112 探测期后仍有 ~96ms
+        # 才到修订信号，首块 flush 发送（0.25s）在途窗口充足（旧 12ms 太窄）
         final = "这是终稿内容，主人辛苦啦。" * 8  # 104 字符，全程 < 探测期
-        svc = _SlowCbReviseSvc.__new__(_SlowCbReviseSvc)
-        svc.text = draft
-        svc.draft = draft
-        svc.final = final
-        svc.step = 0.002
-        ret, sent, streamed = _run_slow_case(svc, cb_sleep=0.12, idle_ms=1000)
+        svc = _SteppedReviseSvc(draft=draft, final=final, step=0.002)
+        ret, sent, streamed = asyncio.run(_run_case(svc, idle_ms=1000, cb_sleep=0.25))
         delivered = "".join(streamed) + "".join(sent)
         assert streamed, "长草稿应先被转发"
         assert delivered.endswith(final), (
