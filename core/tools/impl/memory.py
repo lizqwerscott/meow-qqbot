@@ -2,7 +2,7 @@ import json
 import logging
 from typing import Optional, Tuple
 
-from core.tools._types import ToolEntry, ToolResult, ToolContext
+from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
 
 _log = logging.getLogger(__name__)
@@ -13,20 +13,27 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
     async def _search_memory(args: dict, ctx: ToolContext) -> ToolResult:
         hindsight = deps.hindsight
         if hindsight is None:
-            return ToolResult(content=json.dumps({"error": "记忆系统未就绪"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "记忆系统未就绪"}, ensure_ascii=False)
+            )
 
         query = (args.get("query") or "").strip()
         if not query:
-            return ToolResult(content=json.dumps({"error": "搜索关键词为空"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "搜索关键词为空"}, ensure_ascii=False)
+            )
 
         person_name = (args.get("person_name") or "").strip()
         method = args.get("method", "hybrid")
 
         user_id, resolved_name = _resolve_person(person_name, ctx)
         if user_id is None and person_name:
-            return ToolResult(content=json.dumps(
-                {"error": f"找不到「{person_name}」对应的群友"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"找不到「{person_name}」对应的群友"},
+                    ensure_ascii=False,
+                )
+            )
         if user_id is None:
             user_id = ctx.sender_id
             resolved_name = "当前用户"
@@ -34,14 +41,20 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
         top_k = deps.search_top_k
         try:
             result = await hindsight.search(
-                user_id=user_id, query=query, top_k=top_k,
-                include_profile=True, method=method,
+                user_id=user_id,
+                query=query,
+                top_k=top_k,
+                include_profile=True,
+                method=method,
             )
         except Exception as e:
             _log.warning(f"search_memory 异常: {e}")
-            return ToolResult(content=json.dumps(
-                {"error": f"记忆搜索失败: {e}"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"记忆搜索失败: {e}"},
+                    ensure_ascii=False,
+                )
+            )
 
         episodes = result.get("episodes", [])
         profiles = result.get("profiles", [])
@@ -66,15 +79,20 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
     async def _mark_important(args: dict, ctx: ToolContext) -> ToolResult:
         hindsight = deps.hindsight
         if hindsight is None:
-            return ToolResult(content=json.dumps({"error": "记忆系统未就绪"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "记忆系统未就绪"}, ensure_ascii=False)
+            )
 
         profile_data_str = (args.get("profile_data") or "").strip()
         summary = (args.get("summary") or "").strip()
 
         if not profile_data_str and not summary:
-            return ToolResult(content=json.dumps(
-                {"error": "请提供 profile_data 或 summary"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "请提供 profile_data 或 summary"},
+                    ensure_ascii=False,
+                )
+            )
 
         stored = []
         if profile_data_str:
@@ -82,9 +100,7 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
                 profile_dict = json.loads(profile_data_str)
                 if isinstance(profile_dict, dict) and profile_dict:
                     facts = "；".join(f"{k}是{v}" for k, v in profile_dict.items())
-                    profile_msg = (
-                        f"[这是关于我（{ctx.sender_id}）的自我介绍，请记住这些信息] {facts}"
-                    )
+                    profile_msg = f"[这是关于我（{ctx.sender_id}）的自我介绍，请记住这些信息] {facts}"
                     await hindsight.add_message(
                         session_id=ctx.chat_id,
                         sender_id=ctx.sender_id,
@@ -94,7 +110,9 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
                     )
                     stored.append("画像信息")
             except json.JSONDecodeError:
-                _log.warning(f"mark_important profile_data JSON 解析失败: {profile_data_str[:100]}")
+                _log.warning(
+                    f"mark_important profile_data JSON 解析失败: {profile_data_str[:100]}"
+                )
 
         if summary:
             await hindsight.add_message(
@@ -110,14 +128,19 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
         if stored:
             msg += f" 已记录：{'、'.join(stored)}。"
 
-        return ToolResult(content=json.dumps(
-            {"success": True, "message": msg}, ensure_ascii=False,
-        ))
+        return ToolResult(
+            content=json.dumps(
+                {"success": True, "message": msg},
+                ensure_ascii=False,
+            )
+        )
 
     async def _search_relation(args: dict, ctx: ToolContext) -> ToolResult:
         hindsight = deps.hindsight
         if hindsight is None:
-            return ToolResult(content=json.dumps({"error": "记忆系统未就绪"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "记忆系统未就绪"}, ensure_ascii=False)
+            )
 
         person_a_raw = (args.get("person_a") or "").strip()
         person_b_raw = (args.get("person_b") or "").strip()
@@ -125,25 +148,38 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
         method = args.get("method", "hybrid")
 
         if not person_a_raw or not person_b_raw:
-            return ToolResult(content=json.dumps(
-                {"error": "请指定两个人名或昵称"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "请指定两个人名或昵称"},
+                    ensure_ascii=False,
+                )
+            )
 
         a_id, a_name = _resolve_person(person_a_raw, ctx)
         b_id, b_name = _resolve_person(person_b_raw, ctx)
 
         if a_id is None:
-            return ToolResult(content=json.dumps(
-                {"error": f"找不到「{person_a_raw}」对应的用户"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"找不到「{person_a_raw}」对应的用户"},
+                    ensure_ascii=False,
+                )
+            )
         if b_id is None:
-            return ToolResult(content=json.dumps(
-                {"error": f"找不到「{person_b_raw}」对应的用户"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"找不到「{person_b_raw}」对应的用户"},
+                    ensure_ascii=False,
+                )
+            )
 
         async def search_for(uid, q):
             return await hindsight.search(
-                user_id=uid, query=q, top_k=5, include_profile=True, method=method,
+                user_id=uid,
+                query=q,
+                top_k=5,
+                include_profile=True,
+                method=method,
             )
 
         tasks = []
@@ -157,10 +193,16 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
             task_meta.append(("b", b_id, b_name))
 
         if ctx.sender_id not in (a_id, b_id):
-            tasks.append(search_for(ctx.sender_id, f"{query} {a_name} {b_name}" if query else f"{a_name} {b_name}"))
+            tasks.append(
+                search_for(
+                    ctx.sender_id,
+                    f"{query} {a_name} {b_name}" if query else f"{a_name} {b_name}",
+                )
+            )
             task_meta.append(("speaker", ctx.sender_id, "当前用户"))
 
         import asyncio
+
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
         lines = [f"关于「{a_name}」和「{b_name}」的关系检索结果："]
@@ -208,13 +250,17 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
     async def _memory(args: dict, ctx: ToolContext) -> ToolResult:
         action = (args.get("action") or "").strip()
         match action:
-            case "search":   return await _search_memory(args, ctx)
-            case "relation": return await _search_relation(args, ctx)
+            case "search":
+                return await _search_memory(args, ctx)
+            case "relation":
+                return await _search_relation(args, ctx)
             case _:
-                return ToolResult(content=json.dumps(
-                    {"error": f"未知 action: {action}，可用: search, relation"},
-                    ensure_ascii=False,
-                ))
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": f"未知 action: {action}，可用: search, relation"},
+                        ensure_ascii=False,
+                    )
+                )
 
     def _resolve_person(raw: str, ctx: ToolContext) -> Tuple[Optional[str], str]:
         nm = deps.nickname_manager
@@ -297,7 +343,8 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
         "type": "object",
         "properties": {
             "action": {
-                "type": "string", "enum": ["search", "relation"],
+                "type": "string",
+                "enum": ["search", "relation"],
                 "description": "操作类型：search 搜索记忆 | relation 查询两人关系",
             },
             **_SEARCH_FIELDS,
@@ -313,7 +360,7 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
                 "type": "string",
                 "description": (
                     "需要记住的关于用户的结构化信息，JSON 对象格式。"
-                    "例如 {\"name\": \"小明\", \"likes\": \"打篮球\", \"job\": \"程序员\"}。"
+                    '例如 {"name": "小明", "likes": "打篮球", "job": "程序员"}。'
                     "这些信息会写入长期记忆，下次查询时将作为该用户画像返回。"
                     "如果不需要记录画像则不传。"
                 ),

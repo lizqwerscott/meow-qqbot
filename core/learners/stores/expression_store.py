@@ -1,7 +1,7 @@
 """表情映射存储 — ExpressionMapping 数据模型 + ExpressionStore 持久化。"""
 
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
 
 from core.learners.stores.base_store import JsonStore
@@ -103,7 +103,11 @@ class ExpressionStore:
         await self._store.save(key, mapping.to_dict())
 
     async def update_status(self, expression_hash: str, status: str) -> bool:
-        return await self._store.update(expression_hash, review_status=status, updated_at=time.time())
+        return await self._store.update(
+            expression_hash, review_status=status, updated_at=time.time()
+        )
 
     async def update_weight(self, expression_hash: str, weight: float) -> bool:
-        return await self._store.update(expression_hash, confidence_weight=weight, updated_at=time.time())
+        return await self._store.update(
+            expression_hash, confidence_weight=weight, updated_at=time.time()
+        )

@@ -16,6 +16,7 @@ class SkillBlockBuilder:
         if not self._skill_managers or not self._skill_managers.has_skills:
             return None
         entries = self._skill_managers.get_skill_entries_block(
-            max_skills=max_skills, max_desc_chars=max_desc_chars,
+            max_skills=max_skills,
+            max_desc_chars=max_desc_chars,
         )
         return entries if entries else None

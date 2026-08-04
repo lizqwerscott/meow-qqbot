@@ -38,7 +38,9 @@ async def tasks_list(request: Request):
             "request": request,
             "tasks": tasks,
             "cron_jobs": cron_jobs,
-            "active_tasks": [t for t in tasks if t.status.value in ("pending", "running")],
+            "active_tasks": [
+                t for t in tasks if t.status.value in ("pending", "running")
+            ],
         },
     )
 
@@ -50,7 +52,9 @@ async def task_detail(request: Request, task_id: str):
     task = task_manager.get_task(task_id) if task_manager else None
     if not task:
         return templates.TemplateResponse(request, "tasks/detail.html", {"task": None})
-    return templates.TemplateResponse(request, "tasks/detail.html", {"request": request, "task": task})
+    return templates.TemplateResponse(
+        request, "tasks/detail.html", {"request": request, "task": task}
+    )
 
 
 # ── Cron Job 操作 ──

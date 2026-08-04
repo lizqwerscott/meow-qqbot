@@ -27,7 +27,9 @@ _log = logging.getLogger(__name__)
 import re as _re
 
 # 标点 → 空格
-_CJK_PUNCT_RE = _re.compile(r"[\u3000-\u303f\uff00-\uffef\u2000-\u206f\u2100-\u214f\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65,.:;!?\"'()\[\]{}…—·]")
+_CJK_PUNCT_RE = _re.compile(
+    r"[\u3000-\u303f\uff00-\uffef\u2000-\u206f\u2100-\u214f\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65,.:;!?\"'()\[\]{}…—·]"
+)
 
 
 def _extract_keywords(text: str, max_words: int = 5) -> List[str]:
@@ -35,13 +37,70 @@ def _extract_keywords(text: str, max_words: int = 5) -> List[str]:
     text = _CJK_PUNCT_RE.sub(" ", text)
     tokens = [t.strip() for t in re.split(r"\s+", text) if t.strip()]
     stopwords = {
-        "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一",
-        "你", "他", "她", "它", "们", "这", "那", "什么", "怎么", "这个", "那个",
-        "可以", "知道", "觉得", "应该", "可能", "已经", "没有", "不是", "就是",
-        "因为", "所以", "但是", "而且", "虽然", "然后", "还是", "或者", "如果",
-        "现在", "时候", "今天", "明天", "昨天", "刚刚", "正在",
-        "哈", "啊", "吧", "吗", "呢", "哦", "嗯", "啦", "呀", "嘛", "嘿",
-        "一个", "我们", "你们", "他们", "自己",
+        "的",
+        "了",
+        "在",
+        "是",
+        "我",
+        "有",
+        "和",
+        "就",
+        "不",
+        "人",
+        "都",
+        "一",
+        "你",
+        "他",
+        "她",
+        "它",
+        "们",
+        "这",
+        "那",
+        "什么",
+        "怎么",
+        "这个",
+        "那个",
+        "可以",
+        "知道",
+        "觉得",
+        "应该",
+        "可能",
+        "已经",
+        "没有",
+        "不是",
+        "就是",
+        "因为",
+        "所以",
+        "但是",
+        "而且",
+        "虽然",
+        "然后",
+        "还是",
+        "或者",
+        "如果",
+        "现在",
+        "时候",
+        "今天",
+        "明天",
+        "昨天",
+        "刚刚",
+        "正在",
+        "哈",
+        "啊",
+        "吧",
+        "吗",
+        "呢",
+        "哦",
+        "嗯",
+        "啦",
+        "呀",
+        "嘛",
+        "嘿",
+        "一个",
+        "我们",
+        "你们",
+        "他们",
+        "自己",
     }
     keywords = [t for t in tokens if t.lower() not in stopwords and len(t) >= 2]
     return keywords[:max_words]
@@ -163,7 +222,7 @@ class ExpressionLearner:
             sample_key = f"{kw} @ {cid}"
             if sample_key not in seen:
                 seen.add(sample_key)
-                sample_texts.append(f"- \"{kw}\" (in {cid})")
+                sample_texts.append(f'- "{kw}" (in {cid})')
 
         samples_str = "\n".join(sample_texts[:10])
 
@@ -182,7 +241,10 @@ class ExpressionLearner:
         all_keywords = list(set(suggested + [kw for kw, _, _ in samples[:5]]))
 
         status = "approved"
-        if self._review_required and result.get("confidence", 1.0) < self._auto_approve_threshold:
+        if (
+            self._review_required
+            and result.get("confidence", 1.0) < self._auto_approve_threshold
+        ):
             status = "pending"
 
         mapping = ExpressionMapping(
@@ -294,4 +356,4 @@ class ExpressionLearner:
         log = self._emoji_log.get(emoji_hash)
         if not log:
             return []
-        return list(log)[-self._observation_window:]
+        return list(log)[-self._observation_window :]

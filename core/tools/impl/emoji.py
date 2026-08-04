@@ -3,7 +3,7 @@ import logging
 
 from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
 
-from core.tools._types import ToolEntry, ToolResult, ToolContext
+from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
 
 _log = logging.getLogger(__name__)
@@ -14,30 +14,40 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
     async def _search_emoji(args: dict, ctx: ToolContext) -> ToolResult:
         emoji_manager = deps.emoji_manager
         if emoji_manager is None:
-            return ToolResult(content=json.dumps({"error": "表情管理器未就绪"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "表情管理器未就绪"}, ensure_ascii=False)
+            )
 
         query = args.get("query", "").strip()
         if not query:
-            return ToolResult(content=json.dumps({"error": "搜索关键词为空"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "搜索关键词为空"}, ensure_ascii=False)
+            )
 
         results = emoji_manager.find_emojis(query, max_results=5)
         if not results:
-            return ToolResult(content=json.dumps(
-                {"error": "未找到匹配的表情", "query": query},
-                ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "未找到匹配的表情", "query": query},
+                    ensure_ascii=False,
+                )
+            )
 
         result_data = []
         for r in results:
-            desc = r.get("user_description") or r.get("auto_description", "") or "(无描述)"
+            desc = (
+                r.get("user_description") or r.get("auto_description", "") or "(无描述)"
+            )
             summary = r.get("auto_summary", "") or ""
             tags = r.get("user_tags") or r.get("auto_tags", []) or []
-            result_data.append({
-                "hash": r["hash"][:12],
-                "summary": summary,
-                "description": desc,
-                "tags": tags,
-            })
+            result_data.append(
+                {
+                    "hash": r["hash"][:12],
+                    "summary": summary,
+                    "description": desc,
+                    "tags": tags,
+                }
+            )
 
         return ToolResult(content=json.dumps(result_data, ensure_ascii=False))
 
@@ -47,17 +57,21 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
         bot_engine = deps.bot_engine.value
 
         if emoji_manager is None or media_uploader is None:
-            return ToolResult(content=json.dumps(
-                {"success": False, "reason": "表情管理器或上传器未就绪"},
-                ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"success": False, "reason": "表情管理器或上传器未就绪"},
+                    ensure_ascii=False,
+                )
+            )
 
         emoji_hash = (args.get("emoji_hash") or "").strip()
         if not emoji_hash:
-            return ToolResult(content=json.dumps(
-                {"success": False, "reason": "未提供表情 hash"},
-                ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"success": False, "reason": "未提供表情 hash"},
+                    ensure_ascii=False,
+                )
+            )
 
         effective_chat_id = ctx.delivery_channel or ctx.chat_id
         is_background = bool(ctx.delivery_channel)
@@ -76,24 +90,37 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
         if success:
             _log.info(f"表情已发送: {description}")
             return ToolResult(
-                content=json.dumps({
-                    "success": True,
-                    "description": description,
-                    "message": f"表情「{description}」已发送到聊天中",
-                }, ensure_ascii=False),
+                content=json.dumps(
+                    {
+                        "success": True,
+                        "description": description,
+                        "message": f"表情「{description}」已发送到聊天中",
+                    },
+                    ensure_ascii=False,
+                ),
                 sent_emoji=True,
             )
         else:
             _log.warning(f"表情发送失败 [{emoji_hash[:12]}..]: {error}")
-            return ToolResult(content=json.dumps({
-                "success": False,
-                "reason": error or "发送失败",
-                "suggestion": "可以搜索其他表情试试，或直接用文字表达",
-            }, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps(
+                    {
+                        "success": False,
+                        "reason": error or "发送失败",
+                        "suggestion": "可以搜索其他表情试试，或直接用文字表达",
+                    },
+                    ensure_ascii=False,
+                )
+            )
 
     async def _send_emoji_by_hash(
-        emoji_manager, media_uploader, bot_engine,
-        chat_id: str, emoji_hash: str, is_group: bool, reply_to: str | None = None,
+        emoji_manager,
+        media_uploader,
+        bot_engine,
+        chat_id: str,
+        emoji_hash: str,
+        is_group: bool,
+        reply_to: str | None = None,
     ) -> tuple[bool, str, str, str]:
         record = emoji_manager.find_by_hash(emoji_hash)
         if not record:
@@ -106,7 +133,11 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
         if not local_path.exists():
             return False, "", file_name, f"本地文件缺失: {local_path}"
 
-        desc = record.get("user_description") or record.get("auto_description", "") or "表情"
+        desc = (
+            record.get("user_description")
+            or record.get("auto_description", "")
+            or "表情"
+        )
         chat_type = "group" if is_group else "c2c"
 
         try:
@@ -120,12 +151,16 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
 
             if reply_to:
                 await bot_engine.send_reply(
-                    chat_id=chat_id, is_group=is_group,
-                    message_id=reply_to, media_file_info=file_info,
+                    chat_id=chat_id,
+                    is_group=is_group,
+                    message_id=reply_to,
+                    media_file_info=file_info,
                 )
             else:
                 await bot_engine.send_proactive(
-                    chat_id=chat_id, is_group=is_group, media_file_info=file_info,
+                    chat_id=chat_id,
+                    is_group=is_group,
+                    media_file_info=file_info,
                 )
 
             record = emoji_manager.get_info(full_hash)

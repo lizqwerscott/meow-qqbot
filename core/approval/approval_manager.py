@@ -153,9 +153,7 @@ class ApprovalManager:
 
     # ── 2.4 审批管理：删除条目 / 使用计数 / 统计 ──
 
-    def remove_allowlist_entry(
-        self, pattern: str, source: str | None = None
-    ) -> bool:
+    def remove_allowlist_entry(self, pattern: str, source: str | None = None) -> bool:
         """删除 allowlist 条目（精确 pattern 匹配，可选 source 限定），
         v1 镜像（exec_commands）同步清理。返回是否删除成功。"""
         entries = self._whitelist.get("allowlist", []) or []
@@ -316,8 +314,7 @@ class ApprovalManager:
                 # v2 allowlist 条目（bare-name 或绝对路径 pattern）
                 self._whitelist.setdefault("allowlist", [])
                 if not any(
-                    e.get("pattern") == pattern
-                    for e in self._whitelist["allowlist"]
+                    e.get("pattern") == pattern for e in self._whitelist["allowlist"]
                 ):
                     self._whitelist["allowlist"].append(
                         {
@@ -407,9 +404,7 @@ class ApprovalManager:
         sent = False
         for chat_type, target_id in targets:
             try:
-                if await sender.send(
-                    chat_type=chat_type, chat_id=target_id, req=req
-                ):
+                if await sender.send(chat_type=chat_type, chat_id=target_id, req=req):
                     sent = True
             except Exception as e:
                 _log.warning(
@@ -485,9 +480,7 @@ class ApprovalManager:
                     "tool_name": info.get("tool_name", ""),
                     "details": info.get("details", ""),
                     "created_at": info.get("created_at", 0),
-                    "remaining_secs": (
-                        max(0, int(expires - now)) if expires else None
-                    ),
+                    "remaining_secs": (max(0, int(expires - now)) if expires else None),
                 }
             )
         out.sort(key=lambda p: p["created_at"], reverse=True)

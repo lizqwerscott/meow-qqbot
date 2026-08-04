@@ -6,7 +6,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from core.managers.command_manager import Command, PermissionLevel
 from core.plugins.base import _PLUGIN_REGISTRY, BasePlugin, PluginMeta
@@ -189,7 +189,8 @@ class PluginManager:
         from core.plugins.base import _PLUGIN_REGISTRY
 
         _HANDLER_REGISTRY[:] = [
-            entry for entry in _HANDLER_REGISTRY
+            entry
+            for entry in _HANDLER_REGISTRY
             if not self._is_entry_from_plugin(entry, name)
         ]
 
@@ -210,7 +211,9 @@ class PluginManager:
         if module is None:
             return False
         expected_prefix = f"plugins.{plugin_name}"
-        return module.__name__ == expected_prefix or module.__name__.startswith(f"{expected_prefix}.")
+        return module.__name__ == expected_prefix or module.__name__.startswith(
+            f"{expected_prefix}."
+        )
 
     def get_loaded_names(self) -> List[str]:
         return list(self._loaded.keys())

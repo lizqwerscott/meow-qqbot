@@ -25,9 +25,7 @@ def _tasks_summary(tasks: list) -> str:
             "timeout": "⏰",
             "lost": "💤",
         }.get(t.status.value, "❓")
-        time_str = time.strftime(
-            "%m-%d %H:%M", time.localtime(t.created_at)
-        )
+        time_str = time.strftime("%m-%d %H:%M", time.localtime(t.created_at))
         lines.append(
             f"{status_icon} `{t.id[:10]}..` {time_str} "
             f"[{t.type}] {t.prompt[:40]}..."
@@ -39,13 +37,22 @@ def _tasks_summary(tasks: list) -> str:
     return "\n".join(lines)
 
 
-@command(name="tasks", aliases=["task", "tasklist"], permission="admin", description="管理后台任务")
+@command(
+    name="tasks",
+    aliases=["task", "tasklist"],
+    permission="admin",
+    description="管理后台任务",
+)
 class TasksCommand:
-    def __init__(self, task_manager=None, background_task_runner=None, agent_engine=None):
+    def __init__(
+        self, task_manager=None, background_task_runner=None, agent_engine=None
+    ):
         self._task_manager = task_manager
         self._runner = background_task_runner
 
-    async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
+    async def execute(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
         if self._task_manager is None:
             return make_reply(input_message, "任务系统未就绪。")
 
@@ -63,7 +70,9 @@ class TasksCommand:
         elif subcmd == "show":
             task_id = parts[1] if len(parts) > 1 else ""
             if not task_id:
-                return make_reply(input_message, "请指定任务 ID。用法: /tasks show <id>")
+                return make_reply(
+                    input_message, "请指定任务 ID。用法: /tasks show <id>"
+                )
             # 支持短 ID 搜索
             tasks = self._task_manager.list_tasks(limit=50)
             matched = [t for t in tasks if t.id.startswith(task_id)]
@@ -78,9 +87,13 @@ class TasksCommand:
                 f"- 指令: {t.prompt}",
             ]
             if t.started_at:
-                lines.append(f"- 开始: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t.started_at))}")
+                lines.append(
+                    f"- 开始: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t.started_at))}"
+                )
             if t.finished_at:
-                lines.append(f"- 结束: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t.finished_at))}")
+                lines.append(
+                    f"- 结束: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t.finished_at))}"
+                )
             if t.job_id:
                 lines.append(f"- 关联定时任务: `{t.job_id[:12]}..`")
             if t.result:
@@ -92,11 +105,17 @@ class TasksCommand:
         elif subcmd == "cancel":
             task_id = parts[1] if len(parts) > 1 else ""
             if not task_id:
-                return make_reply(input_message, "请指定任务 ID。用法: /tasks cancel <id>")
+                return make_reply(
+                    input_message, "请指定任务 ID。用法: /tasks cancel <id>"
+                )
             success = await self._task_manager.cancel_task(task_id)
             if success:
                 return make_reply(input_message, f"✅ 任务 {task_id[:12]}.. 已取消。")
-            return make_reply(input_message, f"❌ 无法取消任务 {task_id[:12]}..，可能已完成或不存在。")
+            return make_reply(
+                input_message, f"❌ 无法取消任务 {task_id[:12]}..，可能已完成或不存在。"
+            )
 
         else:
-            return make_reply(input_message, "未知子命令。可用: list, show <id>, cancel <id>")
+            return make_reply(
+                input_message, "未知子命令。可用: list, show <id>, cancel <id>"
+            )

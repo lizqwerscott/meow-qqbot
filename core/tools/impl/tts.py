@@ -3,7 +3,7 @@ import logging
 
 from qqbot_agent_sdk.constants import MEDIA_TYPE_VOICE
 
-from core.tools._types import ToolEntry, ToolResult, ToolContext
+from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
 
 _log = logging.getLogger(__name__)
@@ -55,26 +55,35 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
         bot_engine = deps.bot_engine.value
 
         if not tts_service or not media_uploader or not bot_engine:
-            return ToolResult(content=json.dumps(
-                {"error": "TTS 语音服务或媒体上传器未就绪"},
-                ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "TTS 语音服务或媒体上传器未就绪"},
+                    ensure_ascii=False,
+                )
+            )
 
         text = (args.get("text") or "").strip()
         if not text:
-            return ToolResult(content=json.dumps(
-                {"error": "请提供要合成的文本"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "请提供要合成的文本"},
+                    ensure_ascii=False,
+                )
+            )
 
         instructions = (args.get("instructions") or "").strip()
         voice_mode = (args.get("voice_mode") or "preset").strip()
 
         MAX_TEXT_LENGTH = 500
         if len(text) > MAX_TEXT_LENGTH:
-            return ToolResult(content=json.dumps(
-                {"error": f"文本过长（{len(text)} 字），超过 {MAX_TEXT_LENGTH} 字限制，请精简后重试"},
-                ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {
+                        "error": f"文本过长（{len(text)} 字），超过 {MAX_TEXT_LENGTH} 字限制，请精简后重试"
+                    },
+                    ensure_ascii=False,
+                )
+            )
 
         try:
             audio_bytes = await tts_service.synthesize(
@@ -83,14 +92,20 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
                 voice_mode=voice_mode,
             )
         except Exception as e:
-            return ToolResult(content=json.dumps(
-                {"error": f"语音合成失败: {e}"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"语音合成失败: {e}"},
+                    ensure_ascii=False,
+                )
+            )
 
         if not audio_bytes:
-            return ToolResult(content=json.dumps(
-                {"error": "语音合成无输出"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "语音合成无输出"},
+                    ensure_ascii=False,
+                )
+            )
 
         temp_path = tts_service.save_temp_audio(audio_bytes)
 
@@ -107,30 +122,44 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
                 file_name="tts.wav",
             )
         except Exception as e:
-            return ToolResult(content=json.dumps(
-                {"error": f"语音上传失败: {e}"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"语音上传失败: {e}"},
+                    ensure_ascii=False,
+                )
+            )
 
         try:
             if effective_reply_to:
                 await bot_engine.send_reply(
-                    chat_id=effective_chat_id, is_group=ctx.is_group,
-                    message_id=effective_reply_to, media_file_info=file_info,
+                    chat_id=effective_chat_id,
+                    is_group=ctx.is_group,
+                    message_id=effective_reply_to,
+                    media_file_info=file_info,
                 )
             else:
                 await bot_engine.send_proactive(
-                    chat_id=effective_chat_id, is_group=ctx.is_group,
+                    chat_id=effective_chat_id,
+                    is_group=ctx.is_group,
                     media_file_info=file_info,
                 )
         except Exception as e:
-            return ToolResult(content=json.dumps(
-                {"error": f"发送语音失败: {e}"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"发送语音失败: {e}"},
+                    ensure_ascii=False,
+                )
+            )
 
-        return ToolResult(content=json.dumps({
-            "success": True,
-            "message": "语音已发送到聊天中",
-        }, ensure_ascii=False))
+        return ToolResult(
+            content=json.dumps(
+                {
+                    "success": True,
+                    "message": "语音已发送到聊天中",
+                },
+                ensure_ascii=False,
+            )
+        )
 
     return [
         ToolEntry(

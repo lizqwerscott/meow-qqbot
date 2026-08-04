@@ -31,6 +31,7 @@ INTENT_SCHEDULED = _coalescer.INTENT_SCHEDULED
 @dataclass
 class WakeResult:
     """保留给现有调用者。新代码应使用 WakeRunResult。"""
+
     should_notify: bool = False
     notification_text: str = ""
     captured_replies: list[str] = field(default_factory=list)
@@ -79,7 +80,8 @@ class WakeDispatcher:
         # manual/manual → 同步返回
         if source == SOURCE_MANUAL and intent == INTENT_MANUAL:
             wr = await _coalescer.execute_immediate(
-                source=source, intent=intent,
+                source=source,
+                intent=intent,
                 session_key=session_key,
                 extra_prompt=extra_prompt,
             )
@@ -87,7 +89,8 @@ class WakeDispatcher:
 
         # 其他来源 → fire-and-forget
         _coalescer.request_wake(
-            source=source, intent=intent,
+            source=source,
+            intent=intent,
             session_key=session_key,
             extra_prompt=extra_prompt,
             coalesce_ms=coalesce_ms,
@@ -115,8 +118,8 @@ class WakeDispatcher:
             return None
         r = wr.result
         return WakeResult(
-            should_notify=getattr(r, 'should_notify', False),
-            notification_text=getattr(r, 'notification_text', ''),
-            captured_replies=getattr(r, 'captured_replies', []),
-            error=getattr(r, 'error', None),
+            should_notify=getattr(r, "should_notify", False),
+            notification_text=getattr(r, "notification_text", ""),
+            captured_replies=getattr(r, "captured_replies", []),
+            error=getattr(r, "error", None),
         )

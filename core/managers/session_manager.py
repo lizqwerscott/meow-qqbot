@@ -41,7 +41,8 @@ class SessionTaskManager:
             if queue and not queue.empty():
                 _log.warning(
                     "mark_consumer_done 时队列仍非空 [%s..]: %d 条消息残留",
-                    chat_id[:12], queue.qsize(),
+                    chat_id[:12],
+                    queue.qsize(),
                 )
             self._running.discard(chat_id)
 

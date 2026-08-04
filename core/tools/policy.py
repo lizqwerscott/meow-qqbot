@@ -93,7 +93,8 @@ def _filter_task_allow(
     if unknown:
         _log.warning(
             "task tools_allow 含未知工具名（已忽略）: %s；可用: %s",
-            sorted(unknown), sorted(CRON_ALLOWED),
+            sorted(unknown),
+            sorted(CRON_ALLOWED),
         )
     return names & allowed
 

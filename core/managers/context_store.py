@@ -122,8 +122,7 @@ class JSONLContextStore(ContextStore):
                 new_msgs = messages[flushed:]
                 if new_msgs:
                     lines = [
-                        json.dumps(msg, ensure_ascii=False) + "\n"
-                        for msg in new_msgs
+                        json.dumps(msg, ensure_ascii=False) + "\n" for msg in new_msgs
                     ]
                     with open(path, "a", encoding="utf-8") as f:
                         f.writelines(lines)
@@ -132,9 +131,7 @@ class JSONLContextStore(ContextStore):
                 self._flushed[chat_id] = len(messages)
 
     def _write_full(self, path: Path, messages: List[dict]) -> None:
-        lines = [
-            json.dumps(msg, ensure_ascii=False) + "\n" for msg in messages
-        ]
+        lines = [json.dumps(msg, ensure_ascii=False) + "\n" for msg in messages]
         with open(path, "w", encoding="utf-8") as f:
             f.writelines(lines)
 
@@ -147,9 +144,7 @@ class JSONLContextStore(ContextStore):
                 try:
                     data = self._load_jsonl(path)
                 except Exception as e:
-                    _log.warning(
-                        "加载 JSONL 缓存失败 [%s..]: %s", chat_id[:12], e
-                    )
+                    _log.warning("加载 JSONL 缓存失败 [%s..]: %s", chat_id[:12], e)
                     return None
             elif old_path and old_path.exists():
                 try:
@@ -161,7 +156,8 @@ class JSONLContextStore(ContextStore):
                         old_path.unlink(missing_ok=True)
                         _log.info(
                             "已迁移旧 JSON 缓存 → JSONL [%s..] (%d 条)",
-                            chat_id[:12], len(data),
+                            chat_id[:12],
+                            len(data),
                         )
                     return data or None
                 except Exception as e:
@@ -192,7 +188,8 @@ class JSONLContextStore(ContextStore):
                 except json.JSONDecodeError:
                     _log.warning(
                         "跳过损坏的 JSONL 行 [%s..]: %s",
-                        path.stem[:12], line[:80],
+                        path.stem[:12],
+                        line[:80],
                     )
         return data
 
@@ -213,7 +210,9 @@ class JSONLContextStore(ContextStore):
                 with self._lock:
                     self._flushed.pop(chat_id, None)
                 _log.info(
-                    "已归档 [%s..] → %s", chat_id[:12], archive_path.name,
+                    "已归档 [%s..] → %s",
+                    chat_id[:12],
+                    archive_path.name,
                 )
                 return str(archive_path)
             return None
@@ -246,7 +245,9 @@ class JSONLContextStore(ContextStore):
                     parsed = {k: bool(v) for k, v in data.items()}
                     if parsed:
                         self._chat_types_path.parent.mkdir(parents=True, exist_ok=True)
-                        self._chat_types_path.write_text(json.dumps(parsed, ensure_ascii=False))
+                        self._chat_types_path.write_text(
+                            json.dumps(parsed, ensure_ascii=False)
+                        )
                         path.unlink(missing_ok=True)
                         self._chat_types = parsed
                         _log.info("已迁移 %s → meta/ (%d 条)", label, len(parsed))

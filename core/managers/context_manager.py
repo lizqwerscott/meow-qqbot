@@ -116,7 +116,9 @@ class ChatContextManager:
     ) -> None:
         context = self.get_context(chat_id)
         context.add_assistant_message(
-            content, message_id, tool_calls=tool_calls,
+            content,
+            message_id,
+            tool_calls=tool_calls,
             reasoning_content=reasoning_content,
         )
 
@@ -141,7 +143,9 @@ class ChatContextManager:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             context = await self.get_context_async(chat_id)
-            context.add_user_message(content, message_id, sender_id=sender_id, name=name)
+            context.add_user_message(
+                content, message_id, sender_id=sender_id, name=name
+            )
 
     async def add_assistant_message_async(
         self,
@@ -155,7 +159,9 @@ class ChatContextManager:
         async with lock:
             context = await self.get_context_async(chat_id)
             context.add_assistant_message(
-                content, message_id, tool_calls=tool_calls,
+                content,
+                message_id,
+                tool_calls=tool_calls,
                 reasoning_content=reasoning_content,
             )
 

@@ -35,8 +35,14 @@ class ModelScopeRateLimit:
     def from_headers(cls, headers) -> "ModelScopeRateLimit":
         return cls(
             user_limit=int(headers.get("modelscope-ratelimit-requests-limit", 0)),
-            user_remaining=int(headers.get("modelscope-ratelimit-requests-remaining", -1)),
-            model_limit=int(headers.get("modelscope-ratelimit-model-requests-limit", 0)),
-            model_remaining=int(headers.get("modelscope-ratelimit-model-requests-remaining", -1)),
+            user_remaining=int(
+                headers.get("modelscope-ratelimit-requests-remaining", -1)
+            ),
+            model_limit=int(
+                headers.get("modelscope-ratelimit-model-requests-limit", 0)
+            ),
+            model_remaining=int(
+                headers.get("modelscope-ratelimit-model-requests-remaining", -1)
+            ),
             last_updated=time.time(),
         )

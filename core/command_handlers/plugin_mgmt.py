@@ -35,6 +35,7 @@ def _parse_plugin_url(url: str) -> Optional[str]:
 class PluginManageCommand:
     async def execute(self, input_message: InputMessage, args: str) -> List[dict]:
         from core.plugins.manager import _current as _pm
+
         self.pm = _pm
         if not self.pm:
             return make_reply(input_message, "插件管理器未就绪")
@@ -75,11 +76,16 @@ class PluginManageCommand:
 
         plugin_dir = os.path.join(self.pm._plugin_dir, name)
         if os.path.exists(plugin_dir):
-            return make_reply(msg, f"插件 {name} 已存在，使用 /plugin reload {name} 重载")
+            return make_reply(
+                msg, f"插件 {name} 已存在，使用 /plugin reload {name} 重载"
+            )
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                "git", "clone", url, plugin_dir,
+                "git",
+                "clone",
+                url,
+                plugin_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -123,7 +129,10 @@ class PluginManageCommand:
         if git_dir.is_dir():
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    "git", "-C", str(plugin_path), "pull",
+                    "git",
+                    "-C",
+                    str(plugin_path),
+                    "pull",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -141,7 +150,9 @@ class PluginManageCommand:
             return make_reply(msg, f"**重载插件 `{name}` 失败**，请检查日志")
         cmds = self.pm._plugin_commands.get(name, [])
         cmd_lines = "\n".join(f"- `/{c}`" for c in cmds) if cmds else "无命令"
-        return make_reply(msg, f"**插件 `{name}` v{meta.version} 已重载**\n\n{cmd_lines}")
+        return make_reply(
+            msg, f"**插件 `{name}` v{meta.version} 已重载**\n\n{cmd_lines}"
+        )
 
     async def _unload(self, msg: InputMessage, name: str) -> List[dict]:
         name = name.strip()

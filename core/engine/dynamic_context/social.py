@@ -28,9 +28,7 @@ class SocialBlockBuilder:
 
         if has_users and self._nm:
             try:
-                all_users = sorted(
-                    self._nm.iter_users(), key=lambda x: "，".join(x[1])
-                )
+                all_users = sorted(self._nm.iter_users(), key=lambda x: "，".join(x[1]))
                 total = len(all_users)
                 user_lines = ["【群友列表】"]
                 limit = max_users if max_users > 0 else total
@@ -42,9 +40,7 @@ class SocialBlockBuilder:
                 if len(user_lines) > 1:
                     parts.append("\n".join(user_lines))
             except Exception as e:
-                _log.warning(
-                    "群友列表构建失败 [%s..]: %s", chat_id[:12], e
-                )
+                _log.warning("群友列表构建失败 [%s..]: %s", chat_id[:12], e)
 
         if not parts:
             return None

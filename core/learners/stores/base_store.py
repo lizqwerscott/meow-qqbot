@@ -97,6 +97,7 @@ class JsonStore:
             try:
                 if self._path.exists():
                     import shutil
+
                     shutil.copy2(self._path, backup)
                     _log.info(f"已备份到: {backup}")
             except Exception as e:

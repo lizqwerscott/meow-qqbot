@@ -14,7 +14,6 @@ from starlette.status import HTTP_303_SEE_OTHER, HTTP_429_TOO_MANY_REQUESTS
 
 from core.webui.auth import AuthMiddleware, verify_token
 
-
 # 登录速率限制（内存中，每 IP 5 次/分钟）
 _LOGIN_ATTEMPTS: Dict[str, list] = {}
 _LOGIN_WINDOW = 60
@@ -40,7 +39,9 @@ def _check_login_rate(client_ip: str) -> None:
                 del _LOGIN_ATTEMPTS[ip]
             if len(_LOGIN_ATTEMPTS) <= _LOGIN_MAX_IPS:
                 break
-from core.webui.routers import status, emojis, nicknames, sessions, learners, tasks
+
+
+from core.webui.routers import emojis, learners, nicknames, sessions, status, tasks
 
 _log = logging.getLogger(__name__)
 
@@ -76,7 +77,9 @@ def create_app(managers: Dict[str, Any], webui_config: Dict[str, Any]) -> FastAP
     # Mount emoji images directory first so it takes precedence over /static
     emoji_dir = Path("data/emojis")
     if emoji_dir.exists():
-        app.mount("/static/emojis", StaticFiles(directory=str(emoji_dir)), name="emoji-files")
+        app.mount(
+            "/static/emojis", StaticFiles(directory=str(emoji_dir)), name="emoji-files"
+        )
 
     # Static files
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -88,18 +91,34 @@ def create_app(managers: Dict[str, Any], webui_config: Dict[str, Any]) -> FastAP
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request, error: str = ""):
-        return templates.TemplateResponse(request, "login.html", {"request": request, "error": error})
+        return templates.TemplateResponse(
+            request, "login.html", {"request": request, "error": error}
+        )
 
     @app.post("/login")
     async def login_post(request: Request, token: str = Form(...)):
-        client_ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown").split(",")[0].strip()
+        client_ip = (
+            request.headers.get(
+                "x-forwarded-for", request.client.host if request.client else "unknown"
+            )
+            .split(",")[0]
+            .strip()
+        )
         _check_login_rate(client_ip)
         expected = webui_config.get("token", "")
         if token == expected:
             resp = RedirectResponse(url="/status", status_code=HTTP_303_SEE_OTHER)
-            resp.set_cookie(key="webui_token", value=token, httponly=True, max_age=86400 * 7, samesite="lax")
+            resp.set_cookie(
+                key="webui_token",
+                value=token,
+                httponly=True,
+                max_age=86400 * 7,
+                samesite="lax",
+            )
             return resp
-        return templates.TemplateResponse(request, "login.html", {"request": request, "error": "Token 无效"})
+        return templates.TemplateResponse(
+            request, "login.html", {"request": request, "error": "Token 无效"}
+        )
 
     @app.get("/", include_in_schema=False)
     async def root():

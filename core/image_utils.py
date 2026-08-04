@@ -13,7 +13,7 @@ from PIL import ImageSequence
 # 防止解压缩炸弹：拒绝超过 1 亿像素的图像
 PILImage.MAX_IMAGE_PIXELS = 100_000_000
 
-logger= logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 MODEL_MIN_IMAGE_SIDE = 64
 MODEL_MAX_UPSCALED_IMAGE_SIDE = 2048
@@ -103,7 +103,13 @@ class ImageUtils:
                     selected_frames.append(frame_rgb.copy())
                     last_selected_frame_np = frame_np
                 else:
-                    mse = np.mean((frame_np.astype(np.int16) - last_selected_frame_np.astype(np.int16)) ** 2)
+                    mse = np.mean(
+                        (
+                            frame_np.astype(np.int16)
+                            - last_selected_frame_np.astype(np.int16)
+                        )
+                        ** 2
+                    )
                     if mse > similarity_threshold:
                         selected_frames.append(frame_rgb.copy())
                         last_selected_frame_np = frame_np

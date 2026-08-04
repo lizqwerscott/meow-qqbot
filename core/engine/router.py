@@ -62,7 +62,9 @@ class Router:
                         is_group=msg["is_group"],
                     )
                 except Exception as cb_err:
-                    _log.warning("命令回复发送失败 [%s..]: %s", msg["chat_id"][:12], cb_err)
+                    _log.warning(
+                        "命令回复发送失败 [%s..]: %s", msg["chat_id"][:12], cb_err
+                    )
             _log.debug(f"命令已处理: {input_message.content[:30]}")
             return
 

@@ -7,9 +7,14 @@ from core.message import InputMessage
 _log = logging.getLogger(__name__)
 
 _DIRTY_PATTERNS = (
-    "<available_skills", "<skill>", "<description>",
-    "<name>", "【工具配合原则】", "【记忆系统】",
-    "--- 技能系统 ---", "工具配合原则",
+    "<available_skills",
+    "<skill>",
+    "<description>",
+    "<name>",
+    "【工具配合原则】",
+    "【记忆系统】",
+    "--- 技能系统 ---",
+    "工具配合原则",
 )
 
 _DIRTY_REGEX = re.compile(
@@ -65,17 +70,13 @@ class MemoryBlockBuilder:
                 if learning_ctx:
                     parts.append(learning_ctx)
             except Exception as e:
-                _log.warning(
-                    "学习上下文注入失败 [%s..]: %s", chat_id[:12], e
-                )
+                _log.warning("学习上下文注入失败 [%s..]: %s", chat_id[:12], e)
 
         if self._archive_manager:
             try:
                 summary_text = self._archive_manager.consume_summary(chat_id)
             except Exception as e:
-                _log.warning(
-                    "归档摘要注入失败 [%s..]: %s", chat_id[:12], e
-                )
+                _log.warning("归档摘要注入失败 [%s..]: %s", chat_id[:12], e)
                 summary_text = None
             if summary_text:
                 original_len = len(summary_text)
@@ -83,7 +84,9 @@ class MemoryBlockBuilder:
                     summary_text = summary_text[:max_archive_chars] + "\n...(截断)"
                 _log.info(
                     "注入归档摘要 [%s..] (%d 字符，截断前 %d)",
-                    chat_id[:12], len(summary_text), original_len,
+                    chat_id[:12],
+                    len(summary_text),
+                    original_len,
                 )
                 parts.append(
                     "以下内容来自过去几天的对话记录，"
@@ -136,9 +139,7 @@ class MemoryBlockBuilder:
                 for e in episodes:
                     if count >= 3:
                         break
-                    summary = (
-                        e.get("summary", "") or e.get("episode", "")
-                    ).strip()
+                    summary = (e.get("summary", "") or e.get("episode", "")).strip()
                     if not summary:
                         continue
                     if _is_dirty(summary):

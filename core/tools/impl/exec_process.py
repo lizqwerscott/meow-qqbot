@@ -25,6 +25,7 @@ from core.approval.exec_policy import (
 )
 from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
+from core.tools.env_override_policy import validate_env_override
 from core.tools.exec_analysis import (
     INTERPRETER_BINS,
     analyze_command,
@@ -32,7 +33,6 @@ from core.tools.exec_analysis import (
     resolve_interpreter_target,
 )
 from core.tools.exec_runner import build_argv, run_plan
-from core.tools.env_override_policy import validate_env_override
 from core.tools.impl.file import is_admin_private
 from core.tools.security import parse_command_safe
 from core.tools.shell_env import build_exec_env_for

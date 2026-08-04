@@ -13,7 +13,9 @@ class EmojiListCommand:
     def __init__(self, emoji_manager: EmojiManager):
         self.emoji_manager = emoji_manager
 
-    async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
+    async def execute(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
         try:
             page = 1
             if args.strip():
@@ -26,16 +28,27 @@ class EmojiListCommand:
             if result["total"] == 0:
                 return make_reply(input_message, "还没有记录任何自定义表情。")
 
-            lines = [f"已知自定义表情（共 {result['total']} 个，第 {result['page']} 页）："]
+            lines = [
+                f"已知自定义表情（共 {result['total']} 个，第 {result['page']} 页）："
+            ]
             for emoji in result["emojis"]:
                 short_hash = emoji["hash"][:12]
-                desc = (emoji.get("user_description")
-                        or emoji.get("auto_summary", "")
-                        or emoji.get("auto_description", "")
-                        or "")
+                desc = (
+                    emoji.get("user_description")
+                    or emoji.get("auto_summary", "")
+                    or emoji.get("auto_description", "")
+                    or ""
+                )
                 tags = emoji.get("user_tags") or emoji.get("auto_tags", [])
                 tag_str = f" [{', '.join(tags[:3])}]" if tags else ""
-                marker = " ★" if (emoji.get("user_description") is not None or emoji.get("user_tags")) else ""
+                marker = (
+                    " ★"
+                    if (
+                        emoji.get("user_description") is not None
+                        or emoji.get("user_tags")
+                    )
+                    else ""
+                )
                 count = emoji.get("used_count", 0)
                 lines.append(f"  {short_hash}: {desc}{tag_str}{marker} (x{count})")
 

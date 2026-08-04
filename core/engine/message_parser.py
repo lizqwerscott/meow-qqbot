@@ -85,7 +85,12 @@ class MessageParser:
                 _log.error(f"自定义表情处理失败: {e}")
                 event.content = "[自定义表情]"
 
-        elif event.raw and ("ark" in event.raw or "ark_data" in event.raw or "embed" in event.raw or event.message_type in (3, 4)):
+        elif event.raw and (
+            "ark" in event.raw
+            or "ark_data" in event.raw
+            or "embed" in event.raw
+            or event.message_type in (3, 4)
+        ):
             _log.info(f"Card raw: {event.raw}")
             card_text = parse_card(event.raw or {}, event.message_type)
             if card_text:
@@ -100,7 +105,12 @@ class MessageParser:
             ct = (event.attachments[0].content_type or "").lower()
             if ct.startswith("image/"):
                 msg_type = MessageType.IMAGE
-            elif "voice" in ct or "audio" in ct or ct.endswith(".silk") or ct.endswith(".amr"):
+            elif (
+                "voice" in ct
+                or "audio" in ct
+                or ct.endswith(".silk")
+                or ct.endswith(".amr")
+            ):
                 msg_type = MessageType.VOICE
             elif ct.startswith("video/"):
                 msg_type = MessageType.VIDEO
@@ -125,14 +135,16 @@ class MessageParser:
             if not stripped:
                 _log.debug(
                     "跳过硬解消息: event_type=%s, sender=%s",
-                    event_type, event.author_id[:12] if event.author_id else "?",
+                    event_type,
+                    event.author_id[:12] if event.author_id else "?",
                 )
                 return None
-            cleaned = re.sub(r'<faceType=\d+,[^>]+>', '', stripped).strip()
+            cleaned = re.sub(r"<faceType=\d+,[^>]+>", "", stripped).strip()
             if not cleaned:
                 _log.debug(
                     "消息仅含表情面: event_type=%s, content=%s",
-                    event_type, stripped[:80],
+                    event_type,
+                    stripped[:80],
                 )
                 return None
 
@@ -159,11 +171,15 @@ class MessageParser:
             if raw_elems:
                 replied_author = raw_elems[0].get("author", {}).get("username", "")
             for raw_elem in raw_elems:
-                reply_author_entries.append((
-                    raw_elem.get("author", {}).get("id", ""),
-                    raw_elem.get("author", {}).get("username", ""),
-                ))
-            if elem.attachments and is_custom_emoji(elem.content or "", elem.attachments):
+                reply_author_entries.append(
+                    (
+                        raw_elem.get("author", {}).get("id", ""),
+                        raw_elem.get("author", {}).get("username", ""),
+                    )
+                )
+            if elem.attachments and is_custom_emoji(
+                elem.content or "", elem.attachments
+            ):
                 try:
                     if emoji_manager:
                         summary, desc, tags, _ = await emoji_manager.get_or_build(

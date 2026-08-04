@@ -14,7 +14,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, List, Optional, Set
 
-from core.managers.chat_message import ChatMessage, group_user_messages, strip_content_prefix
+from core.managers.chat_message import (
+    ChatMessage,
+    group_user_messages,
+    strip_content_prefix,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -38,7 +42,9 @@ def _daily_reset_at(hour: int, t: Optional[float] = None) -> float:
     try:
         today_reset = dt.replace(hour=hour, minute=0, second=0, microsecond=0)
     except ValueError:
-        today_reset = dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=hour)
+        today_reset = dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(
+            hours=hour
+        )
     if today_reset.timestamp() > ts:
         today_reset -= timedelta(days=1)
     return today_reset.timestamp()
@@ -145,7 +151,9 @@ class ArchiveManager:
                 except Exception as e:
                     _log.warning(
                         "读取归档摘要失败 [%s..] %s: %s",
-                        chat_id[:12], day_file.name, e,
+                        chat_id[:12],
+                        day_file.name,
+                        e,
                     )
 
         return "\n\n---\n\n".join(parts) if parts else None
@@ -160,6 +168,7 @@ class ArchiveManager:
         async def _do():
             ctx = self._cm.get_context(chat_id)
             return await self._do_archive(ctx, chat_id, is_group, "manual")
+
         return await self._cm.with_chat_lock(chat_id, _do)
 
     def cleanup_old_archives(self) -> int:
@@ -181,9 +190,7 @@ class ArchiveManager:
                                 f.unlink()
                                 removed += 1
                         except Exception as e:
-                            _log.warning(
-                                "清理摘要文件失败 %s: %s", f.name, e
-                            )
+                            _log.warning("清理摘要文件失败 %s: %s", f.name, e)
 
         if removed:
             _log.info("归档清理完成: 移除了 %d 个文件", removed)
@@ -201,7 +208,9 @@ class ArchiveManager:
 
         # 1. 确保数据落盘（后台线程）
         await asyncio.to_thread(
-            store.flush, chat_id, [m.to_dict() for m in ctx.get_history()],
+            store.flush,
+            chat_id,
+            [m.to_dict() for m in ctx.get_history()],
         )
 
         # 2. 收集消息
@@ -212,7 +221,11 @@ class ArchiveManager:
 
         # 4. 生成摘要文本
         summary_text = self._format_summary_text(
-            all_msgs, self._summary_count, is_group, chat_id, date,
+            all_msgs,
+            self._summary_count,
+            is_group,
+            chat_id,
+            date,
         )
 
         # 5. 归档（后台线程）
@@ -229,12 +242,16 @@ class ArchiveManager:
 
         # 8. 写入新数据（后台线程）
         await asyncio.to_thread(
-            store.flush, chat_id, [m.to_dict() for m in replay_msgs],
+            store.flush,
+            chat_id,
+            [m.to_dict() for m in replay_msgs],
         )
 
         _log.info(
             "归档完成 [%s..]: reason=%s replay=%d summary=%s",
-            chat_id[:12], reason, len(replay_msgs),
+            chat_id[:12],
+            reason,
+            len(replay_msgs),
             summary_path or "无",
         )
 
@@ -253,9 +270,7 @@ class ArchiveManager:
 
     # ── 消息提取 ──
 
-    def _extract_replay_messages(
-        self, messages: List[Any], count: int
-    ) -> List[Any]:
+    def _extract_replay_messages(self, messages: List[Any], count: int) -> List[Any]:
         result: List[ChatMessage] = []
         for msg in reversed(messages):
             if msg.role == "tool":
@@ -368,17 +383,23 @@ class ArchiveManager:
             await asyncio.to_thread(file_path.write_text, text, encoding="utf-8")
             _log.info(
                 "归档摘要已写入 [%s..] %s (%d 字符)",
-                chat_id[:12], file_path.name, len(text),
+                chat_id[:12],
+                file_path.name,
+                len(text),
             )
             return str(file_path)
         except Exception as e:
             _log.warning(
-                "写入归档摘要失败 [%s..]: %s", chat_id[:12], e,
+                "写入归档摘要失败 [%s..]: %s",
+                chat_id[:12],
+                e,
             )
             return None
 
 
-def _build_summary_group(lines: List[str], group: List[ChatMessage], window_seconds: int) -> None:
+def _build_summary_group(
+    lines: List[str], group: List[ChatMessage], window_seconds: int
+) -> None:
     """将合并分组格式化为一行或多行，追加到 lines。"""
     first = group[0]
 

@@ -20,6 +20,7 @@ class PluginMeta:
 
 def plugin(name: str, *, version: str = "1.0.0", description: str = ""):
     """装饰器：标记一个类为插件"""
+
     def wrapper(cls: Type) -> Type:
         if name in _PLUGIN_REGISTRY:
             _log.warning(f"插件 {name} 已注册，将被覆盖")
@@ -28,6 +29,7 @@ def plugin(name: str, *, version: str = "1.0.0", description: str = ""):
         )
         _log.debug(f"插件注册: {name} v{version}")
         return cls
+
     return wrapper
 
 

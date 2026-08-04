@@ -54,7 +54,8 @@ class SubAgentManager:
     ) -> dict:
         async with self._lock:
             active = sum(
-                1 for r in self._records.values()
+                1
+                for r in self._records.values()
                 if r.parent_chat_id == parent_chat_id and r.status == "running"
             )
             if active >= self._max_children:
@@ -162,10 +163,13 @@ class SubAgentManager:
     def _notify_parent(self, record: SubAgentRecord):
         if not self._system_events or not record.parent_chat_id:
             return
-        status_zh = {"completed": "完成", "failed": "失败", "timeout": "超时", "cancelled": "已取消"}.get(
-            record.status, record.status
-        )
-        preview = (record.result or record.error or "无输出")
+        status_zh = {
+            "completed": "完成",
+            "failed": "失败",
+            "timeout": "超时",
+            "cancelled": "已取消",
+        }.get(record.status, record.status)
+        preview = record.result or record.error or "无输出"
         self._system_events.enqueue(
             session_key=record.parent_chat_id,
             text=f"子智能体 [{record.id[:8]}..] {status_zh}: {preview}",

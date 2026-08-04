@@ -16,14 +16,14 @@ _log = logging.getLogger(__name__)
 class SkillManagers:
     """SkillManager 封装，提供技能发现、查看和执行能力。"""
 
-    def __init__(self, project_skill_dir: str = "./.agents/skills/", permission_manager=None):
+    def __init__(
+        self, project_skill_dir: str = "./.agents/skills/", permission_manager=None
+    ):
         skill_path = Path(project_skill_dir)
         if skill_path.exists() and skill_path.is_dir():
             self._manager = SkillManager(project_skill_dir=str(skill_path.resolve()))
         else:
-            _log.warning(
-                f"技能目录不存在: {skill_path}，使用默认发现路径"
-            )
+            _log.warning(f"技能目录不存在: {skill_path}，使用默认发现路径")
             self._manager = SkillManager(
                 project_skill_dir="",
                 anthropic_config_dir=None,
@@ -57,7 +57,9 @@ class SkillManagers:
             "使用技能意味着吸收该领域的专业知识来指导行为。"
         )
 
-    def get_skill_entries_block(self, max_skills: int = 0, max_desc_chars: int = 0) -> str:
+    def get_skill_entries_block(
+        self, max_skills: int = 0, max_desc_chars: int = 0
+    ) -> str:
         skills = self._manager.list_skills()
         if not skills:
             return ""
@@ -67,8 +69,15 @@ class SkillManagers:
 
         lines = ["<available_skills>"]
         for s in skills:
-            name = s.name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            desc = (s.description or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            name = (
+                s.name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            )
+            desc = (
+                (s.description or "")
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
             if max_desc_chars > 0 and len(desc) > max_desc_chars:
                 desc = desc[:max_desc_chars] + "..."
             lines.append("  <skill>")
@@ -123,9 +132,7 @@ class SkillManagers:
                 "execution_time_ms": result.execution_time_ms,
             }
         except Exception as e:
-            _log.warning(
-                f"执行 skill 脚本失败 [{skill_name}/{script_name}]: {e}"
-            )
+            _log.warning(f"执行 skill 脚本失败 [{skill_name}/{script_name}]: {e}")
             return {"success": False, "error": str(e)}
 
     def list_skill_names(self) -> list:

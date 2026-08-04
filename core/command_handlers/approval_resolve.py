@@ -56,9 +56,7 @@ class ApprovalResolveCommand:
                 decision,
                 input_message.sender_id[:12],
             )
-            return make_reply(
-                input_message, f"✅ 已处理审批 {session_key}: {decision}"
-            )
+            return make_reply(input_message, f"✅ 已处理审批 {session_key}: {decision}")
         return make_reply(
             input_message,
             f"⚠️ 审批 {session_key} 不存在或已超时（可先执行 审批列表 查看）",

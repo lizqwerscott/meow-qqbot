@@ -15,13 +15,17 @@ class TtsCommand:
         self.bot_engine = bot_engine
         self.tts_service = tts_service
 
-    async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
+    async def execute(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
         if not self.tts_service:
             return make_reply(input_message, "TTS 语音服务未启用")
 
         text = args.strip()
         if not text:
-            return make_reply(input_message, "用法：/tts <文字>\n例如：/tts 大家好，我是猫猫")
+            return make_reply(
+                input_message, "用法：/tts <文字>\n例如：/tts 大家好，我是猫猫"
+            )
 
         audio_bytes = await self.tts_service.synthesize(text)
         if not audio_bytes:

@@ -7,18 +7,24 @@ from core.message import InputMessage
 _log = logging.getLogger(__name__)
 
 
-@command(name="心跳", aliases=["heartbeat", "hb"], permission="admin", description="手动触发心跳检查。可加额外检查指令")
+@command(
+    name="心跳",
+    aliases=["heartbeat", "hb"],
+    permission="admin",
+    description="手动触发心跳检查。可加额外检查指令",
+)
 class HeartbeatCommand:
     def __init__(self, agent_engine, heartbeat_manager):
         self._agent_engine = agent_engine
         self._heartbeat_manager = heartbeat_manager
 
-    async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
-        from datetime import datetime, timezone, timedelta
+    async def execute(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
+        from datetime import datetime, timedelta, timezone
+
         tz_name = "CST (UTC+8)"
-        now_str = datetime.now(timezone(timedelta(hours=8))).strftime(
-            "%Y-%m-%d %H:%M"
-        )
+        now_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
 
         extra = args.strip()
         if extra:
@@ -29,9 +35,12 @@ class HeartbeatCommand:
         _log.info(f"手动触发心跳: extra={extra or '(无)'}")
 
         if self._heartbeat_manager:
-            should_notify, text = await self._heartbeat_manager.trigger_heartbeat(prompt)
+            should_notify, text = await self._heartbeat_manager.trigger_heartbeat(
+                prompt
+            )
         else:
             import time
+
             chat_id = f"heartbeat:{int(time.time())}"
             try:
                 should_notify, text = await self._agent_engine.execute_heartbeat(

@@ -2,7 +2,7 @@
 
 import logging
 
-from core.tools._types import ToolEntry, ToolContext, ToolResult
+from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
 
 _log = logging.getLogger(__name__)
@@ -40,7 +40,8 @@ def create_message_entries(deps: ToolDeps) -> list[ToolEntry]:
         )
         _log.info(
             "send_message 已投递 [%s..]: %s",
-            ctx.chat_id[:12], text[:60],
+            ctx.chat_id[:12],
+            text[:60],
         )
         return ToolResult(content="消息已发送", sent_text=True)
 

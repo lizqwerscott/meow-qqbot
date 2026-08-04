@@ -2,7 +2,7 @@
 
 import json
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
 
 from core.learners.stores.base_store import JsonStore
@@ -73,6 +73,7 @@ class SceneStore:
 
     async def _next_id(self) -> str:
         from core.learners.stores.base_store import _log
+
         nid = self._store._data.get("_next_id", 1)
         self._store._data["_next_id"] = nid + 1
         return f"sc_{nid:04d}"

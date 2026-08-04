@@ -10,12 +10,16 @@ from core.message import InputMessage
 _log = logging.getLogger(__name__)
 
 
-@command(name="归档", aliases=["archive"], permission="admin", description="会话归档管理")
+@command(
+    name="归档", aliases=["archive"], permission="admin", description="会话归档管理"
+)
 class ArchiveCommand:
     def __init__(self, archive_manager: Optional[ArchiveManager] = None):
         self.archive_manager = archive_manager
 
-    async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
+    async def execute(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
         if not self.archive_manager:
             return make_reply(input_message, "归档系统未启用。")
 
@@ -58,7 +62,9 @@ class ArchiveCommand:
             f"摘要: {self.archive_manager._summary_count} 条",
         )
 
-    async def _list_archives(self, input_message: InputMessage, chat_id: str) -> List[Dict[str, Any]]:
+    async def _list_archives(
+        self, input_message: InputMessage, chat_id: str
+    ) -> List[Dict[str, Any]]:
         target = chat_id or input_message.chat_id
         mem_dir = Path(self.archive_manager._memory_dir) / target
         if not mem_dir.is_dir():
@@ -72,17 +78,23 @@ class ArchiveCommand:
             reply += f"\n... (还有 {len(files) - 20} 个)"
         return make_reply(input_message, reply)
 
-    async def _show_summary(self, input_message: InputMessage, chat_id: str) -> List[Dict[str, Any]]:
+    async def _show_summary(
+        self, input_message: InputMessage, chat_id: str
+    ) -> List[Dict[str, Any]]:
         target = chat_id or input_message.chat_id
         text = self.archive_manager.load_recent_summaries(target)
         if not text:
-            return make_reply(input_message, f"会话 {target[:24]}… 没有可用的归档摘要。")
+            return make_reply(
+                input_message, f"会话 {target[:24]}… 没有可用的归档摘要。"
+            )
         preview = text[:1500]
         if len(text) > 1500:
             preview += "\n…(过长已截断)"
         return make_reply(input_message, f"最近摘要:\n{preview}")
 
-    async def _run_archive(self, input_message: InputMessage, chat_id: str) -> List[Dict[str, Any]]:
+    async def _run_archive(
+        self, input_message: InputMessage, chat_id: str
+    ) -> List[Dict[str, Any]]:
         target = chat_id or input_message.chat_id
         try:
             result = await self.archive_manager.archive_manual(
@@ -98,7 +110,9 @@ class ArchiveCommand:
         except Exception as e:
             return make_reply(input_message, f"归档失败: {e}")
 
-    async def _clean_archives(self, input_message: InputMessage) -> List[Dict[str, Any]]:
+    async def _clean_archives(
+        self, input_message: InputMessage
+    ) -> List[Dict[str, Any]]:
         try:
             removed = self.archive_manager.cleanup_old_archives()
             return make_reply(input_message, f"归档清理完成，移除了 {removed} 个文件。")

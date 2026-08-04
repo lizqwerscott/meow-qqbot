@@ -45,14 +45,14 @@ def _find_front_matter(content: str) -> tuple[str, Optional[str]]:
 
     返回 (去除 front matter 后的纯文本, YAML 文本或 None)
     """
-    if not content.startswith('---'):
+    if not content.startswith("---"):
         return content.strip(), None
-    m = re.search(r'\n---[ \t]*$', content[3:], re.MULTILINE)
+    m = re.search(r"\n---[ \t]*$", content[3:], re.MULTILINE)
     if not m:
         return content.strip(), None
     end = 3 + m.start() + 1
     yaml_text = content[3:end].strip()
-    clean = content[end + 3:].strip()
+    clean = content[end + 3 :].strip()
     return clean, yaml_text
 
 
@@ -71,18 +71,18 @@ def _find_tasks_yaml(content: str) -> tuple[str, Optional[str]]:
         return front_clean, front_yaml
     # 回退到行内 tasks: 块
     m = re.search(
-        r'^(?:#+\s*)?tasks\s*:',
+        r"^(?:#+\s*)?tasks\s*:",
         content,
         re.MULTILINE | re.IGNORECASE,
     )
     if not m:
         return content.strip(), None
-    clean = content[:m.start()].strip()
-    raw_yaml = content[m.start():]
-    lines = raw_yaml.split('\n')
-    if lines and lines[0].lstrip().startswith('#'):
-        lines[0] = re.sub(r'^#+\s*', '', lines[0])
-    yaml_text = '\n'.join(lines).strip()
+    clean = content[: m.start()].strip()
+    raw_yaml = content[m.start() :]
+    lines = raw_yaml.split("\n")
+    if lines and lines[0].lstrip().startswith("#"):
+        lines[0] = re.sub(r"^#+\s*", "", lines[0])
+    yaml_text = "\n".join(lines).strip()
     return clean, yaml_text
 
 
@@ -102,24 +102,27 @@ def parse_heartbeat_tasks(content: str) -> list[HeartbeatTask]:
     if not yaml_text:
         return []
     import yaml
+
     try:
         data = yaml.safe_load(yaml_text)
         if not isinstance(data, dict):
             return []
-        items = _yaml_get_key_ci(data, 'tasks')
+        items = _yaml_get_key_ci(data, "tasks")
         if not isinstance(items, list):
             return []
         result = []
         for item in items:
             if not isinstance(item, dict):
                 continue
-            name = str(item.get('name', '') or '')
+            name = str(item.get("name", "") or "")
             if not name:
                 continue
             hb = HeartbeatTask(name=name)
-            hb.interval_seconds = int(item.get('interval_seconds', item.get('interval', 3600)))
-            hb.prompt = str(item.get('prompt', '') or '')
-            hb.command = str(item.get('command', '') or '')
+            hb.interval_seconds = int(
+                item.get("interval_seconds", item.get("interval", 3600))
+            )
+            hb.prompt = str(item.get("prompt", "") or "")
+            hb.command = str(item.get("command", "") or "")
             result.append(hb)
         return result
     except Exception as e:
@@ -127,7 +130,9 @@ def parse_heartbeat_tasks(content: str) -> list[HeartbeatTask]:
         return []
 
 
-def filter_due_tasks(tasks: list[HeartbeatTask], last_run: dict[str, float]) -> list[HeartbeatTask]:
+def filter_due_tasks(
+    tasks: list[HeartbeatTask], last_run: dict[str, float]
+) -> list[HeartbeatTask]:
     now = time.time()
     return [t for t in tasks if now - last_run.get(t.name, 0) >= t.interval_seconds]
 
@@ -143,9 +148,9 @@ class HeartbeatManager:
         admin_ids: Optional[list] = None,
         context_manager: Any = None,
         agent_engine: Any = None,
-        wake_dispatcher: Any = None,   # 保留兼容，内部不再使用
+        wake_dispatcher: Any = None,  # 保留兼容，内部不再使用
         heartbeat_path: str = "",
-        cooldown: Any = None,          # HeartbeatCooldown 实例（用于设置 next_due_ms）
+        cooldown: Any = None,  # HeartbeatCooldown 实例（用于设置 next_due_ms）
     ):
         self._config = config
         self._cooldown = cooldown
@@ -185,7 +190,7 @@ class HeartbeatManager:
 
     def resolve_isolated_session_key(self, base_key: str) -> str:
         """折叠 :heartbeat 链，返回真正的隔离 session key。"""
-        collapsed = re.sub(r'(:heartbeat)+$', '', base_key)
+        collapsed = re.sub(r"(:heartbeat)+$", "", base_key)
         return f"{collapsed}:heartbeat"
 
     async def start(self):
@@ -214,17 +219,19 @@ class HeartbeatManager:
 
     async def _interval_loop(self):
         from .heartbeat_schedule import (
-            resolve_phase_ms,
             compute_next_phase_due_ms,
-            seek_next_active_phase,
             is_in_active_hours_ts,
+            resolve_phase_ms,
+            seek_next_active_phase,
         )
 
         interval_ms = self._every * 60 * 1000
         # 持久化 seed：优先配置项，其次机器标识（重启不变），最后 fallback
-        stable_seed = str(hashlib.sha256(
-            (__import__("platform").node() or "default").encode()
-        ).hexdigest())
+        stable_seed = str(
+            hashlib.sha256(
+                (__import__("platform").node() or "default").encode()
+            ).hexdigest()
+        )
         seed = self._config.get("scheduler_seed", stable_seed)
         phase_ms = resolve_phase_ms(seed, "default", interval_ms)
         ah = self._config.get("active_hours", {})
@@ -239,7 +246,9 @@ class HeartbeatManager:
         while self._running:
             now_ms = time.time() * 1000
             next_due_ms = compute_next_phase_due_ms(now_ms, interval_ms, phase_ms)
-            actual_ms = seek_next_active_phase(next_due_ms, interval_ms, phase_ms, is_active)
+            actual_ms = seek_next_active_phase(
+                next_due_ms, interval_ms, phase_ms, is_active
+            )
             delay = max(0, (actual_ms - time.time() * 1000) / 1000)
             # 将实际触发时间传给 cooldown，使 scheduled wake 的 nextDueMs 检查生效
             if self._cooldown:
@@ -288,9 +297,7 @@ class HeartbeatManager:
             for t in due:
                 self._task_last_run[t.name] = time.time()
             if due:
-                lines = "\n".join(
-                    f"- {t.name}: {t.prompt or t.command}" for t in due
-                )
+                lines = "\n".join(f"- {t.name}: {t.prompt or t.command}" for t in due)
                 return f"{clean}\n\n当前需要关注的子任务：\n{lines}"
             return clean
         if self._config_prompt and self._config_prompt.strip():
@@ -329,6 +336,7 @@ class HeartbeatManager:
         if self._cooldown_hours <= 0:
             return False
         from .delivery_normalization import strip_heartbeat_token
+
         norm_prev, _ = strip_heartbeat_token(self._last_text, ack_max_chars=0)
         norm_cur, _ = strip_heartbeat_token(text, ack_max_chars=0)
         normalized_prev = re.sub(r"\s+", " ", norm_prev).strip()
@@ -362,19 +370,24 @@ class HeartbeatManager:
         if not self._context_manager:
             return
         try:
-            pattern = re.compile(r"^heartbeat:\d+(:heartbeat)?$|^heartbeat:events:heartbeat$")
+            pattern = re.compile(
+                r"^heartbeat:\d+(:heartbeat)?$|^heartbeat:events:heartbeat$"
+            )
             hb_ids = [
-                cid for cid in self._context_manager.get_all_chat_ids()
+                cid
+                for cid in self._context_manager.get_all_chat_ids()
                 if pattern.match(cid)
             ]
             if len(hb_ids) <= keep_last:
                 return
+
             def _sort_key(cid: str) -> int:
                 ts_part = cid.split(":")[1]
                 try:
                     return int(ts_part)
                 except ValueError:
                     return 0
+
             hb_ids.sort(key=_sort_key)
             for cid in hb_ids[:-keep_last]:
                 await self._context_manager.clear_chat_history_async(cid)

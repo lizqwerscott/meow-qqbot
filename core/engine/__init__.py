@@ -2,10 +2,10 @@
 
 from core.engine.agent_engine import AgentEngine
 from core.engine.client import BotEngine
-from core.engine.router import Router
-from core.engine.prompt_builder import PromptBuilder
 from core.engine.duplicate_reply import DuplicateReplyDetector
 from core.engine.hindsight_memory import HindsightMemory
+from core.engine.prompt_builder import PromptBuilder
+from core.engine.router import Router
 
 __all__ = [
     "AgentEngine",

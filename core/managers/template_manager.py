@@ -28,9 +28,7 @@ class TemplateManager:
             except Exception as e:
                 _log.error(f"读取角色卡文件失败: {e}")
 
-    def render_prompt_template(
-        self, template_path: str, context: dict
-    ) -> str:
+    def render_prompt_template(self, template_path: str, context: dict) -> str:
         """
         渲染提示模板
 

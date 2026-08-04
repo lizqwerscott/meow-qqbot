@@ -1,7 +1,7 @@
 import json
 import logging
 
-from core.tools._types import ToolEntry, ToolResult, ToolContext
+from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
 
 _log = logging.getLogger(__name__)
@@ -12,18 +12,24 @@ def create_learner_entries(deps: ToolDeps) -> list[ToolEntry]:
     async def _define_jargon(args: dict, ctx: ToolContext) -> ToolResult:
         learners = deps.learning_orchestrator
         if not learners:
-            return ToolResult(content=json.dumps(
-                {"error": "学习系统未就绪"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "学习系统未就绪"},
+                    ensure_ascii=False,
+                )
+            )
 
         term = (args.get("term") or "").strip()
         definition = (args.get("definition") or "").strip()
         example = (args.get("example") or "").strip()
 
         if not term or not definition:
-            return ToolResult(content=json.dumps(
-                {"error": "请提供俚语词汇和含义"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "请提供俚语词汇和含义"},
+                    ensure_ascii=False,
+                )
+            )
 
         examples = [example] if example else []
         await learners.add_jargon(
@@ -34,26 +40,37 @@ def create_learner_entries(deps: ToolDeps) -> list[ToolEntry]:
             chat_id=ctx.chat_id,
         )
 
-        return ToolResult(content=json.dumps({
-            "success": True,
-            "message": f"已学习俚语「{term}」: {definition}",
-        }, ensure_ascii=False))
+        return ToolResult(
+            content=json.dumps(
+                {
+                    "success": True,
+                    "message": f"已学习俚语「{term}」: {definition}",
+                },
+                ensure_ascii=False,
+            )
+        )
 
     async def _report_behavior_effect(args: dict, ctx: ToolContext) -> ToolResult:
         learners = deps.learning_orchestrator
         if not learners:
-            return ToolResult(content=json.dumps(
-                {"error": "学习系统未就绪"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "学习系统未就绪"},
+                    ensure_ascii=False,
+                )
+            )
 
         scene = (args.get("scene_summary") or "").strip()
         action = (args.get("action_taken") or "").strip()
         effect = (args.get("effect") or "neutral").strip()
 
         if not scene or not action:
-            return ToolResult(content=json.dumps(
-                {"error": "请提供场景和行为描述"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "请提供场景和行为描述"},
+                    ensure_ascii=False,
+                )
+            )
 
         await learners.behavior.report_effect(
             scene_summary=scene,
@@ -62,10 +79,15 @@ def create_learner_entries(deps: ToolDeps) -> list[ToolEntry]:
             chat_id=ctx.chat_id,
         )
 
-        return ToolResult(content=json.dumps({
-            "success": True,
-            "message": f"已记录行为效果「{effect}」: {scene[:40]}..",
-        }, ensure_ascii=False))
+        return ToolResult(
+            content=json.dumps(
+                {
+                    "success": True,
+                    "message": f"已记录行为效果「{effect}」: {scene[:40]}..",
+                },
+                ensure_ascii=False,
+            )
+        )
 
     DEFINE_JARGON_PARAMS = {
         "type": "object",

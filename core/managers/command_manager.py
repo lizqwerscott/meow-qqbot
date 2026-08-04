@@ -110,7 +110,11 @@ class CommandManager:
         if command.permission == PermissionLevel.DEFAULT:
             return True
         if command.permission == PermissionLevel.ADMIN:
-            return self._perm.get_user_role(user_id) == "admin" if self._perm else (user_id in self.admin_id)
+            return (
+                self._perm.get_user_role(user_id) == "admin"
+                if self._perm
+                else (user_id in self.admin_id)
+            )
 
     async def process_message(self, input_message: InputMessage) -> list[dict]:
         """
@@ -132,7 +136,7 @@ class CommandManager:
             if input_message.is_group:
                 # 群聊：猫猫 /<命令> 或 @bot_id /<命令>
                 if content.startswith("猫猫 /"):
-                    raw = content[len("猫猫 /"):].strip()
+                    raw = content[len("猫猫 /") :].strip()
                     if raw:
                         parts = raw.split(maxsplit=1)
                         command_name = parts[0]
@@ -140,7 +144,7 @@ class CommandManager:
                 elif input_message.is_at_mention and input_message.bot_id:
                     prefix = f"@{input_message.bot_id} /"
                     if content.startswith(prefix):
-                        raw = content[len(prefix):].strip()
+                        raw = content[len(prefix) :].strip()
                         if raw:
                             parts = raw.split(maxsplit=1)
                             command_name = parts[0]

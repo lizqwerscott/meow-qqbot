@@ -77,7 +77,12 @@ class SystemEventQueue:
         if dedup_key in sq._seen:
             return False
 
-        event = SystemEvent(text=cleaned, ts=time.time(), context_key=context_key, heartbeat_only=heartbeat_only)
+        event = SystemEvent(
+            text=cleaned,
+            ts=time.time(),
+            context_key=context_key,
+            heartbeat_only=heartbeat_only,
+        )
         sq.queue.append(event)
         sq._seen.add(dedup_key)
 
@@ -147,7 +152,9 @@ class SystemEventQueue:
         if not sq.queue:
             self._queues.pop(session_key, None)
             self._snapshots.pop(session_key, None)
-        _log.debug("drained %d non-heartbeat events [%s..]", len(removed), session_key[:12])
+        _log.debug(
+            "drained %d non-heartbeat events [%s..]", len(removed), session_key[:12]
+        )
         return removed
 
     def peek_non_heartbeat(self, session_key: str) -> list[SystemEvent]:
@@ -174,7 +181,13 @@ class SystemEventQueue:
             self._queues[session_key] = _SessionQueue()
         return self._queues[session_key]
 
-    def _replace_in_queue(self, sq: _SessionQueue, text: str, context_key: str, heartbeat_only: bool = False) -> bool:
+    def _replace_in_queue(
+        self,
+        sq: _SessionQueue,
+        text: str,
+        context_key: str,
+        heartbeat_only: bool = False,
+    ) -> bool:
         """替换同 context_key 的事件。没有匹配到则追加。"""
         for i, event in enumerate(sq.queue):
             if event.context_key == context_key:
@@ -182,7 +195,12 @@ class SystemEventQueue:
                     return False
                 remove_key = (event.text, event.context_key)
                 sq._seen.discard(remove_key)
-                sq.queue[i] = SystemEvent(text=text, ts=time.time(), context_key=context_key, heartbeat_only=heartbeat_only)
+                sq.queue[i] = SystemEvent(
+                    text=text,
+                    ts=time.time(),
+                    context_key=context_key,
+                    heartbeat_only=heartbeat_only,
+                )
                 sq._seen.add((text, context_key))
                 return True
 
@@ -190,7 +208,12 @@ class SystemEventQueue:
         if add_key in sq._seen:
             return False
 
-        event = SystemEvent(text=text, ts=time.time(), context_key=context_key, heartbeat_only=heartbeat_only)
+        event = SystemEvent(
+            text=text,
+            ts=time.time(),
+            context_key=context_key,
+            heartbeat_only=heartbeat_only,
+        )
         sq.queue.append(event)
         sq._seen.add(add_key)
 

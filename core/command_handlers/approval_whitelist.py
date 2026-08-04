@@ -33,13 +33,15 @@ class ApprovalWhitelistCommand:
         parts = args.split()
         if parts and parts[0] in ("删除", "del", "remove"):
             if len(parts) < 2:
-                return make_reply(
-                    input_message, "用法：审批白名单 删除 <pattern>"
-                )
+                return make_reply(input_message, "用法：审批白名单 删除 <pattern>")
             pattern = parts[1]
             ok = self.approval_manager.remove_allowlist_entry(pattern)
             if ok:
-                _log.info("审批白名单已删除: %s (by %s..)", pattern, input_message.sender_id[:12])
+                _log.info(
+                    "审批白名单已删除: %s (by %s..)",
+                    pattern,
+                    input_message.sender_id[:12],
+                )
                 return make_reply(input_message, f"🗑️ 已删除白名单条目: `{pattern}`")
             return make_reply(
                 input_message, f"⚠️ 未找到条目: `{pattern}`（可用 审批白名单 查看）"
@@ -51,8 +53,6 @@ class ApprovalWhitelistCommand:
         lines = [f"📋 审批白名单（{len(entries)} 条）："]
         for e in entries:
             arg = f" | arg=`{e.arg_pattern}`" if e.arg_pattern else ""
-            lines.append(
-                f"- `{e.pattern}`{arg} | {e.source} | 使用 {e.uses} 次"
-            )
+            lines.append(f"- `{e.pattern}`{arg} | {e.source} | 使用 {e.uses} 次")
         lines.append("\n删除：审批白名单 删除 <pattern>")
         return make_reply(input_message, "\n".join(lines))

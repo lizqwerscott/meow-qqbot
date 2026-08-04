@@ -6,9 +6,9 @@
 import logging
 from typing import Any, Dict, List, Optional
 
+from core.learners.base import LearnerConfig, config_from_dict
 from core.learners.jargon_miner import JargonMiner
 from core.learners.stores.jargon_store import JargonEntry, JargonStore
-from core.learners.base import LearnerConfig, config_from_dict
 
 _log = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ class LearningOrchestrator:
         for e in jargons[:10]:
             source_tag = "[手动添加] " if e.source == "manual" else ""
             def_text = e.definition or "(含义待推理)"
-            lines.append(f"- {source_tag}\"{e.term}\": {def_text}")
+            lines.append(f'- {source_tag}"{e.term}": {def_text}')
         return "\n".join(lines)
 
     # ── 查询 / 管理 ──
@@ -91,9 +91,17 @@ class LearningOrchestrator:
     def search_jargon(self, query: str) -> List[JargonEntry]:
         return self.jargon.search(query)
 
-    async def add_jargon(self, term: str, definition: str, examples: Optional[List[str]] = None,
-                         added_by: str = "", chat_id: str = "") -> JargonEntry:
-        return await self.jargon.add_manual(term, definition, examples, added_by, chat_id)
+    async def add_jargon(
+        self,
+        term: str,
+        definition: str,
+        examples: Optional[List[str]] = None,
+        added_by: str = "",
+        chat_id: str = "",
+    ) -> JargonEntry:
+        return await self.jargon.add_manual(
+            term, definition, examples, added_by, chat_id
+        )
 
     async def delete_jargon(self, term: str) -> bool:
         return await self.jargon.delete_entry(term)

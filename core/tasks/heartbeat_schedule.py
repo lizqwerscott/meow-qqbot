@@ -90,12 +90,15 @@ def is_in_active_hours_ts(
     """Unix 时间戳是否在活跃时段内。"""
     if not start_str or not end_str:
         return True
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta, timezone
+
     try:
         import zoneinfo
+
         tz = zoneinfo.ZoneInfo(tz_str)
     except (ImportError, KeyError, TypeError):
         import re
+
         m = re.match(r"^UTC([+-]\d{1,2})(?::(\d{2}))?$", tz_str)
         if m:
             tz = timezone(timedelta(hours=int(m.group(1))))

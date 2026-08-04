@@ -125,6 +125,7 @@ class DynamicContextBuilder:
         text = "\n\n".join(parts)
         if len(text) > 8000:
             _log.warning(
-                "动态 system prompt 较长: %d 字符", len(text),
+                "动态 system prompt 较长: %d 字符",
+                len(text),
             )
         return text

@@ -16,8 +16,8 @@ import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from core.learners.stores.behavior_store import BehaviorPattern, BehaviorStore
 from core.learners.base import exponential_decay
+from core.learners.stores.behavior_store import BehaviorPattern, BehaviorStore
 
 _log = logging.getLogger(__name__)
 
@@ -110,14 +110,16 @@ class BehaviorLearner:
             return
 
         # 触发学习
-        asyncio.create_task(self._learn_pattern(
-            user_msg=user_message,
-            bot_reply=bot_reply,
-            effect=effect,
-            scene_text=scene_text,
-            action_text=action_text,
-            chat_id=chat_id,
-        ))
+        asyncio.create_task(
+            self._learn_pattern(
+                user_msg=user_message,
+                bot_reply=bot_reply,
+                effect=effect,
+                scene_text=scene_text,
+                action_text=action_text,
+                chat_id=chat_id,
+            )
+        )
 
     async def report_effect(
         self,
@@ -137,14 +139,16 @@ class BehaviorLearner:
         if not self._should_trigger(pair_key):
             return
 
-        asyncio.create_task(self._learn_pattern(
-            user_msg=scene_summary,
-            bot_reply=action_taken,
-            effect=effect,
-            scene_text=scene_text,
-            action_text=action_text,
-            chat_id=chat_id,
-        ))
+        asyncio.create_task(
+            self._learn_pattern(
+                user_msg=scene_summary,
+                bot_reply=action_taken,
+                effect=effect,
+                scene_text=scene_text,
+                action_text=action_text,
+                chat_id=chat_id,
+            )
+        )
 
     # ── 学习 ──
 
@@ -264,13 +268,19 @@ class BehaviorLearner:
             if delta_hours < 24:
                 continue
 
-            new_confidence = exponential_decay(pattern.confidence, self._decay_rate, delta_hours)
+            new_confidence = exponential_decay(
+                pattern.confidence, self._decay_rate, delta_hours
+            )
             if new_confidence < self._decay_threshold:
                 await self._store.delete(pattern.scene_descriptor[:64])
                 removed += 1
-                _log.debug(f"BehaviorLearner 衰减删除: {pattern.scene_descriptor[:40]}..")
+                _log.debug(
+                    f"BehaviorLearner 衰减删除: {pattern.scene_descriptor[:40]}.."
+                )
             else:
-                await self._store.update_confidence(pattern.scene_descriptor[:64], new_confidence)
+                await self._store.update_confidence(
+                    pattern.scene_descriptor[:64], new_confidence
+                )
 
         return removed
 

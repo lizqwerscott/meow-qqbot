@@ -19,6 +19,7 @@ def command(
     def wrapper(cls):
         _HANDLER_REGISTRY.append((cls, name, aliases or [], permission, description))
         return cls
+
     return wrapper
 
 

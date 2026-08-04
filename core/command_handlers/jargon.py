@@ -4,18 +4,25 @@ import logging
 from typing import Any, Dict, List
 
 from core.command_handlers.base import command, make_reply
-from core.message import InputMessage
 from core.learners.orchestrator import LearningOrchestrator
+from core.message import InputMessage
 
 _log = logging.getLogger(__name__)
 
 
-@command(name="学词", aliases=["learn", "学个词"], permission="admin", description="添加社群俚语。用法：猫猫学词 <词> = <定义> [例:<例句>]")
+@command(
+    name="学词",
+    aliases=["learn", "学个词"],
+    permission="admin",
+    description="添加社群俚语。用法：猫猫学词 <词> = <定义> [例:<例句>]",
+)
 class JargonLearnCommand:
     def __init__(self, learning_orchestrator: LearningOrchestrator):
         self.learners = learning_orchestrator
 
-    async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
+    async def execute(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
         if not self.learners:
             return make_reply(input_message, "学习系统未启用。")
         if not args.strip():
@@ -35,7 +42,10 @@ class JargonLearnCommand:
             else:
                 definition = rest.strip()
         else:
-            return make_reply(input_message, "格式错误，需要等号分隔。\n正确用法：猫猫学词 <词> = <定义> [例:<例句>]")
+            return make_reply(
+                input_message,
+                "格式错误，需要等号分隔。\n正确用法：猫猫学词 <词> = <定义> [例:<例句>]",
+            )
 
         if not term or not definition:
             return make_reply(input_message, "俚语词汇和含义都不能为空。")
@@ -55,12 +65,19 @@ class JargonLearnCommand:
         )
 
 
-@command(name="词典", aliases=["dict", "俚语列表"], permission="default", description="查看已学习的社群俚语词典。可用：猫猫词典 [搜索词]")
+@command(
+    name="词典",
+    aliases=["dict", "俚语列表"],
+    permission="default",
+    description="查看已学习的社群俚语词典。可用：猫猫词典 [搜索词]",
+)
 class JargonListCommand:
     def __init__(self, learning_orchestrator: LearningOrchestrator):
         self.learners = learning_orchestrator
 
-    async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
+    async def execute(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
         if not self.learners:
             return make_reply(input_message, "学习系统未启用。")
 
@@ -73,7 +90,9 @@ class JargonListCommand:
             entries = self.learners.get_jargon_entries()
 
         if not entries:
-            return make_reply(input_message, "词典中还没有俚语，可以让管理员用「猫猫学词」添加。")
+            return make_reply(
+                input_message, "词典中还没有俚语，可以让管理员用「猫猫学词」添加。"
+            )
 
         if query:
             lines = [f"搜索「{query}」结果（共 {len(entries)} 条）："]
@@ -96,12 +115,19 @@ class JargonListCommand:
         return make_reply(input_message, reply)
 
 
-@command(name="删除词", aliases=["forget", "遗忘"], permission="admin", description="删除已学习的俚语。用法：猫猫删除词 <词>")
+@command(
+    name="删除词",
+    aliases=["forget", "遗忘"],
+    permission="admin",
+    description="删除已学习的俚语。用法：猫猫删除词 <词>",
+)
 class JargonForgetCommand:
     def __init__(self, learning_orchestrator: LearningOrchestrator):
         self.learners = learning_orchestrator
 
-    async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
+    async def execute(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
         if not self.learners:
             return make_reply(input_message, "学习系统未启用。")
 

@@ -4,8 +4,8 @@
 键格式: "{chat_id}:{tier}"
 """
 
-import time
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -13,6 +13,7 @@ from typing import Optional
 @dataclass
 class SessionBinding:
     """单次 session 绑定状态。"""
+
     model_name: str
     tier: str
     bound_at: float
@@ -40,7 +41,9 @@ class SessionBindingManager:
     def _key(chat_id: str, tier: str) -> str:
         return f"{chat_id}:{tier}"
 
-    async def get_if_valid(self, chat_id: str, tier: str, budget: int, ttl: float) -> Optional[SessionBinding]:
+    async def get_if_valid(
+        self, chat_id: str, tier: str, budget: int, ttl: float
+    ) -> Optional[SessionBinding]:
         """原子获取并验证绑定。若过期则自动解绑。
 
         消除外部 get() + is_expired() + unbind() 之间的竞态窗口。

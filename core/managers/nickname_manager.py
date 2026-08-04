@@ -104,13 +104,19 @@ class NicknameManager:
         aliases = entry["aliases"] if entry else []
         if username not in aliases:
             aliases.append(username)
-            self.auto_nicknames[user_id] = {"aliases": aliases, "updated_at": time.time()}
+            self.auto_nicknames[user_id] = {
+                "aliases": aliases,
+                "updated_at": time.time(),
+            }
             _log.debug(f"已采集昵称: {username} ({user_id[:12]}..)")
             await self._save_auto_nicknames()
         elif aliases and aliases[-1] != username:
             aliases.remove(username)
             aliases.append(username)
-            self.auto_nicknames[user_id] = {"aliases": aliases, "updated_at": time.time()}
+            self.auto_nicknames[user_id] = {
+                "aliases": aliases,
+                "updated_at": time.time(),
+            }
             await self._save_auto_nicknames()
 
     # ── 内部文件操作 ──
@@ -157,5 +163,3 @@ class NicknameManager:
     def _write_file(path: str, data: str) -> None:
         with open(path, "w", encoding="utf-8") as f:
             f.write(data)
-
-

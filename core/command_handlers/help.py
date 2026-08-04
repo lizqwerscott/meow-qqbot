@@ -11,6 +11,7 @@ _log = logging.getLogger(__name__)
 def _plugin_command_names() -> Dict[str, List[str]]:
     """返回 {插件名: [命令名, ...]}"""
     from core.plugins.manager import _current as _pm
+
     if not _pm:
         return {}
     return dict(_pm._plugin_commands)
@@ -21,7 +22,9 @@ class HelpCommand:
     def __init__(self, command_manager: CommandManager):
         self.command_manager = command_manager
 
-    async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
+    async def execute(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
         try:
             user_id = input_message.sender_id
             all_commands = self.command_manager.get_all_commands()
@@ -51,14 +54,18 @@ class HelpCommand:
             if builtin_cmds:
                 lines.append("**系统命令**")
                 for cmd in builtin_cmds:
-                    aliases_str = f" (`{', '.join(cmd.aliases)}`)" if cmd.aliases else ""
+                    aliases_str = (
+                        f" (`{', '.join(cmd.aliases)}`)" if cmd.aliases else ""
+                    )
                     lines.append(f"- `{cmd.name}`{aliases_str} — {cmd.description}")
 
             for pname, cmds in plugin_cmds.items():
                 lines.append("")
                 lines.append(f"**插件: {pname}**")
                 for cmd in cmds:
-                    aliases_str = f" (`{', '.join(cmd.aliases)}`)" if cmd.aliases else ""
+                    aliases_str = (
+                        f" (`{', '.join(cmd.aliases)}`)" if cmd.aliases else ""
+                    )
                     lines.append(f"- `{cmd.name}`{aliases_str} — {cmd.description}")
 
             return make_reply(input_message, "\n".join(lines))

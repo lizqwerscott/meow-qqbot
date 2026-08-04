@@ -1,7 +1,7 @@
 import json
 import logging
 
-from core.tools._types import ToolEntry, ToolResult, ToolContext
+from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
 
 _log = logging.getLogger(__name__)
@@ -12,38 +12,53 @@ def create_skill_entries(deps: ToolDeps) -> list[ToolEntry]:
     async def _rescan_skills(args: dict, ctx: ToolContext) -> ToolResult:
         skill_managers = deps.skill_managers
         if not skill_managers:
-            return ToolResult(content=json.dumps(
-                {"error": "技能系统未就绪"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "技能系统未就绪"},
+                    ensure_ascii=False,
+                )
+            )
         result = skill_managers.rescan()
         return ToolResult(content=json.dumps(result, ensure_ascii=False))
 
     async def _view_skill(args: dict, ctx: ToolContext) -> ToolResult:
         skill_managers = deps.skill_managers
         if not skill_managers:
-            return ToolResult(content=json.dumps(
-                {"error": "技能系统未就绪"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "技能系统未就绪"},
+                    ensure_ascii=False,
+                )
+            )
         skill_name = (args.get("skill_name") or "").strip()
         if not skill_name:
-            return ToolResult(content=json.dumps(
-                {"error": "请提供技能名称"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "请提供技能名称"},
+                    ensure_ascii=False,
+                )
+            )
         content = skill_managers.get_skill_detail(skill_name)
         return ToolResult(content=content)
 
     async def _execute_skill(args: dict, ctx: ToolContext) -> ToolResult:
         skill_managers = deps.skill_managers
         if not skill_managers:
-            return ToolResult(content=json.dumps(
-                {"error": "技能系统未就绪"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "技能系统未就绪"},
+                    ensure_ascii=False,
+                )
+            )
         skill_name = (args.get("skill_name") or "").strip()
         script_name = (args.get("script_name") or "").strip()
         if not skill_name or not script_name:
-            return ToolResult(content=json.dumps(
-                {"error": "请提供技能名称和脚本名称"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "请提供技能名称和脚本名称"},
+                    ensure_ascii=False,
+                )
+            )
         arguments = args.get("arguments") or {}
         perm = deps.permission_manager
         default_timeout = perm.get_default_timeout() if perm else 60

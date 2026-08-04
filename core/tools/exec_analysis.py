@@ -59,9 +59,7 @@ MULTICALL_BINS = frozenset({"busybox", "toybox"})
 _WRAPPER_VALUE_FLAGS: Dict[str, frozenset] = {
     "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
     # -c/--command 的值为命令字符串（payload），由 extract_wrapper_payloads 另分析
-    "flock": frozenset(
-        {"-E", "--conflict-exit-code", "-w", "--wait"}
-    ),
+    "flock": frozenset({"-E", "--conflict-exit-code", "-w", "--wait"}),
     "nice": frozenset({"-n", "--adjustment"}),
     "nohup": frozenset(),
     "stdbuf": frozenset({"-i", "--input", "-o", "--output", "-e", "--error"}),
@@ -166,7 +164,22 @@ _PKG_EXEC_BINS = frozenset({"pnpm", "npm", "npx"})
 
 # python 解释器：布尔 flags（跳过）；带值 flags（跳过 flag+值）；终止形态（-c/-m）
 _PY_BOOL_FLAGS = frozenset(
-    {"-B", "-E", "-i", "-I", "-O", "-OO", "-P", "-q", "-s", "-S", "-u", "-v", "-x", "-d"}
+    {
+        "-B",
+        "-E",
+        "-i",
+        "-I",
+        "-O",
+        "-OO",
+        "-P",
+        "-q",
+        "-s",
+        "-S",
+        "-u",
+        "-v",
+        "-x",
+        "-d",
+    }
 )
 _PY_VALUE_FLAGS = frozenset({"-W", "-X", "-Q"})
 _PY_TERMINAL_FLAGS = frozenset({"-c", "-m"})  # inline / 模块形态：不声称覆盖
@@ -174,8 +187,17 @@ _PY_TERMINAL_FLAGS = frozenset({"-c", "-m"})  # inline / 模块形态：不声�
 # node：多文件/求值形态直接不绑定；其余 - 开头 token 保守跳过
 _NODE_TERMINAL_FLAGS = frozenset(
     {
-        "-e", "--eval", "-p", "--print", "-r", "--require", "--import",
-        "-i", "--input-type", "--loader", "--experimental-loader",
+        "-e",
+        "--eval",
+        "-p",
+        "--print",
+        "-r",
+        "--require",
+        "--import",
+        "-i",
+        "--input-type",
+        "--loader",
+        "--experimental-loader",
     }
 )
 
@@ -366,7 +388,9 @@ class ExecSegment:
         False  # 是否为嵌套段（command_substitution / shell wrapper payload 内部）
     )
     is_compound: bool = False  # 复合命令（for/if/...，shell=False 下无可执行文件）
-    heredoc: bool = False  # 段内含 heredoc（<<EOF，对齐 openclaw reason: heredoc 审批触发）
+    heredoc: bool = (
+        False  # 段内含 heredoc（<<EOF，对齐 openclaw reason: heredoc 审批触发）
+    )
     nested_segments: List["ExecSegment"] = field(default_factory=list)  # 内部命令段
     # 包装器解包（2.1）：argv[0] 为转发包装器（timeout/env/...）时，
     # inner_argv 为**最内层**命令 argv，inner_resolution 为其可执行文件解析。

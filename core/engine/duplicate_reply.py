@@ -19,7 +19,9 @@ class DuplicateReplyDetector:
         self._replied: "OrderedDict[str, str]" = OrderedDict()
         self._lock = asyncio.Lock()
 
-    async def handle_message(self, input_message, reply_callback, get_user_nickname) -> bool:
+    async def handle_message(
+        self, input_message, reply_callback, get_user_nickname
+    ) -> bool:
         if not input_message.is_group:
             return False
 
@@ -44,7 +46,8 @@ class DuplicateReplyDetector:
 
         _log.info(
             "检测到重复消息 [%s..]，自动复读: %s",
-            input_message.chat_id[:12], last_content[:30],
+            input_message.chat_id[:12],
+            last_content[:30],
         )
         reply_id = f"dupe_{input_message.id}"
         try:
@@ -65,6 +68,8 @@ class DuplicateReplyDetector:
                 self._replied.popitem(last=False)
 
         await self._cm.add_assistant_message_async(
-            input_message.chat_id, last_content, reply_id,
+            input_message.chat_id,
+            last_content,
+            reply_id,
         )
         return True

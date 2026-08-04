@@ -1,5 +1,5 @@
-import time
 import logging
+import time
 from typing import Optional
 
 _log = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ class SystemEventBlockBuilder:
         lines.append(
             "处理完成后，如果没有需要关注的事项，使用 heartbeat_respond(notify=false) "
             "或回复 NO_REPLY 静默结束。如果有需要通知用户的事项，"
-            "使用 heartbeat_respond(notify=true, notification_text=\"...\")。"
+            '使用 heartbeat_respond(notify=true, notification_text="...")。'
             "仅回复文本时，非 NO_REPLY 的内容会被转发给用户。"
         )
         return "【系统事件】\n" + "\n".join(lines)

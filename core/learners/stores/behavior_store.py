@@ -1,7 +1,7 @@
 """行为模式存储 — BehaviorPattern 数据模型 + BehaviorStore 持久化。"""
 
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
 
 from core.learners.stores.base_store import JsonStore
@@ -97,4 +97,6 @@ class BehaviorStore:
         return await self._store.delete(key)
 
     async def update_confidence(self, key: str, confidence: float) -> bool:
-        return await self._store.update(key, confidence=confidence, updated_at=time.time())
+        return await self._store.update(
+            key, confidence=confidence, updated_at=time.time()
+        )

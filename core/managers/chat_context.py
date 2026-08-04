@@ -4,7 +4,12 @@ import time
 from collections import deque
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from core.managers.chat_message import ChatMessage, _estimate_tokens, group_user_messages, strip_content_prefix
+from core.managers.chat_message import (
+    ChatMessage,
+    _estimate_tokens,
+    group_user_messages,
+    strip_content_prefix,
+)
 from core.managers.context_store import ContextStore
 
 _log = logging.getLogger(__name__)
@@ -103,9 +108,7 @@ class ChatContext:
             return list(self.history)
         return list(self.history)[-max_messages:]
 
-    def get_history_as_dicts(
-        self, max_messages: Optional[int] = None
-    ) -> List[Dict]:
+    def get_history_as_dicts(self, max_messages: Optional[int] = None) -> List[Dict]:
         messages = self.get_history(max_messages)
         return [msg.to_dict() for msg in messages]
 
@@ -113,7 +116,7 @@ class ChatContext:
         self, max_messages: Optional[int] = None
     ) -> List[Dict]:
         """返回合并后的消息 dict 列表（仅合并连续同用户消息）。
-        
+
         原始 ChatContext.history 不变，所有现有系统不受影响。
         """
         messages = self.get_history(max_messages)
@@ -128,9 +131,7 @@ class ChatContext:
                     result.append(merged)
         return result
 
-    def get_conversation_context(
-        self, max_messages: Optional[int] = None
-    ) -> str:
+    def get_conversation_context(self, max_messages: Optional[int] = None) -> str:
         messages = self.get_history(max_messages)
         context_lines = []
         for msg in messages:
@@ -162,12 +163,8 @@ class ChatContext:
             total += _estimate_tokens(msg.content)
             if msg.tool_calls:
                 for tc in msg.tool_calls:
-                    total += _estimate_tokens(
-                        tc.get("function", {}).get("name")
-                    )
-                    total += _estimate_tokens(
-                        tc.get("function", {}).get("arguments")
-                    )
+                    total += _estimate_tokens(tc.get("function", {}).get("name"))
+                    total += _estimate_tokens(tc.get("function", {}).get("arguments"))
             if msg.reasoning_content:
                 total += _estimate_tokens(msg.reasoning_content)
         return total
@@ -217,7 +214,8 @@ class ChatContext:
         if removed:
             _log.info(
                 "恢复后清理了 %d 条孤立 tool_calls/tool 消息 [%s..]",
-                removed, self.chat_id[:12],
+                removed,
+                self.chat_id[:12],
             )
 
         if self._is_expired():
@@ -225,12 +223,15 @@ class ChatContext:
                 "会话缓存已过期 [%s..]，交由 ArchiveManager 处理",
                 self.chat_id[:12],
             )
-            self.last_activity = self.history[-1].timestamp if self.history else time.time()
+            self.last_activity = (
+                self.history[-1].timestamp if self.history else time.time()
+            )
         else:
             self.last_activity = time.time()
             _log.info(
                 "从缓存恢复会话 [%s..] (%d 条)",
-                self.chat_id[:12], len(self.history),
+                self.chat_id[:12],
+                len(self.history),
             )
 
     def _is_expired(self, max_age: float = 86400) -> bool:
@@ -253,10 +254,15 @@ class ChatContext:
             asyncio.to_thread(self.store.flush, self.chat_id, messages)
         )
         self._save_task.add_done_callback(
-            lambda t: _log.error(
-                "持久化到存储失败 [%s..]: %s",
-                self.chat_id[:12], t.exception(),
-            ) if t.exception() else None
+            lambda t: (
+                _log.error(
+                    "持久化到存储失败 [%s..]: %s",
+                    self.chat_id[:12],
+                    t.exception(),
+                )
+                if t.exception()
+                else None
+            )
         )
 
     # ── 异步消息添加（带锁） ──
@@ -295,7 +301,9 @@ class ChatContext:
     ) -> None:
         async with self.lock:
             self.add_assistant_message(
-                content, message_id, tool_calls=tool_calls,
+                content,
+                message_id,
+                tool_calls=tool_calls,
                 reasoning_content=reasoning_content,
             )
 
@@ -356,14 +364,11 @@ class ChatContext:
                 content = msg.content
                 if len(content) > hard_clear:
                     d["content"] = (
-                        "[工具 " + (msg.tool_name or "未知")
-                        + " 的调用结果已裁剪]"
+                        "[工具 " + (msg.tool_name or "未知") + " 的调用结果已裁剪]"
                     )
                 elif len(content) > soft_trim:
                     d["content"] = (
-                        content[:1500]
-                        + "\n\n…[中间内容已裁剪]…\n\n"
-                        + content[-1500:]
+                        content[:1500] + "\n\n…[中间内容已裁剪]…\n\n" + content[-1500:]
                     )
                 result.append(d)
 
@@ -408,9 +413,7 @@ class ChatContext:
         while i < len(history_list):
             msg = history_list[i]
             if msg.role == "assistant" and msg.tool_calls:
-                tc_ids = {
-                    tc.get("id") for tc in msg.tool_calls if tc.get("id")
-                }
+                tc_ids = {tc.get("id") for tc in msg.tool_calls if tc.get("id")}
                 if tc_ids:
                     found_ids = set()
                     for j in range(i + 1, len(history_list)):
@@ -421,7 +424,8 @@ class ChatContext:
                         missing = tc_ids - found_ids
                         _log.warning(
                             "移除孤立 tool_calls [%s..]: missing_ids=%s",
-                            self.chat_id[:12], missing,
+                            self.chat_id[:12],
+                            missing,
                         )
                         i += 1
                         removed += 1
@@ -433,7 +437,8 @@ class ChatContext:
                 else:
                     _log.warning(
                         "移除孤立 tool 消息 [%s..]: tool_call_id=%s",
-                        self.chat_id[:12], msg.tool_call_id,
+                        self.chat_id[:12],
+                        msg.tool_call_id,
                     )
                     i += 1
                     removed += 1
@@ -459,12 +464,8 @@ class ChatContext:
             tokens = _estimate_tokens(msg.content)
             if msg.tool_calls:
                 for tc in msg.tool_calls:
-                    tokens += _estimate_tokens(
-                        tc.get("function", {}).get("name")
-                    )
-                    tokens += _estimate_tokens(
-                        tc.get("function", {}).get("arguments")
-                    )
+                    tokens += _estimate_tokens(tc.get("function", {}).get("name"))
+                    tokens += _estimate_tokens(tc.get("function", {}).get("arguments"))
             if msg.reasoning_content:
                 tokens += _estimate_tokens(msg.reasoning_content)
 
@@ -479,9 +480,7 @@ class ChatContext:
                     continue
 
                 if msg.tool_calls:
-                    tc_ids = {
-                        tc.get("id") for tc in msg.tool_calls if tc.get("id")
-                    }
+                    tc_ids = {tc.get("id") for tc in msg.tool_calls if tc.get("id")}
                     if tc_ids & recent_tool_ids:
                         recent.insert(0, msg)
                         total += tokens
@@ -510,28 +509,20 @@ class ChatContext:
     def _format_for_summary(self, messages: List[ChatMessage]) -> str:
         lines = []
         for m in messages:
-            time_str = time.strftime(
-                "%m-%d %H:%M", time.localtime(m.timestamp)
-            )
+            time_str = time.strftime("%m-%d %H:%M", time.localtime(m.timestamp))
             if m.role == "user":
                 display_name = m.name or m.sender_id or "用户"
                 lines.append(f"[{time_str}] {display_name}: {m.content}")
             elif m.role == "assistant":
                 if m.tool_calls:
-                    tools = ", ".join(
-                        tc["function"]["name"] for tc in m.tool_calls
-                    )
-                    lines.append(
-                        f"[{time_str}] 助手(调用工具: {tools}): {m.content}"
-                    )
+                    tools = ", ".join(tc["function"]["name"] for tc in m.tool_calls)
+                    lines.append(f"[{time_str}] 助手(调用工具: {tools}): {m.content}")
                 else:
                     lines.append(f"[{time_str}] 助手: {m.content}")
             elif m.role == "tool":
                 tname = m.tool_name or "工具"
                 content_preview = m.content[:100].replace("\n", " ")
-                lines.append(
-                    f"[{time_str}] {tname} 返回: {content_preview}..."
-                )
+                lines.append(f"[{time_str}] {tname} 返回: {content_preview}...")
         return "\n".join(lines)
 
     async def compact_history_if_needed(
@@ -551,9 +542,10 @@ class ChatContext:
 
         text = self._format_for_summary(old_msgs)
         _log.info(
-            "正在压缩 [%s..] %d 条消息 → 摘要 "
-            "(估算 %d tokens > %d)",
-            self.chat_id[:12], len(old_msgs), estimated,
+            "正在压缩 [%s..] %d 条消息 → 摘要 " "(估算 %d tokens > %d)",
+            self.chat_id[:12],
+            len(old_msgs),
+            estimated,
             self.compact_threshold_tokens,
         )
 
@@ -586,7 +578,8 @@ class ChatContext:
         summary = summary.strip()
         _log.info(
             "压缩完成: %d 条 → 摘要 (%d 字符)",
-            len(old_msgs), len(summary),
+            len(old_msgs),
+            len(summary),
         )
 
         timestamp = old_msgs[0].timestamp
@@ -605,11 +598,9 @@ class ChatContext:
         return True, usage
 
 
-def _build_merged_dict(
-    group: List[ChatMessage], window_seconds: int
-) -> Optional[Dict]:
+def _build_merged_dict(group: List[ChatMessage], window_seconds: int) -> Optional[Dict]:
     """将一组连续同发送人的 user 消息合并为单个 dict。
-    
+
     group 由 group_user_messages() 产出，保证所有 msg.role == "user"
     且 sender_id 相同。
 

@@ -4,8 +4,8 @@ from typing import Any, Dict, List, Optional
 
 import psutil
 
-from core.engine.agent_engine import AgentEngine
 from core.command_handlers.base import command, make_reply
+from core.engine.agent_engine import AgentEngine
 from core.message import InputMessage
 
 _log = logging.getLogger(__name__)
@@ -26,7 +26,12 @@ def _hindsight_status_line(health: dict) -> str:
     return f"不可达 ❌ ({error})"
 
 
-@command(name="状态", aliases=["status"], permission="admin", description="查看系统状态（管理员专用）")
+@command(
+    name="状态",
+    aliases=["status"],
+    permission="admin",
+    description="查看系统状态（管理员专用）",
+)
 class StatusCommand:
     def __init__(self, agent_engine: AgentEngine, approval_manager=None):
         self.agent_engine = agent_engine
@@ -35,15 +40,18 @@ class StatusCommand:
     @staticmethod
     def _plugin_count() -> int:
         from core.plugins.manager import _current as _pm
+
         return _pm.count if _pm else 0
 
-    async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
+    async def execute(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
         try:
             memory = psutil.virtual_memory()
             cpu_percent = psutil.cpu_percent(interval=0.1)
             disk = psutil.disk_usage("/")
             process = psutil.Process()
-            process_memory = process.memory_info().rss / (1024 ** 2)
+            process_memory = process.memory_info().rss / (1024**2)
             process_cpu = process.cpu_percent(interval=0.1)
 
             stats = self.agent_engine.get_stats()

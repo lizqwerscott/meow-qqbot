@@ -4,18 +4,24 @@ import re
 from typing import Any, Dict, List, Optional
 
 import httpx
-
 from qqbot_agent_sdk import (
     QQApiClient,
     QQWebSocket,
     WSCallbacks,
-    parse_interaction_event,
     parse_approval_button_data,
+    parse_interaction_event,
 )
 from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
-from qqbot_agent_sdk.dto import InlineKeyboard, MediaInfo, MessageToCreate, QQMessageType, WSReadyData
+from qqbot_agent_sdk.dto import (
+    InlineKeyboard,
+    MediaInfo,
+    MessageToCreate,
+    QQMessageType,
+    WSReadyData,
+)
 from qqbot_agent_sdk.media_loader import MediaUploader
 
+from core.ai.multimodal import MultimodalService
 from core.engine.agent_engine import AgentEngine
 from core.engine.message_parser import MessageParser, MessageParserDeps
 from core.engine.router import Router
@@ -23,7 +29,6 @@ from core.managers.command_manager import CommandManager
 from core.managers.emoji_manager import EmojiManager
 from core.managers.nickname_manager import NicknameManager
 from core.message import InputMessage
-from core.ai.multimodal import MultimodalService
 
 _log = logging.getLogger(__name__)
 
@@ -96,36 +101,38 @@ class BotEngine:
 
     @staticmethod
     def _utf8len(text: str) -> int:
-        return len(text.encode('utf-8'))
+        return len(text.encode("utf-8"))
 
     @staticmethod
     def _is_fence_line(line: str) -> str | None:
-        m = re.match(r'^(\s*)(`{3,}|~{3,})', line)
+        m = re.match(r"^(\s*)(`{3,}|~{3,})", line)
         return m.group(2) if m else None
 
     @staticmethod
     def _is_closing_fence_line(line: str, marker: str) -> bool:
         marker_char = marker[0]
-        m = re.match(r'^\s*(' + re.escape(marker_char) + r'{3,})\s*$', line)
+        m = re.match(r"^\s*(" + re.escape(marker_char) + r"{3,})\s*$", line)
         return bool(m and len(m.group(1)) >= len(marker))
 
     @staticmethod
     def _is_table_separator(line: str) -> bool:
         line = line.strip()
-        if not line.startswith('|') or not line.endswith('|'):
+        if not line.startswith("|") or not line.endswith("|"):
             return False
-        cells = [c.strip() for c in line[1:-1].split('|')]
-        return len(cells) >= 2 and all(re.match(r'^:?-+:?$', c) for c in cells)
+        cells = [c.strip() for c in line[1:-1].split("|")]
+        return len(cells) >= 2 and all(re.match(r"^:?-+:?$", c) for c in cells)
 
     @staticmethod
     def _is_table_row(line: str) -> bool:
         line = line.strip()
-        if not line.startswith('|') or not line.endswith('|'):
+        if not line.startswith("|") or not line.endswith("|"):
             return False
-        return len([c.strip() for c in line[1:-1].split('|')]) >= 2
+        return len([c.strip() for c in line[1:-1].split("|")]) >= 2
 
     @staticmethod
-    def _append_or_flush(chunks: list[str], text: str, max_bytes: int, spacer: str = '\n\n'):
+    def _append_or_flush(
+        chunks: list[str], text: str, max_bytes: int, spacer: str = "\n\n"
+    ):
         if not text:
             return
         if chunks:
@@ -141,21 +148,23 @@ class BotEngine:
         if BotEngine._utf8len(t) <= max_bytes:
             BotEngine._append_or_flush(chunks, t, max_bytes)
             return
-        for para in t.split('\n\n'):
+        for para in t.split("\n\n"):
             para = para.strip()
             if not para:
                 continue
             if BotEngine._utf8len(para) <= max_bytes:
                 BotEngine._append_or_flush(chunks, para, max_bytes)
             else:
-                for sentence in re.split(r'(?<=[。！？!?\n])', para):
+                for sentence in re.split(r"(?<=[。！？!?\n])", para):
                     sentence = sentence.strip()
                     if not sentence:
                         continue
                     if BotEngine._utf8len(sentence) <= max_bytes:
-                        BotEngine._append_or_flush(chunks, sentence, max_bytes, spacer='\n')
+                        BotEngine._append_or_flush(
+                            chunks, sentence, max_bytes, spacer="\n"
+                        )
                     else:
-                        buf = ''
+                        buf = ""
                         for char in sentence:
                             cand = buf + char
                             if BotEngine._utf8len(cand) <= max_bytes:
@@ -170,7 +179,7 @@ class BotEngine:
     def _flush_text(chunks: list[str], text_lines: list[str], max_bytes: int):
         if not text_lines:
             return
-        t = '\n'.join(text_lines)
+        t = "\n".join(text_lines)
         text_lines.clear()
         BotEngine._chunk_text(t, max_bytes, chunks)
 
@@ -178,7 +187,7 @@ class BotEngine:
     def _flush_table(chunks: list[str], table_lines: list[str], max_bytes: int):
         if len(table_lines) < 3:
             return
-        full = '\n'.join(table_lines)
+        full = "\n".join(table_lines)
         if BotEngine._utf8len(full) <= max_bytes:
             chunks.append(full)
             table_lines.clear()
@@ -187,19 +196,21 @@ class BotEngine:
         rows = table_lines[2:]
         out_lines = list(header)
         for row in rows:
-            cand = '\n'.join(out_lines + [row])
+            cand = "\n".join(out_lines + [row])
             if BotEngine._utf8len(cand) <= max_bytes:
                 out_lines.append(row)
             else:
                 if len(out_lines) > 2:
-                    chunks.append('\n'.join(out_lines))
+                    chunks.append("\n".join(out_lines))
                 out_lines = list(header) + [row]
         if len(out_lines) > 2:
-            chunks.append('\n'.join(out_lines))
+            chunks.append("\n".join(out_lines))
         table_lines.clear()
 
     @staticmethod
-    def _split_markdown(text: str, max_bytes: int = QQBOT_MARKDOWN_SAFE_CHUNK_BYTE_LIMIT) -> list[str]:
+    def _split_markdown(
+        text: str, max_bytes: int = QQBOT_MARKDOWN_SAFE_CHUNK_BYTE_LIMIT
+    ) -> list[str]:
         if not text:
             return []
         if BotEngine._utf8len(text) <= max_bytes:
@@ -233,7 +244,7 @@ class BotEngine:
             if not fence_body:
                 chunks.append(f"{open_line}\n{close}")
             else:
-                body = '\n'.join(fence_body)
+                body = "\n".join(fence_body)
                 full = f"{open_line}\n{body}\n{close}"
                 if BotEngine._utf8len(full) <= max_bytes:
                     chunks.append(full)
@@ -241,14 +252,14 @@ class BotEngine:
                     lines = list(fence_body)
                     cur = [open_line]
                     for line in lines:
-                        cand = '\n'.join(cur + [line, close])
+                        cand = "\n".join(cur + [line, close])
                         if BotEngine._utf8len(cand) <= max_bytes:
                             cur.append(line)
                         else:
-                            chunks.append('\n'.join(cur + [close]))
+                            chunks.append("\n".join(cur + [close]))
                             cur = [open_line, line]
                     if len(cur) > 1:
-                        chunks.append('\n'.join(cur + [close]))
+                        chunks.append("\n".join(cur + [close]))
             fence_body.clear()
             active_fence = None
 
@@ -264,7 +275,7 @@ class BotEngine:
                 pending_header = None
                 pending_header_cells = None
 
-        lines = text.split('\n')
+        lines = text.split("\n")
 
         for line in lines:
             marker = BotEngine._is_fence_line(line)
@@ -306,7 +317,9 @@ class BotEngine:
                     table_lines.append(line)
                 else:
                     pending_header = line
-                    pending_header_cells = [c.strip() for c in line.strip()[1:-1].split('|')]
+                    pending_header_cells = [
+                        c.strip() for c in line.strip()[1:-1].split("|")
+                    ]
                 continue
 
             _flush_table_lines()
@@ -332,8 +345,11 @@ class BotEngine:
             on_disconnected=lambda: _log.info("WebSocket 已断开"),
             on_fatal_error=lambda code, msg: _log.error(f"致命错误 [{code}]: {msg}"),
             get_session=lambda: (self._session_id, self._last_seq),
-            set_session=lambda sid, seq: setattr(self, "_session_id", sid) or setattr(self, "_last_seq", seq),
-            set_heartbeat_interval=lambda interval: _log.info(f"WS 心跳间隔: {interval}s"),
+            set_session=lambda sid, seq: setattr(self, "_session_id", sid)
+            or setattr(self, "_last_seq", seq),
+            set_heartbeat_interval=lambda interval: _log.info(
+                f"WS 心跳间隔: {interval}s"
+            ),
             on_heartbeat_ack=lambda: _log.debug("WS 心跳 ACK 已确认"),
             clear_token=lambda: self.api.clear_token(),
             fail_pending=lambda reason: _log.warning(f"挂起请求失败: {reason}"),
@@ -373,8 +389,11 @@ class BotEngine:
                     self._main_loop,
                 )
                 future.add_done_callback(
-                    lambda f: _log.error(f"注入 AgentEngine 依赖失败: {f.exception()}")
-                    if f.exception() else None
+                    lambda f: (
+                        _log.error(f"注入 AgentEngine 依赖失败: {f.exception()}")
+                        if f.exception()
+                        else None
+                    )
                 )
                 self._deps_injected = True
             else:
@@ -384,8 +403,11 @@ class BotEngine:
                     self._main_loop,
                 )
                 future.add_done_callback(
-                    lambda f: _log.error(f"重连更新 AgentEngine 失败: {f.exception()}")
-                    if f.exception() else None
+                    lambda f: (
+                        _log.error(f"重连更新 AgentEngine 失败: {f.exception()}")
+                        if f.exception()
+                        else None
+                    )
                 )
 
     async def _inject_agent_engine_deps(self):
@@ -426,7 +448,9 @@ class BotEngine:
         if parsed is None:
             return
 
-        _log.info(f"[{parsed.chat_scope}][({event_type})] {parsed.sender_id}: {parsed.content}")
+        _log.info(
+            f"[{parsed.chat_scope}][({event_type})] {parsed.sender_id}: {parsed.content}"
+        )
 
         # 采集昵称（副作用）
         await self.nickname_manager.collect(parsed.author_id, parsed.author_username)
@@ -475,7 +499,9 @@ class BotEngine:
             session_key, decision = parsed
             approver_id = interaction.operator_openid
             resolved = self.approval_manager and self.approval_manager.resolve(
-                session_key, decision, approver_id,
+                session_key,
+                decision,
+                approver_id,
             )
             if resolved:
                 responses = {
@@ -525,13 +551,19 @@ class BotEngine:
             if reply_to is not None:
                 msg.msg_id = reply_to
             if is_group:
-                return await self.api.post_group_message(chat_id, msg, keyboard=keyboard)
+                return await self.api.post_group_message(
+                    chat_id, msg, keyboard=keyboard
+                )
             return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
 
         if keyboard:
-            msg = self.api.build_text_body(content, reply_to=reply_to, markdown=markdown)
+            msg = self.api.build_text_body(
+                content, reply_to=reply_to, markdown=markdown
+            )
             if is_group:
-                return await self.api.post_group_message(chat_id, msg, keyboard=keyboard)
+                return await self.api.post_group_message(
+                    chat_id, msg, keyboard=keyboard
+                )
             return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
 
         chunks = BotEngine._split_markdown(content)
@@ -541,7 +573,9 @@ class BotEngine:
                 chunk = f"[{i + 1}/{len(chunks)}]\n{chunk}"
             try:
                 last_result = await self.api.send_text(
-                    chat_type, chat_id, chunk,
+                    chat_type,
+                    chat_id,
+                    chunk,
                     reply_to=reply_to,
                     markdown=markdown,
                 )
@@ -549,7 +583,9 @@ class BotEngine:
                 if markdown:
                     _log.warning("Chunk %d Markdown 发送失败，降级为纯文本重试", i)
                     last_result = await self.api.send_text(
-                        chat_type, chat_id, chunk,
+                        chat_type,
+                        chat_id,
+                        chunk,
                         reply_to=reply_to,
                         markdown=False,
                     )
@@ -571,8 +607,13 @@ class BotEngine:
         keyboard: Optional[InlineKeyboard] = None,
     ) -> Dict[str, Any]:
         return await self._send(
-            chat_id, content, reply_to=message_id, is_group=is_group,
-            media_file_info=media_file_info, markdown=markdown, keyboard=keyboard,
+            chat_id,
+            content,
+            reply_to=message_id,
+            is_group=is_group,
+            media_file_info=media_file_info,
+            markdown=markdown,
+            keyboard=keyboard,
         )
 
     async def send_proactive(
@@ -586,8 +627,13 @@ class BotEngine:
         keyboard: Optional[InlineKeyboard] = None,
     ) -> Dict[str, Any]:
         return await self._send(
-            chat_id, content, reply_to=None, is_group=is_group,
-            media_file_info=media_file_info, markdown=markdown, keyboard=keyboard,
+            chat_id,
+            content,
+            reply_to=None,
+            is_group=is_group,
+            media_file_info=media_file_info,
+            markdown=markdown,
+            keyboard=keyboard,
         )
 
     async def _send_reply(

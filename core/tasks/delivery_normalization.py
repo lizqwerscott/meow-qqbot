@@ -9,7 +9,9 @@ from typing import Tuple
 ACK_MAX_CHARS_DEFAULT = 300
 
 
-def strip_heartbeat_token(text: str, ack_max_chars: int = ACK_MAX_CHARS_DEFAULT) -> Tuple[str, bool]:
+def strip_heartbeat_token(
+    text: str, ack_max_chars: int = ACK_MAX_CHARS_DEFAULT
+) -> Tuple[str, bool]:
     """剥离 HEARTBEAT_OK / NO_REPLY token。
 
     返回 (清理后文本, 是否应跳过投递)。
@@ -19,7 +21,7 @@ def strip_heartbeat_token(text: str, ack_max_chars: int = ACK_MAX_CHARS_DEFAULT)
         return "", True
 
     # 剥离 HTML tags 并修整空白
-    cleaned = re.sub(r'<[^>]*>', ' ', text).strip()
+    cleaned = re.sub(r"<[^>]*>", " ", text).strip()
 
     token, alt_token = "HEARTBEAT_OK", "NO_REPLY"
     cleaned_upper = cleaned.upper()
@@ -40,10 +42,10 @@ def strip_heartbeat_token(text: str, ack_max_chars: int = ACK_MAX_CHARS_DEFAULT)
         for tok in (token, alt_token):
             stripped = cleaned
             if stripped.upper().startswith(tok):
-                stripped = stripped[len(tok):].lstrip()
-            m = re.search(re.escape(tok) + r'[^\w]{0,4}$', stripped, re.IGNORECASE)
+                stripped = stripped[len(tok) :].lstrip()
+            m = re.search(re.escape(tok) + r"[^\w]{0,4}$", stripped, re.IGNORECASE)
             if m:
-                stripped = stripped[:m.start()]
+                stripped = stripped[: m.start()]
             if stripped != cleaned:
                 cleaned = stripped
                 changed = True
@@ -63,12 +65,12 @@ def strip_trailing_notify_false(text: str) -> Tuple[str, bool]:
     对应 OpenClaw stripTrailingHeartbeatNotifyFalse。
     """
     m = re.search(
-        r'(?:^|[\r\n])[ \t]*notify\s*=\s*false[ \t]*(?:\r?\n[ \t]*)*$',
+        r"(?:^|[\r\n])[ \t]*notify\s*=\s*false[ \t]*(?:\r?\n[ \t]*)*$",
         text,
         re.IGNORECASE,
     )
     if m:
-        return text[:m.start()].rstrip(), True
+        return text[: m.start()].rstrip(), True
     return text, False
 
 

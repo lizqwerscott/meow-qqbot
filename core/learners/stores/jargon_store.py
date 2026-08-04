@@ -1,7 +1,7 @@
 """俚语存储 — JargonEntry 数据模型 + JargonStore 持久化。"""
 
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
 
 from core.learners.stores.base_store import JsonStore
@@ -86,7 +86,9 @@ class JargonStore:
                 results.append(JargonEntry.from_dict(d))
         return results
 
-    def get_active_for_chat(self, chat_id: str, min_level: int = 1) -> List[JargonEntry]:
+    def get_active_for_chat(
+        self, chat_id: str, min_level: int = 1
+    ) -> List[JargonEntry]:
         """获取某群活跃的俚语（level >= min_level）。
 
         - 手动添加的词条（source=manual）全局可见
@@ -98,7 +100,9 @@ class JargonStore:
             if entry.inference_level >= min_level:
                 if entry.source == "manual":
                     results.append(entry)
-                elif chat_id in entry.origin_sessions or chat_id in entry.group_variants:
+                elif (
+                    chat_id in entry.origin_sessions or chat_id in entry.group_variants
+                ):
                     results.append(entry)
         return results
 

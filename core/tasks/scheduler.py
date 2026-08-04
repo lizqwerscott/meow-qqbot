@@ -40,10 +40,10 @@ class CronJobScheduler:
         self._semaphore = asyncio.Semaphore(max_concurrent)
 
         # 需要外部注入的回调
-        self._on_trigger: Optional[Callable] = None       # async (job: CronJob) -> None
-        self._get_jobs: Optional[Callable] = None          # () -> list[CronJob]
-        self._update_job: Optional[Callable] = None        # async (job: CronJob) -> None
-        self._delete_job: Optional[Callable] = None        # async (job_id: str) -> bool
+        self._on_trigger: Optional[Callable] = None  # async (job: CronJob) -> None
+        self._get_jobs: Optional[Callable] = None  # () -> list[CronJob]
+        self._update_job: Optional[Callable] = None  # async (job: CronJob) -> None
+        self._delete_job: Optional[Callable] = None  # async (job_id: str) -> bool
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -131,9 +131,7 @@ class CronJobScheduler:
             if job.next_run_at <= now - 1:
                 delta = now - job.next_run_at
                 if delta <= self._catch_up_window:
-                    _log.info(
-                        f"定时任务 {job.name} 需补跑 (missed={delta:.0f}s)"
-                    )
+                    _log.info(f"定时任务 {job.name} 需补跑 (missed={delta:.0f}s)")
                     to_trigger.append(job)
                 else:
                     _log.info(
@@ -195,9 +193,7 @@ class CronJobScheduler:
                 continue
 
             if job.next_run_at <= now:
-                _log.info(
-                    f"定时任务到期: {job.name} (next_run_at={job.next_run_at})"
-                )
+                _log.info(f"定时任务到期: {job.name} (next_run_at={job.next_run_at})")
 
                 if job.is_one_shot:
                     # 一次性任务：标记已触发，防止后续重复触发

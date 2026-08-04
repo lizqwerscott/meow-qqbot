@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -12,7 +12,10 @@ router = APIRouter(tags=["learners"])
 
 def _make_flash_redirect(url: str, category: str, message: str):
     separator = "&" if "?" in url else "?"
-    return RedirectResponse(url=f"{url}{separator}flash_{category}={message}", status_code=HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        url=f"{url}{separator}flash_{category}={message}",
+        status_code=HTTP_303_SEE_OTHER,
+    )
 
 
 def _get_learner_data(store: Any) -> list:
@@ -35,22 +38,29 @@ async def jargon_list(
     templates = request.app.state.templates
     orchestrator = managers.get("learning_orchestrator")
 
-    items = _get_learner_data(orchestrator.jargon.store if orchestrator and orchestrator.jargon else None)
+    items = _get_learner_data(
+        orchestrator.jargon.store if orchestrator and orchestrator.jargon else None
+    )
 
     if q:
         q_lower = q.lower()
         items = [
-            item for item in items
+            item
+            for item in items
             if q_lower in item.get("term", "").lower()
             or q_lower in item.get("definition", "").lower()
         ]
 
-    return templates.TemplateResponse(request, "learners/jargons.html", {
-        "request": request,
-        "items": items,
-        "tab": "jargons",
-        "query": q or "",
-    })
+    return templates.TemplateResponse(
+        request,
+        "learners/jargons.html",
+        {
+            "request": request,
+            "items": items,
+            "tab": "jargons",
+            "query": q or "",
+        },
+    )
 
 
 @router.post("/learners/jargons/{term}/delete")
@@ -69,9 +79,11 @@ async def jargon_delete(request: Request, term: str):
 async def behaviors_placeholder():
     return _make_flash_redirect("/learners/jargons", "info", "行为模式功能尚未实现")
 
+
 @router.get("/learners/expressions", response_class=RedirectResponse)
 async def expressions_placeholder():
     return _make_flash_redirect("/learners/jargons", "info", "表情映射功能尚未实现")
+
 
 @router.get("/learners/scenes", response_class=RedirectResponse)
 async def scenes_placeholder():

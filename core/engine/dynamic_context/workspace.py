@@ -71,9 +71,7 @@ class WorkspaceBlockBuilder:
                 "如需在项目根目录执行命令，设置 workdir='.'。"
             )
         else:
-            sandbox = str(
-                self._workspace_manager.sandbox_dir(is_group, chat_id)
-            )
+            sandbox = str(self._workspace_manager.sandbox_dir(is_group, chat_id))
             parts.append(f"当前{ws_type}工作区: {sandbox}/")
             parts.append(
                 "你的文件工作区位于上述 files/ 目录下。"
@@ -83,8 +81,6 @@ class WorkspaceBlockBuilder:
                 "文件路径请使用相对于工作区的相对路径（例如 'memo.txt'），"
                 "不要使用绝对路径。"
             )
-            parts.append(
-                "exec 工具默认工作目录与此一致。"
-            )
+            parts.append("exec 工具默认工作目录与此一致。")
 
         return "\n\n".join(parts)

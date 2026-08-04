@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Optional
 
-from core.tools._types import ToolEntry, ToolContext, ToolResult
+from core.tools._types import ToolContext, ToolEntry, ToolResult
 
 _log = logging.getLogger(__name__)
 
@@ -52,11 +52,15 @@ class ToolRegistry:
         if permission_manager:
             role = permission_manager.get_user_role(ctx.sender_id)
             if not permission_manager.can_use_tool(name, role):
-                _log.warning(f"工具权限拒绝: {name} role={role} sender={ctx.sender_id[:16]}..")
-                return ToolResult(content=json.dumps(
-                    {"error": "你没有权限使用该工具"},
-                    ensure_ascii=False,
-                ))
+                _log.warning(
+                    f"工具权限拒绝: {name} role={role} sender={ctx.sender_id[:16]}.."
+                )
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": "你没有权限使用该工具"},
+                        ensure_ascii=False,
+                    )
+                )
 
         _log.info(f"[工具调用] {name}: {json.dumps(args, ensure_ascii=False)[:200]}")
         result = await entry.handler(args, ctx)

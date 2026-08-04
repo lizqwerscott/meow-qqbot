@@ -34,6 +34,7 @@ class PatchAction:
 # 解析器
 # ═══════════════════════════════════════════════════════════
 
+
 def parse_patch_text(text: str) -> dict[str, PatchAction]:
     """解析 patch 文本，返回 path → PatchAction 的映射。
 
@@ -65,27 +66,27 @@ def parse_patch_text(text: str) -> dict[str, PatchAction]:
             continue
 
         if line.startswith("*** Update File: "):
-            path = line[len("*** Update File: "):]
+            path = line[len("*** Update File: ") :]
             if path in actions:
                 raise DiffError(f"Duplicate path in patch: {path}")
             idx += 1
             move_path = ""
             if idx < len(lines) - 1 and lines[idx].startswith("*** Move to: "):
-                move_path = lines[idx][len("*** Move to: "):]
+                move_path = lines[idx][len("*** Move to: ") :]
                 idx += 1
             action, idx = _parse_update_hunks(lines, idx)
             action.move_path = move_path
             actions[path] = action
 
         elif line.startswith("*** Delete File: "):
-            path = line[len("*** Delete File: "):]
+            path = line[len("*** Delete File: ") :]
             if path in actions:
                 raise DiffError(f"Duplicate path in patch: {path}")
             actions[path] = PatchAction(type=ActionType.DELETE)
             idx += 1
 
         elif line.startswith("*** Add File: "):
-            path = line[len("*** Add File: "):]
+            path = line[len("*** Add File: ") :]
             if path in actions:
                 raise DiffError(f"Duplicate path in patch: {path}")
             action, idx = _parse_add(lines, idx)
@@ -156,7 +157,9 @@ def _parse_update_hunks(lines: list[str], idx: int) -> tuple[PatchAction, int]:
 
 
 def _parse_one_hunk(
-    lines: list[str], idx: int, context_line: str = "",
+    lines: list[str],
+    idx: int,
+    context_line: str = "",
 ) -> tuple[Optional[Hunk], int]:
     """解析单个 Hunk（+/-/ 行）。
 
@@ -172,14 +175,16 @@ def _parse_one_hunk(
         raw = line
 
         # 检查终止条件
-        if raw.startswith((
-            "@@",
-            "*** End Patch",
-            "*** Update File:",
-            "*** Delete File:",
-            "*** Add File:",
-            "*** End of File",
-        )):
+        if raw.startswith(
+            (
+                "@@",
+                "*** End Patch",
+                "*** Update File:",
+                "*** Delete File:",
+                "*** Add File:",
+                "*** End of File",
+            )
+        ):
             break
         if raw == "***":
             idx += 1
@@ -210,12 +215,16 @@ def _parse_one_hunk(
 
     if not started:
         return None, idx
-    return Hunk(old_lines=old_lines, new_lines=new_lines, context_line=context_line), idx
+    return (
+        Hunk(old_lines=old_lines, new_lines=new_lines, context_line=context_line),
+        idx,
+    )
 
 
 # ═══════════════════════════════════════════════════════════
 # Update 匹配引擎（三级降级，对齐 OpenAI）
 # ═══════════════════════════════════════════════════════════
+
 
 def _normalizers() -> list[Callable[[str], str]]:
     return [
@@ -226,7 +235,10 @@ def _normalizers() -> list[Callable[[str], str]]:
 
 
 def _find_context(
-    lines: list[str], old_lines: list[str], start: int, eof: bool,
+    lines: list[str],
+    old_lines: list[str],
+    start: int,
+    eof: bool,
 ) -> int:
     """在 lines 中搜索 old_lines 序列，返回匹配起始行号。
 
@@ -307,6 +319,6 @@ def apply_update_hunks(content: str, hunks: list[Hunk]) -> str:
     # 从后往前应用（保持索引稳定）
     replacements.sort(key=lambda x: x[0], reverse=True)
     for start, count, new_lines in replacements:
-        lines[start:start + count] = list(new_lines)
+        lines[start : start + count] = list(new_lines)
 
     return "\n".join(lines)

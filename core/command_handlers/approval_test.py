@@ -20,11 +20,13 @@ class ApprovalTestCommand:
         self.api = api_client
         self.bot_engine = bot_engine
 
-    async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
+    async def execute(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
         if self.api is None:
             return make_reply(input_message, "❌ api_client 未注入")
 
-        from qqbot_agent_sdk import ApprovalSender, ApprovalRequest, InlineKeyboard
+        from qqbot_agent_sdk import ApprovalRequest, ApprovalSender, InlineKeyboard
         from qqbot_agent_sdk.dto import (
             KeyboardButton,
             KeyboardButtonAction,
@@ -65,47 +67,60 @@ class ApprovalTestCommand:
         keyboard = InlineKeyboard(
             content=KeyboardContent(
                 rows=[
-                    KeyboardRow(buttons=[
-                        KeyboardButton(
-                            id="btn_a",
-                            render_data=KeyboardButtonRenderData(
-                                label="选项 A",
-                                visited_label="已选 A",
-                                style=1,
+                    KeyboardRow(
+                        buttons=[
+                            KeyboardButton(
+                                id="btn_a",
+                                render_data=KeyboardButtonRenderData(
+                                    label="选项 A",
+                                    visited_label="已选 A",
+                                    style=1,
+                                ),
+                                action=KeyboardButtonAction(
+                                    type=1, data="test_keyboard:A"
+                                ),
                             ),
-                            action=KeyboardButtonAction(type=1, data="test_keyboard:A"),
-                        ),
-                        KeyboardButton(
-                            id="btn_b",
-                            render_data=KeyboardButtonRenderData(
-                                label="选项 B",
-                                visited_label="已选 B",
-                                style=0,
+                            KeyboardButton(
+                                id="btn_b",
+                                render_data=KeyboardButtonRenderData(
+                                    label="选项 B",
+                                    visited_label="已选 B",
+                                    style=0,
+                                ),
+                                action=KeyboardButtonAction(
+                                    type=1, data="test_keyboard:B"
+                                ),
                             ),
-                            action=KeyboardButtonAction(type=1, data="test_keyboard:B"),
-                        ),
-                    ]),
-                    KeyboardRow(buttons=[
-                        KeyboardButton(
-                            id="btn_c",
-                            render_data=KeyboardButtonRenderData(
-                                label="选项 C",
-                                visited_label="已选 C",
-                                style=1,
+                        ]
+                    ),
+                    KeyboardRow(
+                        buttons=[
+                            KeyboardButton(
+                                id="btn_c",
+                                render_data=KeyboardButtonRenderData(
+                                    label="选项 C",
+                                    visited_label="已选 C",
+                                    style=1,
+                                ),
+                                action=KeyboardButtonAction(
+                                    type=1, data="test_keyboard:C"
+                                ),
                             ),
-                            action=KeyboardButtonAction(type=1, data="test_keyboard:C"),
-                        ),
-                    ]),
+                        ]
+                    ),
                 ]
             )
         )
 
         if self.bot_engine:
             await self.bot_engine.send_reply(
-                chat_id, "📋 请选择一个选项：",
+                chat_id,
+                "📋 请选择一个选项：",
                 message_id=input_message.id,
                 is_group=input_message.is_group,
                 keyboard=keyboard,
             )
 
-        return make_reply(input_message, "✅ 已发送审批消息和自定义键盘测试，请在聊天中查看并点击按钮")
+        return make_reply(
+            input_message, "✅ 已发送审批消息和自定义键盘测试，请在聊天中查看并点击按钮"
+        )

@@ -37,7 +37,10 @@ async def _save_json(path: str, data: dict) -> None:
 
 def _make_flash_redirect(url: str, category: str, message: str):
     separator = "&" if "?" in url else "?"
-    return RedirectResponse(url=f"{url}{separator}flash_{category}={message}", status_code=HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        url=f"{url}{separator}flash_{category}={message}",
+        status_code=HTTP_303_SEE_OTHER,
+    )
 
 
 @router.get("/nicknames", response_class=HTMLResponse)
@@ -47,11 +50,15 @@ async def nickname_list(request: Request):
     manual = await _load_json(MANUAL_PATH)
     auto = await _load_json(AUTO_PATH)
 
-    return templates.TemplateResponse(request, "nicknames/list.html", {
-        "request": request,
-        "manual_nicknames": manual,
-        "auto_nicknames": auto,
-    })
+    return templates.TemplateResponse(
+        request,
+        "nicknames/list.html",
+        {
+            "request": request,
+            "manual_nicknames": manual,
+            "auto_nicknames": auto,
+        },
+    )
 
 
 @router.post("/nicknames/manual")

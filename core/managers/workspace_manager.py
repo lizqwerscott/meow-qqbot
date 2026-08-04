@@ -29,7 +29,13 @@ class WorkspaceManager:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def resolve_safe_path(self, is_group: bool, chat_id: str, relative_path: str, admin_override: bool = False) -> Path:
+    def resolve_safe_path(
+        self,
+        is_group: bool,
+        chat_id: str,
+        relative_path: str,
+        admin_override: bool = False,
+    ) -> Path:
         """解析沙箱内相对路径，防止目录穿越。
 
         admin_override=True 时以 workspaces/ 根目录为沙箱（仅限管理员私聊）。

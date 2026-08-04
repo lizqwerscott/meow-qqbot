@@ -119,5 +119,5 @@ class ModelCooldownManager:
             return 0.0
         # 指数退避: base * 2^(count - threshold)
         exponent = failure_count - self._failure_threshold
-        delay = self._base_cooldown * (2 ** exponent)
+        delay = self._base_cooldown * (2**exponent)
         return min(delay, self._max_cooldown)

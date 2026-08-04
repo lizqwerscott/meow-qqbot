@@ -46,8 +46,7 @@ class TaskManager:
         )
         await self._store.add_task(task)
         _log.info(
-            f"任务已创建: id={task.id[:12]}.. type={task_type} "
-            f"prompt={prompt[:60]}"
+            f"任务已创建: id={task.id[:12]}.. type={task_type} " f"prompt={prompt[:60]}"
         )
         return task
 
@@ -126,7 +125,9 @@ class TaskManager:
             if task is None:
                 return False
             if task.status not in TaskStatus.active():
-                _log.warning(f"任务 {task_id[:12]}.. 当前状态 {task.status.value} 不可取消")
+                _log.warning(
+                    f"任务 {task_id[:12]}.. 当前状态 {task.status.value} 不可取消"
+                )
                 return False
 
             runner = self._running_tasks.pop(task_id, None)

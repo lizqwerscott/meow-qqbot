@@ -15,8 +15,8 @@ import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from core.learners.stores.scene_store import SceneStore, TagCluster
 from core.learners.base import cosine_similarity
+from core.learners.stores.scene_store import SceneStore, TagCluster
 
 _log = logging.getLogger(__name__)
 
@@ -124,10 +124,12 @@ class SceneClusterer:
             return
 
         async with self._buffer_lock:
-            self._buffer.append({
-                "text": message_text[:200],
-                "ts": time.time(),
-            })
+            self._buffer.append(
+                {
+                    "text": message_text[:200],
+                    "ts": time.time(),
+                }
+            )
 
             if len(self._buffer) >= self._window_size:
                 batch = self._buffer[:]
@@ -212,7 +214,9 @@ class SceneClusterer:
             await self._store.save(cluster)
             _log.info(f"SceneClusterer 新簇: {cid} tags={tags}")
 
-    def _find_best_cluster(self, tags: Dict[str, float]) -> Tuple[Optional[TagCluster], float]:
+    def _find_best_cluster(
+        self, tags: Dict[str, float]
+    ) -> Tuple[Optional[TagCluster], float]:
         """从已有簇中找到最佳匹配。"""
         best_cluster = None
         best_sim = 0.0
@@ -254,7 +258,7 @@ class SceneClusterer:
                 return [None] * len(texts)
 
             results = []
-            for item in data[:len(texts)]:
+            for item in data[: len(texts)]:
                 if isinstance(item, dict):
                     results.append(item)
                 else:

@@ -10,8 +10,9 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from core.tasks.heartbeat_wake import WakeIntent as WI
-from .wake_coalescer import INTENT_MANUAL, INTENT_IMMEDIATE
+
 from .heartbeat_schedule import is_in_active_hours_ts
+from .wake_coalescer import INTENT_IMMEDIATE, INTENT_MANUAL
 
 _log = logging.getLogger(__name__)
 
@@ -64,10 +65,16 @@ def run_preflight(ctx: PreflightContext) -> PreflightResult:
         "[Preflight] entry: source=%s intent=%s session=%s "
         "cron=%s session_active=%s agent_busy=%s events=%s prompt=%s "
         "active_hours=%s delivery_pending=%s",
-        ctx.source, ctx.intent, ctx.session_key[:20],
-        ctx.has_cron_jobs, ctx.is_session_active, ctx.is_agent_busy,
-        ctx.has_system_events, ctx.has_extra_prompt,
-        ctx.active_hours, ctx.is_delivery_pending,
+        ctx.source,
+        ctx.intent,
+        ctx.session_key[:20],
+        ctx.has_cron_jobs,
+        ctx.is_session_active,
+        ctx.is_agent_busy,
+        ctx.has_system_events,
+        ctx.has_extra_prompt,
+        ctx.active_hours,
+        ctx.is_delivery_pending,
     )
 
     # ── 分类唤醒载荷 ──
@@ -86,7 +93,9 @@ def run_preflight(ctx: PreflightContext) -> PreflightResult:
     if not ctx.source_is_manual:
         start, end, tz = (ctx.active_hours + (None, None, None))[:3]
         if start and end:
-            if not is_in_active_hours_ts(time.time(), start, end, tz or "Asia/Shanghai"):
+            if not is_in_active_hours_ts(
+                time.time(), start, end, tz or "Asia/Shanghai"
+            ):
                 _log.info("[Preflight] step=02 active_hours: SKIP → quiet-hours")
                 result.skip_reason = "quiet-hours"
                 return result

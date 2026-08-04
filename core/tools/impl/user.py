@@ -1,7 +1,7 @@
 import json
 import logging
 
-from core.tools._types import ToolEntry, ToolResult, ToolContext
+from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
 
 _log = logging.getLogger(__name__)
@@ -12,11 +12,15 @@ def create_user_entries(deps: ToolDeps) -> list[ToolEntry]:
     async def _search_user(args: dict, ctx: ToolContext) -> ToolResult:
         nm = deps.nickname_manager
         if nm is None:
-            return ToolResult(content=json.dumps({"error": "昵称管理器未就绪"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "昵称管理器未就绪"}, ensure_ascii=False)
+            )
 
         query = (args.get("query") or "").strip().lower()
         if not query:
-            return ToolResult(content=json.dumps({"error": "搜索关键词为空"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "搜索关键词为空"}, ensure_ascii=False)
+            )
 
         matches = []
         for uid, aliases in nm.iter_users():
@@ -33,9 +37,12 @@ def create_user_entries(deps: ToolDeps) -> list[ToolEntry]:
                 matches.append((score, uid, aliases[-1] if aliases else uid))
 
         if not matches:
-            return ToolResult(content=json.dumps(
-                {"error": f"未找到匹配的用户: {query}"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"未找到匹配的用户: {query}"},
+                    ensure_ascii=False,
+                )
+            )
 
         matches.sort(key=lambda x: -x[0])
         result = [{"user_id": uid, "nickname": name} for _, uid, name in matches[:10]]

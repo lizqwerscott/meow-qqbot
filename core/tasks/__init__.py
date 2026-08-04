@@ -24,29 +24,46 @@
 
 from .delivery_normalization import normalize_heartbeat_reply, strip_heartbeat_token
 from .delivery_strategy import (
-    HeartbeatDeliveryStrategy, ChatReplyDeliveryStrategy,
-    SilentDeliveryStrategy, DeliveryStrategy,
+    ChatReplyDeliveryStrategy,
+    DeliveryStrategy,
+    HeartbeatDeliveryStrategy,
+    SilentDeliveryStrategy,
 )
 from .heartbeat import HeartbeatManager
 from .heartbeat_cooldown import HeartbeatCooldown
 from .heartbeat_schedule import (
-    resolve_phase_ms, compute_next_phase_due_ms, seek_next_active_phase,
+    compute_next_phase_due_ms,
     is_in_active_hours_ts,
+    resolve_phase_ms,
+    seek_next_active_phase,
 )
 from .heartbeat_wake import WakeIntent
-from .manager import TaskManager, CronJobManager
-from .models import TaskRecord, TaskStatus, CronJob, SessionMode
-from .wake_mode import WakeMode
-from .preflight import run_preflight, PreflightContext, PreflightResult
+from .manager import CronJobManager, TaskManager
+from .models import CronJob, SessionMode, TaskRecord, TaskStatus
+from .preflight import PreflightContext, PreflightResult, run_preflight
 from .runner import BackgroundTaskRunner
 from .scheduler import CronJobScheduler
 from .store import TaskStore
 from .wake_coalescer import (
-    request_wake, execute_immediate, set_wake_handler, clear_pending,
-    get_status, PendingWake, WakeRunResult, WakeTurnResult,
-    SOURCE_INTERVAL, SOURCE_MANUAL, SOURCE_EXEC, SOURCE_CRON, SOURCE_TASK,
-    INTENT_MANUAL, INTENT_IMMEDIATE, INTENT_EVENT, INTENT_SCHEDULED,
+    INTENT_EVENT,
+    INTENT_IMMEDIATE,
+    INTENT_MANUAL,
+    INTENT_SCHEDULED,
+    SOURCE_CRON,
+    SOURCE_EXEC,
+    SOURCE_INTERVAL,
+    SOURCE_MANUAL,
+    SOURCE_TASK,
+    PendingWake,
+    WakeRunResult,
+    WakeTurnResult,
+    clear_pending,
+    execute_immediate,
+    get_status,
+    request_wake,
+    set_wake_handler,
 )
+from .wake_mode import WakeMode
 from .wake_runner import WakeRunner
 
 __all__ = [

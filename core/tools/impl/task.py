@@ -3,18 +3,27 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from core.tools._types import ToolEntry, ToolResult, ToolContext
+from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
 
 _log = logging.getLogger(__name__)
 
-_CRON_ALLOWED: frozenset = frozenset({
-    "announce", "search_user",
-    "memory", "mark_important",
-    "read_file", "write_file", "edit_file", "apply_patch",
-    "exec",
-    "view_skill", "execute_skill", "rescan_skills",
-})
+_CRON_ALLOWED: frozenset = frozenset(
+    {
+        "announce",
+        "search_user",
+        "memory",
+        "mark_important",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "apply_patch",
+        "exec",
+        "view_skill",
+        "execute_skill",
+        "rescan_skills",
+    }
+)
 
 
 def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
@@ -42,9 +51,12 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
     async def _cron_add(args: dict, ctx: ToolContext) -> ToolResult:
         cron_job_manager = deps.cron_job_manager.value
         if not cron_job_manager:
-            return ToolResult(content=json.dumps(
-                {"error": "定时任务系统未就绪"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "定时任务系统未就绪"},
+                    ensure_ascii=False,
+                )
+            )
 
         name = (args.get("name") or "").strip()
         cron_expression = (args.get("cron_expression") or "").strip()
@@ -61,38 +73,58 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
         tools_allow = args.get("tools_allow")
         if tools_allow is not None:
             if not isinstance(tools_allow, list):
-                return ToolResult(content=json.dumps(
-                    {"error": "tools_allow 必须是字符串数组"}, ensure_ascii=False,
-                ))
-            invalid_names = [n for n in tools_allow if n not in _CRON_ALLOWED and n != "*"]
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": "tools_allow 必须是字符串数组"},
+                        ensure_ascii=False,
+                    )
+                )
+            invalid_names = [
+                n for n in tools_allow if n not in _CRON_ALLOWED and n != "*"
+            ]
             if invalid_names:
-                return ToolResult(content=json.dumps({
-                    "error": (
-                        f"以下工具不允许用于定时任务: {', '.join(invalid_names)}。"
-                        f"可用工具: {', '.join(sorted(_CRON_ALLOWED))}"
-                    ),
-                }, ensure_ascii=False))
+                return ToolResult(
+                    content=json.dumps(
+                        {
+                            "error": (
+                                f"以下工具不允许用于定时任务: {', '.join(invalid_names)}。"
+                                f"可用工具: {', '.join(sorted(_CRON_ALLOWED))}"
+                            ),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
             if "*" in tools_allow:
                 tools_allow = ["*"]
             else:
                 tools_allow = [n for n in tools_allow if n != "*"]
 
         if not name:
-            return ToolResult(content=json.dumps({"error": "name 不能为空"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "name 不能为空"}, ensure_ascii=False)
+            )
         if not prompt and payload_type not in ("command", "system_event"):
-            return ToolResult(content=json.dumps({"error": "prompt 不能为空"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "prompt 不能为空"}, ensure_ascii=False)
+            )
         if not cron_expression and not at_str:
-            return ToolResult(content=json.dumps(
-                {"error": "cron_expression 和 at 必须至少提供一个"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "cron_expression 和 at 必须至少提供一个"},
+                    ensure_ascii=False,
+                )
+            )
 
         at_ts = None
         if at_str:
             at_ts = _parse_iso_datetime(at_str)
             if at_ts is None:
-                return ToolResult(content=json.dumps(
-                    {"error": f"时间格式无法解析: {at_str}"}, ensure_ascii=False,
-                ))
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": f"时间格式无法解析: {at_str}"},
+                        ensure_ascii=False,
+                    )
+                )
 
         valid_modes = {"isolated", "custom", "main"}
         if session_mode not in valid_modes:
@@ -103,9 +135,12 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
         if payload_type not in valid_payloads:
             payload_type = "message"
         if payload_type == "command" and not payload_command:
-            return ToolResult(content=json.dumps(
-                {"error": "payload_type=command 时 command 不能为空"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "payload_type=command 时 command 不能为空"},
+                    ensure_ascii=False,
+                )
+            )
 
         if payload_type == "message":
             payload_command = ""
@@ -115,16 +150,26 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
             payload_command = ""
 
         job = await cron_job_manager.create_job(
-            name=name, cron_expression=cron_expression, prompt=prompt,
-            at=at_ts, delivery_channel=ctx.chat_id, is_group=ctx.is_group,
-            session_mode=session_mode, custom_session_id=custom_session_id,
-            payload_type=payload_type, command=payload_command,
-            model=payload_model, thinking=payload_thinking,
-            enable_notify=enable_notify, tools_allow=tools_allow,
+            name=name,
+            cron_expression=cron_expression,
+            prompt=prompt,
+            at=at_ts,
+            delivery_channel=ctx.chat_id,
+            is_group=ctx.is_group,
+            session_mode=session_mode,
+            custom_session_id=custom_session_id,
+            payload_type=payload_type,
+            command=payload_command,
+            model=payload_model,
+            thinking=payload_thinking,
+            enable_notify=enable_notify,
+            tools_allow=tools_allow,
         )
 
         payload_labels = {
-            "message": "AI 消息", "command": "Shell 命令", "system_event": "系统事件",
+            "message": "AI 消息",
+            "command": "Shell 命令",
+            "system_event": "系统事件",
         }
         if job.is_one_shot:
             desc = f"🕐 一次性{payload_labels.get(payload_type, '任务')}「{name}」已创建！将在 {at_str} 执行。"
@@ -145,27 +190,48 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
         if mode_desc:
             desc += f"\nSession 模式: {mode_desc}"
 
-        return ToolResult(content=json.dumps({
-            "success": True, "job_id": job.id[:16], "name": job.name,
-            "cron_expression": job.cron_expression or "", "at": at_str,
-            "session_mode": session_mode, "session_id": job.custom_session_id or "",
-            "payload_type": payload_type, "command": payload_command or "",
-            "model": payload_model or "", "thinking": payload_thinking or "",
-            "tools_allow": tools_allow, "message": desc,
-        }, ensure_ascii=False))
+        return ToolResult(
+            content=json.dumps(
+                {
+                    "success": True,
+                    "job_id": job.id[:16],
+                    "name": job.name,
+                    "cron_expression": job.cron_expression or "",
+                    "at": at_str,
+                    "session_mode": session_mode,
+                    "session_id": job.custom_session_id or "",
+                    "payload_type": payload_type,
+                    "command": payload_command or "",
+                    "model": payload_model or "",
+                    "thinking": payload_thinking or "",
+                    "tools_allow": tools_allow,
+                    "message": desc,
+                },
+                ensure_ascii=False,
+            )
+        )
 
     async def _cron_update(args: dict, ctx: ToolContext) -> ToolResult:
         cron_job_manager = deps.cron_job_manager.value
         if not cron_job_manager:
-            return ToolResult(content=json.dumps(
-                {"error": "定时任务系统未就绪"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "定时任务系统未就绪"},
+                    ensure_ascii=False,
+                )
+            )
         job_id = (args.get("job_id") or "").strip()
         if not job_id:
-            return ToolResult(content=json.dumps({"error": "job_id 不能为空"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "job_id 不能为空"}, ensure_ascii=False)
+            )
         job = _find_cron_job(job_id)
         if job is None:
-            return ToolResult(content=json.dumps({"error": f"未找到定时任务: {job_id}"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"未找到定时任务: {job_id}"}, ensure_ascii=False
+                )
+            )
         old_name = job.name
         changed = []
 
@@ -174,165 +240,301 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
                 setter(job, args[field], changed)
 
         if not changed:
-            return ToolResult(content=json.dumps({"error": "未提供要修改的字段"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "未提供要修改的字段"}, ensure_ascii=False)
+            )
         await cron_job_manager.update_job(job)
-        return ToolResult(content=json.dumps({
-            "success": True, "job_id": job.id[:16], "name": job.name,
-            "changed": changed, "tools_allow": job.tools_allow,
-            "message": f"定时任务「{old_name}」已更新: {', '.join(changed)}",
-        }, ensure_ascii=False))
+        return ToolResult(
+            content=json.dumps(
+                {
+                    "success": True,
+                    "job_id": job.id[:16],
+                    "name": job.name,
+                    "changed": changed,
+                    "tools_allow": job.tools_allow,
+                    "message": f"定时任务「{old_name}」已更新: {', '.join(changed)}",
+                },
+                ensure_ascii=False,
+            )
+        )
 
     async def _cron_remove(args: dict, ctx: ToolContext) -> ToolResult:
         cron_job_manager = deps.cron_job_manager.value
         if not cron_job_manager:
-            return ToolResult(content=json.dumps({"error": "定时任务系统未就绪"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "定时任务系统未就绪"}, ensure_ascii=False)
+            )
         job_id = (args.get("job_id") or "").strip()
         if not job_id:
-            return ToolResult(content=json.dumps({"error": "job_id 不能为空"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "job_id 不能为空"}, ensure_ascii=False)
+            )
         job = _find_cron_job(job_id)
         if job is None:
-            return ToolResult(content=json.dumps({"error": f"未找到定时任务: {job_id}"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"未找到定时任务: {job_id}"}, ensure_ascii=False
+                )
+            )
         name = job.name
         await cron_job_manager.delete_job(job.id)
-        return ToolResult(content=json.dumps({
-            "success": True, "job_id": job.id[:16], "name": name,
-            "message": f"定时任务「{name}」已删除",
-        }, ensure_ascii=False))
+        return ToolResult(
+            content=json.dumps(
+                {
+                    "success": True,
+                    "job_id": job.id[:16],
+                    "name": name,
+                    "message": f"定时任务「{name}」已删除",
+                },
+                ensure_ascii=False,
+            )
+        )
 
     async def _cron_enable(args: dict, ctx: ToolContext) -> ToolResult:
         cron_job_manager = deps.cron_job_manager.value
         if not cron_job_manager:
-            return ToolResult(content=json.dumps({"error": "定时任务系统未就绪"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "定时任务系统未就绪"}, ensure_ascii=False)
+            )
         job_id = (args.get("job_id") or "").strip()
         if not job_id:
-            return ToolResult(content=json.dumps({"error": "job_id 不能为空"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "job_id 不能为空"}, ensure_ascii=False)
+            )
         job = _find_cron_job(job_id)
         if job is None:
-            return ToolResult(content=json.dumps({"error": f"未找到定时任务: {job_id}"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"未找到定时任务: {job_id}"}, ensure_ascii=False
+                )
+            )
         if job.enabled:
-            return ToolResult(content=json.dumps({
-                "success": True, "job_id": job.id[:16], "name": job.name,
-                "message": f"定时任务「{job.name}」已是启用状态",
-            }, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps(
+                    {
+                        "success": True,
+                        "job_id": job.id[:16],
+                        "name": job.name,
+                        "message": f"定时任务「{job.name}」已是启用状态",
+                    },
+                    ensure_ascii=False,
+                )
+            )
         success = await cron_job_manager.enable_job(job.id)
-        return ToolResult(content=json.dumps({
-            "success": success, "job_id": job.id[:16], "name": job.name,
-            "message": f"定时任务「{job.name}」已启用",
-        }, ensure_ascii=False))
+        return ToolResult(
+            content=json.dumps(
+                {
+                    "success": success,
+                    "job_id": job.id[:16],
+                    "name": job.name,
+                    "message": f"定时任务「{job.name}」已启用",
+                },
+                ensure_ascii=False,
+            )
+        )
 
     async def _cron_disable(args: dict, ctx: ToolContext) -> ToolResult:
         cron_job_manager = deps.cron_job_manager.value
         if not cron_job_manager:
-            return ToolResult(content=json.dumps({"error": "定时任务系统未就绪"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "定时任务系统未就绪"}, ensure_ascii=False)
+            )
         job_id = (args.get("job_id") or "").strip()
         if not job_id:
-            return ToolResult(content=json.dumps({"error": "job_id 不能为空"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "job_id 不能为空"}, ensure_ascii=False)
+            )
         job = _find_cron_job(job_id)
         if job is None:
-            return ToolResult(content=json.dumps({"error": f"未找到定时任务: {job_id}"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"未找到定时任务: {job_id}"}, ensure_ascii=False
+                )
+            )
         if not job.enabled:
-            return ToolResult(content=json.dumps({
-                "success": True, "job_id": job.id[:16], "name": job.name,
-                "message": f"定时任务「{job.name}」已是暂停状态",
-            }, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps(
+                    {
+                        "success": True,
+                        "job_id": job.id[:16],
+                        "name": job.name,
+                        "message": f"定时任务「{job.name}」已是暂停状态",
+                    },
+                    ensure_ascii=False,
+                )
+            )
         success = await cron_job_manager.disable_job(job.id)
-        return ToolResult(content=json.dumps({
-            "success": success, "job_id": job.id[:16], "name": job.name,
-            "message": f"定时任务「{job.name}」已暂停",
-        }, ensure_ascii=False))
+        return ToolResult(
+            content=json.dumps(
+                {
+                    "success": success,
+                    "job_id": job.id[:16],
+                    "name": job.name,
+                    "message": f"定时任务「{job.name}」已暂停",
+                },
+                ensure_ascii=False,
+            )
+        )
 
     async def _cron_list(args: dict, ctx: ToolContext) -> ToolResult:
         cron_job_manager = deps.cron_job_manager.value
         if not cron_job_manager:
-            return ToolResult(content=json.dumps({"error": "定时任务系统未就绪"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "定时任务系统未就绪"}, ensure_ascii=False)
+            )
         jobs = cron_job_manager.list_jobs()
         if not jobs:
-            return ToolResult(content=json.dumps({"jobs": [], "message": "暂无定时任务"}, ensure_ascii=False))
-        result = [{
-            "id": j.id, "name": j.name, "cron_expression": j.cron_expression or "",
-            "at": j.at, "enabled": j.enabled, "next_run_at": j.next_run_at,
-            "is_one_shot": j.is_one_shot, "session_mode": j.session_mode,
-            "custom_session_id": j.custom_session_id or "",
-            "payload_type": j.payload_type,
-            "prompt": j.prompt[:100] if j.prompt else "",
-            "command": j.command[:100] if j.command else "",
-            "tools_allow": j.tools_allow,
-        } for j in jobs]
-        return ToolResult(content=json.dumps({"jobs": result, "total": len(result)}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps(
+                    {"jobs": [], "message": "暂无定时任务"}, ensure_ascii=False
+                )
+            )
+        result = [
+            {
+                "id": j.id,
+                "name": j.name,
+                "cron_expression": j.cron_expression or "",
+                "at": j.at,
+                "enabled": j.enabled,
+                "next_run_at": j.next_run_at,
+                "is_one_shot": j.is_one_shot,
+                "session_mode": j.session_mode,
+                "custom_session_id": j.custom_session_id or "",
+                "payload_type": j.payload_type,
+                "prompt": j.prompt[:100] if j.prompt else "",
+                "command": j.command[:100] if j.command else "",
+                "tools_allow": j.tools_allow,
+            }
+            for j in jobs
+        ]
+        return ToolResult(
+            content=json.dumps(
+                {"jobs": result, "total": len(result)}, ensure_ascii=False
+            )
+        )
 
     async def _cron_get(args: dict, ctx: ToolContext) -> ToolResult:
         cron_job_manager = deps.cron_job_manager.value
         if not cron_job_manager:
-            return ToolResult(content=json.dumps({"error": "定时任务系统未就绪"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "定时任务系统未就绪"}, ensure_ascii=False)
+            )
         job_id = (args.get("job_id") or "").strip()
         if not job_id:
-            return ToolResult(content=json.dumps({"error": "job_id 不能为空"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "job_id 不能为空"}, ensure_ascii=False)
+            )
         job = _find_cron_job(job_id)
         if job is None:
-            return ToolResult(content=json.dumps({"error": f"未找到定时任务: {job_id}"}, ensure_ascii=False))
-        return ToolResult(content=json.dumps({
-            "id": job.id, "name": job.name,
-            "cron_expression": job.cron_expression or "",
-            "at": job.at, "enabled": job.enabled,
-            "next_run_at": job.next_run_at,
-            "is_one_shot": job.is_one_shot,
-            "session_mode": job.session_mode,
-            "custom_session_id": job.custom_session_id or "",
-            "payload_type": job.payload_type,
-            "prompt": job.prompt if job.prompt else "",
-            "command": job.command if job.command else "",
-            "tools_allow": job.tools_allow,
-        }, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"未找到定时任务: {job_id}"}, ensure_ascii=False
+                )
+            )
+        return ToolResult(
+            content=json.dumps(
+                {
+                    "id": job.id,
+                    "name": job.name,
+                    "cron_expression": job.cron_expression or "",
+                    "at": job.at,
+                    "enabled": job.enabled,
+                    "next_run_at": job.next_run_at,
+                    "is_one_shot": job.is_one_shot,
+                    "session_mode": job.session_mode,
+                    "custom_session_id": job.custom_session_id or "",
+                    "payload_type": job.payload_type,
+                    "prompt": job.prompt if job.prompt else "",
+                    "command": job.command if job.command else "",
+                    "tools_allow": job.tools_allow,
+                },
+                ensure_ascii=False,
+            )
+        )
 
     async def _cron(args: dict, ctx: ToolContext) -> ToolResult:
         action = (args.get("action") or "").strip()
         match action:
-            case "add":     return await _cron_add(args, ctx)
-            case "update":  return await _cron_update(args, ctx)
-            case "remove":  return await _cron_remove(args, ctx)
-            case "enable":  return await _cron_enable(args, ctx)
-            case "disable": return await _cron_disable(args, ctx)
-            case "list":    return await _cron_list(args, ctx)
-            case "get":     return await _cron_get(args, ctx)
+            case "add":
+                return await _cron_add(args, ctx)
+            case "update":
+                return await _cron_update(args, ctx)
+            case "remove":
+                return await _cron_remove(args, ctx)
+            case "enable":
+                return await _cron_enable(args, ctx)
+            case "disable":
+                return await _cron_disable(args, ctx)
+            case "list":
+                return await _cron_list(args, ctx)
+            case "get":
+                return await _cron_get(args, ctx)
             case _:
-                return ToolResult(content=json.dumps(
-                    {"error": f"未知 action: {action}，可用: add, update, remove, enable, disable, list, get"},
-                    ensure_ascii=False,
-                ))
+                return ToolResult(
+                    content=json.dumps(
+                        {
+                            "error": f"未知 action: {action}，可用: add, update, remove, enable, disable, list, get"
+                        },
+                        ensure_ascii=False,
+                    )
+                )
 
     async def _task_cancel(args: dict, ctx: ToolContext) -> ToolResult:
         task_manager = deps.task_manager.value
         system_events = deps.system_events
         if not task_manager:
-            return ToolResult(content=json.dumps(
-                {"error": "任务系统未就绪"}, ensure_ascii=False,
-            ))
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "任务系统未就绪"},
+                    ensure_ascii=False,
+                )
+            )
         task_id = (args.get("task_id") or "").strip()
         if not task_id:
-            return ToolResult(content=json.dumps({"error": "task_id 不能为空"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "task_id 不能为空"}, ensure_ascii=False)
+            )
         task = task_manager.get_task(task_id)
         if task is None:
             tasks = task_manager.list_tasks(limit=50)
             matched = [t for t in tasks if t.id.startswith(task_id)]
             if not matched:
-                return ToolResult(content=json.dumps({"error": f"未找到任务: {task_id}"}, ensure_ascii=False))
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": f"未找到任务: {task_id}"}, ensure_ascii=False
+                    )
+                )
             task_id = matched[0].id
         success = await task_manager.cancel_task(task_id)
         if success:
             if system_events:
                 system_events.enqueue(
-                    session_key=ctx.chat_id, text="任务已取消", context_key=f"task:{task_id}",
+                    session_key=ctx.chat_id,
+                    text="任务已取消",
+                    context_key=f"task:{task_id}",
                 )
-            return ToolResult(content=json.dumps({
-                "success": True, "task_id": task_id[:16],
-                "message": f"任务 {task_id[:12]}.. 已取消。",
-            }, ensure_ascii=False))
-        return ToolResult(content=json.dumps({"error": f"无法取消任务 {task_id[:12]}.."}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps(
+                    {
+                        "success": True,
+                        "task_id": task_id[:16],
+                        "message": f"任务 {task_id[:12]}.. 已取消。",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        return ToolResult(
+            content=json.dumps(
+                {"error": f"无法取消任务 {task_id[:12]}.."}, ensure_ascii=False
+            )
+        )
 
     async def _task_list(args: dict, ctx: ToolContext) -> ToolResult:
         task_manager = deps.task_manager.value
         if not task_manager:
-            return ToolResult(content=json.dumps({"error": "任务系统未就绪"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": "任务系统未就绪"}, ensure_ascii=False)
+            )
         status_str = (args.get("status") or "").strip().lower()
         limit = min(args.get("limit") or 20, 50)
         if not isinstance(limit, int) or limit < 1:
@@ -340,33 +542,53 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
         status_filter = None
         if status_str:
             from core.tasks.models import TaskStatus as TS
+
             try:
                 status_filter = TS(status_str)
             except ValueError:
                 pass
         tasks = task_manager.list_tasks(limit=limit, status=status_filter)
         if not tasks:
-            return ToolResult(content=json.dumps({"tasks": [], "message": "暂无任务记录"}, ensure_ascii=False))
-        result = [{
-            "id": t.id, "type": t.type, "status": t.status.value,
-            "created_at": t.created_at, "started_at": t.started_at,
-            "finished_at": t.finished_at, "job_id": t.job_id,
-            "prompt": t.prompt[:100] if t.prompt else "",
-            "result": t.result[:200] if t.result else None,
-            "error": t.error[:200] if t.error else None,
-        } for t in tasks]
-        return ToolResult(content=json.dumps({"tasks": result, "total": len(result)}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps(
+                    {"tasks": [], "message": "暂无任务记录"}, ensure_ascii=False
+                )
+            )
+        result = [
+            {
+                "id": t.id,
+                "type": t.type,
+                "status": t.status.value,
+                "created_at": t.created_at,
+                "started_at": t.started_at,
+                "finished_at": t.finished_at,
+                "job_id": t.job_id,
+                "prompt": t.prompt[:100] if t.prompt else "",
+                "result": t.result[:200] if t.result else None,
+                "error": t.error[:200] if t.error else None,
+            }
+            for t in tasks
+        ]
+        return ToolResult(
+            content=json.dumps(
+                {"tasks": result, "total": len(result)}, ensure_ascii=False
+            )
+        )
 
     async def _task(args: dict, ctx: ToolContext) -> ToolResult:
         action = (args.get("action") or "").strip()
         match action:
-            case "list":   return await _task_list(args, ctx)
-            case "cancel": return await _task_cancel(args, ctx)
+            case "list":
+                return await _task_list(args, ctx)
+            case "cancel":
+                return await _task_cancel(args, ctx)
             case _:
-                return ToolResult(content=json.dumps(
-                    {"error": f"未知 action: {action}，可用: list, cancel"},
-                    ensure_ascii=False,
-                ))
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": f"未知 action: {action}，可用: list, cancel"},
+                        ensure_ascii=False,
+                    )
+                )
 
     def _updater_name(job, val, changed):
         job.name = (val or "").strip()
@@ -457,19 +679,56 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
     }
 
     _CRON_JOB_FIELDS = {
-        "name": {"type": "string", "description": "任务的名字，方便管理和查找，如'早安提醒'、'新年提醒'"},
-        "cron_expression": {"type": "string", "description": "周期性 cron 表达式（北京时间 CST/UTC+8，与 at 二选一）。例如：'0 8 * * *' 表示北京时间每天早上8点"},
-        "at": {"type": "string", "description": "一次性执行时间，ISO 8601 格式（北京时间 CST/UTC+8）。例如：'2027-01-01T08:00:00+08:00'"},
-        "prompt": {"type": "string", "description": "AI 要执行的指令。仅在 payload_type=message 时有效且必填。"},
-        "session_mode": {"type": "string", "enum": ["isolated", "custom", "main"], "description": "任务执行所在的 session 模式。默认为 isolated。"},
-        "session_id": {"type": "string", "description": "custom 模式下使用的命名 session ID。"},
-        "payload_type": {"type": "string", "enum": ["message", "command", "system_event"], "description": "任务载荷类型。默认为 message。"},
-        "command": {"type": "string", "description": "shell 命令。仅在 payload_type=command 时有效且必填。"},
-        "model": {"type": "string", "description": "AI 模型覆盖，仅对 message 载荷有效。"},
-        "thinking": {"type": "string", "enum": ["off", "low", "medium", "high"], "description": "AI 思考级别覆盖。"},
-        "enable_notify": {"type": "boolean", "description": "是否投递执行结果到频道。默认为 true。"},
+        "name": {
+            "type": "string",
+            "description": "任务的名字，方便管理和查找，如'早安提醒'、'新年提醒'",
+        },
+        "cron_expression": {
+            "type": "string",
+            "description": "周期性 cron 表达式（北京时间 CST/UTC+8，与 at 二选一）。例如：'0 8 * * *' 表示北京时间每天早上8点",
+        },
+        "at": {
+            "type": "string",
+            "description": "一次性执行时间，ISO 8601 格式（北京时间 CST/UTC+8）。例如：'2027-01-01T08:00:00+08:00'",
+        },
+        "prompt": {
+            "type": "string",
+            "description": "AI 要执行的指令。仅在 payload_type=message 时有效且必填。",
+        },
+        "session_mode": {
+            "type": "string",
+            "enum": ["isolated", "custom", "main"],
+            "description": "任务执行所在的 session 模式。默认为 isolated。",
+        },
+        "session_id": {
+            "type": "string",
+            "description": "custom 模式下使用的命名 session ID。",
+        },
+        "payload_type": {
+            "type": "string",
+            "enum": ["message", "command", "system_event"],
+            "description": "任务载荷类型。默认为 message。",
+        },
+        "command": {
+            "type": "string",
+            "description": "shell 命令。仅在 payload_type=command 时有效且必填。",
+        },
+        "model": {
+            "type": "string",
+            "description": "AI 模型覆盖，仅对 message 载荷有效。",
+        },
+        "thinking": {
+            "type": "string",
+            "enum": ["off", "low", "medium", "high"],
+            "description": "AI 思考级别覆盖。",
+        },
+        "enable_notify": {
+            "type": "boolean",
+            "description": "是否投递执行结果到频道。默认为 true。",
+        },
         "tools_allow": {
-            "type": ["array", "null"], "items": {"type": "string"},
+            "type": ["array", "null"],
+            "items": {"type": "string"},
             "description": "指定该定时任务可用的工具列表。设置为 ['*'] 可使用全部 cron 允许的工具。",
         },
     }
@@ -478,7 +737,8 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
         "type": "object",
         "properties": {
             "action": {
-                "type": "string", "enum": ["add", "update", "remove", "enable", "disable", "list", "get"],
+                "type": "string",
+                "enum": ["add", "update", "remove", "enable", "disable", "list", "get"],
                 "description": "操作类型：add 创建 | update 修改 | remove 删除 | enable 启用 | disable 暂停 | list 列出所有 | get 查看单个",
             },
             "job_id": {
@@ -505,7 +765,8 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
         "type": "object",
         "properties": {
             "action": {
-                "type": "string", "enum": ["list", "cancel"],
+                "type": "string",
+                "enum": ["list", "cancel"],
                 "description": "操作类型：list 列出后台任务执行记录 | cancel 取消正在运行或等待中的任务",
             },
             "task_id": {

@@ -8,12 +8,19 @@ from core.tools.skill_managers import SkillManagers
 _log = logging.getLogger(__name__)
 
 
-@command(name="技能列表", aliases=["skills"], permission="admin", description="查看所有已安装的技能（管理员专用）")
+@command(
+    name="技能列表",
+    aliases=["skills"],
+    permission="admin",
+    description="查看所有已安装的技能（管理员专用）",
+)
 class SkillsListCommand:
     def __init__(self, skill_managers: SkillManagers):
         self.skill_managers = skill_managers
 
-    async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
+    async def execute(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
         if not self.skill_managers.has_skills:
             return make_reply(input_message, "当前没有安装任何技能。")
 
@@ -24,7 +31,7 @@ class SkillsListCommand:
             desc = ""
             for line in detail.splitlines():
                 if line.startswith("description:"):
-                    desc = line[len("description:"):].strip().strip('"').strip("'")
+                    desc = line[len("description:") :].strip().strip('"').strip("'")
                     break
             if desc:
                 lines.append(f"  • {name} — {desc}")
@@ -34,12 +41,19 @@ class SkillsListCommand:
         return make_reply(input_message, "\n".join(lines))
 
 
-@command(name="技能重新扫描", aliases=["rescan_skills", "技能刷新"], permission="admin", description="重新扫描技能目录，发现新增或移除的技能（管理员专用）")
+@command(
+    name="技能重新扫描",
+    aliases=["rescan_skills", "技能刷新"],
+    permission="admin",
+    description="重新扫描技能目录，发现新增或移除的技能（管理员专用）",
+)
 class SkillsRescanCommand:
     def __init__(self, skill_managers: SkillManagers):
         self.skill_managers = skill_managers
 
-    async def execute(self, input_message: InputMessage, args: str) -> List[Dict[str, Any]]:
+    async def execute(
+        self, input_message: InputMessage, args: str
+    ) -> List[Dict[str, Any]]:
         result = self.skill_managers.rescan()
         return make_reply(
             input_message,
