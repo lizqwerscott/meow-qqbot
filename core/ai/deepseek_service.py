@@ -396,10 +396,8 @@ class DeepSeekResponsesService:
                         "response.output_item.done",
                     ):
                         item = getattr(event, "item", None)
-                        if (
-                            item is not None
-                            and getattr(item, "type", None) == "function_call"
-                        ):
+                        itype = getattr(item, "type", None) if item else None
+                        if itype == "function_call":
                             name = getattr(item, "name", None)
                             call_id = getattr(item, "call_id", None) or getattr(
                                 item, "id", None
@@ -410,6 +408,16 @@ class DeepSeekResponsesService:
                             if call_id:
                                 call_ids[getattr(item, "id", None)] = call_id
                                 call_ids[call_id] = call_id
+                        elif itype == "message" and et == "response.output_item.added":
+                            # 模型修订输出（草稿→终稿）：新 message item 开始，
+                            # 之前 item 的文本必须丢弃——否则草稿+终稿在缓冲里
+                            # 拼接成翻倍内容（线上事故：两条部分重复的消息）。
+                            buffer.text_parts.clear()
+                        elif (
+                            itype == "reasoning" and et == "response.output_item.added"
+                        ):
+                            # 修订后的新 reasoning item：旧思维链丢弃（仅日志用途）
+                            buffer.reasoning_parts.clear()
                     elif et == "response.output_text.delta":
                         buffer.text_parts.append(event.delta)
                         if callbacks and callbacks.on_text:

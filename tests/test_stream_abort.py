@@ -239,6 +239,60 @@ class TestDeepSeekStreamAbort:
                 svc.chat_completion_stream(messages=[{"role": "user", "content": "hi"}])
             )
 
+    def test_draft_then_final_keeps_only_final(self):
+        """修订输出（草稿+终稿两个 message item）：缓冲只保留终稿。
+
+        回归（线上事故）：DeepSeek v4-flash 先流草稿再流终稿，旧实现把两个
+        item 的 output_text.delta 全部 append → 内容 = 草稿+终稿翻倍，用户
+        看到两条消息（首块切在草稿末尾 + 补发终稿）。
+        """
+        p1 = "第一段"
+        p2 = "第二段"
+        p3 = "第三段补充"
+
+        class _DraftFinalStream:
+            async def __aiter__(self):
+                yield _ev(
+                    "response.output_item.added",
+                    item=NS(type="message", id="item_draft"),
+                )
+                for ch in p1 + "\n\n" + p2:
+                    yield _ev(
+                        "response.output_text.delta", delta=ch, item_id="item_draft"
+                    )
+                yield _ev(
+                    "response.output_item.done",
+                    item=NS(type="message", id="item_draft"),
+                )
+                yield _ev(
+                    "response.output_item.added",
+                    item=NS(type="message", id="item_final"),
+                )
+                for ch in p1 + "\n\n" + p2 + "\n\n" + p3:
+                    yield _ev(
+                        "response.output_text.delta", delta=ch, item_id="item_final"
+                    )
+                yield _ev(
+                    "response.output_item.done",
+                    item=NS(type="message", id="item_final"),
+                )
+                yield _ev("response.completed", response=NS(usage=None))
+
+            async def close(self):
+                pass
+
+        async def create(**kwargs):
+            return _DraftFinalStream()
+
+        svc = _make_deepseek_service(create)
+        message, usage = asyncio_run(
+            svc.chat_completion_stream(messages=[{"role": "user", "content": "hi"}])
+        )
+        assert message is not None
+        assert (
+            message.content == p1 + "\n\n" + p2 + "\n\n" + p3
+        ), "内容必须只含终稿，草稿文本不得混入"
+
     def test_complete_stream_returns_message(self):
         """response.completed 正常收尾不受影响。"""
 
