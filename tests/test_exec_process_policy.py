@@ -437,9 +437,7 @@ async def test_interp_wrapper_inner_bound(deps, tmp_path):
             return True
 
         FakeSender.return_value.send = fake_send
-        r = await _exec(
-            deps, f"timeout 5 node {app}", ADMIN, workdir=str(tmp_path)
-        )
+        r = await _exec(deps, f"timeout 5 node {app}", ADMIN, workdir=str(tmp_path))
         assert "error" not in r
     assert plans[0]["inner_file"] == os.path.realpath(str(app))
     assert plans[0]["interp_unbound"] is False
@@ -756,3 +754,186 @@ async def test_payload_inner_miss_blocks_allowlisted_outer(deps):
         )
         r = json.loads(result.content)
         assert "error" in r
+
+
+# ── exec env 参数（对齐 OpenClaw：模型直接传环境变量，免 `bash -c 'export ...'`）──
+
+
+async def test_env_param_injected_and_runs(deps):
+    # env 参数传给命令（用 python3 读环境变量验证注入）。python3 -c 是 inline
+    # eval → 走审批路径（mock 自动 allow-once），环境变量需真实注入子进程。
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-once", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        entries = create_exec_process_entries(deps)
+        exec_entry = next(e for e in entries if e.name == "exec")
+        pycmd = "import os,sys; sys.stdout.write(os.environ.get('FRESHRSS_URL',''))"
+        result = await exec_entry.handler(
+            {
+                "command": "python3 -c " + repr(pycmd),
+                "env": {"FRESHRSS_URL": "http://192.168.100.203:8050"},
+            },
+            _ctx(ADMIN),
+        )
+        r = json.loads(result.content)
+        assert "error" not in r
+        assert "192.168.100.203" in r["stdout"]
+
+
+async def test_env_param_blocked_dangerous_key(deps):
+    # 危险键（PYTHONPATH）→ Security Violation：即使命令 allowlist 命中也拒绝
+    entries = create_exec_process_entries(deps)
+    exec_entry = next(e for e in entries if e.name == "exec")
+    result = await exec_entry.handler(
+        {"command": "ls -la", "env": {"PYTHONPATH": "/tmp/x"}},
+        _ctx(ADMIN),
+    )
+    r = json.loads(result.content)
+    assert "error" in r
+    assert "Security Violation" in r["error"]
+
+
+async def test_env_param_blocked_path(deps):
+    # PATH 覆盖 → 拒绝
+    entries = create_exec_process_entries(deps)
+    exec_entry = next(e for e in entries if e.name == "exec")
+    result = await exec_entry.handler(
+        {"command": "ls -la", "env": {"PATH": "/evil:/bin"}},
+        _ctx(ADMIN),
+    )
+    r = json.loads(result.content)
+    assert "error" in r
+    assert "Security Violation" in r["error"]
+
+
+async def test_env_param_blocked_prefix(deps):
+    # LD_ 前缀 → 拒绝
+    entries = create_exec_process_entries(deps)
+    exec_entry = next(e for e in entries if e.name == "exec")
+    result = await exec_entry.handler(
+        {"command": "ls -la", "env": {"LD_PRELOAD": "/tmp/x.so"}},
+        _ctx(ADMIN),
+    )
+    r = json.loads(result.content)
+    assert "error" in r
+    assert "Security Violation" in r["error"]
+
+
+async def test_env_param_invalid_key(deps):
+    # 非法键名 → 拒绝
+    entries = create_exec_process_entries(deps)
+    exec_entry = next(e for e in entries if e.name == "exec")
+    result = await exec_entry.handler(
+        {"command": "ls -la", "env": {"1BAD KEY": "x"}},
+        _ctx(ADMIN),
+    )
+    r = json.loads(result.content)
+    assert "error" in r
+    assert "Security Violation" in r["error"]
+
+
+async def test_env_param_bound_in_plan(deps):
+    # 审批（admin miss 走卡）时 env 进入 plan 绑定，approval 通过后执行比对一致
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-once", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        entries = create_exec_process_entries(deps)
+        exec_entry = next(e for e in entries if e.name == "exec")
+        # vim 不在白名单 → 审批；env 进入 plan
+        result = await exec_entry.handler(
+            {
+                "command": "python3 -c 'print(1)'",
+                "env": {"MY_TOOL_KEY": "secret"},
+            },
+            _ctx(ADMIN),
+        )
+        r = json.loads(result.content)
+        # python3 -c 是 inline → 审批路径；允许通过后 MY_TOOL_KEY 环境已生效
+        assert "error" not in r
+
+
+async def test_env_param_background_reaches_spawn(deps):
+    # 后台执行：模型 env 覆盖必须透传到 spawn 的子进程环境。
+    # 用 allowlist 命中的 ls（非 inline）→ 直跑，不走审批；断言 spawn 收到 env。
+    entries = create_exec_process_entries(deps)
+    exec_entry = next(e for e in entries if e.name == "exec")
+    result = await exec_entry.handler(
+        {
+            "command": "ls -la",
+            "env": {"FRESHRSS_URL": "http://bg:8050"},
+            "background": True,
+        },
+        _ctx(ADMIN),
+    )
+    r = json.loads(result.content)
+    assert "error" not in r
+    assert r.get("background") is True
+    # spawn 被调用且 env 含覆盖子集（且是 str 归一后的值）
+    spawn_env = deps.process_registry.value.spawn.call_args.kwargs["env"]
+    assert spawn_env.get("FRESHRSS_URL") == "http://bg:8050"
+    # 危险键仍被拒绝：即使后台也不放行
+    result2 = await exec_entry.handler(
+        {"command": "ls -la", "env": {"NODE_OPTIONS": "--evil"}, "background": True},
+        _ctx(ADMIN),
+    )
+    assert "Security Violation" in json.loads(result2.content)["error"]
+
+
+# ── env_override_policy 模块级单测（集中验证安全边界，锁住黑名单行为）──
+
+
+async def test_validate_env_override_allows_benign_and_coerces_numeric(deps):
+    from core.tools.env_override_policy import validate_env_override
+
+    overrides, errors = validate_env_override(
+        {"FRESHRSS_URL": "http://x:8050", "MY_PORT": 8080, "MY_FLAG": True}
+    )
+    # 数字被接收并强转 str；布尔 True 不是 str/int/float → 拒绝并报错
+    assert "FRESHRSS_URL" in overrides
+    assert "MY_PORT" in overrides and overrides["MY_PORT"] == "8080"
+    assert "MY_FLAG" not in overrides
+    assert any("MY_FLAG" in e for e in errors)
+
+
+async def test_validate_env_override_rejects_invalid_and_blocked(deps):
+    from core.tools.env_override_policy import validate_env_override
+
+    overrides, errors = validate_env_override(
+        {"1BAD K": "x", "PATH": "/evil", "PYTHONPATH": "/p", "LD_PRELOAD": "/x"}
+    )
+    assert overrides == {}  # 全部被拒，无一注入
+    joined = "; ".join(errors)
+    assert "非法环境变量键名" in joined
+    assert "PATH" in joined
+    assert "PYTHONPATH" in joined
+    assert "LD_PRELOAD" in joined
+
+
+async def test_validate_env_override_none_and_non_dict(deps):
+    from core.tools.env_override_policy import validate_env_override
+
+    assert validate_env_override(None) == ({}, [])
+    assert validate_env_override({}) == ({}, [])
+    overrides, errors = validate_env_override("not-a-dict")
+    assert overrides == {}
+    assert errors == ["env 参数必须是 {KEY: value} 字典"]
+
+
+async def test_validate_env_override_case_insensitive_block(deps):
+    from core.tools.env_override_policy import validate_env_override
+
+    # 键名大小写不敏感：小写 path 也拦（对齐 openclaw 的 uppercase 归一）
+    overrides, errors = validate_env_override({"path": "/evil", "paths": "/ok"})
+    assert "path" not in overrides
+    assert "非法" not in "; ".join(errors)  # 不因小写是"合法标识符"而放行
+    assert "paths" in overrides  # 非关键键正常放行

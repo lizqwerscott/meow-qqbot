@@ -32,11 +32,21 @@ from core.tools.exec_analysis import (
     resolve_interpreter_target,
 )
 from core.tools.exec_runner import build_argv, run_plan
+from core.tools.env_override_policy import validate_env_override
 from core.tools.impl.file import is_admin_private
 from core.tools.security import parse_command_safe
 from core.tools.shell_env import build_exec_env_for
 
 _log = logging.getLogger(__name__)
+
+# ── exec 工具 env 参数（对齐 OpenClaw bash-tools.exec.ts 的 env override）──
+#
+# 模型可经 exec 的 env 参数传环境变量（如给 freshrss 脚本传 FRESHRSS_URL），
+# 从而不再需要包一层 `bash -c 'export ... && ...'`（那会触发 strictInlineEval 门禁）。
+#
+# 安全语义（对齐 openclaw sanitizeHostExecEnvWithDiagnostics）：键名必须合法；
+# PATH 覆盖禁止；危险键/前缀硬拒绝（Security Violation，非静默忽略）。策略表
+# 集中维护在 core/tools/env_override_policy.py，评审/更新只改一处。
 
 
 def _build_exec_policy(perm, approval_mgr):
@@ -65,6 +75,11 @@ def _plan_mismatch(stored: dict, current: dict) -> bool:
     if stored.get("argv") != current.get("argv"):
         return True
     if stored.get("inner_file") != current.get("inner_file"):
+        return True
+    # env 绑定（对齐 openclaw args.env）：绑定的是模型传入的覆盖子集
+    # （plan['env'] = env_overrides），非整份合并基础环境——基础环境含 login-shell
+    # PATH/HOME 等非确定值，比对会导致误报；覆盖子集是确定性输入。
+    if stored.get("env") != current.get("env"):
         return True
     return False
 
@@ -152,6 +167,25 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                 )
             )
 
+        # ── env 参数（对齐 OpenClaw exec 工具）：模型可传环境变量，免去
+        #    `bash -c 'export ...'` 包装（那会触发 strictInlineEval 门禁）。
+        #    危险键 / PATH / 非法键名 → 硬拒绝（对齐 openclaw Security Violation）。
+        #    注意：plan 只绑定模型传入的覆盖子集 env_overrides（确定性），不绑定
+        #    合并后的整份 base 环境（login-shell PATH/HOME 等非确定，比对会误报
+        #    APPROVAL_MISMATCH）。
+        base_env = await build_exec_env_for(perm)
+        env_overrides, env_errors = validate_env_override(args.get("env"))
+        if env_errors:
+            detail = "; ".join(env_errors)
+            _log.warning("exec 环境变量校验失败: %s", detail)
+            return ToolResult(
+                content=json.dumps(
+                    {"error": f"Security Violation: {detail}"},
+                    ensure_ascii=False,
+                )
+            )
+        exec_env = dict(base_env)
+        exec_env.update(env_overrides)
         approval_mgr = deps.approval_manager.value
         reviewer = deps.exec_reviewer.value if deps.exec_reviewer else None
 
@@ -239,10 +273,7 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
         heredoc_hit = any(seg.heredoc for seg in iter_all_segments(segments))
 
         effective_allow = (
-            per_segment_ok
-            and not inline_hit
-            and not heredoc_hit
-            and analysis_ok
+            per_segment_ok and not inline_hit and not heredoc_hit and analysis_ok
         )
         needs_ask = requires_approval(
             ask=policy.ask,
@@ -256,6 +287,8 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
             "command": command,
             "argv": parts,
             "cwd": workdir,
+            # 绑定覆盖子集（非整份合并环境），对齐 openclaw 绑定 requestedEnv
+            "env": env_overrides,
             "resolved_path": (
                 segments[0].resolution.resolved_path
                 if segments and segments[0].resolution
@@ -264,11 +297,9 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
             "role": role,
             # 2.1 包装器解包：allow-always 持久化内层可执行路径；
             # 链式命令持久化所有顶层段（每段独立解析）
-            "persist_pattern": [
-                _persist_target(seg) for seg in segments
-            ]
-            if segments
-            else None,
+            "persist_pattern": (
+                [_persist_target(seg) for seg in segments] if segments else None
+            ),
             # 2.2 解释器绑定：目标脚本文件（唯一确定时）+ 是否无法声称覆盖
             "inner_file": inner_file,
             "interp_unbound": interp_unbound,
@@ -385,7 +416,6 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                 )
             try:
                 effective_timeout = min(timeout or 120, 300)
-                env = await build_exec_env_for(perm)
                 # 后台同样绑定解析后的可执行路径（pin executable）
                 bg_parts = build_argv(segments[0]) if segments else parts
                 session_id = await process_registry.spawn(
@@ -395,7 +425,7 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                     chat_id=ctx.chat_id,
                     delivery_channel=delivery_channel,
                     timeout=effective_timeout,
-                    env=env,
+                    env=exec_env,
                 )
                 return ToolResult(
                     content=json.dumps(
@@ -421,12 +451,11 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
         # 前台：段级执行（分析-执行绑定，支持 && || ; | 语义）
         effective_timeout = min(timeout or 60, 120)
         try:
-            env = await build_exec_env_for(perm)
             result = await asyncio.wait_for(
                 asyncio.to_thread(
                     run_plan,
                     segments,
-                    env=env,
+                    env=exec_env,
                     cwd=workdir,
                     timeout=effective_timeout,
                 ),
@@ -562,6 +591,17 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
             "command": {
                 "type": "string",
                 "description": "要执行的 bash 命令",
+            },
+            "env": {
+                "type": "object",
+                "additionalProperties": {"type": ["string", "number"]},
+                "description": (
+                    "传递环境变量（可选）。键值对会在 exec 时注入子进程环境，"
+                    "这样就不需要包一层 `bash -c 'export K=V && ...'`。"
+                    "值可为字符串或数字（数字会转字符串）。"
+                    "注意：PATH / 语言运行时 / 凭据等危险变量会被拒绝（Security Violation），"
+                    "不能覆盖这些键。"
+                ),
             },
             "timeout": {
                 "type": "integer",

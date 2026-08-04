@@ -98,6 +98,7 @@ uv run black <file>   # format code
 - **safe bins**（`[exec]` 段 `safe_bins`，对齐 openclaw `tools.exec.safeBins`）：预信任窄 stdin 过滤器（内置默认 profiles：head/tail/wc/tr；`safe_bin_profiles` 可覆盖），命中且 argv 满足 profile（`max_positional`/`allowed_value_flags`/`allowed_flags`/`denied_flags`）的段视为 allowlist 满足，管道场景（`ls | head -5`）无需白名单条目。
 - **审批超时 followup**：`[exec]` 段 `approval_timeout`（默认 300s，对齐 openclaw pending 过期）；后台执行审批超时/拒绝时向 delivery_channel 投递 followup 通知（对齐 openclaw "命令未运行" 会话恢复）。
 - `strict_inline_eval`: `python -c` / `node -e` / `osascript -e` 等内联求值即使二进制在白名单也强制审批，且 allow-always 不落白名单（`persist=False`）。
+- **exec `env` 参数**（对齐 OpenClaw）：模型可直接给 exec 传 `env`（`{KEY: value}`）注入子进程环境，避免包 `bash -c 'export K=V && ...'`（后者触发 strictInlineEval 门禁）。危险键/PATH/非法键名硬拒绝（`Security Violation`）；env 覆盖子集进入 plan 绑定（审批时比对防漂移，只绑模型传入的覆盖、不绑非确定的 login-shell 基础环境）。危险键/前缀表集中维护在 `core/tools/env_override_policy.py`。此表是**有意添加的 env 覆盖黑名单**——与命令层"无黑名单"哲学不同：env 注入无法靠命令 allowlist/审批兜底（环境变量不触发命令审批，PATH/LD_*/PYTHONPATH 可劫持二进制解析），因此这里是命令行黑名单原则之外的**正当安全例外**。
 - allowlist 命中直跑；miss 时 admin 私聊弹审批卡（`ask_fallback` 默认 deny），其余拒绝。前台群聊不弹卡（审批/审查仅限 c2c）；**后台执行（`background=true`）例外**——对齐 OpenClaw：interactive chat 中的 background exec 走同一审批流，审批卡投递 admin c2c，通过后才 spawn，避免"审批不到直接失败"；auto-reviewer 是模型判定不依赖聊天面，同样放行。
 - 非 admin 仍叠加 `PermissionManager.check_command_allowed`（替换/串联/管道/重定向/长度/`[commands].allowed`）。
 - `mode=auto` 可接 `ExecAutoReviewer`（`core/approval/auto_reviewer.py`，通过 `deps.exec_reviewer` 注入），miss 先 LLM 审查再转人工。
