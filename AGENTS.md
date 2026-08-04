@@ -36,6 +36,7 @@ uv run black <file>   # format code
 - `core/tools/` — tool definitions, `ToolExecutor`, skill managers, `ToolLoop`
 - `core/plugins/` — plugin system (`PluginManager`, `BasePlugin`)
 - `core/learners/` — learning system (`LearningOrchestrator` + `JargonMiner`, `BehaviorLearner`, `ExpressionLearner`, `SceneClusterer`)
+- `core/markdown_split.py` — **Markdown 安全拆块**: 非流式发送前的字节级拆块（`split_markdown`，围栏/表格状态机）+ 流式转发安全切点（`markdown_safe_cut` / `trailing_structure` / `pending_starts_incomplete`）。两份状态机共用同一套 `is_fence_line`/`is_table_*` 判定谓词，改动只在本模块内同步
 - `core/rule_router.py` — `RuleRouter`: 15-dimension scoring engine (ClawRouter-style) for model-tier routing
 - `core/router_model.py` — Lightweight router model (qwen2.5:7b) for smart tier routing: simple tasks reply directly, complex tasks mark `[ESCALATE]`
 - `core/message.py` — Unified message model (`MessageType`, `ResourceMeta`) for all resource types (emoji/image/voice/video/file)

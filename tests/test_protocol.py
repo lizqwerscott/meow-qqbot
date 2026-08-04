@@ -1,9 +1,13 @@
 """AI 协议抽象层测试 — AssistantMessage / AssistantToolCall wire 格式。"""
 
+import pytest
+
 from core.ai.protocol import (
     AssistantMessage,
     AssistantToolCall,
+    StreamBuffer,
     ensure_messages_consistent,
+    log_llm_error,
 )
 
 
@@ -120,3 +124,76 @@ class TestEnsureMessagesConsistent:
         ensure_messages_consistent(messages)
         assert len(messages) == 1
         assert messages[0]["role"] == "user"
+
+
+class TestStreamBuffer:
+    """流式聚合缓冲：消灭服务层平行 list 参数组后的唯一拼装点。"""
+
+    def test_assemble_full_message(self):
+        """文本 + 思维链 + 工具调用 → 完整 AssistantMessage。"""
+        buf = StreamBuffer()
+        buf.text_parts.extend(["你好", "世界"])
+        buf.reasoning_parts.append("思考中")
+        buf.tool_calls.append(
+            AssistantToolCall(id="c1", name="web_search", arguments="{}")
+        )
+        message, usage = buf.assemble({"prompt_tokens": 1})
+        assert message is not None
+        assert message.content == "你好世界"
+        assert message.reasoning_content == "思考中"
+        assert message.tool_calls[0].name == "web_search"
+        assert usage == {"prompt_tokens": 1}
+
+    def test_assemble_empty_returns_none(self):
+        """无任何内容 → (None, usage)，调用方走失败/回退路径。"""
+        message, usage = StreamBuffer().assemble(None)
+        assert message is None and usage is None
+
+    def test_assemble_drops_incomplete_tool_calls(self):
+        """无 name 的未完成调用被过滤（对齐旧 _assemble_stream_result 语义）。"""
+        buf = StreamBuffer()
+        buf.tool_calls.append(AssistantToolCall(id="c1", name="", arguments=""))
+        message, usage = buf.assemble(None)
+        assert message is None
+
+    def test_reset_clears_all(self):
+        """reset：降级重试前清空（重试是全新生成）。"""
+        buf = StreamBuffer()
+        buf.text_parts.append("旧内容")
+        buf.tool_calls.append(AssistantToolCall(id="c1", name="t", arguments=""))
+        buf.reset()
+        message, usage = buf.assemble(None)
+        assert message is None
+
+
+class TestLogLlmError:
+    """统一错误分类日志（限流/服务不可用/超时/其他）。"""
+
+    @pytest.mark.parametrize(
+        "err, level",
+        [
+            (RuntimeError("429 Too Many Requests"), "WARNING"),
+            (RuntimeError("rate_limit_exceeded"), "WARNING"),
+            (RuntimeError("502 Bad Gateway"), "ERROR"),
+            (RuntimeError("503 Service Unavailable"), "ERROR"),
+            (RuntimeError("service_unavailable"), "ERROR"),
+            (RuntimeError("request timeout after 30s"), "WARNING"),
+            (RuntimeError("connection refused"), "ERROR"),
+        ],
+    )
+    def test_classification(self, caplog, err, level):
+        """429/rate_limit/timeout → warning；502/503/其他 → error。"""
+        with caplog.at_level("WARNING", logger="core.ai.protocol"):
+            log_llm_error(err, "model-x")
+        assert any(r.levelname == level for r in caplog.records)
+        assert all(
+            r.levelname == level for r in caplog.records if "model-x" in r.getMessage()
+        )
+
+    def test_service_and_tag_format(self, caplog):
+        """service/tag 参数控制日志措辞（DeepSeek 流式等）。"""
+        with caplog.at_level("WARNING", logger="core.ai.protocol"):
+            log_llm_error(RuntimeError("429"), "m1", service="DeepSeek", tag="（流式）")
+        assert any(
+            "DeepSeek 请求被限流（流式） [m1]" in r.getMessage() for r in caplog.records
+        )

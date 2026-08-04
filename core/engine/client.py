@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import re
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -28,11 +27,10 @@ from core.engine.router import Router
 from core.managers.command_manager import CommandManager
 from core.managers.emoji_manager import EmojiManager
 from core.managers.nickname_manager import NicknameManager
+from core.markdown_split import split_markdown
 from core.message import InputMessage
 
 _log = logging.getLogger(__name__)
-
-QQBOT_MARKDOWN_SAFE_CHUNK_BYTE_LIMIT = 3600
 
 
 class BotEngine:
@@ -96,241 +94,6 @@ class BotEngine:
         self._last_seq: Optional[int] = None
 
         _log.info("BotEngine 已初始化")
-
-    # ── Markdown 文本拆分 ──
-
-    @staticmethod
-    def _utf8len(text: str) -> int:
-        return len(text.encode("utf-8"))
-
-    @staticmethod
-    def _is_fence_line(line: str) -> str | None:
-        m = re.match(r"^(\s*)(`{3,}|~{3,})", line)
-        return m.group(2) if m else None
-
-    @staticmethod
-    def _is_closing_fence_line(line: str, marker: str) -> bool:
-        marker_char = marker[0]
-        m = re.match(r"^\s*(" + re.escape(marker_char) + r"{3,})\s*$", line)
-        return bool(m and len(m.group(1)) >= len(marker))
-
-    @staticmethod
-    def _is_table_separator(line: str) -> bool:
-        line = line.strip()
-        if not line.startswith("|") or not line.endswith("|"):
-            return False
-        cells = [c.strip() for c in line[1:-1].split("|")]
-        return len(cells) >= 2 and all(re.match(r"^:?-+:?$", c) for c in cells)
-
-    @staticmethod
-    def _is_table_row(line: str) -> bool:
-        line = line.strip()
-        if not line.startswith("|") or not line.endswith("|"):
-            return False
-        return len([c.strip() for c in line[1:-1].split("|")]) >= 2
-
-    @staticmethod
-    def _append_or_flush(
-        chunks: list[str], text: str, max_bytes: int, spacer: str = "\n\n"
-    ):
-        if not text:
-            return
-        if chunks:
-            last = chunks[-1]
-            cand = last + spacer + text
-            if BotEngine._utf8len(cand) <= max_bytes:
-                chunks[-1] = cand
-                return
-        chunks.append(text)
-
-    @staticmethod
-    def _chunk_text(t: str, max_bytes: int, chunks: list[str]):
-        if BotEngine._utf8len(t) <= max_bytes:
-            BotEngine._append_or_flush(chunks, t, max_bytes)
-            return
-        for para in t.split("\n\n"):
-            para = para.strip()
-            if not para:
-                continue
-            if BotEngine._utf8len(para) <= max_bytes:
-                BotEngine._append_or_flush(chunks, para, max_bytes)
-            else:
-                for sentence in re.split(r"(?<=[。！？!?\n])", para):
-                    sentence = sentence.strip()
-                    if not sentence:
-                        continue
-                    if BotEngine._utf8len(sentence) <= max_bytes:
-                        BotEngine._append_or_flush(
-                            chunks, sentence, max_bytes, spacer="\n"
-                        )
-                    else:
-                        buf = ""
-                        for char in sentence:
-                            cand = buf + char
-                            if BotEngine._utf8len(cand) <= max_bytes:
-                                buf = cand
-                            else:
-                                chunks.append(buf)
-                                buf = char
-                        if buf:
-                            chunks.append(buf)
-
-    @staticmethod
-    def _flush_text(chunks: list[str], text_lines: list[str], max_bytes: int):
-        if not text_lines:
-            return
-        t = "\n".join(text_lines)
-        text_lines.clear()
-        BotEngine._chunk_text(t, max_bytes, chunks)
-
-    @staticmethod
-    def _flush_table(chunks: list[str], table_lines: list[str], max_bytes: int):
-        if len(table_lines) < 3:
-            return
-        full = "\n".join(table_lines)
-        if BotEngine._utf8len(full) <= max_bytes:
-            chunks.append(full)
-            table_lines.clear()
-            return
-        header = table_lines[0:2]
-        rows = table_lines[2:]
-        out_lines = list(header)
-        for row in rows:
-            cand = "\n".join(out_lines + [row])
-            if BotEngine._utf8len(cand) <= max_bytes:
-                out_lines.append(row)
-            else:
-                if len(out_lines) > 2:
-                    chunks.append("\n".join(out_lines))
-                out_lines = list(header) + [row]
-        if len(out_lines) > 2:
-            chunks.append("\n".join(out_lines))
-        table_lines.clear()
-
-    @staticmethod
-    def _split_markdown(
-        text: str, max_bytes: int = QQBOT_MARKDOWN_SAFE_CHUNK_BYTE_LIMIT
-    ) -> list[str]:
-        if not text:
-            return []
-        if BotEngine._utf8len(text) <= max_bytes:
-            return [text]
-
-        chunks: list[str] = []
-        text_lines: list[str] = []
-        fence_body: list[str] = []
-        active_fence: tuple[str, str] | None = None  # (open_line, marker)
-
-        pending_header: str | None = None
-        pending_header_cells: list[str] | None = None
-        table_lines: list[str] = []
-        in_table = False
-
-        def _ct(t: str):
-            BotEngine._chunk_text(t, max_bytes, chunks)
-
-        def _flush_text():
-            nonlocal text_lines
-            if active_fence:
-                return
-            BotEngine._flush_text(chunks, text_lines, max_bytes)
-
-        def _flush_fence_and_close():
-            nonlocal fence_body, active_fence
-            if not active_fence:
-                return
-            open_line, marker = active_fence
-            close = marker
-            if not fence_body:
-                chunks.append(f"{open_line}\n{close}")
-            else:
-                body = "\n".join(fence_body)
-                full = f"{open_line}\n{body}\n{close}"
-                if BotEngine._utf8len(full) <= max_bytes:
-                    chunks.append(full)
-                else:
-                    lines = list(fence_body)
-                    cur = [open_line]
-                    for line in lines:
-                        cand = "\n".join(cur + [line, close])
-                        if BotEngine._utf8len(cand) <= max_bytes:
-                            cur.append(line)
-                        else:
-                            chunks.append("\n".join(cur + [close]))
-                            cur = [open_line, line]
-                    if len(cur) > 1:
-                        chunks.append("\n".join(cur + [close]))
-            fence_body.clear()
-            active_fence = None
-
-        def _flush_table_lines():
-            nonlocal table_lines, in_table, pending_header, pending_header_cells
-            if in_table or (pending_header and table_lines):
-                BotEngine._flush_table(chunks, table_lines, max_bytes)
-                in_table = False
-                pending_header = None
-                pending_header_cells = None
-            elif pending_header:
-                text_lines.append(pending_header)
-                pending_header = None
-                pending_header_cells = None
-
-        lines = text.split("\n")
-
-        for line in lines:
-            marker = BotEngine._is_fence_line(line)
-            if marker:
-                if active_fence is None:
-                    _flush_table_lines()
-                    _flush_text()
-                    active_fence = (line, marker)
-                elif BotEngine._is_closing_fence_line(line, active_fence[1]):
-                    _flush_fence_and_close()
-                continue
-
-            if active_fence:
-                fence_body.append(line)
-                continue
-
-            if in_table and BotEngine._is_table_row(line):
-                table_lines.append(line)
-                continue
-
-            if BotEngine._is_table_separator(line):
-                if pending_header is not None:
-                    _flush_text()
-                    table_lines = [pending_header, line]
-                    in_table = True
-                    pending_header = None
-                    pending_header_cells = None
-                else:
-                    text_lines.append(line)
-                continue
-
-            if BotEngine._is_table_row(line):
-                if pending_header is not None:
-                    text_lines.append(pending_header)
-                    pending_header = None
-                    pending_header_cells = None
-                    text_lines.append(line)
-                elif in_table:
-                    table_lines.append(line)
-                else:
-                    pending_header = line
-                    pending_header_cells = [
-                        c.strip() for c in line.strip()[1:-1].split("|")
-                    ]
-                continue
-
-            _flush_table_lines()
-            text_lines.append(line)
-
-        _flush_table_lines()
-        if active_fence:
-            _flush_fence_and_close()
-        _flush_text()
-
-        return chunks
 
     # ── 生命周期 ──
 
@@ -566,7 +329,7 @@ class BotEngine:
                 )
             return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
 
-        chunks = BotEngine._split_markdown(content)
+        chunks = split_markdown(content)
         last_result: Dict[str, Any] = {}
         for i, chunk in enumerate(chunks):
             if len(chunks) > 1:

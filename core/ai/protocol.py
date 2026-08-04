@@ -87,6 +87,27 @@ class StreamAbortedError(Exception):
     """
 
 
+def log_llm_error(
+    e: Exception, model: str, *, service: str = "AI", tag: str = ""
+) -> None:
+    """统一 LLM 请求错误分类日志（各 provider 服务共用一份判定）。
+
+    分类：429/rate_limit → warning（限流），502/503/service_unavailable → error
+    （服务不可用），timeout → warning，其余 → error。
+    tag 形如「（流式）」「（带工具）」插在动作词后，service 区分实现。
+    """
+    err_str = str(e)
+    low = err_str.lower()
+    if "429" in err_str or "rate_limit" in low:
+        _log.warning("%s 请求被限流%s [%s]: %s", service, tag, model, err_str)
+    elif "502" in err_str or "503" in err_str or "service_unavailable" in low:
+        _log.error("%s 服务不可用%s [%s]: %s", service, tag, model, err_str)
+    elif "timeout" in low:
+        _log.warning("%s 请求超时%s [%s]: %s", service, tag, model, err_str)
+    else:
+        _log.error("%s 请求失败%s [%s]: %s", service, tag, model, err_str)
+
+
 @dataclass
 class StreamCallbacks:
     """流式回调：on_text / on_reasoning 收到的是**累计文本**（非增量）。
@@ -97,6 +118,53 @@ class StreamCallbacks:
 
     on_text: Callable[[str], Awaitable[None]] | None = None
     on_reasoning: Callable[[str], Awaitable[None]] | None = None
+
+
+@dataclass
+class StreamBuffer:
+    """流式聚合缓冲（各 provider 服务共用，消灭平行 list 参数组）。
+
+    - text_parts / reasoning_parts：增量文本与思维链片段（累计拼接）。
+    - tool_calls：按出现顺序聚合的 AssistantToolCall（chat-completions 按
+      delta 下标增量填充；Responses API 侧在收尾时一次性灌入）。
+    - assemble()：把缓冲拼成完整 AssistantMessage，无内容时返回 (None, usage)。
+    """
+
+    text_parts: list[str] = field(default_factory=list)
+    reasoning_parts: list[str] = field(default_factory=list)
+    tool_calls: list[AssistantToolCall] = field(default_factory=list)
+
+    @property
+    def content(self) -> str | None:
+        return "".join(self.text_parts) or None
+
+    @property
+    def reasoning_content(self) -> str | None:
+        return "".join(self.reasoning_parts) or None
+
+    def reset(self) -> None:
+        """清空全部缓冲（降级重试是全新生成，旧增量必须丢弃）。"""
+        self.text_parts.clear()
+        self.reasoning_parts.clear()
+        self.tool_calls.clear()
+
+    def assemble(
+        self, usage: dict[str, Any] | None
+    ) -> tuple[AssistantMessage | None, dict[str, Any] | None]:
+        """拼装最终消息：无文本/思维链/完整工具调用时返回 (None, usage)。"""
+        content = self.content
+        reasoning_content = self.reasoning_content
+        tool_calls = [tc for tc in self.tool_calls if tc.name] or None
+        if content or reasoning_content or tool_calls:
+            return (
+                AssistantMessage(
+                    content=content,
+                    tool_calls=tool_calls,
+                    reasoning_content=reasoning_content,
+                ),
+                usage,
+            )
+        return None, usage
 
 
 class LLMService(Protocol):

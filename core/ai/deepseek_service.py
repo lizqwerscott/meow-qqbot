@@ -28,8 +28,10 @@ from core.ai.protocol import (
     AssistantMessage,
     AssistantToolCall,
     StreamAbortedError,
+    StreamBuffer,
     StreamCallbacks,
     ensure_messages_consistent,
+    log_llm_error,
 )
 
 _log = logging.getLogger(__name__)
@@ -294,21 +296,6 @@ class DeepSeekResponsesService:
 
         return kwargs
 
-    def _log_error(self, err: Exception, model_to_use: str, tag: str = ""):
-        err_str = str(err)
-        if "429" in err_str or "rate_limit" in err_str.lower():
-            _log.warning("DeepSeek 请求被限流%s [%s]: %s", tag, model_to_use, err_str)
-        elif (
-            "502" in err_str
-            or "503" in err_str
-            or "service_unavailable" in err_str.lower()
-        ):
-            _log.error("DeepSeek 服务不可用%s [%s]: %s", tag, model_to_use, err_str)
-        elif "timeout" in err_str.lower():
-            _log.warning("DeepSeek 请求超时%s [%s]: %s", tag, model_to_use, err_str)
-        else:
-            _log.error("DeepSeek 请求失败%s [%s]: %s", tag, model_to_use, err_str)
-
     # ── 协议方法 ──
 
     async def chat_completion(
@@ -333,7 +320,7 @@ class DeepSeekResponsesService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            self._log_error(e, model_to_use)
+            log_llm_error(e, model_to_use, service="DeepSeek")
             return None, None
 
     async def chat_completion_with_tools(
@@ -357,7 +344,7 @@ class DeepSeekResponsesService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            self._log_error(e, model_to_use)
+            log_llm_error(e, model_to_use, service="DeepSeek")
             return None, None
 
     async def chat_completion_stream(
@@ -380,9 +367,8 @@ class DeepSeekResponsesService:
         """
         model_to_use = model or self.model
 
-        # 聚合缓冲放 try 外：create() 早期抛异常时 except 分支也要能引用（断流回退）
-        text_parts: list[str] = []
-        reasoning_parts: list[str] = []
+        # 聚合缓冲放 try 外：create() 早期抛异常时 except 分支也要能引用（断流抛错）
+        buffer = StreamBuffer()
         # item_id -> [name, arguments_buf]（保持出现顺序）
         tool_calls: OrderedDict[str, list[str]] = OrderedDict()
         # item_id/call_id -> function name。
@@ -400,14 +386,6 @@ class DeepSeekResponsesService:
             kwargs = self._build_kwargs(
                 msgs, tools, model_to_use, temperature, max_tokens, stream=True
             )
-
-            async def _emit_text():
-                if callbacks and callbacks.on_text and text_parts:
-                    await callbacks.on_text("".join(text_parts))
-
-            async def _emit_reasoning():
-                if callbacks and callbacks.on_reasoning and reasoning_parts:
-                    await callbacks.on_reasoning("".join(reasoning_parts))
 
             stream = await self.client.responses.create(**kwargs)
             try:
@@ -433,13 +411,15 @@ class DeepSeekResponsesService:
                                 call_ids[getattr(item, "id", None)] = call_id
                                 call_ids[call_id] = call_id
                     elif et == "response.output_text.delta":
-                        text_parts.append(event.delta)
+                        buffer.text_parts.append(event.delta)
                         if callbacks and callbacks.on_text:
-                            await callbacks.on_text("".join(text_parts))
+                            await callbacks.on_text("".join(buffer.text_parts))
                     elif et == "response.reasoning_text.delta":
-                        reasoning_parts.append(event.delta)
+                        buffer.reasoning_parts.append(event.delta)
                         if callbacks and callbacks.on_reasoning:
-                            await callbacks.on_reasoning("".join(reasoning_parts))
+                            await callbacks.on_reasoning(
+                                "".join(buffer.reasoning_parts)
+                            )
                     elif et == "response.function_call_arguments.delta":
                         buf = tool_calls.setdefault(event.item_id, ["", ""])
                         buf[1] += event.delta
@@ -470,47 +450,23 @@ class DeepSeekResponsesService:
                 if close_fn is not None:
                     await close_fn()
 
-            return self._assemble_stream_result(
-                text_parts, reasoning_parts, tool_calls, usage, call_ids
-            )
+            buffer.tool_calls = [
+                AssistantToolCall(
+                    id=call_ids.get(item_id, item_id),
+                    name=buf[0],
+                    arguments=buf[1],
+                )
+                for item_id, buf in tool_calls.items()
+                if buf[0]
+            ]
+            return buffer.assemble(usage)
         except asyncio.CancelledError:
             raise
         except StreamAbortedError:
             raise
         except Exception as e:
-            self._log_error(e, model_to_use, "（流式）")
+            log_llm_error(e, model_to_use, service="DeepSeek", tag="（流式）")
             # 聚合到一半断流：不把半截结果当完整返回（上层会误判成功、跳过
             # fallback、投递截断回复）。抛 StreamAbortedError，由 ToolLoop 依
             # 转发状态决定回退（零转发）或终止（已转发部分文本，避免双回复）。
             raise StreamAbortedError(f"流式响应中断: {e}") from e
-
-    @staticmethod
-    def _assemble_stream_result(
-        text_parts: list[str],
-        reasoning_parts: list[str],
-        tool_calls: OrderedDict[str, list[str]],
-        usage: dict[str, Any] | None,
-        call_ids: dict[str, str] | None = None,
-    ) -> tuple[AssistantMessage | None, dict[str, Any] | None]:
-        """把流式聚合的增量拼成完整的 AssistantMessage（对齐非流式 _parse_output）。"""
-        content = "".join(text_parts) or None
-        reasoning_content = "".join(reasoning_parts) or None
-        calls = [
-            AssistantToolCall(
-                id=(call_ids or {}).get(item_id, item_id),
-                name=buf[0],
-                arguments=buf[1],
-            )
-            for item_id, buf in tool_calls.items()
-            if buf[0]
-        ]
-        if content or reasoning_content or calls:
-            return (
-                AssistantMessage(
-                    content=content,
-                    tool_calls=calls or None,
-                    reasoning_content=reasoning_content,
-                ),
-                usage,
-            )
-        return None, usage

@@ -11,8 +11,10 @@ from core.ai.protocol import (
     AssistantMessage,
     AssistantToolCall,
     StreamAbortedError,
+    StreamBuffer,
     StreamCallbacks,
     ensure_messages_consistent,
+    log_llm_error,
 )
 
 _log = logging.getLogger(__name__)
@@ -21,11 +23,7 @@ _log = logging.getLogger(__name__)
 async def _consume_chunk_stream(
     stream: Any,
     callbacks: StreamCallbacks | None,
-    text_parts: list[str],
-    reasoning_parts: list[str],
-    tool_call_ids: list[str],
-    tool_call_names: list[str],
-    tool_call_args: list[str],
+    buffer: StreamBuffer,
 ) -> dict[str, Any] | None:
     """迭代 chat-completions SSE 流，把增量聚合进缓冲；返回 usage（若有）。
 
@@ -38,27 +36,28 @@ async def _consume_chunk_stream(
         if delta is None:
             continue
         if getattr(delta, "content", None):
-            text_parts.append(delta.content)
+            buffer.text_parts.append(delta.content)
             if callbacks and callbacks.on_text:
-                await callbacks.on_text("".join(text_parts))
+                await callbacks.on_text("".join(buffer.text_parts))
         reasoning = getattr(delta, "reasoning_content", None)
         if reasoning:
-            reasoning_parts.append(reasoning)
+            buffer.reasoning_parts.append(reasoning)
             if callbacks and callbacks.on_reasoning:
-                await callbacks.on_reasoning("".join(reasoning_parts))
+                await callbacks.on_reasoning("".join(buffer.reasoning_parts))
         for tc in getattr(delta, "tool_calls", None) or []:
             idx = tc.index or 0
-            while len(tool_call_ids) <= idx:
-                tool_call_ids.append("")
-                tool_call_names.append("")
-                tool_call_args.append("")
+            while len(buffer.tool_calls) <= idx:
+                buffer.tool_calls.append(
+                    AssistantToolCall(id="", name="", arguments="")
+                )
+            target = buffer.tool_calls[idx]
             if tc.id:
-                tool_call_ids[idx] = tc.id
+                target.id = tc.id
             if tc.function:
                 if tc.function.name:
-                    tool_call_names[idx] = tc.function.name
+                    target.name = tc.function.name
                 if tc.function.arguments:
-                    tool_call_args[idx] += tc.function.arguments
+                    target.arguments += tc.function.arguments
     return None
 
 
@@ -158,19 +157,7 @@ class AIService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            err_str = str(e)
-            if "429" in err_str or "rate_limit" in err_str.lower():
-                _log.warning("AI 请求被限流 [%s]: %s", model_to_use, err_str)
-            elif (
-                "502" in err_str
-                or "503" in err_str
-                or "service_unavailable" in err_str.lower()
-            ):
-                _log.error("AI 服务不可用 [%s]: %s", model_to_use, err_str)
-            elif "timeout" in err_str.lower():
-                _log.warning("AI 请求超时 [%s]: %s", model_to_use, err_str)
-            else:
-                _log.error("AI 请求失败 [%s]: %s", model_to_use, err_str)
+            log_llm_error(e, model_to_use)
             return None, None
 
     def _is_reasoning_model(self, model: str) -> bool:
@@ -194,12 +181,8 @@ class AIService:
         max_tokens_to_use = max_tokens if max_tokens is not None else self.max_tokens
         is_reasoning = self._is_reasoning_model(model_to_use)
 
-        # 聚合缓冲放 try 外：create() 早期抛异常时 except 分支也要能引用（断流回退）
-        text_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        tool_call_ids: list[str] = []
-        tool_call_names: list[str] = []
-        tool_call_args: list[str] = []
+        # 聚合缓冲放 try 外：create() 早期抛异常时 except 分支也要能引用（断流抛错）
+        buffer = StreamBuffer()
         usage: dict[str, Any] | None = None
 
         try:
@@ -232,28 +215,13 @@ class AIService:
 
             stream = await self.client.chat.completions.create(**kwargs)
             try:
-                usage = await _consume_chunk_stream(
-                    stream,
-                    callbacks,
-                    text_parts,
-                    reasoning_parts,
-                    tool_call_ids,
-                    tool_call_names,
-                    tool_call_args,
-                )
+                usage = await _consume_chunk_stream(stream, callbacks, buffer)
             finally:
                 close_fn = getattr(stream, "close", None)
                 if close_fn is not None:
                     await close_fn()
 
-            return self._assemble_stream_result(
-                text_parts,
-                reasoning_parts,
-                tool_call_ids,
-                tool_call_names,
-                tool_call_args,
-                usage,
-            )
+            return buffer.assemble(usage)
         except asyncio.CancelledError:
             raise
         except StreamAbortedError:
@@ -270,24 +238,12 @@ class AIService:
                 kwargs.pop("stream_options", None)
                 # 重试前清空聚合缓冲：重试是一次全新的生成，旧增量必须丢弃
                 # （防御：网关在流中途才拒绝该参数时，缓冲里已有半截内容）。
-                text_parts.clear()
-                reasoning_parts.clear()
-                tool_call_ids.clear()
-                tool_call_names.clear()
-                tool_call_args.clear()
+                buffer.reset()
                 usage = None
                 try:
                     stream = await self.client.chat.completions.create(**kwargs)
                     try:
-                        usage = await _consume_chunk_stream(
-                            stream,
-                            callbacks,
-                            text_parts,
-                            reasoning_parts,
-                            tool_call_ids,
-                            tool_call_names,
-                            tool_call_args,
-                        )
+                        usage = await _consume_chunk_stream(stream, callbacks, buffer)
                     finally:
                         close_fn = getattr(stream, "close", None)
                         if close_fn is not None:
@@ -298,62 +254,12 @@ class AIService:
                     # 降级重试也失败：与主路径一致抛错，由上层决定回退/终止
                     _log.error("流式降级重试也失败 [%s]: %s", model_to_use, e2)
                     raise StreamAbortedError(f"流式降级重试失败: {e2}") from e2
-                return self._assemble_stream_result(
-                    text_parts,
-                    reasoning_parts,
-                    tool_call_ids,
-                    tool_call_names,
-                    tool_call_args,
-                    usage,
-                )
-            if "429" in err_str or "rate_limit" in low:
-                _log.warning("AI 请求被限流（流式） [%s]: %s", model_to_use, err_str)
-            elif "502" in err_str or "503" in err_str or "service_unavailable" in low:
-                _log.error("AI 服务不可用（流式） [%s]: %s", model_to_use, err_str)
-            elif "timeout" in low:
-                _log.warning("AI 请求超时（流式） [%s]: %s", model_to_use, err_str)
-            else:
-                _log.error("AI 请求失败（流式） [%s]: %s", model_to_use, err_str)
+                return buffer.assemble(usage)
+            log_llm_error(e, model_to_use, tag="（流式）")
             # 聚合到一半断流：不把半截结果当完整返回——上层会误判成功、跳过
             # fallback、投递截断回复。抛 StreamAbortedError，由 ToolLoop 依
             # 转发状态决定回退（零转发）或终止（已转发部分文本，避免双回复）。
             raise StreamAbortedError(f"流式响应中断: {e}") from e
-
-    @staticmethod
-    def _assemble_stream_result(
-        text_parts: list[str],
-        reasoning_parts: list[str],
-        tool_call_ids: list[str],
-        tool_call_names: list[str],
-        tool_call_args: list[str],
-        usage: dict[str, Any] | None,
-    ) -> tuple[AssistantMessage | None, dict[str, Any] | None]:
-        """把流式聚合的增量拼成完整的 AssistantMessage（与 chat_completion_with_tools 同构）。"""
-        content = "".join(text_parts) or None
-        reasoning_content = "".join(reasoning_parts) or None
-        tool_calls = None
-        if tool_call_ids:
-            tool_calls = [
-                AssistantToolCall(
-                    id=tool_call_ids[i],
-                    name=tool_call_names[i],
-                    arguments=tool_call_args[i],
-                )
-                for i in range(len(tool_call_ids))
-                if tool_call_names[i]
-            ]
-            tool_calls = tool_calls or None
-
-        if content or reasoning_content or tool_calls:
-            return (
-                AssistantMessage(
-                    content=content,
-                    tool_calls=tool_calls,
-                    reasoning_content=reasoning_content,
-                ),
-                usage,
-            )
-        return None, usage
 
     def _build_extra_body(self) -> dict[str, Any] | None:
         if self.reasoning_effort:
@@ -434,17 +340,5 @@ class AIService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            err_str = str(e)
-            if "429" in err_str or "rate_limit" in err_str.lower():
-                _log.warning("AI 请求被限流（带工具） [%s]: %s", model_to_use, err_str)
-            elif (
-                "502" in err_str
-                or "503" in err_str
-                or "service_unavailable" in err_str.lower()
-            ):
-                _log.error("AI 服务不可用（带工具） [%s]: %s", model_to_use, err_str)
-            elif "timeout" in err_str.lower():
-                _log.warning("AI 请求超时（带工具） [%s]: %s", model_to_use, err_str)
-            else:
-                _log.error("AI 请求失败（带工具） [%s]: %s", model_to_use, err_str)
+            log_llm_error(e, model_to_use, tag="（带工具）")
             return None, None

@@ -16,6 +16,11 @@ from typing import Any, Awaitable, Callable, List, Optional
 
 from core.ai.fallback_runner import FallbackRunner
 from core.ai.protocol import StreamCallbacks, ensure_messages_consistent
+from core.markdown_split import (
+    markdown_safe_cut,
+    pending_starts_incomplete,
+    trailing_structure,
+)
 from core.message import InputMessage, MessageType
 from core.tools._types import ToolContext
 from core.tools.impl import execute as execute_tool
@@ -63,121 +68,6 @@ def _is_silent_reply_text(text: str) -> bool:
             remaining = stripped[len(token) :].lstrip("`").strip("：:，, \t")
             if not remaining or len(remaining) < _ACK_MAX_CHARS:
                 return True
-    return False
-
-
-def _trailing_structure(text: str) -> tuple[bool, bool, str | None]:
-    """扫描已发文本末尾状态：是否处于表格内 / 代码围栏内（含围栏 marker）。
-
-    供 _markdown_safe_cut 作为 initial 状态，使跨块的表格/围栏延续正确。
-    """
-    from core.engine.client import BotEngine  # 延迟导入防循环依赖
-
-    in_fence = False
-    fence_marker: str | None = None
-    in_table = False
-    for line in text.rstrip("\n").split("\n"):
-        marker = BotEngine._is_fence_line(line)
-        if marker:
-            if not in_fence:
-                in_fence = True
-                fence_marker = marker
-            elif BotEngine._is_closing_fence_line(line, fence_marker):
-                in_fence = False
-                fence_marker = None
-        elif in_fence:
-            pass
-        elif BotEngine._is_table_separator(line):
-            in_table = True
-        elif BotEngine._is_table_row(line):
-            if not in_table:
-                in_table = True  # 表头行后（未遇分隔行）也视为表内延续
-        else:
-            in_table = False
-    return in_table, in_fence, fence_marker
-
-
-def _markdown_safe_cut(
-    text: str,
-    limit: int,
-    initial_in_table: bool = False,
-    initial_in_fence: bool = False,
-    initial_fence_marker: str | None = None,
-) -> int:
-    """在 text 的 limit 字符内找安全的块切点：不切断代码围栏与 markdown 表格。
-
-    返回切点索引（行尾，含换行）；整个文本都处于表格/围栏内时返回 0，
-    调用方按原样切（超长表格由 BotEngine._split_markdown 兜底拆块）。
-    状态机与 BotEngine._split_markdown 保持一致：表内/围栏体内不可切，
-    普通行行尾即安全切点（表格或围栏整体留在块内，宁小勿断）。
-    initial_* 由 _flush_stream_block 传入已发文本的末尾状态，
-    使跨块的表格/围栏延续正确（pending 开头是数据行时行尾可切）。
-    """
-    if limit <= 0:
-        return 0
-    from core.engine.client import BotEngine  # 延迟导入防循环依赖
-
-    safe = 0
-    pos = 0
-    in_fence = initial_in_fence
-    fence_marker = initial_fence_marker if initial_in_fence else None
-    in_table = initial_in_table
-    pending_header = False
-    for line in text.split("\n"):
-        if pos >= limit:
-            break
-        marker = BotEngine._is_fence_line(line)
-        if marker:
-            if not in_fence:
-                in_fence = True
-                fence_marker = marker
-            elif BotEngine._is_closing_fence_line(line, fence_marker):
-                in_fence = False
-                fence_marker = None
-                safe = pos + len(line) + 1  # 围栏完整结束后可切（行尾）
-        elif in_fence:
-            pass  # 围栏体内不可切
-        elif BotEngine._is_table_separator(line):
-            in_table = True
-            pending_header = False
-        elif BotEngine._is_table_row(line):
-            if in_table:
-                # 表内数据行：行尾可切（表格延续，行保持完整；表头在块首或上一块）
-                safe = pos + len(line) + 1
-            else:
-                pending_header = True  # 表头候选：等分隔行确认（表头行尾不可切）
-        elif line.strip().startswith("|"):
-            # 以 | 开头但未闭合：流式生成中的半截表格行/表头 → 结构内，不可切
-            pass
-        else:
-            # 普通行：表格/围栏结束，行尾即安全切点。半截行（流式生成中，
-            # 无换行结尾）不更新 safe——否则切点 = len+1 超出文本长度，
-            # 调用方不切，半截链接/单词会整段发出（QQ 半截链接的根因）。
-            in_table = False
-            pending_header = False
-            end = pos + len(line) + 1
-            if end <= len(text):
-                safe = end
-        pos += len(line) + 1
-    return safe
-
-
-def _pending_starts_incomplete(text: str, sent_prefix: str) -> bool:
-    """pending 是否以未完成结构开头（表格行 / 上一块切在围栏体内）。
-
-    空闲 flush 时命中则跳过本次发送（等流继续，收尾补发兜底），
-    避免把半截表格或代码块发出。
-    """
-    from core.engine.client import BotEngine  # 延迟导入防循环依赖
-
-    first = text.split("\n", 1)[0].strip()
-    if first and (
-        BotEngine._is_table_separator(first) or BotEngine._is_table_row(first)
-    ):
-        return True  # 表头/分隔行已在上一块或尚未生成
-    sent_lines = [ln for ln in sent_prefix.rstrip().split("\n") if ln.strip()]
-    if sent_lines and BotEngine._is_fence_line(sent_lines[-1]):
-        return True  # 已发部分以围栏开始行结尾 → pending 是围栏体
     return False
 
 
@@ -308,17 +198,17 @@ class ToolLoop:
                         # message_delivered: send_message 等工具已投递过消息，
                         # 流式文本与工具投递重复，跳过（收尾补发同样会被拦截）
                         return
-                    if not allow_partial and _pending_starts_incomplete(
+                    if not allow_partial and pending_starts_incomplete(
                         pending, st.text[: st.sent]
                     ):
                         return
                     # 统一找安全切点：达块大小按 limit 切；空闲 flush/首块按当前全文
                     # 扫描（末尾是半截表头/半截行时切回结构前，宁可少发）
                     limit = self._stream_block_chars if allow_partial else len(pending)
-                    in_table, in_fence, fence_marker = _trailing_structure(
+                    in_table, in_fence, fence_marker = trailing_structure(
                         st.text[: st.sent]
                     )
-                    cut = _markdown_safe_cut(
+                    cut = markdown_safe_cut(
                         pending,
                         limit,
                         initial_in_table=in_table,

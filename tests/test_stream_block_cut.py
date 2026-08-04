@@ -15,12 +15,12 @@ from types import SimpleNamespace as NS
 import pytest
 
 from core.ai.protocol import AssistantMessage
-from core.tools.tool_loop import (
-    ToolLoop,
-    _markdown_safe_cut,
-    _pending_starts_incomplete,
-    _trailing_structure,
+from core.markdown_split import (
+    markdown_safe_cut,
+    pending_starts_incomplete,
+    trailing_structure,
 )
+from core.tools.tool_loop import ToolLoop
 
 # ── 线上真实消息（2026-08-04 16:19 FreshRSS r/emacs 推送，jsonl 原文） ──
 REAL_R_EMACS_MESSAGE = (
@@ -75,21 +75,21 @@ class TestMarkdownSafeCut:
     def test_plain_text_cuts_at_line_end(self):
         """多行普通文本：切点 ≤ limit+一行余量，且落在行尾。"""
         text = "第一行普通文本。\n第二行普通文本。\n第三行普通文本。\n" * 20
-        cut = _markdown_safe_cut(text, 100)
+        cut = markdown_safe_cut(text, 100)
         assert 0 < cut <= 111
         assert text[cut - 1] == "\n"
 
     def test_single_long_line_no_cut(self):
         """单行超长（无换行）：无有效切点，交给 _split_markdown 兜底。"""
         one = "这是一段普通的文本。" * 50
-        cut = _markdown_safe_cut(one, 100)
+        cut = markdown_safe_cut(one, 100)
         assert not (0 < cut < len(one))
 
     def test_table_not_split_at_limit(self):
         """limit 落在表格中间：切点退回表格前（表格整体留到下一块）。"""
         prefix = "表格测试开始。\n"
         table = "| 列1 | 列2 |\n| --- | --- |\n| a | b |\n| c | d |\n| e | f |\n| g | h |\n| i | j |\n"
-        cut = _markdown_safe_cut(prefix + table, len(prefix) + 20)
+        cut = markdown_safe_cut(prefix + table, len(prefix) + 20)
         assert cut == len(prefix)
         assert "|" not in (prefix + table)[:cut]
 
@@ -98,7 +98,7 @@ class TestMarkdownSafeCut:
         prefix = "表格测试开始。\n"
         table = "| 列1 | 列2 |\n| --- | --- |\n| a | b |\n| c | d |\n| e | f |\n| g | h |\n| i | j |\n"
         text = prefix + table + "表格结束后的普通文本。" * 5
-        cut = _markdown_safe_cut(text, len(prefix) + len(table) + 10)
+        cut = markdown_safe_cut(text, len(prefix) + len(table) + 10)
         assert cut >= len(prefix) + len(table)
         block = text[:cut]
         assert block.count("| --- |") == 1
@@ -112,18 +112,18 @@ class TestMarkdownSafeCut:
         """
         # 半截链接行
         t = "第一行。\n第二行。\n[链接](https://www.reddit.com/r/emacs/comments/1vel7ne/announc"
-        assert _markdown_safe_cut(t, 100) == len("第一行。\n第二行。\n")
+        assert markdown_safe_cut(t, 100) == len("第一行。\n第二行。\n")
         # 文本恰好 = limit 且末尾半截链接
         t2 = "第一行。\n[链接](https://example.com/abc"
-        assert _markdown_safe_cut(t2, len(t2)) == len("第一行。\n")
+        assert markdown_safe_cut(t2, len(t2)) == len("第一行。\n")
         # 半截表格行：表格整体（表头+分隔+半截行）留到下一块，切点退回表格前
         t3 = "表格测试开始。\n| 列1 | 列2 |\n| --- | --- |\n| 未完成 | 行"
-        assert _markdown_safe_cut(t3, len(t3) + 1) == len("表格测试开始。\n")
+        assert markdown_safe_cut(t3, len(t3) + 1) == len("表格测试开始。\n")
 
     def test_complete_end_no_cut(self):
         """末尾是完整行：切点 ≥ len（调用方不切，整块发出）。"""
         t = "第一行。\n第二行。\n"
-        cut = _markdown_safe_cut(t, len(t) + 5)
+        cut = markdown_safe_cut(t, len(t) + 5)
         assert not (0 < cut < len(t))
 
     def test_fence_body_never_cut(self):
@@ -132,28 +132,26 @@ class TestMarkdownSafeCut:
             "代码开始：\n```python\nprint('hello')\nprint('world')\n```\n继续普通文本。"
             * 3
         )
-        assert _markdown_safe_cut(fence_text, 30) == len("代码开始：\n")
+        assert markdown_safe_cut(fence_text, 30) == len("代码开始：\n")
         # 末尾半截围栏
         half_fence = "代码开始：\n```python\nprint('x')\n"
-        assert _markdown_safe_cut(half_fence, len(half_fence) + 1) == len(
-            "代码开始：\n"
-        )
+        assert markdown_safe_cut(half_fence, len(half_fence) + 1) == len("代码开始：\n")
 
     def test_table_continuation_cuts_at_row_end(self):
         """延续表格（initial_in_table）：数据行尾可切，半截行被切掉。"""
         tail = "| 数据01 | 7 | 完整行 |\n| 数据02 | 14 | 半截"
-        cut = _markdown_safe_cut(tail, 100, initial_in_table=True)
+        cut = markdown_safe_cut(tail, 100, initial_in_table=True)
         assert cut == len("| 数据01 | 7 | 完整行 |\n")
 
     def test_fence_continuation(self):
         """围栏延续（initial_in_fence）：围栏体内不可切，结束行后可切。"""
         fence_cont = "print('y')\nprint('z')\n```\n普通文本继续。\n"
-        cut = _markdown_safe_cut(
+        cut = markdown_safe_cut(
             fence_cont, 100, initial_in_fence=True, initial_fence_marker="```"
         )
         assert cut >= len("print('y')\nprint('z')\n```\n")
         assert (
-            _markdown_safe_cut(
+            markdown_safe_cut(
                 "print('y')\nprint('z')\n",
                 100,
                 initial_in_fence=True,
@@ -166,16 +164,16 @@ class TestMarkdownSafeCut:
 class TestTrailingStructure:
     def test_table_state(self):
         """已发文本末尾状态：表内 / 围栏内（含 marker）。"""
-        assert _trailing_structure("表头\n| --- | --- |\n| 数据 | 值 |\n") == (
+        assert trailing_structure("表头\n| --- | --- |\n| 数据 | 值 |\n") == (
             True,
             False,
             None,
         )
         # 末尾换行不重置表内状态（修复：rstrip 后再 split）
-        assert _trailing_structure("| 数据 | 值 |\n") == (True, False, None)
-        assert _trailing_structure("普通文本\n```python\n") == (False, True, "```")
-        assert _trailing_structure("```python\nprint(1)\n```\n") == (False, False, None)
-        assert _trailing_structure(
+        assert trailing_structure("| 数据 | 值 |\n") == (True, False, None)
+        assert trailing_structure("普通文本\n```python\n") == (False, True, "```")
+        assert trailing_structure("```python\nprint(1)\n```\n") == (False, False, None)
+        assert trailing_structure(
             "表头\n| --- | --- |\n| 数据 | 值 |\n\n普通文本\n"
         ) == (
             False,
@@ -187,11 +185,11 @@ class TestTrailingStructure:
 class TestPendingStartsIncomplete:
     def test_incomplete_structures(self):
         """空闲 flush 跳过条件：表格行开头 / 围栏体开头。"""
-        assert _pending_starts_incomplete("| 行数据 | 值 |", "表头已发") is True
-        assert _pending_starts_incomplete("| --- | --- |", "表头已发") is True
-        assert _pending_starts_incomplete("print('x')", "```python\n") is True
-        assert _pending_starts_incomplete("普通文本", "") is False
-        assert _pending_starts_incomplete("```python\n", "") is False
+        assert pending_starts_incomplete("| 行数据 | 值 |", "表头已发") is True
+        assert pending_starts_incomplete("| --- | --- |", "表头已发") is True
+        assert pending_starts_incomplete("print('x')", "```python\n") is True
+        assert pending_starts_incomplete("普通文本", "") is False
+        assert pending_starts_incomplete("```python\n", "") is False
 
 
 # ── ToolLoop 流式集成测试 ──
