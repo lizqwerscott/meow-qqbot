@@ -12,13 +12,14 @@ import argparse
 import asyncio
 import logging
 import sys
-import tomllib
 from pathlib import Path
 
 # 确保项目根目录在 sys.path 中，使 core 模块可导入
 _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
+
+from core.config_loader import ConfigLoader
 
 import httpx
 
@@ -35,21 +36,20 @@ async def main():
     parser.add_argument("--config", default="config/config.toml", help="配置文件路径")
     args = parser.parse_args()
 
-    config_path = Path(args.config)
-    if not config_path.exists():
-        print(f"错误: 配置文件不存在: {config_path}")
+    # 用 ConfigLoader 加载主配置 + 模型配置（自动合并 config/models.toml）
+    try:
+        cfg = ConfigLoader(args.config)
+    except Exception as exc:
+        print(f"错误: 配置文件加载失败: {exc}")
         sys.exit(1)
-
-    with open(config_path, "rb") as f:
-        raw = tomllib.load(f)
 
     from core.ai.model_registry import ModelRegistry
     from core.ai.multimodal import MultimodalService
     from core.managers.emoji_manager import EmojiManager
 
-    providers_config = raw.get("providers", {})
-    groups_config = raw.get("groups", {})
-    multimodal_cfg = raw.get("multimodal", {})
+    providers_config = cfg.providers
+    groups_config = cfg.groups
+    multimodal_cfg = cfg.multimodal
 
     services = []
     model_names = []
@@ -76,10 +76,12 @@ async def main():
                 print(f"  {ok}  {qn}")
 
     # ── 策略 2: 旧格式 [models.xxx] 中的 ollama 模型 ──────────
-    if not services and raw.get("models"):
+    # 注：该旧格式 section 在模型配置拆分后已不存在（已迁移到
+    # config/models.toml 的 [providers] + [groups]），此分支已废弃。
+    if not services and cfg.models:
         from core.ai.service import AIService
 
-        for mname, mcfg in raw["models"].items():
+        for mname, mcfg in cfg.models.items():
             if mcfg.get("provider") == "ollama":
                 model = mcfg.get("model", "")
                 if not model:
@@ -118,8 +120,7 @@ async def main():
     if not services:
         print("错误: 无法确定 VLM 模型。请配置以下任一:")
         print("  1. [providers] + [groups]（新格式，推荐）")
-        print("  2. [models.xxx] provider='ollama'（旧格式）")
-        print("  3. [multimodal] model=... host=...（直接配置）")
+        print("  2. [multimodal] model=... host=...（直接配置）")
         sys.exit(1)
 
     mm_svc = MultimodalService(services, model_names=model_names)
