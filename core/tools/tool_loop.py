@@ -335,6 +335,11 @@ class ToolLoop:
                         # 取消竞态：可能已发出，承诺已发送，防止补发重复
                         st.sent += len(pending)
                         raise
+                    except Exception as e:
+                        # 发送失败：与 reply_callback 失败同等对待（记录、不重发）。
+                        # sent 必须前进——否则后续 flush / 收尾补发会把同一段再发
+                        # 一遍（重复投递），且已承诺的文本无法撤回。
+                        _log.warning("流式块发送失败 [%s]: %s", chat_id[:12], e)
                     st.sent += len(pending)
                     text_was_sent = True
 
@@ -410,6 +415,18 @@ class ToolLoop:
                             current_model_name,
                             chat_id[:12],
                         )
+                        # 断流收尾：把已累积未发出的尾巴按块补发，不丢回复结尾。
+                        # 已实时转发过部分文本无法干净回退（会双回复），
+                        # 这里尽力把剩余文本送达；失败也不再重试。
+                        try:
+                            while st.sent < len(st.text) and not message_delivered:
+                                await _flush_stream_block(allow_partial=True)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as cb_err:
+                            _log.warning(
+                                "断流收尾补发失败 [%s]: %s", chat_id[:12], cb_err
+                            )
                         break
 
                 if message is not None:

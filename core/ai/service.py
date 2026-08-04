@@ -10,6 +10,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from core.ai.protocol import (
     AssistantMessage,
     AssistantToolCall,
+    StreamAbortedError,
     StreamCallbacks,
     ensure_messages_consistent,
 )
@@ -255,6 +256,8 @@ class AIService:
             )
         except asyncio.CancelledError:
             raise
+        except StreamAbortedError:
+            raise
         except Exception as e:
             err_str = str(e)
             # 部分网关（如 ollama /v1）不认 stream_options，重试一次不带它
@@ -265,6 +268,14 @@ class AIService:
                 or "unrecognized" in low
             ):
                 kwargs.pop("stream_options", None)
+                # 重试前清空聚合缓冲：重试是一次全新的生成，旧增量必须丢弃
+                # （防御：网关在流中途才拒绝该参数时，缓冲里已有半截内容）。
+                text_parts.clear()
+                reasoning_parts.clear()
+                tool_call_ids.clear()
+                tool_call_names.clear()
+                tool_call_args.clear()
+                usage = None
                 try:
                     stream = await self.client.chat.completions.create(**kwargs)
                     try:
@@ -284,16 +295,9 @@ class AIService:
                 except asyncio.CancelledError:
                     raise
                 except Exception as e2:
-                    # 降级重试也失败：不逃逸，按断流契约返回已聚合部分（有日志）
+                    # 降级重试也失败：与主路径一致抛错，由上层决定回退/终止
                     _log.error("流式降级重试也失败 [%s]: %s", model_to_use, e2)
-                    return self._assemble_stream_result(
-                        text_parts,
-                        reasoning_parts,
-                        tool_call_ids,
-                        tool_call_names,
-                        tool_call_args,
-                        None,
-                    )
+                    raise StreamAbortedError(f"流式降级重试失败: {e2}") from e2
                 return self._assemble_stream_result(
                     text_parts,
                     reasoning_parts,
@@ -310,15 +314,10 @@ class AIService:
                 _log.warning("AI 请求超时（流式） [%s]: %s", model_to_use, err_str)
             else:
                 _log.error("AI 请求失败（流式） [%s]: %s", model_to_use, err_str)
-            # 聚合到一半断流：把已生成部分返回（已实时转发过时上层不能 fallback 双回复）
-            return self._assemble_stream_result(
-                text_parts,
-                reasoning_parts,
-                tool_call_ids,
-                tool_call_names,
-                tool_call_args,
-                None,
-            )
+            # 聚合到一半断流：不把半截结果当完整返回——上层会误判成功、跳过
+            # fallback、投递截断回复。抛 StreamAbortedError，由 ToolLoop 依
+            # 转发状态决定回退（零转发）或终止（已转发部分文本，避免双回复）。
+            raise StreamAbortedError(f"流式响应中断: {e}") from e
 
     @staticmethod
     def _assemble_stream_result(

@@ -338,12 +338,22 @@ class TestStreamBlockIntegration:
         assert streamed == [] and sent == []
 
     def test_abort_after_probe_stops_loop(self):
-        """探测期后断流：已转发 → 终止，不补发不报错（防双回复）。"""
+        """探测期后断流：已转发 → 不再回退，未发出的尾巴补发（不丢结尾）。
+
+        回归：修复前断流时尾巴（st.text[st.sent:]）静默丢弃，用户丢失回复结尾；
+        修复后已发前缀 + 补发尾巴 = 已生成的全部文本，且无重复。
+        """
         text = "这是一段会在探测期之后被打断的文本内容，流式转发此时已经开始工作。" * 5
+        throw_after = 130
         ret, sent, streamed = asyncio.run(
-            _run_case(_MockSvc(text=text, throw_after=130))
+            _run_case(_MockSvc(text=text, throw_after=throw_after))
         )
-        assert streamed != [] and sent == [] and ret == (False, True)
+        assert streamed != [] and ret == (False, True)
+        delivered = "".join(streamed) + "".join(sent)
+        # 流在 i=throw_after 后中断：已生成 = 前 throw_after+1 字符
+        assert (
+            delivered == text[: throw_after + 1]
+        ), "已发前缀 + 补发尾巴必须等于已生成部分，无重复无丢失"
 
     def test_abort_before_probe_falls_back(self):
         """探测期内断流：零转发 → 兜底消息。"""

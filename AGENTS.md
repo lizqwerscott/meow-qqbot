@@ -29,6 +29,7 @@ uv run black <file>   # format code
 - `core/ai/service.py` — OpenAI-compatible LLM client (`openai[aiohttp]`); returns unified `AssistantMessage` protocol objects
 - `core/ai/protocol.py` — **AI 协议抽象层**: `AssistantMessage` / `AssistantToolCall` 统一消息对象（`tool_calls_data` wire 组装）+ `ensure_messages_consistent` 一致性清理。核心循环（ToolLoop/FallbackRunner）只依赖本模块，不感知底层协议
 - `core/ai/provider_factory.py` — **Provider 工厂注册表**: `@register_provider(type)` 自注册构造器，`ModelRegistry` 构造零分支。新增 provider = 写 factory + 配置，不动注册表
+- `core/ai/deepseek_service.py` — `DeepSeekResponsesService`: DeepSeek Responses API 实现（provider type `deepseek_responses`，目前仅支持 `deepseek-v4-flash`），满足 `LLMService` 协议，非流式/流式共用同一套消息转换
 - `core/ai/multimodal.py` — VLM vision model client for emoji/image analysis
 - `core/ai/model_registry.py` — `ModelRegistry`: multi-model config + fallback chains
 - `core/managers/` — `*Manager` classes (command, context, cost, emoji, nickname, session, template, permission, workspace)
@@ -59,6 +60,7 @@ uv run black <file>   # format code
 - **Per-session isolation**: `SessionTaskManager` creates separate `asyncio.Queue` + `asyncio.Lock` per `chat_id`. Messages within the same session are processed serially.
 - **Message dedup**: `AgentEngine._processed_ids` (OrderedDict, LRU cap 1000) prevents WS reconnect double-processing.
 - **Tool loop**: `ToolLoop` runs up to N rounds of AI → tool_calls → execute → feed back (configurable via `max_tool_rounds`, default unlimited = -1). Every text response is sent immediately via `reply_callback`.
+- **Block streaming** (optional, `[ai]` config): `stream_reply = true` 开启后，文本轮走 `chat_completion_stream`，增量按 `stream_block_chars`（默认 800）或空闲 `stream_block_idle_ms`（默认 1000）分块实时投递，静默探测期（112 字符）内绝不转发（防 NO_REPLY 漏出）。流中途失败抛 `StreamAbortedError`（`core/ai/protocol.py`）：零转发 → 回退下一模型；已转发部分文本 → 终止并补发剩余尾巴，避免双回复与丢结尾。
 - **Auto memory injection**: `_build_memory_context` fetches relevant Hindsight episodes/profiles and injects into the dynamic system prompt (invisible to user). Up to 3 episodes (150 chars each) + 1 profile; dirty data filtered.
 - **Prompt structure**: Static prompt (role + character card + skill intro + memory desc + tool coop + emoji guide) rendered once from Jinja2 templates (`prompts/`). Dynamic block (skill entries + memory context + learning context + time + emoji tags + users list + workspace info) appended as a separate system message each turn.
 - **Multi-model routing** (optional): `RuleRouter` scores messages on 16 dimensions (code, complexity, reasoning, etc.) and assigns SIMPLE / MEDIUM / COMPLEX / REASONING tiers. Each tier has a fallback chain of models from `[models]` config. Routing disabled by default (`[routing].enabled = false`).

@@ -77,6 +77,16 @@ class AssistantMessage:
         return wire
 
 
+class StreamAbortedError(Exception):
+    """流式响应中途失败（create 成功后迭代中断 / API 侧 failed 事件）。
+
+    服务层不得把半截聚合结果当「正常完成」返回——调用方（ToolLoop）无法区分
+    截断与完整，会把截断回复标记为成功并跳过 fallback。正确约定：流式失败
+    必须抛本异常，由调用方依据自身的转发状态决定回退（零转发）还是终止
+    （已实时转发部分文本，回退会双回复）。
+    """
+
+
 @dataclass
 class StreamCallbacks:
     """流式回调：on_text / on_reasoning 收到的是**累计文本**（非增量）。
@@ -98,6 +108,9 @@ class LLMService(Protocol):
     流式方法 chat_completion_stream 返回的 AssistantMessage 与非流式
     chat_completion_with_tools 完全一致（内部聚合 delta），调用方可按
     callbacks 是否提供决定要不要实时转发文本。
+
+    流式中途失败（断流/API 侧 failed）时抛 StreamAbortedError——返回值
+    只表示「正常完成」，半截聚合不得冒充完整结果。
     """
 
     model: str

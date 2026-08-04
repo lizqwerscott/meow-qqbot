@@ -27,6 +27,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from core.ai.protocol import (
     AssistantMessage,
     AssistantToolCall,
+    StreamAbortedError,
     StreamCallbacks,
     ensure_messages_consistent,
 )
@@ -462,6 +463,8 @@ class DeepSeekResponsesService:
                         resp = getattr(event, "response", None)
                         err = getattr(resp, "error", None) if resp else None
                         _log.error("Responses API 流式失败 [%s]: %s", model_to_use, err)
+                        # API 侧失败：不把半截聚合当完整结果返回，抛错交上层决策
+                        raise StreamAbortedError(f"Responses API 流式失败: {err}")
             finally:
                 close_fn = getattr(stream, "close", None)
                 if close_fn is not None:
@@ -472,12 +475,14 @@ class DeepSeekResponsesService:
             )
         except asyncio.CancelledError:
             raise
+        except StreamAbortedError:
+            raise
         except Exception as e:
             self._log_error(e, model_to_use, "（流式）")
-            # 聚合到一半断流：把已生成部分返回（已实时转发过时上层不能 fallback 双回复）
-            return self._assemble_stream_result(
-                text_parts, reasoning_parts, tool_calls, None, call_ids
-            )
+            # 聚合到一半断流：不把半截结果当完整返回（上层会误判成功、跳过
+            # fallback、投递截断回复）。抛 StreamAbortedError，由 ToolLoop 依
+            # 转发状态决定回退（零转发）或终止（已转发部分文本，避免双回复）。
+            raise StreamAbortedError(f"流式响应中断: {e}") from e
 
     @staticmethod
     def _assemble_stream_result(
