@@ -10,10 +10,12 @@ import asyncio
 import itertools
 import json
 import logging
-from typing import Any, Callable, List, Optional
+import time
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, List, Optional
 
 from core.ai.fallback_runner import FallbackRunner
-from core.ai.protocol import ensure_messages_consistent
+from core.ai.protocol import StreamCallbacks, ensure_messages_consistent
 from core.message import InputMessage, MessageType
 from core.tools._types import ToolContext
 from core.tools.impl import execute as execute_tool
@@ -22,6 +24,32 @@ _log = logging.getLogger(__name__)
 
 _SILENT_TOKENS = frozenset({"NO_REPLY", "HEARTBEAT_OK"})
 _ACK_MAX_CHARS = 100
+# 静默探测期：最长静默回复 = 最长 token (HEARTBEAT_OK=12) + _ACK_MAX_CHARS 追加字符。
+# 累计文本（strip 后）不超过探测期时绝不转发，保证 NO_REPLY/HEARTBEAT_OK 不会被流式漏出。
+_STREAM_PROBE_CHARS = _ACK_MAX_CHARS + 12
+
+
+@dataclass
+class _StreamBlockState:
+    """block 流式转发状态（工具循环每轮新建，杜绝跨轮泄漏）。
+
+    sent: 已承诺/已转发的字符数（相对最新累计文本的索引）
+    forwarded: 是否转发过任何块
+    text: 最新累计文本（on_text 回调更新）
+    last_flush: 上次转发时刻 (monotonic)
+    timer: 空闲 flush 任务（流结束/异常时须 cancel，防幽灵文本）
+    """
+
+    sent: int = 0
+    forwarded: bool = False
+    text: str = ""
+    last_flush: float | None = None
+    timer: asyncio.Task | None = field(default=None, repr=False, compare=False)
+
+    def cancel_timer(self) -> None:
+        if self.timer is not None:
+            self.timer.cancel()
+            self.timer = None
 
 
 def _is_silent_reply_text(text: str) -> bool:
@@ -58,6 +86,17 @@ class ToolLoop:
         self.hindsight = ctx.memory.hindsight_memory
         self._max_tool_rounds = ctx.ai.max_tool_rounds
         self._model_registry = ctx.ai.model_registry
+        # 流式回复（block 模式，对齐 openclaw qqbot 插件）：文本累积到
+        # stream_block_chars 或距上次发送空闲 stream_block_idle_ms 才发一块，
+        # 不做逐句连发，避免 QQ 群聊刷屏。
+        self._stream_reply = bool(getattr(ctx.ai, "stream_reply", False))
+        self._stream_block_chars = max(
+            int(getattr(ctx.ai, "stream_block_chars", 800) or 800), 64
+        )
+        self._stream_block_idle = max(
+            float(getattr(ctx.ai, "stream_block_idle_ms", 1000) or 1000) / 1000.0,
+            0.05,
+        )
 
     async def run(
         self,
@@ -74,6 +113,7 @@ class ToolLoop:
         model_chain: Optional[List[str]] = None,
         binding_manager=None,
         tier: Optional[str] = None,
+        stream_callback: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> tuple[bool, bool]:
         """执行工具调用循环。
 
@@ -82,6 +122,9 @@ class ToolLoop:
             model_chain: 模型链（如 ["cheap", "primary"]），启用 fallback。
             binding_manager: SessionBindingManager（启用 session 绑定优化）
             tier: 当前消息的 RuleRouter 分类档位（用于 session 绑定键）
+            stream_callback: 流式文本转发回调（async (text_chunk) -> None）。
+                传入后（且 [ai].stream_reply 开启）AI 文本增量会在静默探测期后
+                按自然边界分片实时转发；未传入则只聚合不转发，行为与非流式一致。
 
         Returns:
             (sent_emoji, text_was_sent)
@@ -131,18 +174,105 @@ class ToolLoop:
                     svc = self.ai_service
                 current_model_name = runner.current if runner else None
 
+                # ── 流式转发状态（每轮新建，杜绝跨轮泄漏） ──
+                st = _StreamBlockState()
+
+                async def _flush_stream_block() -> None:
+                    """发送当前累积的 pending 文本（block 投递）。
+
+                    先承诺后发送：取消竞态下（await 中注入 CancelledError）消息可能已
+                    送达，sent 先递增可防止收尾补发把同一段再发一遍。
+                    """
+                    nonlocal text_was_sent
+                    pending = st.text[st.sent :]
+                    if not pending or message_delivered:
+                        # message_delivered: send_message 等工具已投递过消息，
+                        # 流式文本与工具投递重复，跳过（收尾补发同样会被拦截）
+                        return
+                    st.forwarded = True
+                    st.last_flush = time.monotonic()
+                    try:
+                        await stream_callback(pending)
+                    except asyncio.CancelledError:
+                        # 取消竞态：可能已发出，承诺已发送，防止补发重复
+                        st.sent += len(pending)
+                        raise
+                    st.sent += len(pending)
+                    text_was_sent = True
+
+                async def _idle_flush_task(delay: float) -> None:
+                    try:
+                        await asyncio.sleep(delay)
+                    except asyncio.CancelledError:
+                        return
+                    st.timer = None
+                    try:
+                        await _flush_stream_block()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        _log.warning("空闲 flush 失败 [%s]: %s", chat_id[:12], e)
+
+                def _schedule_idle_flush() -> None:
+                    """安排空闲定时器：距上次转发 ≥ idle 时强制发一块（首块立即发）。"""
+                    if st.timer is not None:
+                        return
+                    now = time.monotonic()
+                    last = st.last_flush or (now - self._stream_block_idle)
+                    delay = max(0.0, self._stream_block_idle - (now - last))
+                    st.timer = asyncio.create_task(_idle_flush_task(delay))
+
+                async def _on_stream_text(text_so_far: str) -> None:
+                    """block 聚合：达块大小立即发，否则空闲超时触发；静默探测期内不发。"""
+                    st.text = text_so_far
+                    pending = text_so_far[st.sent :]
+                    if not pending:
+                        return
+                    # 静默探测期（对 strip 后长度判定，防前导空白绕过）：绝不转发
+                    if len(text_so_far.strip()) <= _STREAM_PROBE_CHARS:
+                        return
+                    if len(pending) >= self._stream_block_chars:
+                        await _flush_stream_block()
+                    else:
+                        _schedule_idle_flush()
+
                 was_exception = False
                 try:
-                    message, usage = await svc.chat_completion_with_tools(
-                        messages=messages,
-                        tools=tools,
-                    )
+                    # 协议已声明 chat_completion_stream，直接调用（不防御式探测）
+                    if self._stream_reply:
+                        cb = None
+                        if stream_callback is not None:
+                            cb = StreamCallbacks(on_text=_on_stream_text)
+                        message, usage = await svc.chat_completion_stream(
+                            messages=messages,
+                            tools=tools,
+                            callbacks=cb,
+                        )
+                    else:
+                        message, usage = await svc.chat_completion_with_tools(
+                            messages=messages,
+                            tools=tools,
+                        )
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
                     was_exception = True
                     _log.warning(f"模型 [{current_model_name}] 调用异常: {e}")
                     message, usage = None, None
+                    # 无条件取消空闲定时器：即使尚未转发，timer 也引用本轮的 st，
+                    # 不取消会在 fallback 到下一模型后触发幽灵文本（双回复）
+                    st.cancel_timer()
+                    if st.forwarded:
+                        # 已实时转发过部分文本：无法干净回退（会双回复），记冷却后终止
+                        if runner:
+                            await runner.mark_failure(record_cooldown=True)
+                        _log.error(
+                            "流式转发中途失败，已发送部分文本，不再回退: "
+                            "model=%s chat=%s",
+                            current_model_name,
+                            chat_id[:12],
+                        )
+                        break
 
                 if message is not None:
                     if runner:
@@ -197,6 +327,11 @@ class ToolLoop:
             if usage and self.cost_tracker:
                 self.cost_tracker.record_turn(chat_id, model_for_cost, usage)
 
+            # 流式已转发部分文本但调用异常：终止整个循环（部分文本已送达）
+            if st.forwarded and message is None:
+                st.cancel_timer()
+                return sent_emoji, True
+
             if message is None:
                 try:
                     await reply_callback(chat_id, "AI 服务异常", reply_to, is_group)
@@ -207,6 +342,9 @@ class ToolLoop:
 
             response_text = message.content or ""
             tool_calls = message.tool_calls or []
+
+            # 流已结束：取消挂起的空闲定时器，剩余文本由下方收尾逻辑一次性补发
+            st.cancel_timer()
 
             reasoning = message.reasoning_content
             if reasoning:
@@ -236,19 +374,32 @@ class ToolLoop:
                         f"[工具循环 第{round_idx + 1}轮] send_message 已投递，跳过后续文本发送"
                     )
                 elif _is_silent_reply_text(response_text) or suppress_reply:
-                    _log.info(f"[工具循环 第{round_idx + 1}轮] 静默回复，跳过发送")
-                else:
-                    try:
-                        await reply_callback(
-                            chat_id=chat_id,
-                            content=response_text,
-                            message_id=reply_to,
-                            is_group=is_group,
-                        )
-                    except Exception as cb_err:
+                    if st.forwarded:
+                        # 探测期内不应发生；若发生（超长静默追加），已转发部分无法撤回
                         _log.warning(
-                            "回复 callback 失败 [%s]: %s", chat_id[:12], cb_err
+                            f"[工具循环 第{round_idx + 1}轮] 静默回复但流式已转发部分文本，"
+                            "无法撤回"
                         )
+                    else:
+                        _log.info(f"[工具循环 第{round_idx + 1}轮] 静默回复，跳过发送")
+                else:
+                    # 流式已转发前缀 → 只发剩余部分，避免重复
+                    remaining = response_text[st.sent :]
+                    if remaining:
+                        try:
+                            await reply_callback(
+                                chat_id=chat_id,
+                                content=remaining,
+                                message_id=reply_to,
+                                is_group=is_group,
+                            )
+                        except Exception as cb_err:
+                            _log.warning(
+                                "回复 callback 失败 [%s]: %s", chat_id[:12], cb_err
+                            )
+                    # 同步 sent：即使补发走了 reply_callback，也标记已投递，
+                    # 防止残留定时器 flush 再次发送同段文本
+                    st.sent = len(response_text)
                     text_was_sent = True
 
             if response_text or tool_calls:

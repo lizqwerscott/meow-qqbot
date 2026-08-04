@@ -15,6 +15,12 @@ class AIContext:
     rule_router: Any = None
     multimodal_service: Any = None
     max_tool_rounds: int = -1
+    # 流式回复：stream_reply 开启后，文本轮走 chat_completion_stream，
+    # 以 block 模式投递（对齐 openclaw qqbot 插件）：累积到 stream_block_chars
+    # 或距上次发送空闲 stream_block_idle_ms 才发一块，避免逐句连发刷屏。
+    stream_reply: bool = False
+    stream_block_chars: int = 800
+    stream_block_idle_ms: int = 1000
 
 
 @dataclass
@@ -68,5 +74,3 @@ class EngineContext:
     bg: BgContext = field(default_factory=BgContext)
     sub: SubContext = field(default_factory=SubContext)
     sys: SysContext = field(default_factory=SysContext)
-
-

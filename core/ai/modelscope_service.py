@@ -122,3 +122,27 @@ class ModelScopeService(AIService):
             temperature=temperature,
             max_tokens=max_tokens,
         )
+
+    async def chat_completion_stream(
+        self,
+        messages: Iterable[ChatCompletionMessageParam],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        callbacks: Optional[Any] = None,
+    ) -> tuple[Optional[AssistantMessage], Optional[Dict[str, Any]]]:
+        """流式同样走配额门禁，防止 stream_reply 开启后绕过限流。"""
+        if not self.can_call:
+            _log.warning(
+                f"ModelScope [{model or self.model}] 额度耗尽，跳过调用（流式）"
+            )
+            return None, None
+        return await super().chat_completion_stream(
+            messages=messages,
+            tools=tools,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            callbacks=callbacks,
+        )

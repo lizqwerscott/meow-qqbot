@@ -355,6 +355,7 @@ class ServiceGraph:
             )
 
         # ── EngineContext ──
+        ai_config = self.cfg.ai or {}
         ctx = EngineContext(
             ai=AIContext(
                 ai_service=self.ai_service,
@@ -362,6 +363,9 @@ class ServiceGraph:
                 rule_router=self.rule_router,
                 multimodal_service=self.multimodal_service,
                 max_tool_rounds=self.cfg.max_tool_rounds,
+                stream_reply=ai_config.get("stream_reply", False),
+                stream_block_chars=ai_config.get("stream_block_chars", 800),
+                stream_block_idle_ms=ai_config.get("stream_block_idle_ms", 1000),
             ),
             prompt=PromptContext(
                 template_manager=self.template_manager,

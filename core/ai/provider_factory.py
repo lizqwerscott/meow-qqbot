@@ -98,3 +98,30 @@ def _build_modelscope(pcfg: dict[str, Any], mcfg: dict[str, Any]) -> LLMService:
         max_tokens=mcfg.get("max_tokens", 8192),
         reasoning_effort=mcfg.get("reasoning_effort"),
     )
+
+
+@register_provider("deepseek_responses")
+def _build_deepseek_responses(pcfg: dict[str, Any], mcfg: dict[str, Any]) -> LLMService:
+    """DeepSeek Responses API（OpenAI responses 端点，非 chat-completions）。
+
+    base_url 默认 https://api.deepseek.com（Responses API 无 /v1 前缀）。
+    目前仅支持 deepseek-v4-flash 模型。
+    """
+    from core.ai.deepseek_service import DeepSeekResponsesService
+
+    model = mcfg.get("model", "deepseek-v4-flash")
+    if model != "deepseek-v4-flash":
+        _log.warning(
+            f"deepseek_responses 目前仅支持 deepseek-v4-flash，配置了 [{model}]，"
+            "Responses API 调用可能失败"
+        )
+    return DeepSeekResponsesService(
+        api_key=pcfg.get("api_key", ""),
+        base_url=pcfg.get("base_url"),
+        model=model,
+        timeout=mcfg.get("timeout", 30),
+        max_retries=mcfg.get("max_retries", 0),
+        temperature=mcfg.get("temperature", 0.7),
+        max_tokens=mcfg.get("max_tokens", 8192),
+        reasoning_effort=mcfg.get("reasoning_effort"),
+    )

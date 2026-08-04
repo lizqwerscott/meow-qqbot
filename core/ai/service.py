@@ -10,10 +10,55 @@ from openai.types.chat import ChatCompletionMessageParam
 from core.ai.protocol import (
     AssistantMessage,
     AssistantToolCall,
+    StreamCallbacks,
     ensure_messages_consistent,
 )
 
 _log = logging.getLogger(__name__)
+
+
+async def _consume_chunk_stream(
+    stream: Any,
+    callbacks: StreamCallbacks | None,
+    text_parts: list[str],
+    reasoning_parts: list[str],
+    tool_call_ids: list[str],
+    tool_call_names: list[str],
+    tool_call_args: list[str],
+) -> dict[str, Any] | None:
+    """迭代 chat-completions SSE 流，把增量聚合进缓冲；返回 usage（若有）。
+
+    主路径与 stream_options 降级重试路径共用，保证两处聚合语义一致。
+    """
+    async for chunk in stream:
+        if not chunk.choices and chunk.usage:
+            return chunk.usage.model_dump()
+        delta = chunk.choices[0].delta if chunk.choices else None
+        if delta is None:
+            continue
+        if getattr(delta, "content", None):
+            text_parts.append(delta.content)
+            if callbacks and callbacks.on_text:
+                await callbacks.on_text("".join(text_parts))
+        reasoning = getattr(delta, "reasoning_content", None)
+        if reasoning:
+            reasoning_parts.append(reasoning)
+            if callbacks and callbacks.on_reasoning:
+                await callbacks.on_reasoning("".join(reasoning_parts))
+        for tc in getattr(delta, "tool_calls", None) or []:
+            idx = tc.index or 0
+            while len(tool_call_ids) <= idx:
+                tool_call_ids.append("")
+                tool_call_names.append("")
+                tool_call_args.append("")
+            if tc.id:
+                tool_call_ids[idx] = tc.id
+            if tc.function:
+                if tc.function.name:
+                    tool_call_names[idx] = tc.function.name
+                if tc.function.arguments:
+                    tool_call_args[idx] += tc.function.arguments
+    return None
 
 
 class AIService:
@@ -129,6 +174,187 @@ class AIService:
 
     def _is_reasoning_model(self, model: str) -> bool:
         return any(k in model for k in ("o1", "o3", "deepseek", "reasoning"))
+
+    async def chat_completion_stream(
+        self,
+        messages: Iterable[ChatCompletionMessageParam],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        callbacks: StreamCallbacks | None = None,
+    ) -> tuple[AssistantMessage | None, dict[str, Any] | None]:
+        """流式版 chat_completion_with_tools（chat-completions SSE）。
+
+        内部聚合增量片段，返回的 AssistantMessage 与非流式完全一致；
+        callbacks 收到的是**累计文本**（含 reasoning），调用方按需转发。
+        """
+        model_to_use = model or self.model
+        max_tokens_to_use = max_tokens if max_tokens is not None else self.max_tokens
+        is_reasoning = self._is_reasoning_model(model_to_use)
+
+        # 聚合缓冲放 try 外：create() 早期抛异常时 except 分支也要能引用（断流回退）
+        text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_call_ids: list[str] = []
+        tool_call_names: list[str] = []
+        tool_call_args: list[str] = []
+        usage: dict[str, Any] | None = None
+
+        try:
+            msgs = list(messages)
+            ensure_messages_consistent(msgs)
+
+            kwargs: dict[str, Any] = {
+                "messages": msgs,
+                "model": model_to_use,
+                "max_tokens": max_tokens_to_use,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+
+            if not (is_reasoning or self.reasoning_effort):
+                temperature_to_use = (
+                    temperature if temperature is not None else self.temperature
+                )
+                kwargs["temperature"] = temperature_to_use
+
+            if self.reasoning_effort:
+                kwargs["reasoning_effort"] = self.reasoning_effort
+
+            extra_body = self._build_extra_body()
+            if extra_body:
+                kwargs["extra_body"] = extra_body
+
+            if tools:
+                kwargs["tools"] = tools
+
+            stream = await self.client.chat.completions.create(**kwargs)
+            try:
+                usage = await _consume_chunk_stream(
+                    stream,
+                    callbacks,
+                    text_parts,
+                    reasoning_parts,
+                    tool_call_ids,
+                    tool_call_names,
+                    tool_call_args,
+                )
+            finally:
+                close_fn = getattr(stream, "close", None)
+                if close_fn is not None:
+                    await close_fn()
+
+            return self._assemble_stream_result(
+                text_parts,
+                reasoning_parts,
+                tool_call_ids,
+                tool_call_names,
+                tool_call_args,
+                usage,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            err_str = str(e)
+            # 部分网关（如 ollama /v1）不认 stream_options，重试一次不带它
+            low = err_str.lower()
+            if (
+                "stream_options" in low
+                or "include_usage" in low
+                or "unrecognized" in low
+            ):
+                kwargs.pop("stream_options", None)
+                try:
+                    stream = await self.client.chat.completions.create(**kwargs)
+                    try:
+                        usage = await _consume_chunk_stream(
+                            stream,
+                            callbacks,
+                            text_parts,
+                            reasoning_parts,
+                            tool_call_ids,
+                            tool_call_names,
+                            tool_call_args,
+                        )
+                    finally:
+                        close_fn = getattr(stream, "close", None)
+                        if close_fn is not None:
+                            await close_fn()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e2:
+                    # 降级重试也失败：不逃逸，按断流契约返回已聚合部分（有日志）
+                    _log.error("流式降级重试也失败 [%s]: %s", model_to_use, e2)
+                    return self._assemble_stream_result(
+                        text_parts,
+                        reasoning_parts,
+                        tool_call_ids,
+                        tool_call_names,
+                        tool_call_args,
+                        None,
+                    )
+                return self._assemble_stream_result(
+                    text_parts,
+                    reasoning_parts,
+                    tool_call_ids,
+                    tool_call_names,
+                    tool_call_args,
+                    usage,
+                )
+            if "429" in err_str or "rate_limit" in low:
+                _log.warning("AI 请求被限流（流式） [%s]: %s", model_to_use, err_str)
+            elif "502" in err_str or "503" in err_str or "service_unavailable" in low:
+                _log.error("AI 服务不可用（流式） [%s]: %s", model_to_use, err_str)
+            elif "timeout" in low:
+                _log.warning("AI 请求超时（流式） [%s]: %s", model_to_use, err_str)
+            else:
+                _log.error("AI 请求失败（流式） [%s]: %s", model_to_use, err_str)
+            # 聚合到一半断流：把已生成部分返回（已实时转发过时上层不能 fallback 双回复）
+            return self._assemble_stream_result(
+                text_parts,
+                reasoning_parts,
+                tool_call_ids,
+                tool_call_names,
+                tool_call_args,
+                None,
+            )
+
+    @staticmethod
+    def _assemble_stream_result(
+        text_parts: list[str],
+        reasoning_parts: list[str],
+        tool_call_ids: list[str],
+        tool_call_names: list[str],
+        tool_call_args: list[str],
+        usage: dict[str, Any] | None,
+    ) -> tuple[AssistantMessage | None, dict[str, Any] | None]:
+        """把流式聚合的增量拼成完整的 AssistantMessage（与 chat_completion_with_tools 同构）。"""
+        content = "".join(text_parts) or None
+        reasoning_content = "".join(reasoning_parts) or None
+        tool_calls = None
+        if tool_call_ids:
+            tool_calls = [
+                AssistantToolCall(
+                    id=tool_call_ids[i],
+                    name=tool_call_names[i],
+                    arguments=tool_call_args[i],
+                )
+                for i in range(len(tool_call_ids))
+                if tool_call_names[i]
+            ]
+            tool_calls = tool_calls or None
+
+        if content or reasoning_content or tool_calls:
+            return (
+                AssistantMessage(
+                    content=content,
+                    tool_calls=tool_calls,
+                    reasoning_content=reasoning_content,
+                ),
+                usage,
+            )
+        return None, usage
 
     def _build_extra_body(self) -> dict[str, Any] | None:
         if self.reasoning_effort:

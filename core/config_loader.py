@@ -26,6 +26,7 @@ class AppConfig(BaseModel):
     secret: SecretStr
     bot_id: str = ""
     max_tool_rounds: int = -1
+    ai: dict = {}
     character_card: str = "characters/default.md"
     providers: dict = {}
     groups: dict = {}
@@ -85,9 +86,7 @@ class ConfigLoader:
         except Exception as exc:
             raise ConfigError(f"config.toml 加载失败: {exc}") from exc
 
-    def _merge_models_file(
-        self, raw: dict, models_path: str
-    ) -> dict:
+    def _merge_models_file(self, raw: dict, models_path: str) -> dict:
         """将 config/models.toml 中的模型 section 合并进主配置。
 
         models_path 可通过环境变量 MQ_MODELS_CONFIG 覆盖；文件不存在时不报错
@@ -115,10 +114,7 @@ class ConfigLoader:
             if isinstance(incoming, dict) and isinstance(existing, dict):
                 merged = dict(existing)
                 for key, value in incoming.items():
-                    if (
-                        isinstance(value, dict)
-                        and isinstance(merged.get(key), dict)
-                    ):
+                    if isinstance(value, dict) and isinstance(merged.get(key), dict):
                         merged[key] = {
                             **merged[key],
                             **value,
@@ -147,6 +143,11 @@ class ConfigLoader:
     @property
     def max_tool_rounds(self) -> int:
         return self._cfg.max_tool_rounds
+
+    @property
+    def ai(self) -> dict:
+        """[ai] 段：流式回复等 AI 行为配置。"""
+        return self._cfg.ai
 
     @property
     def character_card(self) -> str:

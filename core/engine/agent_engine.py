@@ -427,6 +427,19 @@ class AgentEngine:
         )
 
         # 6. 工具调用循环
+
+        # 流式转发包装：把 AI 实时生成的文本分片发给用户（QQ 无消息编辑，只能逐条发）
+        async def _stream_deliver(chunk: str) -> None:
+            try:
+                await reply_callback(
+                    chat_id=chat_id,
+                    content=chunk,
+                    message_id=input_message.id,
+                    is_group=is_group,
+                )
+            except Exception as cb_err:
+                _log.warning("流式转发失败 [%s..]: %s", chat_id[:12], cb_err)
+
         await self.tool_loop.run(
             messages=messages,
             tools=tools_to_use,
@@ -439,6 +452,7 @@ class AgentEngine:
             model_chain=input_message.model_chain,
             binding_manager=self._session_binding,
             tier=input_message.tier,
+            stream_callback=_stream_deliver,
         )
 
         if self._system_events:

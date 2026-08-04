@@ -15,7 +15,7 @@ ToolLoop / FallbackRunner / ModelRegistry 只消费本模块的类型。
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -77,11 +77,27 @@ class AssistantMessage:
         return wire
 
 
+@dataclass
+class StreamCallbacks:
+    """流式回调：on_text / on_reasoning 收到的是**累计文本**（非增量）。
+
+    传累计文本而非原始 delta，是为了让调用方（如 ToolLoop 分片发送）
+    无需自己拼接，直接按累计长度切片即可。
+    """
+
+    on_text: Callable[[str], Awaitable[None]] | None = None
+    on_reasoning: Callable[[str], Awaitable[None]] | None = None
+
+
 class LLMService(Protocol):
     """LLM 服务契约（结构化子类型：AIService / ModelScopeService 自动满足）。
 
     ModelRegistry / FallbackRunner / ProviderFactory 只依赖本协议，
-    新增 provider 必须实现这两个方法 + close，否则静态检查报错。
+    新增 provider 必须实现这些方法 + close，否则静态检查报错。
+
+    流式方法 chat_completion_stream 返回的 AssistantMessage 与非流式
+    chat_completion_with_tools 完全一致（内部聚合 delta），调用方可按
+    callbacks 是否提供决定要不要实时转发文本。
     """
 
     model: str
@@ -103,6 +119,16 @@ class LLMService(Protocol):
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+    ) -> tuple[AssistantMessage | None, dict[str, Any] | None]: ...
+
+    async def chat_completion_stream(
+        self,
+        messages: Iterable[ChatCompletionMessageParam],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        callbacks: StreamCallbacks | None = None,
     ) -> tuple[AssistantMessage | None, dict[str, Any] | None]: ...
 
     async def close(self) -> None: ...
