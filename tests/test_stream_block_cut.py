@@ -593,3 +593,184 @@ class TestToolLoopStreamReset:
         assert delivered.endswith(final), "终稿必须完整收尾，开头不得被跳过"
         sentence = "这是终稿的完整回复内容，主人下班辛苦了好好休息。"
         assert delivered.count(sentence) == 5, "终稿不得重复"
+
+
+# ── 重复气泡回归（18:59 线上事故）：flush 发送在途时的并发捕获 ──
+
+
+class _SlowCbSvc:
+    """逐字符流式服务（可指定字符步进间隔），配合慢 stream_callback
+    复现「发送在途时 on_text / on_reset 并发」的竞态窗口。
+    """
+
+    def __init__(self, text: str, step: float = 0.002):
+        self.text = text
+        self.step = step
+
+    @property
+    def model(self):
+        return "mock"
+
+    async def chat_completion_stream(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        temperature=None,
+        max_tokens=None,
+        callbacks=None,
+    ):
+        buf = ""
+        for ch in self.text:
+            await asyncio.sleep(self.step)
+            buf += ch
+            if callbacks and callbacks.on_text:
+                await callbacks.on_text(buf)
+        return AssistantMessage(content=buf), {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+        }
+
+
+class _SlowCbReviseSvc(_SlowCbSvc):
+    """长草稿流式到一半（flush 发送在途）触发修订 → 终稿从零重流。"""
+
+    async def chat_completion_stream(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        temperature=None,
+        max_tokens=None,
+        callbacks=None,
+    ):
+        buf = ""
+        for ch in self.draft:
+            await asyncio.sleep(self.step)
+            buf += ch
+            if callbacks and callbacks.on_text:
+                await callbacks.on_text(buf)
+        if callbacks and callbacks.on_reset:
+            await callbacks.on_reset()
+        buf = ""
+        for ch in self.final:
+            await asyncio.sleep(self.step)
+            buf += ch
+            if callbacks and callbacks.on_text:
+                await callbacks.on_text(buf)
+        return AssistantMessage(content=buf), {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+        }
+
+
+def _run_slow_case(svc, *, cb_sleep, block_chars=800, idle_ms=50):
+    """与 _run_case 相同，但 stream_callback 模拟 QQ API 延迟（发送在途）。"""
+    loop = _make_loop(svc, block_chars, idle_ms)
+    sent, streamed = [], []
+
+    async def reply_cb(chat_id, content, message_id, is_group):
+        sent.append(content)
+
+    async def stream_cb(chunk):
+        await asyncio.sleep(cb_sleep)  # 发送在途窗口
+        streamed.append(chunk)
+
+    async def run():
+        return await loop.run(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            chat_id="c1",
+            is_group=True,
+            reply_to="m1",
+            reply_callback=reply_cb,
+            stream_callback=stream_cb,
+        )
+
+    ret = asyncio.run(run())
+    return ret, sent, streamed
+
+
+class _PauseFlushSvc:
+    """流式到触发首块 flush 后显式停顿：发送在途期间第二个空闲定时器
+    必然触发（复现 18:59 重复气泡的确定性条件：flush 在途 + 再次调度）。"""
+
+    @property
+    def model(self):
+        return "mock"
+
+    async def chat_completion_stream(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        temperature=None,
+        max_tokens=None,
+        callbacks=None,
+    ):
+        line = "这是第一段完整内容，主人下班辛苦啦。\n"
+        first = line * 18  # 216 字符 > 112 探测期，触发首块 flush
+        buf = ""
+        for ch in first:
+            await asyncio.sleep(0.001)
+            buf += ch
+            if callbacks and callbacks.on_text:
+                await callbacks.on_text(buf)
+        # 停顿：首块 flush 的发送（0.12s）在途期间，空闲定时器（50ms）
+        # 必然触发第二次 flush —— 旧实现以旧偏移二次捕获同一段文本
+        await asyncio.sleep(0.3)
+        rest = "第二段收尾内容，猫猫陪你休息。\n"
+        buf = ""
+        for ch in rest:
+            await asyncio.sleep(0.001)
+            buf += ch
+            if callbacks and callbacks.on_text:
+                await callbacks.on_text(buf)
+        return AssistantMessage(content=first + rest), {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+        }
+
+
+class TestToolLoopFlushRace:
+    """flush 发送在途时的并发竞态：同一段文本不得被二次捕获（重复气泡）。"""
+
+    def test_second_idle_flush_never_recaptures_inflight_segment(self):
+        """18:59 重复气泡事故回归。
+
+        旧实现发送完成才推进 st.sent；发送在途时 on_text 会再次调度空闲
+        定时器，新 flush 以旧偏移二次捕获同一段文本（逐字节相同的重复
+        气泡，用户看到 [P1][P2][P2][P3]，而上下文历史只有一份）。
+        发送前推进后，任何并发 on_text 看到的偏移都已包含在途块，
+        同一段不可能再被捕获。
+        """
+        line = "这是第一段完整内容，主人下班辛苦啦。\n"
+        svc = _PauseFlushSvc()
+        ret, sent, streamed = _run_slow_case(svc, cb_sleep=0.12, idle_ms=50)
+        delivered = "".join(streamed) + "".join(sent)
+        assert streamed, "长文本应先被转发"
+        assert delivered.count(line) == 18, (
+            f"第一段不得被二次捕获（重复气泡事故）：出现 {delivered.count(line)} 次，"
+            f"delivered={delivered!r}"
+        )
+
+    def test_reset_during_inflight_flush_keeps_final_complete(self):
+        """修订（on_reset）在 flush 发送在途时到达：终稿必须从头完整投递。
+
+        旧实现发送后才推进 st.sent，on_reset 把 sent 清零后再 += 在途块
+        长度（0 + len(pending)）→ 偏移损坏 → 终稿开头被跳过/整条被吞。
+        """
+        draft = "这是草稿内容。" * 17  # 119 字符 > 112 探测期，会触发首块 flush
+        final = "这是终稿内容，主人辛苦啦。" * 8  # 104 字符，全程 < 探测期
+        svc = _SlowCbReviseSvc.__new__(_SlowCbReviseSvc)
+        svc.text = draft
+        svc.draft = draft
+        svc.final = final
+        svc.step = 0.002
+        ret, sent, streamed = _run_slow_case(svc, cb_sleep=0.12, idle_ms=1000)
+        delivered = "".join(streamed) + "".join(sent)
+        assert streamed, "长草稿应先被转发"
+        assert delivered.endswith(final), (
+            f"修订后的终稿必须从头完整投递（不得被旧偏移吞掉）："
+            f"delivered={delivered!r}"
+        )

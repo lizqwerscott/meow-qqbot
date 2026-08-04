@@ -214,19 +214,25 @@ class ToolLoop:
                         pending = pending[:cut]
                     st.forwarded = True
                     st.last_flush = time.monotonic()
+                    # 先承诺后发送：await 之前就推进 sent。
+                    # 重复气泡根因（18:59 线上事故）：旧实现发送后才推进，而
+                    # _idle_flush_task 在 flush 开始前已把 timer 置 None——发送
+                    # 在途期间 on_text 会再次调度空闲定时器，新 flush 以旧偏移
+                    # 二次捕获同一段文本（逐字节相同的重复气泡）；on_reset 在
+                    # 发送期间触发同样会把偏移算错（0 + len(pending)）。
+                    # 发送前推进后：任何并发 on_text / on_reset / 收尾补发看到的
+                    # 偏移都已是「本块已投递」，同一段文本不可能被再次捕获。
+                    # 发送失败/取消不回退：已承诺的文本无法撤回（与旧语义一致）。
+                    st.sent += len(pending)
+                    text_committed = True
                     try:
                         await stream_callback(pending)
                     except asyncio.CancelledError:
-                        # 取消竞态：可能已发出，承诺已发送，防止补发重复
-                        st.sent += len(pending)
                         raise
                     except Exception as e:
-                        # 发送失败：与 reply_callback 失败同等对待（记录、不重发）。
-                        # sent 必须前进——否则后续 flush / 收尾补发会把同一段再发
-                        # 一遍（重复投递），且已承诺的文本无法撤回。
+                        # 发送失败：与 reply_callback 失败同等对待（记录、不重发），
+                        # sent 已推进，后续 flush / 收尾补发不会重发同段。
                         _log.warning("流式块发送失败 [%s]: %s", chat_id[:12], e)
-                    st.sent += len(pending)
-                    text_committed = True
 
                 async def _idle_flush_task(delay: float) -> None:
                     try:
