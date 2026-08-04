@@ -532,6 +532,47 @@ class TestToolLoopAbortFallback:
         assert delivered == text[:131], "尾巴必须补发，且无重复"
 
 
+class _ReviseSvc:
+    """模拟 DeepSeek 修订输出：长草稿（超探测期，已被转发）→ on_reset → 终稿。"""
+
+    @property
+    def model(self):
+        return "mock"
+
+    async def chat_completion_stream(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        temperature=None,
+        max_tokens=None,
+        callbacks=None,
+    ):
+        # 长草稿：> 112 字符探测期，会被实时转发（无法撤回）
+        draft = "这是很长很长的草稿内容，主人听我说。" * 8
+        buf = ""
+        for ch in draft:
+            await asyncio.sleep(0)  # 让出事件循环，空闲 flush 定时器才能跑
+            buf += ch
+            if callbacks and callbacks.on_text:
+                await callbacks.on_text(buf)
+        # 模型修订：触发 on_reset（真实 DeepSeek 服务在终稿 message item 时触发）
+        if callbacks and callbacks.on_reset:
+            await callbacks.on_reset()
+        # 终稿：全新生成
+        buf = ""
+        final = "这是终稿的完整回复内容，主人下班辛苦了好好休息。" * 5
+        for ch in final:
+            await asyncio.sleep(0)
+            buf += ch
+            if callbacks and callbacks.on_text:
+                await callbacks.on_text(buf)
+        return AssistantMessage(content=buf), {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+        }
+
+
 class TestToolLoopStreamReset:
     """服务内部重试（on_reset）：新文本从 0 偏移转发，半截旧文本不混入。"""
 
@@ -541,3 +582,17 @@ class TestToolLoopStreamReset:
         full = "这是重试后的完整回复内容，长度足以越过静默探测期。" * 3
         assert delivered == full, "重试文本必须从 0 偏移完整投递"
         assert "半截内容" not in delivered
+
+    def test_revision_after_forwarded_draft_delivers_full_final(self):
+        """草稿已被转发后的修订：终稿必须从头完整投递（不得从旧偏移切片）。
+
+        回归（第二轮审查）：旧实现清缓冲但不触发 on_reset，st.sent 停在草稿
+        长度 → 终稿开头被跳过/整条被吞，双气泡症状在长草稿下依旧存在。
+        """
+        ret, sent, streamed = asyncio.run(_run_case(_ReviseSvc()))
+        delivered = "".join(streamed) + "".join(sent)
+        final = "这是终稿的完整回复内容，主人下班辛苦了好好休息。" * 5
+        assert streamed != [], "长草稿应先被转发"
+        assert delivered.endswith(final), "终稿必须完整收尾，开头不得被跳过"
+        sentence = "这是终稿的完整回复内容，主人下班辛苦了好好休息。"
+        assert delivered.count(sentence) == 5, "终稿不得重复"

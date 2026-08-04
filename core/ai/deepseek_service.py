@@ -177,13 +177,21 @@ def _normalize_usage(usage: Any) -> dict[str, Any] | None:
 
 
 def _parse_output(response: Any) -> AssistantMessage | None:
-    """非流式响应 output items → AssistantMessage。"""
+    """非流式响应 output items → AssistantMessage。
+
+    与流式路径共用修订语义（AGENTS.md「非流式/流式共用同一套消息转换」）：
+    新 message item 开始 = 模型修订输出，之前的文本与工具调用全部丢弃，
+    只保留最新 item 的内容。
+    """
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_calls: list[AssistantToolCall] = []
     for item in getattr(response, "output", None) or []:
         t = getattr(item, "type", None)
         if t == "message":
+            # 修订语义：新 message item 取代之前的草稿（文本 + 工具调用）
+            content_parts.clear()
+            tool_calls.clear()
             for part in getattr(item, "content", None) or []:
                 if getattr(part, "type", None) == "output_text" and getattr(
                     part, "text", None
@@ -198,6 +206,8 @@ def _parse_output(response: Any) -> AssistantMessage | None:
                 )
             )
         elif t == "reasoning":
+            # 修订后的新 reasoning item：旧思维链丢弃（仅日志用途）
+            reasoning_parts.clear()
             for part in getattr(item, "content", None) or []:
                 text = getattr(part, "text", None)
                 if text:
@@ -399,20 +409,33 @@ class DeepSeekResponsesService:
                         itype = getattr(item, "type", None) if item else None
                         if itype == "function_call":
                             name = getattr(item, "name", None)
-                            call_id = getattr(item, "call_id", None) or getattr(
-                                item, "id", None
-                            )
+                            # done 事件的 item 可能缺 call_id：只记录显式 call_id，
+                            # 否则 done 会用 item_id 覆盖 added 已记录的正确映射
+                            # （回注 function_call_output 时用错 id 会 400）。
+                            raw_call_id = getattr(item, "call_id", None)
+                            call_id = raw_call_id or getattr(item, "id", None)
                             if name:
                                 call_names[getattr(item, "id", None)] = name
                                 call_names[call_id] = name
-                            if call_id:
-                                call_ids[getattr(item, "id", None)] = call_id
-                                call_ids[call_id] = call_id
+                            if raw_call_id:
+                                call_ids[getattr(item, "id", None)] = raw_call_id
+                                call_ids[raw_call_id] = raw_call_id
                         elif itype == "message" and et == "response.output_item.added":
-                            # 模型修订输出（草稿→终稿）：新 message item 开始，
-                            # 之前 item 的文本必须丢弃——否则草稿+终稿在缓冲里
-                            # 拼接成翻倍内容（线上事故：两条部分重复的消息）。
+                            # 模型修订输出（草稿→终稿）：新 message item 取代旧 item，
+                            # 旧文本/工具调用必须丢弃——否则草稿+终稿拼接翻倍
+                            # （线上事故），草稿工具调用还会被幽灵执行。
+                            discarded = bool(buffer.text_parts) or bool(tool_calls)
                             buffer.text_parts.clear()
+                            tool_calls.clear()
+                            call_names.clear()
+                            call_ids.clear()
+                            # 累计文本将从零重新开始：调用方（ToolLoop）转发偏移必须
+                            # 同步归零（st.sent 停在草稿长度会让终稿从旧偏移切片/整条
+                            # 被吞）。仅在真有内容被丢弃时触发——首个 message item 是
+                            # 空转，不打扰调用方；on_reset 保留 forwarded 标志，草稿
+                            # 若已转发，后续断流仍按已转发终止（防双回复）。
+                            if discarded and callbacks and callbacks.on_reset:
+                                await callbacks.on_reset()
                         elif (
                             itype == "reasoning" and et == "response.output_item.added"
                         ):

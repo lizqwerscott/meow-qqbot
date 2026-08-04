@@ -29,7 +29,7 @@ uv run black <file>   # format code
 - `core/ai/service.py` — OpenAI-compatible LLM client (`openai[aiohttp]`); returns unified `AssistantMessage` protocol objects
 - `core/ai/protocol.py` — **AI 协议抽象层**: `AssistantMessage` / `AssistantToolCall` 统一消息对象（`tool_calls_data` wire 组装）+ `ensure_messages_consistent` 一致性清理。核心循环（ToolLoop/FallbackRunner）只依赖本模块，不感知底层协议
 - `core/ai/provider_factory.py` — **Provider 工厂注册表**: `@register_provider(type)` 自注册构造器，`ModelRegistry` 构造零分支。新增 provider = 写 factory + 配置，不动注册表
-- `core/ai/deepseek_service.py` — `DeepSeekResponsesService`: DeepSeek Responses API 实现（provider type `deepseek_responses`，目前仅支持 `deepseek-v4-flash`），满足 `LLMService` 协议，非流式/流式共用同一套消息转换
+- `core/ai/deepseek_service.py` — `DeepSeekResponsesService`: DeepSeek Responses API 实现（provider type `deepseek_responses`，目前仅支持 `deepseek-v4-flash`），满足 `LLMService` 协议，非流式/流式共用同一套消息转换。**修订语义**：模型先出草稿再出终稿（两个 output item）时只保留最新 item——流式在 `output_item.added` 时清缓冲并触发 `StreamCallbacks.on_reset`（调用方归零转发偏移），非流式 `_parse_output` 同理；草稿的工具调用一并丢弃（防幽灵执行）
 - `core/ai/multimodal.py` — VLM vision model client for emoji/image analysis
 - `core/ai/model_registry.py` — `ModelRegistry`: multi-model config + fallback chains
 - `core/managers/` — `*Manager` classes (command, context, cost, emoji, nickname, session, template, permission, workspace)

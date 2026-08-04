@@ -293,6 +293,141 @@ class TestDeepSeekStreamAbort:
             message.content == p1 + "\n\n" + p2 + "\n\n" + p3
         ), "内容必须只含终稿，草稿文本不得混入"
 
+    def test_revision_emits_on_reset_and_drops_draft_tool_calls(self):
+        """修订时触发 on_reset（调用方归零转发偏移）+ 草稿工具调用丢弃。
+
+        回归：草稿被转发过（超长/空闲 flush）后若不触发 on_reset，终稿会从
+        旧偏移切片；草稿的 function_call 不丢弃会被幽灵执行。
+        """
+        resets = {"n": 0}
+
+        async def on_reset():
+            resets["n"] += 1
+
+        class _ReviseStream:
+            async def __aiter__(self):
+                # 草稿轮：文本 + 工具调用
+                yield _ev(
+                    "response.output_item.added",
+                    item=NS(type="message", id="m_draft"),
+                )
+                for ch in "草稿文本":
+                    yield _ev("response.output_text.delta", delta=ch, item_id="m_draft")
+                yield _ev(
+                    "response.output_item.done",
+                    item=NS(type="message", id="m_draft"),
+                )
+                yield _ev(
+                    "response.output_item.added",
+                    item=NS(
+                        type="function_call",
+                        id="fc_draft",
+                        name="web_search",
+                        call_id="call_draft",
+                    ),
+                )
+                yield _ev(
+                    "response.function_call_arguments.delta",
+                    item_id="fc_draft",
+                    delta='{"q": "旧查询"}',
+                )
+                yield _ev(
+                    "response.function_call_arguments.done",
+                    item_id="fc_draft",
+                    arguments='{"q": "旧查询"}',
+                )
+                yield _ev(
+                    "response.output_item.done",
+                    item=NS(type="function_call", id="fc_draft"),
+                )
+                # 终稿轮：新 message item 取代草稿
+                yield _ev(
+                    "response.output_item.added",
+                    item=NS(type="message", id="m_final"),
+                )
+                for ch in "终稿文本内容":
+                    yield _ev("response.output_text.delta", delta=ch, item_id="m_final")
+                yield _ev(
+                    "response.output_item.done",
+                    item=NS(type="message", id="m_final"),
+                )
+                yield _ev(
+                    "response.output_item.added",
+                    item=NS(
+                        type="function_call",
+                        id="fc_final",
+                        name="web_search",
+                        call_id="call_final",
+                    ),
+                )
+                yield _ev(
+                    "response.function_call_arguments.delta",
+                    item_id="fc_final",
+                    delta='{"q": "新查询"}',
+                )
+                yield _ev(
+                    "response.function_call_arguments.done",
+                    item_id="fc_final",
+                    arguments='{"q": "新查询"}',
+                )
+                yield _ev(
+                    "response.output_item.done",
+                    item=NS(type="function_call", id="fc_final"),
+                )
+                yield _ev("response.completed", response=NS(usage=None))
+
+            async def close(self):
+                pass
+
+        async def create(**kwargs):
+            return _ReviseStream()
+
+        svc = _make_deepseek_service(create)
+        message, usage = asyncio_run(
+            svc.chat_completion_stream(
+                messages=[{"role": "user", "content": "hi"}],
+                callbacks=StreamCallbacks(on_reset=on_reset),
+            )
+        )
+        assert resets["n"] == 1, "终稿 message item 开始时必须触发一次 on_reset"
+        assert message is not None
+        assert message.content == "终稿文本内容"
+        assert message.tool_calls is not None and len(message.tool_calls) == 1
+        assert message.tool_calls[0].id == "call_final", "草稿工具调用必须被丢弃"
+        assert message.tool_calls[0].arguments == '{"q": "新查询"}'
+
+    def test_parse_output_revision_keeps_only_final(self):
+        """非流式 _parse_output 对齐修订语义：只保留最新 message/工具调用。"""
+
+        def _msg_item(i, text):
+            return NS(
+                type="message", id=f"m{i}", content=[NS(type="output_text", text=text)]
+            )
+
+        def _fc_item(i):
+            return NS(
+                type="function_call",
+                id=f"fc{i}",
+                call_id=f"call_{i}",
+                name="web_search",
+                arguments='{"q": "q%d"}' % i,
+            )
+
+        response = NS(
+            output=[
+                _msg_item(1, "草稿文本"),
+                _fc_item(1),
+                _msg_item(2, "终稿文本"),
+                _fc_item(2),
+            ]
+        )
+        from core.ai.deepseek_service import _parse_output
+
+        msg = _parse_output(response)
+        assert msg is not None
+        assert msg.content == "终稿文本"
+        assert len(msg.tool_calls) == 1 and msg.tool_calls[0].id == "call_2"
+
     def test_complete_stream_returns_message(self):
         """response.completed 正常收尾不受影响。"""
 
