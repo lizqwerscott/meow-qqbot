@@ -150,10 +150,14 @@ def _markdown_safe_cut(
             # 以 | 开头但未闭合：流式生成中的半截表格行/表头 → 结构内，不可切
             pass
         else:
-            # 普通行：表格/围栏结束，行尾即安全切点
+            # 普通行：表格/围栏结束，行尾即安全切点。半截行（流式生成中，
+            # 无换行结尾）不更新 safe——否则切点 = len+1 超出文本长度，
+            # 调用方不切，半截链接/单词会整段发出（QQ 半截链接的根因）。
             in_table = False
             pending_header = False
-            safe = pos + len(line) + 1
+            end = pos + len(line) + 1
+            if end <= len(text):
+                safe = end
         pos += len(line) + 1
     return safe
 
