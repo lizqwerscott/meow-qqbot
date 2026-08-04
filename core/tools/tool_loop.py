@@ -12,9 +12,9 @@ import json
 import logging
 from typing import Any, Callable, List, Optional
 
-from core.message import InputMessage, MessageType
-
 from core.ai.fallback_runner import FallbackRunner
+from core.ai.protocol import ensure_messages_consistent
+from core.message import InputMessage, MessageType
 from core.tools._types import ToolContext
 from core.tools.impl import execute as execute_tool
 
@@ -32,70 +32,10 @@ def _is_silent_reply_text(text: str) -> bool:
         if stripped == token:
             return True
         if stripped.startswith(token):
-            remaining = stripped[len(token):].lstrip("`").strip("：:，, \t")
+            remaining = stripped[len(token) :].lstrip("`").strip("：:，, \t")
             if not remaining or len(remaining) < _ACK_MAX_CHARS:
                 return True
     return False
-
-
-def ensure_messages_consistent(messages: List[dict]) -> None:
-    """清理 messages 中孤立的 tool_calls 并修复 tool 响应顺序。
-
-    场景：某轮 AI 返回了 tool_calls，但后续处理异常导致
-    对应的 tool 响应消息未追加完整。下次请求时 API 会 400。
-    修复：删除最后一个没有对应 tool 响应的 assistant 消息。
-
-    此外，因竞态条件可能在 assistant(tool_calls) 和 tool 响应之间
-    插入了用户消息，导致 API 400。修复：将 tool 响应紧跟在对应的
-    tool_calls 之后，被插入的消息移到 tool 响应后面。
-    """
-    result = []
-    i = 0
-    while i < len(messages):
-        msg = messages[i]
-        if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            tc_ids = {
-                tc["id"] for tc in msg["tool_calls"]
-                if isinstance(tc, dict) and tc.get("id")
-            }
-            if not tc_ids:
-                _log.warning(f"移除无 ID 的 tool_calls 消息: count={len(msg['tool_calls'])}")
-                i += 1
-                continue
-            result.append(msg)
-            i += 1
-            tools = []
-            interleaved = []
-            while i < len(messages) and tc_ids:
-                m = messages[i]
-                if m.get("role") == "tool" and m.get("tool_call_id") in tc_ids:
-                    tools.append(m)
-                    tc_ids.discard(m["tool_call_id"])
-                    i += 1
-                elif not tc_ids:
-                    break
-                else:
-                    interleaved.append(m)
-                    i += 1
-            if tc_ids:
-                _log.warning(
-                    f"tool_calls 缺少响应: missing_ids={tc_ids}, "
-                    f"移除第 {len(result) - 1} 条 assistant"
-                )
-                result.pop()
-                result.extend(interleaved)
-            else:
-                result.extend(tools)
-                result.extend(interleaved)
-        else:
-            if msg.get("role") == "tool":
-                _log.warning(
-                    f"移除孤立的 tool 消息: tool_call_id={msg.get('tool_call_id')}"
-                )
-            else:
-                result.append(messages[i])
-            i += 1
-    messages[:] = result
 
 
 class ToolLoop:
@@ -167,7 +107,9 @@ class ToolLoop:
             if not ok:
                 _log.warning(f"模型链全部冷却/无效: {model_chain}")
                 try:
-                    await reply_callback(chat_id, "所有模型均不可用，请稍后重试", reply_to, is_group)
+                    await reply_callback(
+                        chat_id, "所有模型均不可用，请稍后重试", reply_to, is_group
+                    )
                 except Exception as cb_err:
                     _log.warning("回复 callback 失败 [%s]: %s", chat_id[:12], cb_err)
                 return False, True
@@ -192,7 +134,8 @@ class ToolLoop:
                 was_exception = False
                 try:
                     message, usage = await svc.chat_completion_with_tools(
-                        messages=messages, tools=tools,
+                        messages=messages,
+                        tools=tools,
                     )
                 except asyncio.CancelledError:
                     raise
@@ -204,7 +147,9 @@ class ToolLoop:
                 if message is not None:
                     if runner:
                         await runner.mark_success(
-                            mgr=binding_manager, chat_id=chat_id, tier=tier,
+                            mgr=binding_manager,
+                            chat_id=chat_id,
+                            tier=tier,
                         )
                     break
 
@@ -214,9 +159,7 @@ class ToolLoop:
                     if await runner.acquire():
                         if binding_manager and tier:
                             await binding_manager.bind(chat_id, tier, runner.current)
-                        _log.warning(
-                            f"模型链剩余模型: {runner.remaining}，继续尝试"
-                        )
+                        _log.warning(f"模型链剩余模型: {runner.remaining}，继续尝试")
                         continue
 
                     # 剩余链全在冷却/失败：走兜底
@@ -228,15 +171,22 @@ class ToolLoop:
                         if binding_manager and tier:
                             await binding_manager.bind(chat_id, tier, runner.current)
                         await runner.mark_success(
-                            mgr=binding_manager, chat_id=chat_id, tier=tier,
+                            mgr=binding_manager,
+                            chat_id=chat_id,
+                            tier=tier,
                         )
                     else:
                         try:
                             await reply_callback(
-                                chat_id, "所有模型均不可用", reply_to, is_group,
+                                chat_id,
+                                "所有模型均不可用",
+                                reply_to,
+                                is_group,
                             )
                         except Exception as cb_err:
-                            _log.warning("回复 callback 失败 [%s]: %s", chat_id[:12], cb_err)
+                            _log.warning(
+                                "回复 callback 失败 [%s]: %s", chat_id[:12], cb_err
+                            )
                         return sent_emoji, True
                     break
                 else:
@@ -258,37 +208,23 @@ class ToolLoop:
             response_text = message.content or ""
             tool_calls = message.tool_calls or []
 
-            reasoning = getattr(message, "reasoning_content", None) or None
+            reasoning = message.reasoning_content
             if reasoning:
-                _log.info(
-                    f"[工具循环 第{round_idx + 1}轮 思考过程]\n{reasoning}"
-                )
+                _log.info(f"[工具循环 第{round_idx + 1}轮 思考过程]\n{reasoning}")
 
             _log.info(
                 f"[工具循环 第{round_idx + 1}轮] "
                 f"text={response_text[:50]!r}... "
-                f"tool_calls={[tc.function.name for tc in tool_calls]}"
+                f"tool_calls={[tc.name for tc in tool_calls]}"
             )
 
-            tool_calls_data = None
-            if tool_calls:
-                tool_calls_data = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in tool_calls
-                ]
+            tool_calls_data = message.tool_calls_data
 
             # ── 预检：本轮是否有 heartbeat_respond(notify=false) ──
             for tc in tool_calls:
-                if tc.function.name == "heartbeat_respond":
+                if tc.name == "heartbeat_respond":
                     try:
-                        tc_args = json.loads(tc.function.arguments)
+                        tc_args = json.loads(tc.arguments)
                         if not tc_args.get("notify", True):
                             suppress_reply = True
                     except json.JSONDecodeError:
@@ -300,9 +236,7 @@ class ToolLoop:
                         f"[工具循环 第{round_idx + 1}轮] send_message 已投递，跳过后续文本发送"
                     )
                 elif _is_silent_reply_text(response_text) or suppress_reply:
-                    _log.info(
-                        f"[工具循环 第{round_idx + 1}轮] 静默回复，跳过发送"
-                    )
+                    _log.info(f"[工具循环 第{round_idx + 1}轮] 静默回复，跳过发送")
                 else:
                     try:
                         await reply_callback(
@@ -312,7 +246,9 @@ class ToolLoop:
                             is_group=is_group,
                         )
                     except Exception as cb_err:
-                        _log.warning("回复 callback 失败 [%s]: %s", chat_id[:12], cb_err)
+                        _log.warning(
+                            "回复 callback 失败 [%s]: %s", chat_id[:12], cb_err
+                        )
                     text_was_sent = True
 
             if response_text or tool_calls:
@@ -327,12 +263,7 @@ class ToolLoop:
             if not tool_calls:
                 break
 
-            assistant_msg: dict = {"role": "assistant", "content": response_text or None}
-            reasoning_content = getattr(message, "reasoning_content", None)
-            if reasoning_content:
-                assistant_msg["reasoning_content"] = reasoning_content
-            assistant_msg["tool_calls"] = tool_calls_data
-            messages.append(assistant_msg)
+            messages.append(message.to_wire())
 
             ctx = ToolContext(
                 chat_id=chat_id,
@@ -346,30 +277,37 @@ class ToolLoop:
 
             for tc in tool_calls:
                 try:
-                    args = json.loads(tc.function.arguments)
+                    args = json.loads(tc.arguments)
                 except json.JSONDecodeError:
                     _log.warning(
-                        "工具参数解析失败: %s", tc.function.arguments,
+                        "工具参数解析失败: %s",
+                        tc.arguments,
                     )
                     content = json.dumps({"error": "参数解析失败"})
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": content,
-                    })
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": content,
+                        }
+                    )
                     try:
                         await self.context_manager.add_tool_result_async(
-                            chat_id, tc.function.name, content, tc.id,
+                            chat_id,
+                            tc.name,
+                            content,
+                            tc.id,
                         )
                     except Exception as persist_err:
                         _log.warning(
                             "持久化参数解析失败结果 [%s]: %s",
-                            tc.function.name, persist_err,
+                            tc.name,
+                            persist_err,
                         )
                     continue
 
                 try:
-                    result = await execute_tool(tc.function.name, args, ctx, self._perm)
+                    result = await execute_tool(tc.name, args, ctx, self._perm)
                     content = result.content
                     if result.sent_emoji:
                         sent_emoji = True
@@ -383,38 +321,55 @@ class ToolLoop:
                 except Exception as e:
                     _log.error(
                         "工具 [%s] 执行异常: %s",
-                        tc.function.name, e, exc_info=True,
+                        tc.name,
+                        e,
+                        exc_info=True,
                     )
-                    content = json.dumps({"error": f"执行异常: {e}"}, ensure_ascii=False)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": content,
-                    })
+                    content = json.dumps(
+                        {"error": f"执行异常: {e}"}, ensure_ascii=False
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": content,
+                        }
+                    )
                     try:
                         await self.context_manager.add_tool_result_async(
-                            chat_id, tc.function.name, content, tc.id,
+                            chat_id,
+                            tc.name,
+                            content,
+                            tc.id,
                         )
                     except Exception as persist_err:
                         _log.warning(
                             "持久化工具结果失败 [%s]: %s",
-                            tc.function.name, persist_err,
+                            tc.name,
+                            persist_err,
                         )
                     continue
 
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": content,
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": content,
+                    }
+                )
                 await self.context_manager.add_tool_result_async(
-                    chat_id, tc.function.name, content, tc.id,
+                    chat_id,
+                    tc.name,
+                    content,
+                    tc.id,
                 )
 
                 # 在 tool 响应之后写入表情标记，避免插在 assistant(tc) 和 tool 之间
                 if result.sent_emoji:
                     await self.context_manager.add_assistant_message_async(
-                        chat_id, "[助手发送了一个表情]", reply_to,
+                        chat_id,
+                        "[助手发送了一个表情]",
+                        reply_to,
                     )
 
             if get_user_nickname:
@@ -462,36 +417,52 @@ class ToolLoop:
             steered.append(user_msg)
 
             await self.context_manager.add_user_message_async(
-                chat_id, content, msg.id,
-                sender_id=msg.sender_id, name=nick,
+                chat_id,
+                content,
+                msg.id,
+                sender_id=msg.sender_id,
+                name=nick,
             )
 
             if self.hindsight and msg.msg_type != MessageType.CARD:
-                task = asyncio.ensure_future(self.hindsight.add_message(
-                    session_id=chat_id,
-                    sender_id=msg.sender_id,
-                    content=content,
-                    context=self.hindsight.msg_type_to_context(msg.msg_type),
-                    timestamp=msg.timestamp,
-                    resources=msg.resources,
-                ))
+                task = asyncio.ensure_future(
+                    self.hindsight.add_message(
+                        session_id=chat_id,
+                        sender_id=msg.sender_id,
+                        content=content,
+                        context=self.hindsight.msg_type_to_context(msg.msg_type),
+                        timestamp=msg.timestamp,
+                        resources=msg.resources,
+                    )
+                )
                 task.add_done_callback(
-                    lambda t: _log.warning(
-                        "记录到 Hindsight 失败 [%s..]: %s",
-                        chat_id[:12], t.exception(),
-                    ) if t.exception() else None
+                    lambda t: (
+                        _log.warning(
+                            "记录到 Hindsight 失败 [%s..]: %s",
+                            chat_id[:12],
+                            t.exception(),
+                        )
+                        if t.exception()
+                        else None
+                    )
                 )
 
-            if msg.sender_id != current_sender_id and self.hindsight and self.prompt_builder:
+            if (
+                msg.sender_id != current_sender_id
+                and self.hindsight
+                and self.prompt_builder
+            ):
                 memory_text = await self.prompt_builder.build_memory_context(
                     sender_id=msg.sender_id,
                     input_message=msg,
                 )
                 if memory_text:
-                    steered.append({
-                        "role": "system",
-                        "content": memory_text,
-                    })
+                    steered.append(
+                        {
+                            "role": "system",
+                            "content": memory_text,
+                        }
+                    )
 
             queue.task_done()
 

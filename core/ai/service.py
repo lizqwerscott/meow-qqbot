@@ -1,31 +1,43 @@
 import asyncio
 import logging
 import os
-from typing import Any, Dict, Iterable, List, Optional
+from collections.abc import Iterable
+from typing import Any
 
-from httpx import Timeout
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
+
+from core.ai.protocol import (
+    AssistantMessage,
+    AssistantToolCall,
+    ensure_messages_consistent,
+)
 
 _log = logging.getLogger(__name__)
 
 
 class AIService:
     """
-    AI 服务类，使用 OpenAI 官方包
+    AI 服务类，使用 OpenAI 官方包。
+
+    两级返回粒度是设计意图（契约）：
+    - `chat_completion`（无工具）返回 `str` 文本，供学习者/归档/简单对话消费；
+    - `chat_completion_with_tools` 返回 `AssistantMessage`（含 tool_calls /
+      reasoning_content / raw），供工具循环消费。
+    新增调用方按所需粒度选方法；需要完整消息的无工具场景，再引入消息级方法。
     """
 
     def __init__(
         self,
         api_key: str,
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
         model: str = "gpt-3.5-turbo",
         timeout: int = 30,
         max_retries: int = 3,
         temperature: float = 0.7,
         max_tokens: int = 8192,
-        reasoning_effort: Optional[str] = None,
-        http_client: Optional[Any] = None,
+        reasoning_effort: str | None = None,
+        http_client: Any | None = None,
     ):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
@@ -40,7 +52,10 @@ class AIService:
         self.reasoning_effort = reasoning_effort
 
         self.client = AsyncOpenAI(
-            api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries,
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=max_retries,
             http_client=http_client,
         )
 
@@ -56,21 +71,21 @@ class AIService:
     async def chat_completion(
         self,
         messages: Iterable[ChatCompletionMessageParam],
-        model: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        response_format: Optional[Dict] = None,
-    ) -> tuple[Optional[str], Optional[Dict]]:
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> tuple[str | None, dict[str, Any] | None]:
         model_to_use = model or self.model
         max_tokens_to_use = max_tokens if max_tokens is not None else self.max_tokens
         is_reasoning = self._is_reasoning_model(model_to_use)
 
         try:
-            kwargs: Dict[str, Any] = dict(
-                messages=messages,
-                model=model_to_use,
-                max_tokens=max_tokens_to_use,
-            )
+            kwargs: dict[str, Any] = {
+                "messages": messages,
+                "model": model_to_use,
+                "max_tokens": max_tokens_to_use,
+            }
 
             if not (is_reasoning or self.reasoning_effort):
                 temperature_to_use = (
@@ -94,13 +109,17 @@ class AIService:
                 return response.choices[0].message.content, usage
             else:
                 return None, usage
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            if isinstance(e, asyncio.CancelledError):
-                raise
             err_str = str(e)
             if "429" in err_str or "rate_limit" in err_str.lower():
                 _log.warning("AI 请求被限流 [%s]: %s", model_to_use, err_str)
-            elif "502" in err_str or "503" in err_str or "service_unavailable" in err_str.lower():
+            elif (
+                "502" in err_str
+                or "503" in err_str
+                or "service_unavailable" in err_str.lower()
+            ):
                 _log.error("AI 服务不可用 [%s]: %s", model_to_use, err_str)
             elif "timeout" in err_str.lower():
                 _log.warning("AI 请求超时 [%s]: %s", model_to_use, err_str)
@@ -111,7 +130,7 @@ class AIService:
     def _is_reasoning_model(self, model: str) -> bool:
         return any(k in model for k in ("o1", "o3", "deepseek", "reasoning"))
 
-    def _build_extra_body(self) -> Optional[Dict[str, Any]]:
+    def _build_extra_body(self) -> dict[str, Any] | None:
         if self.reasoning_effort:
             return {"thinking": {"type": "enabled"}}
         return None
@@ -119,27 +138,30 @@ class AIService:
     async def chat_completion_with_tools(
         self,
         messages: Iterable[ChatCompletionMessageParam],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        model: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-    ) -> tuple[Optional[Any], Optional[Dict]]:
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> tuple[AssistantMessage | None, dict[str, Any] | None]:
+        """带工具调用的一次性对话，返回统一协议对象 AssistantMessage。
+
+        Returns:
+            (AssistantMessage | None, usage_dict | None)
+        """
         model_to_use = model or self.model
         max_tokens_to_use = max_tokens if max_tokens is not None else self.max_tokens
         is_reasoning = self._is_reasoning_model(model_to_use)
 
         try:
             # 最终防线：清理孤立的 tool_calls，防止重启恢复后历史不完整导致 API 400
-            from core.tools.tool_loop import ensure_messages_consistent
-
             msgs = list(messages)
             ensure_messages_consistent(msgs)
 
-            kwargs: Dict[str, Any] = dict(
-                messages=msgs,
-                model=model_to_use,
-                max_tokens=max_tokens_to_use,
-            )
+            kwargs: dict[str, Any] = {
+                "messages": msgs,
+                "model": model_to_use,
+                "max_tokens": max_tokens_to_use,
+            }
 
             if is_reasoning or self.reasoning_effort:
                 pass
@@ -162,15 +184,39 @@ class AIService:
             response = await self.client.chat.completions.create(**kwargs)
             usage = response.usage.model_dump() if response.usage else None
             if hasattr(response, "choices") and response.choices:
-                return response.choices[0].message, usage
+                msg = response.choices[0].message
+                return (
+                    AssistantMessage(
+                        content=msg.content,
+                        tool_calls=(
+                            [
+                                AssistantToolCall(
+                                    id=tc.id,
+                                    name=tc.function.name,
+                                    arguments=tc.function.arguments,
+                                )
+                                for tc in msg.tool_calls
+                            ]
+                            if getattr(msg, "tool_calls", None)
+                            else None
+                        ),
+                        reasoning_content=getattr(msg, "reasoning_content", None),
+                        raw=msg,
+                    ),
+                    usage,
+                )
             return None, usage
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            if isinstance(e, asyncio.CancelledError):
-                raise
             err_str = str(e)
             if "429" in err_str or "rate_limit" in err_str.lower():
                 _log.warning("AI 请求被限流（带工具） [%s]: %s", model_to_use, err_str)
-            elif "502" in err_str or "503" in err_str or "service_unavailable" in err_str.lower():
+            elif (
+                "502" in err_str
+                or "503" in err_str
+                or "service_unavailable" in err_str.lower()
+            ):
                 _log.error("AI 服务不可用（带工具） [%s]: %s", model_to_use, err_str)
             elif "timeout" in err_str.lower():
                 _log.warning("AI 请求超时（带工具） [%s]: %s", model_to_use, err_str)

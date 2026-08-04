@@ -7,7 +7,9 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set
+
+from core.ai.protocol import AssistantMessage, LLMService
 
 _log = logging.getLogger(__name__)
 
@@ -18,7 +20,8 @@ class FallbackResult:
 
     .ok → model_name 不为 None 即成功。
     """
-    message: Any = None
+
+    message: Optional[AssistantMessage] = None
     usage: Optional[Dict] = None
     model_name: Optional[str] = None
 
@@ -59,7 +62,7 @@ class FallbackRunner:
         self._chain = list(chain)
         self._failed: Set[str] = set()
         self._current_name: Optional[str] = None
-        self._current_svc: Optional[Any] = None
+        self._current_svc: Optional[LLMService] = None
 
     @property
     def current(self) -> Optional[str]:
@@ -69,7 +72,7 @@ class FallbackRunner:
     def remaining(self) -> List[str]:
         return [m for m in self._chain if m not in self._failed]
 
-    def service(self) -> Optional[Any]:
+    def service(self) -> Optional[LLMService]:
         return self._current_svc
 
     async def acquire(self) -> bool:
@@ -96,18 +99,29 @@ class FallbackRunner:
         """
         if mgr and tier:
             # get_if_valid 原子读取绑定，暂用 inf 跳过过期检查（需要 binding.model_name 查配置）
-            binding = await mgr.get_if_valid(chat_id, tier,
-                                             budget=float('inf'), ttl=float('inf'))
+            binding = await mgr.get_if_valid(
+                chat_id, tier, budget=float("inf"), ttl=float("inf")
+            )
             if binding:
-                cfg = (self._registry.get_session_config(binding.model_name)
-                       if self._registry else None)
+                cfg = (
+                    self._registry.get_session_config(binding.model_name)
+                    if self._registry
+                    else None
+                )
                 budget, ttl = cfg if cfg else (30, 600)
                 if binding.is_expired(budget, ttl):
                     await mgr.unbind(chat_id, tier)
                 else:
-                    svc = self._registry.get(binding.model_name) if self._registry else None
-                    if svc and not await self._registry.cooldown_manager.is_cooled_down(
-                        binding.model_name
+                    svc = (
+                        self._registry.get(binding.model_name)
+                        if self._registry
+                        else None
+                    )
+                    if (
+                        svc
+                        and not await self._registry.cooldown_manager.is_cooled_down(
+                            binding.model_name
+                        )
                     ):
                         self._current_name = binding.model_name
                         self._current_svc = svc
@@ -141,9 +155,7 @@ class FallbackRunner:
         if self._current_name:
             self._failed.add(self._current_name)
             if record_cooldown and self._registry:
-                await self._registry.cooldown_manager.record_failure(
-                    self._current_name
-                )
+                await self._registry.cooldown_manager.record_failure(self._current_name)
             _log.warning(f"模型 [{self._current_name}] 失败，尝试 fallback...")
             self._current_name = None
             self._current_svc = None
@@ -184,7 +196,9 @@ class FallbackRunner:
             if msg is not None:
                 await self.mark_success()
                 return FallbackResult(
-                    message=msg, usage=usage, model_name=self._current_name,
+                    message=msg,
+                    usage=usage,
+                    model_name=self._current_name,
                 )
 
             await self.mark_failure(record_cooldown=record_cooldown)
@@ -192,7 +206,7 @@ class FallbackRunner:
     async def last_resort(
         self,
         messages: Iterable[Any],
-        tools: Optional[List[Dict]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
         max_tokens: Optional[int] = None,
     ) -> FallbackResult:
         """兜底：剩余链全在冷却时，强制尝试一遍（忽略冷却）。
@@ -208,7 +222,9 @@ class FallbackRunner:
                 continue
             try:
                 msg, usage = await svc.chat_completion_with_tools(
-                    messages=messages, tools=tools, max_tokens=max_tokens,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=max_tokens,
                 )
             except asyncio.CancelledError:
                 raise
@@ -219,6 +235,8 @@ class FallbackRunner:
                 _log.warning(f"兜底成功: 模型 [{qualified_name}]")
                 self._current_name = qualified_name
                 self._current_svc = svc
-                return FallbackResult(message=msg, usage=usage, model_name=qualified_name)
+                return FallbackResult(
+                    message=msg, usage=usage, model_name=qualified_name
+                )
         _log.error(f"兜底失败: remaining={remaining}")
         return FallbackResult()

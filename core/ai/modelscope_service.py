@@ -11,8 +11,9 @@ import httpx
 from httpx import Timeout
 from openai.types.chat import ChatCompletionMessageParam
 
-from core.ai.service import AIService
+from core.ai.protocol import AssistantMessage
 from core.ai.rate_limit import ModelScopeRateLimit
+from core.ai.service import AIService
 
 _log = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ class ModelScopeService(AIService):
         return self._rate_limit.can_call
 
     @property
-    def quota_info(self) -> dict:
+    def quota_info(self) -> dict[str, Any]:
         rl = self._rate_limit
         return {
             "user_limit": rl.user_limit,
@@ -86,7 +87,8 @@ class ModelScopeService(AIService):
         model: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-    ) -> tuple[Optional[str], Optional[Dict]]:
+        response_format: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
         if not self.can_call:
             _log.warning(
                 f"ModelScope [{model or self.model}] 额度耗尽，跳过调用: "
@@ -95,7 +97,11 @@ class ModelScopeService(AIService):
             )
             return None, None
         return await super().chat_completion(
-            messages=messages, model=model, temperature=temperature, max_tokens=max_tokens,
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
         )
 
     async def chat_completion_with_tools(
@@ -105,13 +111,14 @@ class ModelScopeService(AIService):
         model: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-    ) -> tuple[Optional[Any], Optional[Dict]]:
+    ) -> tuple[Optional[AssistantMessage], Optional[Dict[str, Any]]]:
         if not self.can_call:
-            _log.warning(
-                f"ModelScope [{model or self.model}] 额度耗尽，跳过调用"
-            )
+            _log.warning(f"ModelScope [{model or self.model}] 额度耗尽，跳过调用")
             return None, None
         return await super().chat_completion_with_tools(
-            messages=messages, tools=tools, model=model,
-            temperature=temperature, max_tokens=max_tokens,
+            messages=messages,
+            tools=tools,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )

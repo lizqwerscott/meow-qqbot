@@ -12,8 +12,9 @@ from typing import Any, Dict, Iterable, List, Optional
 from openai.types.chat import ChatCompletionMessageParam
 
 from core.ai.cooldown import ModelCooldownManager
-from core.ai.service import AIService
 from core.ai.fallback_runner import FallbackRunner
+from core.ai.protocol import LLMService
+from core.ai.provider_factory import get_provider_factory
 
 _log = logging.getLogger(__name__)
 
@@ -40,10 +41,10 @@ class ModelRegistry:
         groups_config: dict,
         cooldown_config: Optional[Dict] = None,
     ):
-        self._services: Dict[str, Any] = {}
+        self._services: Dict[str, LLMService] = {}
         self._groups: Dict[str, List[str]] = {}
         self._tier_map: Dict[str, str] = {}
-        self._default_service: Optional[Any] = None
+        self._default_service: Optional[LLMService] = None
         self._cooldown = ModelCooldownManager(cooldown_config or {})
         self._session_configs: Dict[str, _SessionConfig] = {}
         self._default_session_config = _SessionConfig()
@@ -52,8 +53,12 @@ class ModelRegistry:
             provider_budget = pcfg.get("session_budget")
             provider_ttl = pcfg.get("session_ttl")
             provider_type = pcfg.get("type", "openai")
-            api_key = pcfg.get("api_key", "")
-            base_url = pcfg.get("base_url")
+            factory = get_provider_factory(provider_type)
+            if factory is None:
+                _log.warning(
+                    f"Provider [{provider_name}]: 未知类型 [{provider_type}]，跳过"
+                )
+                continue
 
             for model_cfg in pcfg.get("models", []):
                 model_name = model_cfg.get("name")
@@ -64,66 +69,55 @@ class ModelRegistry:
                     continue
                 qualified_name = f"{provider_name}/{model_name}"
 
-                if provider_type == "modelscope":
-                    from core.ai.modelscope_service import ModelScopeService
-                    svc = ModelScopeService(
-                        api_key=api_key,
-                        base_url=base_url,
-                        model=model_cfg.get("model", "gpt-3.5-turbo"),
-                        timeout=model_cfg.get("timeout", 30),
-                        max_retries=model_cfg.get("max_retries", 0),
-                        temperature=model_cfg.get("temperature", 0.7),
-                        max_tokens=model_cfg.get("max_tokens", 8192),
-                        reasoning_effort=model_cfg.get("reasoning_effort"),
+                try:
+                    svc = factory(pcfg, model_cfg)
+                except Exception as e:
+                    _log.warning(
+                        f"Provider [{provider_name}] 构造模型 [{model_name}] 失败: {e}"
                     )
-                elif provider_type == "ollama":
-                    host = pcfg.get("host", "http://localhost:11434").rstrip("/")
-                    base_url = pcfg.get("base_url") or f"{host}/v1"
-                    svc = AIService(
-                        api_key=api_key or "not-needed",
-                        base_url=base_url,
-                        model=model_cfg.get("model", "llama3.2"),
-                        timeout=model_cfg.get("timeout", 120),
-                        max_retries=model_cfg.get("max_retries", 0),
-                        temperature=model_cfg.get("temperature", 0.7),
-                        max_tokens=model_cfg.get("max_tokens", 4096),
-                        reasoning_effort=model_cfg.get("reasoning_effort"),
-                    )
-                else:
-                    svc = AIService(
-                        api_key=api_key,
-                        base_url=base_url,
-                        model=model_cfg.get("model", "gpt-3.5-turbo"),
-                        timeout=model_cfg.get("timeout", 30),
-                        max_retries=model_cfg.get("max_retries", 0),
-                        temperature=model_cfg.get("temperature", 0.7),
-                        max_tokens=model_cfg.get("max_tokens", 8192),
-                        reasoning_effort=model_cfg.get("reasoning_effort"),
-                    )
+                    continue
                 self._services[qualified_name] = svc
 
                 m_budget = model_cfg.get("session_budget")
                 m_ttl = model_cfg.get("session_ttl")
-                budget = (m_budget if m_budget is not None
-                          else provider_budget if provider_budget is not None
-                          else self._default_session_config.budget)
-                ttl = (m_ttl if m_ttl is not None
-                       else provider_ttl if provider_ttl is not None
-                       else self._default_session_config.ttl)
-                self._session_configs[qualified_name] = _SessionConfig(budget=budget, ttl=ttl)
+                budget = (
+                    m_budget
+                    if m_budget is not None
+                    else (
+                        provider_budget
+                        if provider_budget is not None
+                        else self._default_session_config.budget
+                    )
+                )
+                ttl = (
+                    m_ttl
+                    if m_ttl is not None
+                    else (
+                        provider_ttl
+                        if provider_ttl is not None
+                        else self._default_session_config.ttl
+                    )
+                )
+                self._session_configs[qualified_name] = _SessionConfig(
+                    budget=budget, ttl=ttl
+                )
+
+                # 日志用解析后的生效 base_url（factory 内部可能回退，如 ollama host → {host}/v1），
+                # 避免 ollama 只配 host 时打出 None（回归修复，对齐旧 if/elif 分支日志）。
+                effective_base_url = getattr(svc, "base_url", None) or pcfg.get(
+                    "base_url"
+                )
 
                 _log.info(
                     f"模型 [{qualified_name}]({provider_type}): "
-                    f"{model_cfg.get('model')} @ {base_url}"
+                    f"{model_cfg.get('model')} @ {effective_base_url}"
                 )
 
         for group_name, gcfg in groups_config.items():
             raw_chain = gcfg.get("models", [])
             valid_chain = [m for m in raw_chain if m in self._services]
             if not valid_chain:
-                _log.warning(
-                    f"组 [{group_name}]: 无可用的模型 (配置: {raw_chain})"
-                )
+                _log.warning(f"组 [{group_name}]: 无可用的模型 (配置: {raw_chain})")
                 continue
             self._groups[group_name] = valid_chain
             _log.info(f"  组 [{group_name}]: 模型链 {valid_chain}")
@@ -131,10 +125,10 @@ class ModelRegistry:
                 self._default_service = self._services.get(valid_chain[0])
 
     @property
-    def default_service(self) -> Optional[Any]:
+    def default_service(self) -> Optional[LLMService]:
         return self._default_service
 
-    def get(self, name: str) -> Optional[Any]:
+    def get(self, name: str) -> Optional[LLMService]:
         return self._services.get(name)
 
     def get_group(self, group_name: str) -> List[str]:
@@ -159,9 +153,7 @@ class ModelRegistry:
                     f"模型链 {self._groups[group_name]}"
                 )
             else:
-                _log.warning(
-                    f"  分档 [{tier}]: 组 [{group_name}] 不存在"
-                )
+                _log.warning(f"  分档 [{tier}]: 组 [{group_name}] 不存在")
 
     def get_chain(self, tier: str, fallback: Optional[List[str]] = None) -> List[str]:
         """获取指定分档的模型链。
@@ -193,7 +185,7 @@ class ModelRegistry:
 
     async def resolve_model_chain(
         self, model_chain: List[str]
-    ) -> Optional[tuple[str, Any]]:
+    ) -> Optional[tuple[str, LLMService]]:
         """从模型链中解析第一个可用模型（不做 API 调用）。
 
         只做冷却检查和服务存在性检查。
@@ -218,6 +210,9 @@ class ModelRegistry:
         max_tokens: Optional[int] = None,
     ) -> tuple[Optional[Any], Optional[Dict], Optional[str]]:
         """按模型链顺序调用，失败自动 fallback。
+
+        DEPRECATED: 当前无调用方。职责已被 FallbackRunner.run 模式覆盖
+        （见 core/ai/fallback_runner.py docstring 模式 2），后续删除。
 
         Returns:
             (ChatCompletionMessage | None, usage_dict | None, model_name_used | None)

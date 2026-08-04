@@ -240,7 +240,7 @@ class PromptBuilder:
             )
 
         # ── 6. 防御：清理孤立的 tool_calls（防止 compaction 拆散配对） ──
-        from core.tools.tool_loop import ensure_messages_consistent
+        from core.ai.protocol import ensure_messages_consistent
 
         ensure_messages_consistent(messages)
 

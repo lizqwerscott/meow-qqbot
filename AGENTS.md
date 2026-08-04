@@ -26,7 +26,9 @@ uv run black <file>   # format code
 - `core/engine/prompt_builder.py` — Prompt assembly (Jinja2 templates in `prompts/`)
 - `core/engine/hindsight_memory.py` — `HindsightMemory`: async HTTP client for Hindsight (`http://127.0.0.1:8888`)
 - `core/engine/duplicate_reply.py` — Duplicate message detection/echoback in groups
-- `core/ai/service.py` — OpenAI-compatible LLM client (`openai[aiohttp]`)
+- `core/ai/service.py` — OpenAI-compatible LLM client (`openai[aiohttp]`); returns unified `AssistantMessage` protocol objects
+- `core/ai/protocol.py` — **AI 协议抽象层**: `AssistantMessage` / `AssistantToolCall` 统一消息对象（`tool_calls_data` wire 组装）+ `ensure_messages_consistent` 一致性清理。核心循环（ToolLoop/FallbackRunner）只依赖本模块，不感知底层协议
+- `core/ai/provider_factory.py` — **Provider 工厂注册表**: `@register_provider(type)` 自注册构造器，`ModelRegistry` 构造零分支。新增 provider = 写 factory + 配置，不动注册表
 - `core/ai/multimodal.py` — VLM vision model client for emoji/image analysis
 - `core/ai/model_registry.py` — `ModelRegistry`: multi-model config + fallback chains
 - `core/managers/` — `*Manager` classes (command, context, cost, emoji, nickname, session, template, permission, workspace)
