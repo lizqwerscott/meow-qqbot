@@ -2,7 +2,7 @@ import asyncio
 import logging
 import time
 from collections import deque
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 from core.managers.chat_message import (
     ChatMessage,
@@ -22,20 +22,17 @@ class ChatContext:
         chat_id: str,
         store: ContextStore,
         max_history: int = 10000,
-        compact_threshold_tokens: int = 950000,
-        keep_recent_tokens: int = 50000,
         merge_window_seconds: int = 15,
     ):
         self.chat_id = chat_id
         self.store = store
         self.max_history = max_history
-        self.compact_threshold_tokens = compact_threshold_tokens
-        self.keep_recent_tokens = keep_recent_tokens
         self.merge_window_seconds = merge_window_seconds
         self.history = deque(maxlen=max_history)
         self.last_activity = time.time()
         self.lock = asyncio.Lock()
         self._save_task: Optional[asyncio.Task] = None
+        self._save_pending = False
 
     # ── 消息添加 ──
 
@@ -185,9 +182,9 @@ class ChatContext:
         self.store.delete(self.chat_id)
 
     def set_messages(self, messages: List[ChatMessage]) -> None:
-        self.history.clear()
-        for msg in messages:
-            self.history.append(msg)
+        self.history = deque(messages, maxlen=self.max_history)
+        self.last_activity = time.time()
+        self._try_schedule_save()
 
     def restore_from_store(self) -> bool:
         data = self.store.load(self.chat_id)
@@ -246,24 +243,34 @@ class ChatContext:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
+            self.store.flush(
+                self.chat_id,
+                [message.to_dict() for message in self.history],
+            )
             return
         if self._save_task and not self._save_task.done():
+            self._save_pending = True
             return
+        self._save_pending = False
         messages = [m.to_dict() for m in self.history]
         self._save_task = asyncio.ensure_future(
             asyncio.to_thread(self.store.flush, self.chat_id, messages)
         )
-        self._save_task.add_done_callback(
-            lambda t: (
-                _log.error(
-                    "持久化到存储失败 [%s..]: %s",
-                    self.chat_id[:12],
-                    t.exception(),
-                )
-                if t.exception()
-                else None
+        self._save_task.add_done_callback(self._on_save_done)
+
+    def _on_save_done(self, task: asyncio.Task) -> None:
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error:
+            _log.error(
+                "持久化到存储失败 [%s..]: %s",
+                self.chat_id[:12],
+                error,
             )
-        )
+        if self._save_pending:
+            self._try_schedule_save()
 
     # ── 异步消息添加（带锁） ──
 
@@ -450,152 +457,6 @@ class ChatContext:
             self.history = deque(result, maxlen=self.max_history)
 
         return removed
-
-    # ── Token 辅助方法 ──
-
-    def _split_by_token_budget(
-        self, messages: List[ChatMessage], recent_budget: int
-    ) -> Tuple[List[ChatMessage], List[ChatMessage]]:
-        recent: List[ChatMessage] = []
-        total = 0
-        recent_tool_ids: set = set()
-
-        for msg in reversed(messages):
-            tokens = _estimate_tokens(msg.content)
-            if msg.tool_calls:
-                for tc in msg.tool_calls:
-                    tokens += _estimate_tokens(tc.get("function", {}).get("name"))
-                    tokens += _estimate_tokens(tc.get("function", {}).get("arguments"))
-            if msg.reasoning_content:
-                tokens += _estimate_tokens(msg.reasoning_content)
-
-            if total + tokens > recent_budget and recent:
-                if (
-                    msg.role == "tool"
-                    and msg.tool_call_id
-                    and msg.tool_call_id in recent_tool_ids
-                ):
-                    recent.insert(0, msg)
-                    total += tokens
-                    continue
-
-                if msg.tool_calls:
-                    tc_ids = {tc.get("id") for tc in msg.tool_calls if tc.get("id")}
-                    if tc_ids & recent_tool_ids:
-                        recent.insert(0, msg)
-                        total += tokens
-                        for tc in msg.tool_calls:
-                            tid = tc.get("id")
-                            if tid:
-                                recent_tool_ids.discard(tid)
-                        continue
-
-                break
-
-            recent.insert(0, msg)
-            total += tokens
-            if msg.role == "tool" and msg.tool_call_id:
-                recent_tool_ids.add(msg.tool_call_id)
-
-        old = (
-            messages[: -len(recent)]
-            if recent
-            else messages[:-1] if len(messages) > 1 else []
-        )
-        return old, recent
-
-    # ── 压缩 (Compaction) ──
-
-    def _format_for_summary(self, messages: List[ChatMessage]) -> str:
-        lines = []
-        for m in messages:
-            time_str = time.strftime("%m-%d %H:%M", time.localtime(m.timestamp))
-            if m.role == "user":
-                display_name = m.name or m.sender_id or "用户"
-                lines.append(f"[{time_str}] {display_name}: {m.content}")
-            elif m.role == "assistant":
-                if m.tool_calls:
-                    tools = ", ".join(tc["function"]["name"] for tc in m.tool_calls)
-                    lines.append(f"[{time_str}] 助手(调用工具: {tools}): {m.content}")
-                else:
-                    lines.append(f"[{time_str}] 助手: {m.content}")
-            elif m.role == "tool":
-                tname = m.tool_name or "工具"
-                content_preview = m.content[:100].replace("\n", " ")
-                lines.append(f"[{time_str}] {tname} 返回: {content_preview}...")
-        return "\n".join(lines)
-
-    async def compact_history_if_needed(
-        self, ai_service: Any, force: bool = False
-    ) -> tuple[bool, Optional[Dict]]:
-        estimated = self.estimate_tokens_for_history()
-        if not force and estimated < self.compact_threshold_tokens:
-            return False, None
-
-        all_msgs = list(self.history)
-        old_msgs, recent_msgs = self._split_by_token_budget(
-            all_msgs, self.keep_recent_tokens
-        )
-
-        if not old_msgs:
-            return False, None
-
-        text = self._format_for_summary(old_msgs)
-        _log.info(
-            "正在压缩 [%s..] %d 条消息 → 摘要 " "(估算 %d tokens > %d)",
-            self.chat_id[:12],
-            len(old_msgs),
-            estimated,
-            self.compact_threshold_tokens,
-        )
-
-        try:
-            summary, usage = await ai_service.chat_completion(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "你是一个对话摘要助手。请将以下对话内容压缩为一段"
-                            "简洁的摘要，保留重要的事实、决定、用户偏好、约定等"
-                            "关键信息。不要添加原文没有的内容。"
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": f"请总结以下对话：\n\n{text}",
-                    },
-                ],
-                max_tokens=500,
-            )
-        except Exception as e:
-            _log.warning(f"压缩失败: {e!r}")
-            return False, None
-
-        if not summary:
-            _log.warning("压缩返回空结果，跳过")
-            return False, usage
-
-        summary = summary.strip()
-        _log.info(
-            "压缩完成: %d 条 → 摘要 (%d 字符)",
-            len(old_msgs),
-            len(summary),
-        )
-
-        timestamp = old_msgs[0].timestamp
-        new_history = deque(maxlen=self.max_history)
-        new_history.append(
-            ChatMessage(
-                role="assistant",
-                content=f"【历史对话摘要】\n{summary}",
-                timestamp=timestamp,
-                name="系统",
-            )
-        )
-        for m in recent_msgs:
-            new_history.append(m)
-        self.history = new_history
-        return True, usage
 
 
 def _build_merged_dict(group: List[ChatMessage], window_seconds: int) -> Optional[Dict]:

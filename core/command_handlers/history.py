@@ -16,11 +16,8 @@ _log = logging.getLogger(__name__)
     description="上下文管理",
 )
 class HistoryCommand:
-    def __init__(
-        self, context_manager: ChatContextManager, ai_service: Optional[Any] = None
-    ):
+    def __init__(self, context_manager: ChatContextManager):
         self.context_manager = context_manager
-        self.ai_service = ai_service
 
     async def execute(
         self, input_message: InputMessage, args: str
@@ -67,7 +64,7 @@ class HistoryCommand:
             f"消息数: {count} (用户 {role_counts.get('user', 0)}, 助手 {role_counts.get('assistant', 0)}, 工具 {role_counts.get('tool', 0)})",
             f"最近活动: {last_time}",
             f"最近消息: {last_preview}",
-            f"最大历史: {ctx.max_history} | 压缩阈值: {ctx.compact_threshold_tokens} tokens",
+            f"最大历史: {ctx.max_history} | 压缩阈值: {self.context_manager.compaction_threshold_tokens} tokens",
         ]
         return make_reply(input_message, "\n".join(parts))
 
@@ -103,14 +100,12 @@ class HistoryCommand:
     async def _compact(
         self, input_message: InputMessage, chat_id: str
     ) -> List[Dict[str, Any]]:
-        if not self.ai_service:
-            return make_reply(input_message, "AI 服务未就绪，无法压缩。")
-        target = chat_id or input_message.chat_id
         try:
+            target = chat_id or input_message.chat_id
             ctx = self.context_manager.get_context(target)
             old_count = ctx.get_history_count()
-            compacted, _ = await ctx.compact_history_if_needed(
-                self.ai_service, force=True
+            compacted, _, ctx = await self.context_manager.compact_history_if_needed(
+                target, force=True
             )
             new_count = ctx.get_history_count()
             if compacted:
@@ -120,7 +115,7 @@ class HistoryCommand:
                 )
             return make_reply(
                 input_message,
-                f"会话 {target[:24]}… 无需压缩 ({old_count} 条, 阈值 {ctx.compact_threshold_tokens} tokens)",
+                f"会话 {target[:24]}… 无需压缩 ({old_count} 条, 阈值 {self.context_manager.compaction_threshold_tokens} tokens)",
             )
         except Exception as e:
             return make_reply(input_message, f"压缩失败: {e}")

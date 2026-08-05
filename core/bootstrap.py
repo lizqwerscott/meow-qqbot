@@ -32,6 +32,7 @@ from core.engine.system_events import SystemEventQueue
 from core.engine.wake_dispatcher import WakeDispatcher
 from core.learners.orchestrator import LearningOrchestrator
 from core.managers.archive_manager import ArchiveManager
+from core.managers.context_compactor import ContextCompactor
 from core.managers.context_manager import ChatContextManager
 from core.managers.context_store import JSONLContextStore, MemoryContextStore
 from core.managers.cost_tracker import CostTracker
@@ -159,11 +160,15 @@ class ServiceGraph:
             if _cache_dir
             else MemoryContextStore()
         )
-        self.context_manager = ChatContextManager(
-            store=_store,
-            max_history_per_chat=ctx_mgmt.get("max_history", 10000),
+        self.context_compactor = ContextCompactor(
+            ai_service=self.ai_service,
             compact_threshold_tokens=ctx_mgmt.get("compact_threshold_tokens", 950000),
             keep_recent_tokens=ctx_mgmt.get("keep_recent_tokens", 50000),
+        )
+        self.context_manager = ChatContextManager(
+            store=_store,
+            compactor=self.context_compactor,
+            max_history_per_chat=ctx_mgmt.get("max_history", 10000),
             max_tool_results=ctx_mgmt.get("max_tool_results", 5),
             keep_last_assistants=ctx_mgmt.get("keep_last_assistants", 3),
             soft_trim=ctx_mgmt.get("soft_trim", 20000),

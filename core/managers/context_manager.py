@@ -4,6 +4,7 @@ import threading
 from typing import Any, Dict, List, Optional
 
 from core.managers.chat_context import ChatContext
+from core.managers.context_compactor import ContextCompactor
 from core.managers.context_store import ContextStore
 
 _log = logging.getLogger(__name__)
@@ -14,10 +15,9 @@ class ChatContextManager:
     def __init__(
         self,
         store: ContextStore,
+        compactor: ContextCompactor,
         max_history_per_chat: int = 10000,
         cleanup_interval: int = 3600,
-        compact_threshold_tokens: int = 950000,
-        keep_recent_tokens: int = 50000,
         max_tool_results: int = 5,
         keep_last_assistants: int = 3,
         soft_trim: int = 20000,
@@ -25,10 +25,9 @@ class ChatContextManager:
         merge_window_seconds: int = 15,
     ):
         self._store = store
+        self._compactor = compactor
         self.max_history_per_chat = max_history_per_chat
         self.cleanup_interval = cleanup_interval
-        self.compact_threshold_tokens = compact_threshold_tokens
-        self.keep_recent_tokens = keep_recent_tokens
         self.max_tool_results = max_tool_results
         self.keep_last_assistants = keep_last_assistants
         self.soft_trim = soft_trim
@@ -60,8 +59,6 @@ class ChatContextManager:
                     chat_id=chat_id,
                     store=self._store,
                     max_history=self.max_history_per_chat,
-                    compact_threshold_tokens=self.compact_threshold_tokens,
-                    keep_recent_tokens=self.keep_recent_tokens,
                     merge_window_seconds=self.merge_window_seconds,
                 )
                 ctx.restore_from_store()
@@ -77,8 +74,6 @@ class ChatContextManager:
                     chat_id=chat_id,
                     store=self._store,
                     max_history=self.max_history_per_chat,
-                    compact_threshold_tokens=self.compact_threshold_tokens,
-                    keep_recent_tokens=self.keep_recent_tokens,
                     merge_window_seconds=self.merge_window_seconds,
                 )
                 await ctx.restore_from_store_async()
@@ -251,16 +246,20 @@ class ChatContextManager:
         async with lock:
             return await func()
 
+    @property
+    def compaction_threshold_tokens(self) -> int:
+        return self._compactor.compact_threshold_tokens
+
     async def compact_history_if_needed(
-        self, chat_id: str, ai_service, force: bool = False
+        self, chat_id: str, force: bool = False
     ) -> tuple[bool, Optional[Dict], "ChatContext"]:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             context = await self.get_context_async(chat_id)
-            compacted, usage = await context.compact_history_if_needed(
-                ai_service, force=force
-            )
-        return compacted, usage, context
+            result = await self._compactor.compact(context.get_history(), force=force)
+            if result.compacted:
+                context.set_messages(result.messages)
+            return result.compacted, result.usage, context
 
     # ── 上下文生命周期 ──
 

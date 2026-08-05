@@ -138,9 +138,7 @@ class PromptBuilder:
         # ── 1. Token 阈值触发 compaction ──
         try:
             _, compact_usage, ctx = (
-                await self.context_manager.compact_history_if_needed(
-                    chat_id, self.ai_service
-                )
+                await self.context_manager.compact_history_if_needed(chat_id)
             )
             if compact_usage and cost_tracker:
                 cost_tracker.record_turn(chat_id, self.ai_service.model, compact_usage)

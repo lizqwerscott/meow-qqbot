@@ -6,7 +6,6 @@ from core.managers.chat_context import ChatContext
 from core.managers.chat_message import ChatMessage
 from core.managers.context_store import MemoryContextStore
 
-
 # ── helpers ──
 
 
@@ -16,8 +15,13 @@ def make_ctx(chat_id="test_001", max_history=100):
     return ctx, store
 
 
-def add_assistant_with_toolcalls(ctx, msg_id: str, call_ids: list[str], content="思考中"):
-    calls = [{"id": cid, "type": "function", "function": {"name": "tool", "arguments": "{}"}} for cid in call_ids]
+def add_assistant_with_toolcalls(
+    ctx, msg_id: str, call_ids: list[str], content="思考中"
+):
+    calls = [
+        {"id": cid, "type": "function", "function": {"name": "tool", "arguments": "{}"}}
+        for cid in call_ids
+    ]
     ctx.add_assistant_message(content, message_id=msg_id, tool_calls=calls)
 
 
@@ -138,10 +142,23 @@ def test_orphan_removed_then_re_added():
 
 def test_restore_from_store():
     ctx, store = make_ctx()
-    store.flush(ctx.chat_id, [
-        {"role": "user", "content": "hello", "timestamp": 100.0, "message_id": "m1"},
-        {"role": "assistant", "content": "hi", "timestamp": 101.0, "message_id": "m2"},
-    ])
+    store.flush(
+        ctx.chat_id,
+        [
+            {
+                "role": "user",
+                "content": "hello",
+                "timestamp": 100.0,
+                "message_id": "m1",
+            },
+            {
+                "role": "assistant",
+                "content": "hi",
+                "timestamp": 101.0,
+                "message_id": "m2",
+            },
+        ],
+    )
     assert ctx.restore_from_store() is True
     assert ctx.get_history_count() == 2
     assert ctx.history[0].content == "hello"
@@ -155,10 +172,13 @@ def test_restore_from_store_no_data():
 
 def test_restore_from_store_corrupted_entry():
     ctx, store = make_ctx()
-    store.flush(ctx.chat_id, [
-        {"role": "user", "content": "good", "timestamp": 100.0},
-        {"role": "assistant", "content": "fine", "timestamp": 101.0},
-    ])
+    store.flush(
+        ctx.chat_id,
+        [
+            {"role": "user", "content": "good", "timestamp": 100.0},
+            {"role": "assistant", "content": "fine", "timestamp": 101.0},
+        ],
+    )
     assert ctx.restore_from_store() is True
     assert ctx.get_history_count() == 2
 
@@ -201,7 +221,9 @@ def test_pruned_tool_soft_trim():
         ctx.add_assistant_message(f"a{i}", message_id=f"m_a{i}")
     add_assistant_with_toolcalls(ctx, "a_tool", ["c1"])
     add_tool_result(ctx, "c1", "x" * 30000)
-    result = ctx.get_pruned_history(max_messages=20, max_tool_results=0, soft_trim=20000, hard_clear=180000)
+    result = ctx.get_pruned_history(
+        max_messages=20, max_tool_results=0, soft_trim=20000, hard_clear=180000
+    )
     tool_entry = next(d for d in result if d.get("role") == "tool")
     assert "中间内容已裁剪" in tool_entry["content"]
 
@@ -213,7 +235,9 @@ def test_pruned_hard_clear():
         ctx.add_assistant_message(f"a{i}", message_id=f"m_a{i}")
     add_assistant_with_toolcalls(ctx, "a_tool", ["c1"])
     add_tool_result(ctx, "c1", "x" * 200000)
-    result = ctx.get_pruned_history(max_messages=20, max_tool_results=0, soft_trim=20000, hard_clear=180000)
+    result = ctx.get_pruned_history(
+        max_messages=20, max_tool_results=0, soft_trim=20000, hard_clear=180000
+    )
     tool_entry = next(d for d in result if d.get("role") == "tool")
     assert "已裁剪" in tool_entry["content"]
     assert "x" * 200000 not in tool_entry["content"]
@@ -262,8 +286,10 @@ def test_clear_history():
 
 def test_set_messages():
     ctx, _ = make_ctx()
-    msgs = [ChatMessage(role="user", content="a", timestamp=1.0),
-            ChatMessage(role="assistant", content="b", timestamp=2.0)]
+    msgs = [
+        ChatMessage(role="user", content="a", timestamp=1.0),
+        ChatMessage(role="assistant", content="b", timestamp=2.0),
+    ]
     ctx.set_messages(msgs)
     assert ctx.get_history_count() == 2
 

@@ -7,6 +7,7 @@ from core.managers.command_manager import (
     CommandRegistry,
     PermissionLevel,
 )
+from core.managers.context_compactor import CompactionResult, ContextCompactor
 from core.managers.context_manager import ChatContextManager
 from core.managers.context_store import (
     ContextStore,
@@ -26,6 +27,8 @@ __all__ = [
     "PermissionLevel",
     "ChatContext",
     "ChatContextManager",
+    "ContextCompactor",
+    "CompactionResult",
     "ContextStore",
     "JSONLContextStore",
     "MemoryContextStore",
