@@ -38,5 +38,5 @@ libs/
 .claude/
 .pi-subagents/
 
-# 审查产物
-/docs/architecture-review-*.html
+# agent run plan
+/docs/
