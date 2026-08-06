@@ -13,7 +13,8 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
-from typing import Any, Callable, List, Optional, Set
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, List, Optional, Set
 
 from core.engine.context import EngineContext
 from core.engine.prompt_builder import PromptBuilder
@@ -26,6 +27,36 @@ from core.tasks.wake_coalescer import WakeTurnResult
 from core.tools.tool_loop import ToolLoop
 
 _log = logging.getLogger(__name__)
+
+
+TurnPromptFactory = Callable[[], Awaitable[tuple[list[dict], Optional[list[dict]]]]]
+
+
+@dataclass(frozen=True)
+class _TurnRequest:
+    chat_id: str
+    sender_id: str
+    is_group: bool
+    reply_to: str
+    route_text: str
+    prompt_factory: TurnPromptFactory
+    reply_callback: Callable
+    get_user_nickname: Optional[Callable[[str], str]] = None
+    delivery_channel: str = ""
+    reply_to_message_id: str = ""
+    model_chain: Optional[list[str]] = None
+    tier: Optional[str] = None
+    timeout: Optional[float] = None
+    serialize_session: bool = True
+    rollback_message_id: str = ""
+    stream_callback: Optional[Callable[[str], Awaitable[None]]] = None
+
+
+@dataclass(frozen=True)
+class _TurnResult:
+    replies: tuple[str, ...] = field(default_factory=tuple)
+    sent_emoji: bool = False
+    text_committed: bool = False
 
 
 def pick_final_notification_reply(
@@ -349,9 +380,7 @@ class AgentEngine:
         reply_callback: Callable,
         get_user_nickname: Callable[[str], str],
     ) -> None:
-        session_lock = await self.session_manager.get_lock(chat_id)
-
-        async with session_lock:
+        try:
             while True:
                 try:
                     queue = await self.session_manager.get_queue(chat_id)
@@ -376,17 +405,6 @@ class AgentEngine:
                         exc_info=True,
                     )
                     try:
-                        await self.context_manager.remove_last_user_message_if_async(
-                            input_message.chat_id,
-                            input_message.id,
-                        )
-                    except Exception as rollback_err:
-                        _log.warning(
-                            "回滚上下文失败 [%s..]: %s",
-                            input_message.chat_id[:12],
-                            rollback_err,
-                        )
-                    try:
                         await reply_callback(
                             chat_id=chat_id,
                             content="抱歉，处理您的消息时出现了问题，请稍后再试。",
@@ -399,10 +417,86 @@ class AgentEngine:
                             chat_id[:12],
                             reply_err,
                         )
-
-        await self.session_manager.mark_consumer_done(chat_id)
+        finally:
+            await self.session_manager.mark_consumer_done(chat_id)
 
     # ── 消息处理 ──
+
+    async def _run_turn(self, request: _TurnRequest) -> _TurnResult:
+        """运行一次统一的 prompt、路由、工具循环编排。"""
+        replies: list[str] = []
+
+        async def _capturing_reply_callback(*args, **kwargs) -> None:
+            content = kwargs.get("content")
+            if content is None and len(args) > 1:
+                content = args[1]
+            if content is not None:
+                replies.append(content)
+            await request.reply_callback(*args, **kwargs)
+
+        async def _execute() -> _TurnResult:
+            messages, tools = await request.prompt_factory()
+            model_chain = request.model_chain
+            tier = request.tier
+            if model_chain is None and tier is None:
+                if self.rule_router and self.model_registry:
+                    tier = self.rule_router.classify(request.route_text)
+                    model_chain = self.model_registry.get_chain(tier) or None
+
+            run = self.tool_loop.run(
+                messages=messages,
+                tools=tools or [],
+                chat_id=request.chat_id,
+                is_group=request.is_group,
+                reply_to=request.reply_to,
+                reply_callback=_capturing_reply_callback,
+                sender_id=request.sender_id,
+                get_user_nickname=request.get_user_nickname,
+                delivery_channel=request.delivery_channel,
+                reply_to_message_id=request.reply_to_message_id,
+                model_chain=model_chain,
+                binding_manager=self._session_binding,
+                tier=tier,
+                stream_callback=request.stream_callback,
+            )
+            if request.timeout is not None:
+                sent_emoji, text_committed = await asyncio.wait_for(
+                    run, timeout=request.timeout
+                )
+            else:
+                sent_emoji, text_committed = await run
+            return _TurnResult(
+                replies=tuple(replies),
+                sent_emoji=sent_emoji,
+                text_committed=text_committed,
+            )
+
+        async def _execute_with_rollback() -> _TurnResult:
+            try:
+                return await _execute()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if request.rollback_message_id:
+                    try:
+                        await self.context_manager.remove_last_user_message_if_async(
+                            request.chat_id,
+                            request.rollback_message_id,
+                        )
+                    except Exception as rollback_err:
+                        _log.warning(
+                            "回滚上下文失败 [%s..]: %s",
+                            request.chat_id[:12],
+                            rollback_err,
+                        )
+                raise
+
+        if not request.serialize_session:
+            return await _execute_with_rollback()
+
+        session_lock = await self.session_manager.get_lock(request.chat_id)
+        async with session_lock:
+            return await _execute_with_rollback()
 
     async def _process_message(
         self,
@@ -416,15 +510,15 @@ class AgentEngine:
 
         await self.context_manager.record_chat_type(chat_id, is_group)
 
-        # 1-5. Prompt 组装（含 compaction + 工具确定 + 记忆注入）
-        messages, tools_to_use = await self.prompt_builder.build(
-            chat_id=chat_id,
-            is_group=is_group,
-            user_nickname=user_nickname,
-            sender_id=input_message.sender_id,
-            input_message=input_message,
-            cost_tracker=self.cost_tracker,
-        )
+        async def _build_prompt() -> tuple[list[dict], Optional[list[dict]]]:
+            return await self.prompt_builder.build(
+                chat_id=chat_id,
+                is_group=is_group,
+                user_nickname=user_nickname,
+                sender_id=input_message.sender_id,
+                input_message=input_message,
+                cost_tracker=self.cost_tracker,
+            )
 
         # 6. 工具调用循环
 
@@ -440,19 +534,21 @@ class AgentEngine:
             except Exception as cb_err:
                 _log.warning("流式转发失败 [%s..]: %s", chat_id[:12], cb_err)
 
-        await self.tool_loop.run(
-            messages=messages,
-            tools=tools_to_use,
-            chat_id=chat_id,
-            is_group=is_group,
-            reply_to=input_message.id,
-            reply_callback=reply_callback,
-            sender_id=input_message.sender_id,
-            get_user_nickname=get_user_nickname,
-            model_chain=input_message.model_chain,
-            binding_manager=self._session_binding,
-            tier=input_message.tier,
-            stream_callback=_stream_deliver,
+        await self._run_turn(
+            _TurnRequest(
+                chat_id=chat_id,
+                sender_id=input_message.sender_id,
+                is_group=is_group,
+                reply_to=input_message.id,
+                route_text=input_message.content,
+                prompt_factory=_build_prompt,
+                reply_callback=reply_callback,
+                get_user_nickname=get_user_nickname,
+                model_chain=input_message.model_chain,
+                tier=input_message.tier,
+                rollback_message_id=input_message.id,
+                stream_callback=_stream_deliver,
+            )
         )
 
         if self._system_events:
@@ -491,16 +587,13 @@ class AgentEngine:
         """
         _log.info(f"开始后台任务: chat_id={chat_id[:20]}.. prompt={prompt[:60]}")
 
-        # 用于捕获回复的容器
-        captured_replies: list[str] = []
-
         async def capturing_reply_callback(
             chat_id: str,
             content: str,
             message_id: str,
             is_group: bool,
         ) -> None:
-            captured_replies.append(content)
+            return None
 
         # 创建合成 InputMessage
         msg = InputMessage(
@@ -513,49 +606,38 @@ class AgentEngine:
         )
 
         try:
-            # 写入用户消息到上下文（便于查阅，但不作为历史注入）
-            await self.context_manager.add_user_message_async(
-                chat_id,
-                prompt,
-                msg.id,
-                sender_id=sender_id,
-                name="system",
-            )
 
-            # 规则路由分级（同 _process_message 风格）
-            model_chain = None
-            tier = None
-            if self.rule_router and self.model_registry:
-                tier = self.rule_router.classify(prompt)
-                model_chain = self.model_registry.get_chain(tier) or None
-
-            # 构建 task 专用 messages（system + user）
-            messages, tools_to_use = await self.prompt_builder.build_task_messages(
-                chat_id=chat_id,
-                prompt=prompt,
-                tools_allow=tools_allow,
-            )
-
-            # 执行工具循环（带超时）
-            await asyncio.wait_for(
-                self.tool_loop.run(
-                    messages=messages,
-                    tools=tools_to_use,
+            async def _build_prompt() -> tuple[list[dict], Optional[list[dict]]]:
+                # 写入用户消息到上下文（便于查阅，但不作为历史注入）
+                await self.context_manager.add_user_message_async(
+                    chat_id,
+                    prompt,
+                    msg.id,
+                    sender_id=sender_id,
+                    name="system",
+                )
+                return await self.prompt_builder.build_task_messages(
                     chat_id=chat_id,
+                    prompt=prompt,
+                    tools_allow=tools_allow,
+                )
+
+            turn = await self._run_turn(
+                _TurnRequest(
+                    chat_id=chat_id,
+                    sender_id=sender_id,
                     is_group=is_group,
                     reply_to=msg.id,
+                    route_text=prompt,
+                    prompt_factory=_build_prompt,
                     reply_callback=capturing_reply_callback,
-                    sender_id=sender_id,
                     delivery_channel=delivery_channel,
                     reply_to_message_id=reply_to_message_id,
-                    model_chain=model_chain,
-                    binding_manager=self._session_binding,
-                    tier=tier,
-                ),
-                timeout=300,
+                    timeout=300,
+                )
             )
 
-            result = "\n".join(captured_replies) if captured_replies else None
+            result = "\n".join(turn.replies) if turn.replies else None
             _log.info(
                 f"后台任务完成: chat_id={chat_id[:20]}.. "
                 f"result_len={len(result or '')}"
@@ -630,59 +712,49 @@ class AgentEngine:
             is_at_mention=False,
         )
 
-        captured: list[str] = []
         wake_resp: dict = {}
 
         token = _heartbeat_response.set(wake_resp)
         try:
-            # 向后兼容：无预制 messages 时自己构建
-            if messages is None:
-                if source in ("interval", "manual"):
-                    messages, tools = (
-                        await self.prompt_builder.build_heartbeat_messages(
-                            prompt=extra_prompt,
-                            system_prompt_mode=(
-                                "minimal" if source == "interval" else "normal"
-                            ),
-                            session_mode="isolated",
-                            admin_chat_id=self._admin_id[0] if self._admin_id else "",
-                            chat_id=chat_id,
-                            system_event_key=system_event_key or "heartbeat:events",
-                        )
-                    )
-                else:
-                    messages, tools = await self.prompt_builder.build(
-                        chat_id=session_key,
-                        is_group=is_group,
-                        user_nickname="系统",
-                        sender_id="system",
-                        input_message=msg,
-                        cost_tracker=self.cost_tracker,
-                    )
 
-            model_chain = None
-            tier = None
-            if self.rule_router and self.model_registry:
-                tier = self.rule_router.classify(extra_prompt or "[系统事件]")
-                model_chain = self.model_registry.get_chain(tier) or None
+            async def _build_prompt() -> tuple[list[dict], Optional[list[dict]]]:
+                # 向后兼容：无预制 messages 时自己构建
+                if messages is not None:
+                    return messages, tools
+                if source in ("interval", "manual"):
+                    return await self.prompt_builder.build_heartbeat_messages(
+                        prompt=extra_prompt,
+                        system_prompt_mode=(
+                            "minimal" if source == "interval" else "normal"
+                        ),
+                        session_mode="isolated",
+                        admin_chat_id=self._admin_id[0] if self._admin_id else "",
+                        chat_id=chat_id,
+                        system_event_key=system_event_key or "heartbeat:events",
+                    )
+                return await self.prompt_builder.build(
+                    chat_id=session_key,
+                    is_group=is_group,
+                    user_nickname="系统",
+                    sender_id="system",
+                    input_message=msg,
+                    cost_tracker=self.cost_tracker,
+                )
 
             async def _capture(chat_id, content, message_id, is_group):
-                captured.append(content)
+                return None
 
-            await asyncio.wait_for(
-                self.tool_loop.run(
-                    messages=messages,
-                    tools=tools or [],
+            turn = await self._run_turn(
+                _TurnRequest(
                     chat_id=chat_id,
+                    sender_id="system",
                     is_group=is_group,
                     reply_to=msg.id,
+                    route_text=extra_prompt or "[系统事件]",
+                    prompt_factory=_build_prompt,
                     reply_callback=_capture,
-                    sender_id="system",
-                    model_chain=model_chain,
-                    binding_manager=self._session_binding,
-                    tier=tier,
-                ),
-                timeout=timeout,
+                    timeout=timeout,
+                )
             )
 
             # ── 通知决策（不再区分 source，统一通知文本） ──
@@ -693,12 +765,12 @@ class AgentEngine:
                     result.should_notify = True
                     result.deliver_to_user = wake_resp.get("deliver_to_user", "")
             else:
-                reply = pick_final_notification_reply(captured, _check_silent)
+                reply = pick_final_notification_reply(list(turn.replies), _check_silent)
                 if reply:
                     result.notification_text = reply
                     result.should_notify = True
 
-            result.captured_replies = captured
+            result.captured_replies = list(turn.replies)
         except Exception as e:
             _log.error("run_wake_turn 异常 [%s]: %s", source, e, exc_info=True)
             result.error = str(e)
