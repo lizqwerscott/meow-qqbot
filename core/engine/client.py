@@ -233,6 +233,7 @@ class BotEngine:
             mentioned_ids=parsed.mentioned_ids,
             replied_content=parsed.replied_content,
             replied_author=parsed.replied_author,
+            replied_author_id=parsed.replied_author_id,
             msg_type=parsed.msg_type,
             resources=parsed.resources,
         )

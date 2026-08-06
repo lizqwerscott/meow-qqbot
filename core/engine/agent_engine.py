@@ -320,10 +320,7 @@ class AgentEngine:
         if input_message.msg_type == MessageType.EMOJI:
             return
 
-        needs_ai = True
-        if input_message.is_group and not input_message.is_at_mention:
-            if not input_message.content.startswith("猫猫"):
-                needs_ai = False
+        needs_ai = self._should_dispatch_to_ai(input_message)
 
         # ── 规则路由智能分级（ClawRouter 风格） ──
         if needs_ai and self.rule_router and self.model_registry:
@@ -353,6 +350,15 @@ class AgentEngine:
                 _log.debug(f"已启动会话 {chat_id[:12]}.. 的消费者")
         else:
             await self._run_hooks(input_message, reply_callback, get_user_nickname)
+
+    def _should_dispatch_to_ai(self, input_message: InputMessage) -> bool:
+        if not input_message.is_group:
+            return True
+        if input_message.is_at_mention:
+            return True
+        if input_message.content.startswith("猫猫"):
+            return True
+        return input_message.replied_author_id == self._bot_id
 
     # ── 辅助方法 ──
 

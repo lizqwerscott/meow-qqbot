@@ -31,6 +31,7 @@ class ParsedMessage:
     is_at_mention: bool
     replied_content: str
     replied_author: str
+    replied_author_id: str
     author_id: str
     author_username: str
     mention_entries: List[Tuple[str, str]] = field(default_factory=list)
@@ -164,12 +165,15 @@ class MessageParser:
 
         replied_content = ""
         replied_author = ""
+        replied_author_id = ""
         reply_author_entries: List[Tuple[str, str]] = []
         if event.msg_elements:
             elem = event.msg_elements[0]
             raw_elems = raw.get("msg_elements", [])
             if raw_elems:
-                replied_author = raw_elems[0].get("author", {}).get("username", "")
+                replied_author_data = raw_elems[0].get("author", {})
+                replied_author = replied_author_data.get("username", "")
+                replied_author_id = replied_author_data.get("id", "")
             for raw_elem in raw_elems:
                 reply_author_entries.append(
                     (
@@ -212,6 +216,7 @@ class MessageParser:
             is_at_mention=is_at_mention,
             replied_content=replied_content,
             replied_author=replied_author,
+            replied_author_id=replied_author_id,
             author_id=author_id,
             author_username=author_username,
             mention_entries=mention_entries,

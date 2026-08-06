@@ -44,6 +44,7 @@ class InputMessage:
     mentioned_ids: List[str] = field(default_factory=list)
     replied_content: str = ""
     replied_author: str = ""
+    replied_author_id: str = ""
     msg_type: MessageType = MessageType.TEXT
     timestamp: Optional[float] = None
     model_chain: Optional[List[str]] = None

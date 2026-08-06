@@ -54,6 +54,7 @@ class FakeToolLoop:
 
 def make_engine(tool_loop, *, rule_router=None, model_registry=None):
     engine = AgentEngine.__new__(AgentEngine)
+    engine._bot_id = "bot"
     engine.context_manager = FakeContextManager()
     engine.session_manager = SessionTaskManager()
     engine.tool_loop = tool_loop
@@ -65,6 +66,40 @@ def make_engine(tool_loop, *, rule_router=None, model_registry=None):
     engine._admin_id = []
     engine._reply_callback = None
     return engine
+
+
+def test_should_dispatch_to_ai_for_reply_to_bot():
+    engine = make_engine(FakeToolLoop())
+
+    from core.message import InputMessage
+
+    message = InputMessage(
+        "id",
+        "user",
+        "chat",
+        "",
+        True,
+        replied_author_id="bot",
+    )
+
+    assert engine._should_dispatch_to_ai(message) is True
+
+
+def test_should_not_dispatch_to_ai_for_reply_to_other_user():
+    engine = make_engine(FakeToolLoop())
+
+    from core.message import InputMessage
+
+    message = InputMessage(
+        "id",
+        "user",
+        "chat",
+        "",
+        True,
+        replied_author_id="other-user",
+    )
+
+    assert engine._should_dispatch_to_ai(message) is False
 
 
 @pytest.mark.asyncio
