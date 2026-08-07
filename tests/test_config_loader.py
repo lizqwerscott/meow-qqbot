@@ -5,8 +5,6 @@ import pytest
 
 from core.config_loader import ConfigError, ConfigLoader
 
-from core.config_loader import ConfigError, ConfigLoader
-
 
 def _write_toml(path: str, content: str):
     p = Path(path)
@@ -46,6 +44,7 @@ def test_valid_config(tmp_path):
     assert cfg.character_card == "characters/default.md"
     assert cfg.providers == {}
     assert cfg.groups == {}
+    assert cfg.media == {}
 
 
 def test_appid_secret_access(tmp_path):

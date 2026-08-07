@@ -34,8 +34,10 @@ class ParsedMessage:
     replied_author_id: str
     author_id: str
     author_username: str
+    replied_message_id: str = ""
     mention_entries: List[Tuple[str, str]] = field(default_factory=list)
     reply_author_entries: List[Tuple[str, str]] = field(default_factory=list)
+    replied_resources: List[ResourceMeta] = field(default_factory=list)
 
 
 @dataclass
@@ -122,6 +124,7 @@ class MessageParser:
                 ResourceMeta(
                     resource_type=str(msg_type),
                     resource_id=att.url.strip(),
+                    source_url=att.url.strip(),
                     mime_type=att.content_type or "",
                     height=att.height or 0,
                     width=att.width or 0,
@@ -164,16 +167,31 @@ class MessageParser:
             mention_entries.append((m.get("id", ""), m.get("username", "")))
 
         replied_content = ""
+        replied_resources: List[ResourceMeta] = []
         replied_author = ""
         replied_author_id = ""
+        replied_message_id = ""
         reply_author_entries: List[Tuple[str, str]] = []
+        raw_elems = raw.get("msg_elements", [])
         if event.msg_elements:
             elem = event.msg_elements[0]
-            raw_elems = raw.get("msg_elements", [])
             if raw_elems:
                 replied_author_data = raw_elems[0].get("author", {})
                 replied_author = replied_author_data.get("username", "")
                 replied_author_id = replied_author_data.get("id", "")
+                replied_message_id = (
+                    raw_elems[0].get("id")
+                    or raw_elems[0].get("message_id")
+                    or raw_elems[0].get("messageId")
+                    or ""
+                )
+            if not replied_message_id:
+                replied_message_id = (
+                    raw.get("replied_message_id")
+                    or raw.get("reply_message_id")
+                    or raw.get("message_reference", {}).get("message_id", "")
+                    or ""
+                )
             for raw_elem in raw_elems:
                 reply_author_entries.append(
                     (
@@ -198,6 +216,23 @@ class MessageParser:
                     replied_content = "[引用消息: 自定义表情]"
             elif elem.attachments:
                 replied_content = (elem.content or "") + " [含附件]"
+                replied_resources = [
+                    ResourceMeta(
+                        resource_type=(
+                            "image"
+                            if (att.content_type or "").lower().startswith("image/")
+                            else "file"
+                        ),
+                        resource_id=(att.url or "").strip(),
+                        source_url=(att.url or "").strip(),
+                        mime_type=att.content_type or "",
+                        height=att.height or 0,
+                        width=att.width or 0,
+                        size=att.size or 0,
+                        filename=att.filename or "",
+                    )
+                    for att in elem.attachments
+                ]
             else:
                 replied_content = elem.content or ""
 
@@ -217,8 +252,10 @@ class MessageParser:
             replied_content=replied_content,
             replied_author=replied_author,
             replied_author_id=replied_author_id,
+            replied_message_id=replied_message_id,
             author_id=author_id,
             author_username=author_username,
             mention_entries=mention_entries,
             reply_author_entries=reply_author_entries,
+            replied_resources=replied_resources,
         )

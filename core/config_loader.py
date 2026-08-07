@@ -47,6 +47,7 @@ class AppConfig(BaseModel):
     heartbeat: dict = {}
     web_search: dict = {}
     web_fetch: dict = {}
+    media: dict = {}
     approval: dict = {}  # [approval]：审批卡转发目标等
 
 
@@ -232,3 +233,8 @@ class ConfigLoader:
     @property
     def web_fetch(self) -> dict:
         return self._cfg.web_fetch
+
+    @property
+    def media(self) -> dict:
+        """[media] 段：媒体存储、下载和图片理解配置。"""
+        return self._cfg.media

@@ -26,6 +26,7 @@ class ToolDeps:
     search_top_k: int = 5
     admin_ids: list = field(default_factory=list)
     bot_id: str = ""
+    media_service: Any = None
 
     # ── Mutable deps (Ref containers, updated after construction) ──
     media_uploader: Ref = field(default_factory=Ref)  # Ref[MediaUploader]

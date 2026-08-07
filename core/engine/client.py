@@ -60,6 +60,7 @@ class BotEngine:
         emoji_manager: Optional[EmojiManager] = None,
         multimodal_service: Optional[MultimodalService] = None,
         permission_manager=None,
+        media_service=None,
     ):
         self._app_id = app_id
         self._client_secret = client_secret
@@ -80,6 +81,7 @@ class BotEngine:
         self.emoji_manager = emoji_manager
         self.multimodal_service = multimodal_service
         self.permission_manager = permission_manager
+        self.media_service = media_service
         self.parser = MessageParser(MessageParserDeps(emoji_manager=emoji_manager))
         self.command_manager: CommandManager = CommandManager(
             admin_id=admin_id,
@@ -234,9 +236,16 @@ class BotEngine:
             replied_content=parsed.replied_content,
             replied_author=parsed.replied_author,
             replied_author_id=parsed.replied_author_id,
+            replied_message_id=parsed.replied_message_id,
             msg_type=parsed.msg_type,
             resources=parsed.resources,
+            replied_resources=parsed.replied_resources,
         )
+
+        if self.media_service:
+            await self.media_service.ingest_message(input_message)
+            await self.media_service.resolve_replied_resources(input_message)
+            await self.media_service.ingest_replied_resources(input_message)
 
         await self.router.route(
             input_message=input_message,

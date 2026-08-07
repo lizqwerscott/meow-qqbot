@@ -12,6 +12,7 @@ import core.command_handlers.heartbeat
 import core.command_handlers.help
 import core.command_handlers.history
 import core.command_handlers.jargon
+import core.command_handlers.media
 import core.command_handlers.plugin_mgmt
 import core.command_handlers.skills
 import core.command_handlers.status

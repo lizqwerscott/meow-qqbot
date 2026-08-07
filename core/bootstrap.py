@@ -41,6 +41,7 @@ from core.managers.nickname_manager import NicknameManager
 from core.managers.permission_manager import PermissionManager
 from core.managers.template_manager import TemplateManager
 from core.managers.workspace_manager import WorkspaceManager
+from core.media.service import MediaService
 from core.plugins.manager import PluginManager
 from core.rule_router import RuleRouter
 from core.tasks import (
@@ -138,6 +139,31 @@ class ServiceGraph:
                 )
         else:
             _log.info("多模态服务未启用（enabled=false），跳过 VLM 图片分析")
+
+        media_config = self.cfg.media
+        self.media_service = MediaService(
+            http_client=self.http_client,
+            multimodal=self.multimodal_service,
+            storage_dir=media_config.get("storage_dir", "data/media"),
+            enabled=media_config.get("enabled", True),
+            image_understanding=media_config.get("image_understanding", {}),
+            recent_window_seconds=media_config.get("recent_window_seconds", 600),
+            recent_max_items=media_config.get("recent_max_items", 5),
+            max_attachments_per_message=media_config.get(
+                "max_attachments_per_message", 5
+            ),
+            max_image_bytes=media_config.get("download", {}).get(
+                "max_image_bytes", 10 * 1024 * 1024
+            ),
+            max_file_bytes=media_config.get("download", {}).get(
+                "max_file_bytes", 25 * 1024 * 1024
+            ),
+            download_timeout=media_config.get("download", {}).get(
+                "timeout_seconds", 15
+            ),
+            download_concurrency=media_config.get("download", {}).get("concurrency", 4),
+            max_total_bytes=media_config.get("max_total_bytes", 2 * 1024 * 1024 * 1024),
+        )
 
         # ── EmojiManager ──
         self.emoji_manager = EmojiManager(
@@ -401,6 +427,7 @@ class ServiceGraph:
 
         # ── AgentEngine ──
         self.agent_engine = AgentEngine(ctx)
+        self.agent_engine.set_media_service(self.media_service)
 
         # ── 注入 TTS ──
         if self.tts_service:
@@ -420,6 +447,7 @@ class ServiceGraph:
             search_top_k=hindsight_config.get("search_top_k", 5),
             admin_ids=list(self.admin_ids),
             bot_id=self.bot_id,
+            media_service=self.media_service,
             web=self.web_service,
             media_uploader=Ref(),
             bot_engine=Ref(),
@@ -454,6 +482,7 @@ class ServiceGraph:
             nickname_manager=self.nickname_manager,
             emoji_manager=self.emoji_manager,
             multimodal_service=self.multimodal_service,
+            media_service=self.media_service,
         )
 
     # ── 阶段 3: 交叉连线 ────────────────────────────────────────────
@@ -715,6 +744,7 @@ class ServiceGraph:
             archive_manager=self.archive_manager,
             tts_service=self.tts_service,
             approval_manager=self.approval_manager,
+            media_service=self.media_service,
         )
 
         # ── 插件加载 ──
@@ -741,6 +771,7 @@ class ServiceGraph:
                     "agent_engine": self.agent_engine,
                     "learning_orchestrator": self.learning_orchestrator,
                     "archive_manager": self.archive_manager,
+                    "media_service": self.media_service,
                 },
                 webui_config=webui_config,
             )
@@ -771,6 +802,7 @@ class ServiceGraph:
     async def start(self):
         """启动所有后台服务。"""
         await self.check_hindsight_health()
+        await self.media_service.open()
 
         gateway_url = await self.bot_engine.api.get_gateway_url()
         loop = asyncio.get_running_loop()
@@ -847,6 +879,8 @@ class ServiceGraph:
             await self.cron_scheduler.stop()
         if self.heartbeat_manager:
             await self.heartbeat_manager.stop()
+        if getattr(self, "media_service", None):
+            await self.media_service.close()
         if self.task_cleanup_task:
             self.task_cleanup_task.cancel()
         if self.context_cleanup_task:

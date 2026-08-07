@@ -54,19 +54,24 @@ class MultimodalService:
             f"多模态服务已启动: {len(ai_services)} 个模型, " f"主模型: {self.model}"
         )
 
-    async def analyze_image(self, image_path: str) -> str:
-        cache_key = await self._get_cache_key(image_path, "image")
+    async def analyze_image(
+        self, image_path: str, *, prompt: str | None = None, max_tokens: int = 1024
+    ) -> str:
+        normalized_prompt = " ".join((prompt or "").split())
+        cache_key = await self._get_cache_key(
+            image_path, f"image:{normalized_prompt}:v2"
+        )
         if cache_key in self._cache:
             _log.debug(f"分析图片命中缓存: {image_path}")
             self._cache.move_to_end(cache_key)
             return self._cache[cache_key][0]
 
         base64_data = await self._encode_image(image_path)
-        prompt = (
-            "请用一句话简要描述这张图片中的主要内容。" "只返回描述，不要附加其他文字。"
+        prompt = normalized_prompt or (
+            "请用一句话简要描述这张图片中的主要内容。只返回描述，不要附加其他文字。"
         )
 
-        result = await self._call_vlm(base64_data, prompt)
+        result = await self._call_vlm(base64_data, prompt, max_tokens=max_tokens)
         result = (result or "图片").strip()
 
         self._set_cache(cache_key, result, result, [])

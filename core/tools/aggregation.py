@@ -13,6 +13,7 @@ def create_all_tool_entries(deps: ToolDeps) -> list[ToolEntry]:
     from core.tools.impl.file import create_file_entries
     from core.tools.impl.heartbeat import create_heartbeat_entries
     from core.tools.impl.learner import create_learner_entries
+    from core.tools.impl.media import create_media_entries
     from core.tools.impl.memory import create_memory_entries
     from core.tools.impl.message import create_message_entries
     from core.tools.impl.search import create_search_entries
@@ -38,4 +39,5 @@ def create_all_tool_entries(deps: ToolDeps) -> list[ToolEntry]:
     entries.extend(create_tts_entries(deps))
     entries.extend(create_exec_process_entries(deps))
     entries.extend(create_message_entries(deps))
+    entries.extend(create_media_entries(deps))
     return entries

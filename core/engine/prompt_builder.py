@@ -104,6 +104,7 @@ class PromptBuilder:
         self._system_events = ctx.mgmt.system_events
         self._tts_service = None
         self._deps = deps
+        self.media_service = None
         self._dynamic_ctx_builder = DynamicContextBuilder(
             hindsight=self.hindsight,
             search_top_k=self._search_top_k,
@@ -181,6 +182,9 @@ class PromptBuilder:
                     has_sub_agents=self._has_sub_agents,
                     has_learners=bool(self.learners),
                     has_web=bool(getattr(self._deps, "web", None)),
+                    has_media=bool(
+                        self.media_service and self.media_service.tools_enabled
+                    ),
                 ),
                 deps=self._deps,
                 role=role,
@@ -236,6 +240,28 @@ class PromptBuilder:
                     "content": dynamic_text,
                 }
             )
+
+        if self.media_service and self.media_service.tools_enabled:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "媒体协作规则：图片摘要足以回答时直接回答，不要重复调用工具；"
+                        "需要确认细节、文字或人物关系时调用 inspect_image。"
+                        "inspect_image 只能使用当前消息、引用消息或近期媒体目录中的 media:// 引用；"
+                        "多张图片指代不清时先询问用户，不要猜测。"
+                    ),
+                }
+            )
+
+        if self.media_service:
+            try:
+                media_context = await self.media_service.prepare_for_ai(input_message)
+                media_text = media_context.as_text()
+                if media_text:
+                    messages.append({"role": "system", "content": media_text})
+            except Exception as exc:
+                _log.warning("媒体上下文构建失败 [%s..]: %s", chat_id[:12], exc)
 
         # ── 6. 防御：清理孤立的 tool_calls（防止 compaction 拆散配对） ──
         from core.ai.protocol import ensure_messages_consistent

@@ -16,6 +16,7 @@ SECTIONS: dict[str, set[str]] = {
     "heartbeat": {"heartbeat_respond"},
     "learner": {"define_jargon", "report_behavior_effect"},
     "message": {"send_message"},
+    "media": {"inspect_image"},
 }
 
 _ALL_TOOLS: set[str] = set()
@@ -87,6 +88,7 @@ FEATURE_SECTION_MAP: dict[str, set[str]] = {
     "has_tts": {"tts"},
     "has_sub_agents": {"sub_agent"},
     "has_learners": {"learner"},
+    "has_media": {"media"},
 }
 
 CRON_ALLOWED: set[str] = {

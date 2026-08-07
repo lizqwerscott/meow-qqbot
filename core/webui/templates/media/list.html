@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}媒体管理 - 猫猫管理{% endblock %}
+{% block content %}
+<h2>🖼️ 媒体管理</h2>
+<p>当前占用：{{ "%.1f"|format(usage[0] / 1024 / 1024) }} MiB，共 {{ usage[1] }} 个对象</p>
+<p><a href="/media?order={{ 'asc' if order == 'desc' else 'desc' }}">按时间{{ '正序' if order == 'desc' else '倒序' }}</a></p>
+<table><tr><th>时间</th><th>类型</th><th>大小</th><th>文件名</th><th>操作</th></tr>
+{% for item in items %}
+<tr><td>{{ item.created_at|format_timestamp }}</td><td>{{ item.mime_type }}</td><td>{{ item.size }} bytes</td><td>{{ item.filename }}</td>
+<td><form method="post" action="/media/{{ item.media_id }}/delete"><button type="submit">删除</button></form></td></tr>
+{% else %}<tr><td colspan="5">暂无媒体</td></tr>{% endfor %}
+</table>
+{% endblock %}

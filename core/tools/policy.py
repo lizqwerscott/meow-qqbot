@@ -24,6 +24,7 @@ class ChatContext:
     has_tts: bool = False
     has_sub_agents: bool = False
     has_learners: bool = False
+    has_media: bool = False
 
 
 def build_tools(

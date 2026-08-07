@@ -90,6 +90,7 @@ class AgentEngine:
         self.emoji_manager = ctx.prompt.emoji_manager
         self.media_uploader = None
         self.multimodal_service = ctx.ai.multimodal_service
+        self.media_service = None
         self._tts_service = None
         self._api_client = None
 
@@ -168,6 +169,12 @@ class AgentEngine:
 
     def set_multimodal_service(self, multimodal_service: Any):
         self.multimodal_service = multimodal_service
+
+    def set_media_service(self, media_service: Any):
+        self.media_service = media_service
+        self.prompt_builder.media_service = media_service
+        if self._deps:
+            self._deps.media_service = media_service
 
     def set_tts_service(self, tts_service: Any):
         self._tts_service = tts_service
@@ -259,7 +266,26 @@ class AgentEngine:
             except Exception as e:
                 _log.warning("归档失败 [%s..]: %s", chat_id[:12], e)
 
+        media_history_text = ""
+        if self.media_service and self._should_dispatch_to_ai(input_message):
+            try:
+                media_context = await self.media_service.prepare_for_ai(input_message)
+                media_history_text = "\n\n".join(
+                    [*media_context.current_blocks, *media_context.replied_blocks]
+                )
+            except Exception as exc:
+                _log.warning("媒体历史上下文构建失败 [%s..]: %s", chat_id[:12], exc)
+
         content_with_context = input_message.content
+        media_refs = [
+            resource.media_uri
+            for resource in (*input_message.resources, *input_message.replied_resources)
+            if resource.media_uri
+        ]
+        if media_refs:
+            content_with_context += "\n[媒体引用: " + ", ".join(media_refs) + "]"
+        if media_history_text:
+            content_with_context += "\n" + media_history_text
         if input_message.replied_content:
             if input_message.replied_author:
                 context_prefix = f"[正在回复 {input_message.replied_author}: {input_message.replied_content}]"
