@@ -1,6 +1,8 @@
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional
+import time
+from dataclasses import dataclass
+from typing import Any, Dict, List, Literal, Optional
 
 import httpx
 from qqbot_agent_sdk import (
@@ -31,6 +33,33 @@ from core.markdown_split import split_markdown
 from core.message import InputMessage
 
 _log = logging.getLogger(__name__)
+_REPLY_DELIVERY_STATE_TTL = 600.0
+
+
+@dataclass
+class _ReplyDeliveryState:
+    mode: Literal["passive", "proactive"] = "passive"
+    next_chunk_index: int = 1
+    last_used: float = 0.0
+
+
+def _is_passive_reply_limit_error(exc: BaseException) -> bool:
+    """Return whether QQ explicitly rejected a passive reply window."""
+    messages = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        messages.append(str(current).lower())
+        current = current.__cause__ or current.__context__
+
+    text = " ".join(messages)
+    return (
+        "被动回复时间或者次数超过限制" in text
+        or "passive reply" in text
+        and ("time" in text or "count" in text)
+        and ("limit" in text or "exceed" in text)
+    )
 
 
 class BotEngine:
@@ -94,6 +123,9 @@ class BotEngine:
         self.approval_manager: Optional[Any] = None
         self._session_id: Optional[str] = None
         self._last_seq: Optional[int] = None
+        self._reply_delivery_states: dict[
+            tuple[str, str, str], _ReplyDeliveryState
+        ] = {}
 
         _log.info("BotEngine 已初始化")
 
@@ -312,32 +344,112 @@ class BotEngine:
         media_file_info: Optional[str] = None,
         markdown: bool = True,
         keyboard: Optional[InlineKeyboard] = None,
+        delivery_state: Optional[_ReplyDeliveryState] = None,
+        chunk_index: Optional[int] = None,
     ) -> Dict[str, Any]:
         chat_type = "group" if is_group else "c2c"
+        state = delivery_state or _ReplyDeliveryState(
+            mode="passive" if reply_to is not None else "proactive"
+        )
+        state.last_used = time.monotonic()
+        current_chunk_index = chunk_index or state.next_chunk_index
+        state.next_chunk_index = max(state.next_chunk_index, current_chunk_index + 1)
 
-        if media_file_info:
+        async def send_message(msg: MessageToCreate) -> Dict[str, Any]:
+            if is_group:
+                return await self.api.post_group_message(
+                    chat_id, msg, keyboard=keyboard
+                )
+            return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
+
+        async def send_proactive_message(
+            current_content: str, *, current_markdown: bool
+        ) -> Dict[str, Any]:
+            if media_file_info:
+                msg = make_media_message()
+            else:
+                msg = self.api.build_text_body(
+                    current_content, reply_to=None, markdown=current_markdown
+                )
+            return await send_message(msg)
+
+        def make_media_message() -> MessageToCreate:
             msg = MessageToCreate(
                 msg_type=QQMessageType.RICH_MEDIA,
                 msg_seq=self.api.next_msg_seq(),
                 media=MediaInfo(file_info=media_file_info),
             )
-            if reply_to is not None:
+            if state.mode == "passive":
                 msg.msg_id = reply_to
-            if is_group:
-                return await self.api.post_group_message(
-                    chat_id, msg, keyboard=keyboard
+            return msg
+
+        async def send_chunk(
+            current_content: str,
+            *,
+            current_markdown: bool = markdown,
+            current_chunk_index: Optional[int] = None,
+        ) -> Dict[str, Any]:
+            log_chunk_index = current_chunk_index or state.next_chunk_index
+            try:
+                if state.mode == "proactive":
+                    return await send_proactive_message(
+                        current_content, current_markdown=current_markdown
+                    )
+                if media_file_info:
+                    result = await send_message(make_media_message())
+                elif keyboard:
+                    msg = self.api.build_text_body(
+                        current_content,
+                        reply_to=reply_to,
+                        markdown=current_markdown,
+                    )
+                    result = await send_message(msg)
+                else:
+                    result = await self.api.send_text(
+                        chat_type,
+                        chat_id,
+                        current_content,
+                        reply_to=reply_to,
+                        markdown=current_markdown,
+                        retries=1,
+                    )
+                state.mode = "proactive"
+                return result
+            except Exception as exc:
+                if state.mode != "passive" or not _is_passive_reply_limit_error(exc):
+                    raise
+                state.mode = "proactive"
+                _log.warning(
+                    "被动回复受限 [chat_type=%s][chat_id=%s]"
+                    "[mode=passive->proactive][chunk=%s][reason=%s]",
+                    chat_type,
+                    chat_id[:12],
+                    log_chunk_index,
+                    exc,
                 )
-            return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
+                try:
+                    result = await send_proactive_message(
+                        current_content, current_markdown=current_markdown
+                    )
+                except Exception as fallback_exc:
+                    _log.error(
+                        "主动发送兜底失败 [chat_type=%s][chat_id=%s]"
+                        "[original_error=%s][fallback_error=%s]",
+                        chat_type,
+                        chat_id[:12],
+                        exc,
+                        fallback_exc,
+                        exc_info=True,
+                    )
+                    raise
+                _log.info("主动发送兜底成功 [%s][%s]", chat_type, chat_id[:12])
+                return result
+
+        if media_file_info:
+            return await send_chunk(content)
 
         if keyboard:
-            msg = self.api.build_text_body(
-                content, reply_to=reply_to, markdown=markdown
-            )
-            if is_group:
-                return await self.api.post_group_message(
-                    chat_id, msg, keyboard=keyboard
-                )
-            return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
+            return await send_chunk(content)
 
         chunks = split_markdown(content)
         last_result: Dict[str, Any] = {}
@@ -345,28 +457,44 @@ class BotEngine:
             if len(chunks) > 1:
                 chunk = f"[{i + 1}/{len(chunks)}]\n{chunk}"
             try:
-                last_result = await self.api.send_text(
-                    chat_type,
-                    chat_id,
-                    chunk,
-                    reply_to=reply_to,
-                    markdown=markdown,
-                )
-            except Exception:
-                if markdown:
+                last_result = await send_chunk(chunk, current_chunk_index=i + 1)
+            except Exception as exc:
+                if (
+                    markdown
+                    and state.mode == "passive"
+                    and not _is_passive_reply_limit_error(exc)
+                ):
                     _log.warning("Chunk %d Markdown 发送失败，降级为纯文本重试", i)
-                    last_result = await self.api.send_text(
-                        chat_type,
-                        chat_id,
+                    last_result = await send_chunk(
                         chunk,
-                        reply_to=reply_to,
-                        markdown=False,
+                        current_markdown=False,
+                        current_chunk_index=i + 1,
                     )
                 else:
                     raise
             if i < len(chunks) - 1:
                 await asyncio.sleep(0.3)
         return last_result
+
+    def _get_reply_delivery_state(
+        self, chat_id: str, message_id: str, is_group: bool
+    ) -> _ReplyDeliveryState:
+        chat_type = "group" if is_group else "c2c"
+        key = (chat_type, chat_id, message_id)
+        now = time.monotonic()
+        for old_key, old_state in list(self._reply_delivery_states.items()):
+            if now - old_state.last_used > _REPLY_DELIVERY_STATE_TTL:
+                del self._reply_delivery_states[old_key]
+        state = self._reply_delivery_states.get(key)
+        if state is None:
+            state = _ReplyDeliveryState(
+                mode="passive" if message_id else "proactive",
+                last_used=now,
+            )
+            self._reply_delivery_states[key] = state
+        else:
+            state.last_used = now
+        return state
 
     async def send_reply(
         self,
@@ -379,6 +507,7 @@ class BotEngine:
         markdown: bool = True,
         keyboard: Optional[InlineKeyboard] = None,
     ) -> Dict[str, Any]:
+        state = self._get_reply_delivery_state(chat_id, message_id, is_group)
         return await self._send(
             chat_id,
             content,
@@ -387,6 +516,7 @@ class BotEngine:
             media_file_info=media_file_info,
             markdown=markdown,
             keyboard=keyboard,
+            delivery_state=state,
         )
 
     async def send_proactive(
@@ -414,6 +544,13 @@ class BotEngine:
     ) -> None:
         try:
             reply_to = message_id if message_id else None
-            await self._send(chat_id, content, reply_to=reply_to, is_group=is_group)
+            state = self._get_reply_delivery_state(chat_id, message_id, is_group)
+            await self._send(
+                chat_id,
+                content,
+                reply_to=reply_to,
+                is_group=is_group,
+                delivery_state=state,
+            )
         except Exception as e:
             _log.error("发送回复失败 [%s]: %s", chat_id, e)
