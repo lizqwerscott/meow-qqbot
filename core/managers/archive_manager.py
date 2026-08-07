@@ -12,7 +12,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from core.managers.chat_message import (
     ChatMessage,
@@ -117,9 +117,7 @@ class ArchiveManager:
     async def archive_if_stale(
         self, chat_id: str, is_group: bool
     ) -> Optional[ArchiveResult]:
-        async def _do():
-            ctx = self._cm.get_context(chat_id)
-
+        async def _do(ctx):
             if ctx.is_empty():
                 return None
 
@@ -131,7 +129,7 @@ class ArchiveManager:
 
             return await self._do_archive(ctx, chat_id, is_group, "daily")
 
-        return await self._cm.with_chat_lock(chat_id, _do)
+        return await self._cm._with_context_locked(chat_id, _do)
 
     def load_recent_summaries(self, chat_id: str) -> Optional[str]:
         mem_dir = _get_memory_dir(self._memory_dir, chat_id)
@@ -158,18 +156,42 @@ class ArchiveManager:
 
         return "\n\n---\n\n".join(parts) if parts else None
 
+    async def load_recent_summaries_async(self, chat_id: str) -> Optional[str]:
+        return await asyncio.to_thread(self.load_recent_summaries, chat_id)
+
     def consume_summary(self, chat_id: str) -> Optional[str]:
         if chat_id not in self._pending_injection:
             return None
         self._pending_injection.discard(chat_id)
         return self.load_recent_summaries(chat_id)
 
+    async def consume_summary_async(self, chat_id: str) -> Optional[str]:
+        if chat_id not in self._pending_injection:
+            return None
+        self._pending_injection.discard(chat_id)
+        return await self.load_recent_summaries_async(chat_id)
+
+    async def get_session_status_async(self, chat_id: str) -> Dict[str, Any]:
+        history = await self._cm.get_chat_history_async(chat_id)
+        return {
+            "message_count": len(history),
+            "last_activity": (
+                history[-1].get("timestamp", time.time()) if history else None
+            ),
+            "archive_count": len(
+                await asyncio.to_thread(
+                    lambda: list(
+                        (_get_memory_dir(self._memory_dir, chat_id)).glob("*.md")
+                    )
+                )
+            ),
+        }
+
     async def archive_manual(self, chat_id: str, is_group: bool) -> ArchiveResult:
-        async def _do():
-            ctx = self._cm.get_context(chat_id)
+        async def _do(ctx):
             return await self._do_archive(ctx, chat_id, is_group, "manual")
 
-        return await self._cm.with_chat_lock(chat_id, _do)
+        return await self._cm._with_context_locked(chat_id, _do)
 
     def cleanup_old_archives(self) -> int:
         retention_seconds = self._retention_days * 86400
@@ -195,6 +217,21 @@ class ArchiveManager:
         if removed:
             _log.info("归档清理完成: 移除了 %d 个文件", removed)
         return removed
+
+    async def cleanup_old_archives_async(self) -> int:
+        return await asyncio.to_thread(self.cleanup_old_archives)
+
+    async def list_archives_async(self, chat_id: str) -> List[dict]:
+        return await asyncio.to_thread(self._list_memory_files, chat_id)
+
+    def _list_memory_files(self, chat_id: str) -> List[dict]:
+        mem_dir = _get_memory_dir(self._memory_dir, chat_id)
+        if not mem_dir.is_dir():
+            return []
+        return [
+            {"path": str(path), "size": path.stat().st_size}
+            for path in mem_dir.glob("*.md")
+        ]
 
     # ── 内部方法（需在 per-chat 锁内调用） ──
 

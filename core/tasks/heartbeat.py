@@ -375,7 +375,7 @@ class HeartbeatManager:
             )
             hb_ids = [
                 cid
-                for cid in self._context_manager.get_all_chat_ids()
+                for cid in await self._context_manager.get_all_chat_ids_async()
                 if pattern.match(cid)
             ]
             if len(hb_ids) <= keep_last:
@@ -391,6 +391,6 @@ class HeartbeatManager:
             hb_ids.sort(key=_sort_key)
             for cid in hb_ids[:-keep_last]:
                 await self._context_manager.clear_chat_history_async(cid)
-                self._context_manager.remove_context(cid)
+                await self._context_manager.remove_context_async(cid)
         except Exception as e:
             _log.warning(f"清理心跳上下文失败: {e}")

@@ -39,26 +39,78 @@ def mgr(store, compactor):
 
 
 @pytest.mark.asyncio
-async def test_get_context_async_creates_new(mgr):
-    ctx = await mgr.get_context_async("chat_001")
-    assert ctx is not None
-    assert ctx.chat_id == "chat_001"
-    assert "chat_001" in mgr.contexts
+async def test_first_history_access_creates_new(mgr):
+    assert await mgr.get_chat_history_async("chat_001") == []
+    assert await mgr.get_all_chat_ids_async() == ["chat_001"]
 
 
 @pytest.mark.asyncio
-async def test_get_context_async_reuses_existing(mgr):
-    ctx1 = await mgr.get_context_async("chat_001")
-    ctx2 = await mgr.get_context_async("chat_001")
-    assert ctx1 is ctx2
+async def test_first_history_access_reuses_existing(mgr):
+    await mgr.get_chat_history_async("chat_001")
+    await mgr.get_chat_history_async("chat_001")
+    assert await mgr.get_context_count_async() == 1
 
 
 @pytest.mark.asyncio
-async def test_get_context_async_loads_from_store(mgr, store):
+async def test_history_access_loads_from_store(mgr, store):
     store.flush("chat_001", [{"role": "user", "content": "hello", "timestamp": 100.0}])
-    ctx = await mgr.get_context_async("chat_001")
-    assert len(ctx.history) == 1
-    assert ctx.history[0].content == "hello"
+    history = await mgr.get_chat_history_async("chat_001")
+    assert len(history) == 1
+    assert history[0]["raw_content"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_access_restores_once(compactor):
+    class BlockingStore(MemoryContextStore):
+        def __init__(self):
+            super().__init__()
+            self.load_calls = 0
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def load_async(self, chat_id):
+            self.load_calls += 1
+            self.started.set()
+            await self.release.wait()
+            return None
+
+    store = BlockingStore()
+    mgr = ChatContextManager(store=store, compactor=compactor)
+    first = asyncio.create_task(mgr.get_chat_history_async("chat_001"))
+    await store.started.wait()
+    second = asyncio.create_task(mgr.get_chat_history_async("chat_001"))
+    await asyncio.sleep(0)
+    assert store.load_calls == 1
+    store.release.set()
+    first_history, second_history = await asyncio.gather(first, second)
+    assert first_history == second_history == []
+
+
+@pytest.mark.asyncio
+async def test_first_access_different_chats_restores_in_parallel(compactor):
+    class ParallelStore(MemoryContextStore):
+        def __init__(self):
+            super().__init__()
+            self.started = set()
+            self.release = asyncio.Event()
+
+        async def load_async(self, chat_id):
+            self.started.add(chat_id)
+            if len(self.started) == 2:
+                self.release.set()
+            await self.release.wait()
+            return None
+
+    store = ParallelStore()
+    mgr = ChatContextManager(store=store, compactor=compactor)
+    await asyncio.wait_for(
+        asyncio.gather(
+            mgr.get_chat_history_async("chat_001"),
+            mgr.get_chat_history_async("chat_002"),
+        ),
+        timeout=1,
+    )
+    assert store.started == {"chat_001", "chat_002"}
 
 
 @pytest.mark.asyncio
@@ -66,17 +118,17 @@ async def test_add_user_message_async(mgr):
     await mgr.add_user_message_async(
         "chat_001", "hello", message_id="msg_001", sender_id="user_001"
     )
-    ctx = await mgr.get_context_async("chat_001")
-    assert len(ctx.history) == 1
-    assert ctx.history[0].role == "user"
-    assert ctx.history[0].content == "hello"
+    history = await mgr.get_chat_history_async("chat_001")
+    assert len(history) == 1
+    assert history[0]["role"] == "user"
+    assert history[0]["raw_content"] == "hello"
 
 
 @pytest.mark.asyncio
 async def test_add_assistant_message_async(mgr):
     await mgr.add_assistant_message_async("chat_001", "hi there", message_id="msg_002")
-    ctx = await mgr.get_context_async("chat_001")
-    assert ctx.history[0].role == "assistant"
+    history = await mgr.get_chat_history_async("chat_001")
+    assert history[0]["role"] == "assistant"
 
 
 @pytest.mark.asyncio
@@ -84,8 +136,8 @@ async def test_add_tool_result_async(mgr):
     await mgr.add_tool_result_async(
         "chat_001", "search", '{"result": "ok"}', "call_001"
     )
-    ctx = await mgr.get_context_async("chat_001")
-    assert ctx.history[0].role == "tool"
+    history = await mgr.get_chat_history_async("chat_001")
+    assert history[0]["role"] == "tool"
 
 
 def test_set_messages_persists_without_event_loop():
@@ -173,8 +225,7 @@ async def test_remove_last_user_message_match(mgr):
     await mgr.add_user_message_async("chat_001", "hello", message_id="msg_001")
     result = await mgr.remove_last_user_message_if_async("chat_001", "msg_001")
     assert result is True
-    ctx = await mgr.get_context_async("chat_001")
-    assert len(ctx.history) == 0
+    assert await mgr.get_chat_history_async("chat_001") == []
 
 
 @pytest.mark.asyncio
@@ -182,8 +233,7 @@ async def test_remove_last_user_message_no_match(mgr):
     await mgr.add_user_message_async("chat_001", "hello", message_id="msg_001")
     result = await mgr.remove_last_user_message_if_async("chat_001", "wrong_id")
     assert result is False
-    ctx = await mgr.get_context_async("chat_001")
-    assert len(ctx.history) == 1
+    assert len(await mgr.get_chat_history_async("chat_001")) == 1
 
 
 @pytest.mark.asyncio
@@ -204,10 +254,10 @@ async def test_remove_last_user_message_empty_chat(mgr):
 
 @pytest.mark.asyncio
 async def test_compact_history_if_needed_noop(mgr):
-    compacted, usage, ctx = await mgr.compact_history_if_needed("chat_001")
+    compacted, usage, count = await mgr.compact_history_if_needed("chat_001")
     assert compacted is False
     assert usage is None
-    assert ctx.get_history() == []
+    assert count == 0
 
 
 @pytest.mark.asyncio
@@ -216,20 +266,19 @@ async def test_compact_history_if_needed_forwards_force_and_applies_result(
 ):
     from core.managers.chat_message import ChatMessage
 
-    ctx = await mgr.get_context_async("chat_001")
+    await mgr.add_user_message_async("chat_001", "old")
     original = ChatMessage(role="user", content="old", timestamp=1)
-    ctx.add_message("user", "old")
     replacement = ChatMessage(role="assistant", content="summary", timestamp=1)
     compactor.result = CompactionResult(True, [replacement], {"total_tokens": 3})
 
-    compacted, usage, result_ctx = await mgr.compact_history_if_needed(
+    compacted, usage, count = await mgr.compact_history_if_needed(
         "chat_001", force=True
     )
 
     assert compacted is True
     assert usage == {"total_tokens": 3}
-    assert result_ctx is ctx
-    assert ctx.get_history() == [replacement]
+    assert count == 1
+    assert (await mgr.get_chat_history_async("chat_001"))[0]["content"] == "summary"
     assert compactor.calls[0][1] is True
     assert compactor.calls[0][0][0].content == original.content
 
@@ -281,24 +330,72 @@ async def test_compaction_different_chats_can_run_in_parallel(mgr, compactor):
     await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
     assert len(started) == 2
 
-    ctx = await mgr.get_context_async("chat_001")
-    ctx.add_message("user", "keep")
-    before = ctx.get_history()
+    await mgr.add_user_message_async("chat_001", "keep")
+    before = await mgr.get_chat_history_async("chat_001")
 
     compacted, usage, _ = await mgr.compact_history_if_needed("chat_001")
 
     assert compacted is False
     assert usage is None
-    assert ctx.get_history() == before
+    assert await mgr.get_chat_history_async("chat_001") == before
 
 
 @pytest.mark.asyncio
 async def test_cleanup_inactive_contexts(mgr):
-    ctx = await mgr.get_context_async("chat_001")
-    ctx.last_activity = 0  # 强制过期
-    removed = mgr.cleanup_inactive_contexts(max_inactivity=0)
+    store = mgr.store
+    store.flush("chat_001", [{"role": "user", "content": "old", "timestamp": 0}])
+    await mgr.get_chat_history_async("chat_001")
+    removed = await mgr.cleanup_inactive_contexts_async(max_inactivity=0)
     assert "chat_001" in removed
-    assert "chat_001" not in mgr.contexts
+    assert "chat_001" not in await mgr.get_all_chat_ids_async()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_does_not_release_file_lock_for_retained_context(compactor):
+    class TrackingStore(MemoryContextStore):
+        def __init__(self):
+            super().__init__()
+            self.released = []
+
+        def release_file_lock(self, chat_id):
+            self.released.append(chat_id)
+
+    store = TrackingStore()
+    mgr = ChatContextManager(store=store, compactor=compactor)
+    await mgr.add_user_message_async("chat_001", "active")
+
+    removed = await mgr.cleanup_inactive_contexts_async(max_inactivity=3600)
+
+    assert removed == []
+    assert store.released == []
+
+
+@pytest.mark.asyncio
+async def test_remove_context_waits_for_pending_save(compactor):
+    class BlockingStore(MemoryContextStore):
+        def __init__(self):
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def flush(self, chat_id, messages):
+            self.started.set()
+            self.release.wait(timeout=1)
+            super().flush(chat_id, messages)
+
+    store = BlockingStore()
+    mgr = ChatContextManager(store=store, compactor=compactor)
+    await mgr.add_user_message_async("chat_001", "pending")
+    await asyncio.to_thread(store.started.wait, 1)
+
+    removal = asyncio.create_task(mgr.remove_context_async("chat_001"))
+    await asyncio.sleep(0)
+    assert not removal.done()
+
+    store.release.set()
+    await asyncio.wait_for(removal, timeout=1)
+    assert await mgr.get_all_chat_ids_async() == []
+    assert store.load("chat_001")[0]["raw_content"] == "pending"
 
 
 # ── 聊天类型 ──

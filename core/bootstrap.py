@@ -828,8 +828,10 @@ class ServiceGraph:
             while True:
                 await asyncio.sleep(3600)
                 try:
-                    removed = self.context_manager.cleanup_inactive_contexts(
-                        max_inactivity=7200
+                    removed = (
+                        await self.context_manager.cleanup_inactive_contexts_async(
+                            max_inactivity=7200
+                        )
                     )
                     if removed:
                         _log.info("上下文清理: 移除了 %d 个不活跃会话", len(removed))

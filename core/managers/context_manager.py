@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import threading
 from typing import Any, Dict, List, Optional
 
 from core.managers.chat_context import ChatContext
@@ -35,7 +34,6 @@ class ChatContextManager:
         self.merge_window_seconds = merge_window_seconds
         self.contexts: Dict[str, ChatContext] = {}
         self._ctx_lock = asyncio.Lock()
-        self._ctx_sync_lock = threading.Lock()
         self._chat_locks: Dict[str, asyncio.Lock] = {}
 
     @property
@@ -50,35 +48,24 @@ class ChatContextManager:
                 self._chat_locks[chat_id] = asyncio.Lock()
             return self._chat_locks[chat_id]
 
-    def get_context(self, chat_id: str) -> ChatContext:
-        if chat_id in self.contexts:
-            return self.contexts[chat_id]
-        with self._ctx_sync_lock:
-            if chat_id not in self.contexts:
-                ctx = ChatContext(
-                    chat_id=chat_id,
-                    store=self._store,
-                    max_history=self.max_history_per_chat,
-                    merge_window_seconds=self.merge_window_seconds,
-                )
-                ctx.restore_from_store()
-                self.contexts[chat_id] = ctx
-            return self.contexts[chat_id]
-
-    async def get_context_async(self, chat_id: str) -> ChatContext:
-        if chat_id in self.contexts:
-            return self.contexts[chat_id]
+    async def _get_or_restore_context_locked(self, chat_id: str) -> ChatContext:
         async with self._ctx_lock:
-            if chat_id not in self.contexts:
-                ctx = ChatContext(
-                    chat_id=chat_id,
-                    store=self._store,
-                    max_history=self.max_history_per_chat,
-                    merge_window_seconds=self.merge_window_seconds,
-                )
-                await ctx.restore_from_store_async()
-                self.contexts[chat_id] = ctx
-            return self.contexts[chat_id]
+            context = self.contexts.get(chat_id)
+        if context is None:
+            context = ChatContext(
+                chat_id=chat_id,
+                store=self._store,
+                max_history=self.max_history_per_chat,
+                merge_window_seconds=self.merge_window_seconds,
+            )
+            await context.restore_from_store_async()
+            async with self._ctx_lock:
+                existing = self.contexts.get(chat_id)
+                if existing is None:
+                    self.contexts[chat_id] = context
+                    return context
+                return existing
+        return context
 
     # ── 聊天类型 ──
 
@@ -90,43 +77,6 @@ class ChatContextManager:
 
     # ── 消息添加 ──
 
-    def add_user_message(
-        self,
-        chat_id: str,
-        content: str,
-        message_id: Optional[str] = None,
-        sender_id: Optional[str] = None,
-        name: Optional[str] = None,
-    ) -> None:
-        context = self.get_context(chat_id)
-        context.add_user_message(content, message_id, sender_id=sender_id, name=name)
-
-    def add_assistant_message(
-        self,
-        chat_id: str,
-        content: str,
-        message_id: Optional[str] = None,
-        tool_calls: Optional[List[Dict]] = None,
-        reasoning_content: Optional[str] = None,
-    ) -> None:
-        context = self.get_context(chat_id)
-        context.add_assistant_message(
-            content,
-            message_id,
-            tool_calls=tool_calls,
-            reasoning_content=reasoning_content,
-        )
-
-    def add_tool_result(
-        self,
-        chat_id: str,
-        tool_name: str,
-        content: str,
-        tool_call_id: str,
-    ) -> None:
-        context = self.get_context(chat_id)
-        context.add_tool_result(tool_name, content, tool_call_id)
-
     async def add_user_message_async(
         self,
         chat_id: str,
@@ -137,7 +87,7 @@ class ChatContextManager:
     ) -> None:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
-            context = await self.get_context_async(chat_id)
+            context = await self._get_or_restore_context_locked(chat_id)
             context.add_user_message(
                 content, message_id, sender_id=sender_id, name=name
             )
@@ -152,7 +102,7 @@ class ChatContextManager:
     ) -> None:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
-            context = await self.get_context_async(chat_id)
+            context = await self._get_or_restore_context_locked(chat_id)
             context.add_assistant_message(
                 content,
                 message_id,
@@ -169,29 +119,53 @@ class ChatContextManager:
     ) -> None:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
-            context = await self.get_context_async(chat_id)
+            context = await self._get_or_restore_context_locked(chat_id)
             context.add_tool_result(tool_name, content, tool_call_id)
 
     # ── 历史读取 ──
-
-    def get_history(
-        self, chat_id: str, max_messages: Optional[int] = None
-    ) -> List[Dict]:
-        if chat_id not in self.contexts:
-            return []
-        return self.contexts[chat_id].get_history_as_dicts(max_messages)
-
-    def get_chat_history(
-        self, chat_id: str, max_messages: Optional[int] = None
-    ) -> List[Dict]:
-        return self.get_history(chat_id, max_messages)
 
     async def get_chat_history_async(
         self, chat_id: str, max_messages: Optional[int] = None
     ) -> List[Dict]:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
-            return self.get_chat_history(chat_id, max_messages)
+            context = await self._get_or_restore_context_locked(chat_id)
+            return context.get_history_as_dicts(max_messages)
+
+    async def get_history_as_dicts_merged_async(
+        self, chat_id: str, max_messages: Optional[int] = None
+    ) -> List[Dict]:
+        lock = await self._get_chat_lock(chat_id)
+        async with lock:
+            context = await self._get_or_restore_context_locked(chat_id)
+            return context.get_history_as_dicts_merged(max_messages)
+
+    async def get_session_summary_async(self, chat_id: str) -> Dict[str, Any]:
+        lock = await self._get_chat_lock(chat_id)
+        async with lock:
+            context = await self._get_or_restore_context_locked(chat_id)
+            history = context.get_history_as_dicts()
+            return {
+                "message_count": len(history),
+                "last_activity": context.last_activity,
+                "estimated_tokens": context.estimate_tokens_for_history(),
+            }
+
+    async def remove_orphaned_tool_calls_async(self, chat_id: str) -> int:
+        lock = await self._get_chat_lock(chat_id)
+        async with lock:
+            context = await self._get_or_restore_context_locked(chat_id)
+            return context.remove_orphaned_tool_calls()
+
+    async def get_recent_user_contents_async(
+        self, chat_id: str, count: int = 2
+    ) -> List[str]:
+        lock = await self._get_chat_lock(chat_id)
+        async with lock:
+            context = await self._get_or_restore_context_locked(chat_id)
+            return [
+                message.content for message in context.history if message.role == "user"
+            ][-count:]
 
     async def get_pruned_history_async(
         self,
@@ -200,9 +174,7 @@ class ChatContextManager:
     ) -> List[Dict]:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
-            if chat_id not in self.contexts:
-                return []
-            ctx = self.contexts[chat_id]
+            ctx = await self._get_or_restore_context_locked(chat_id)
             return ctx.get_pruned_history(
                 max_messages=max_messages or len(ctx.history),
                 max_tool_results=self.max_tool_results,
@@ -211,40 +183,35 @@ class ChatContextManager:
                 hard_clear=self.hard_clear,
             )
 
-    def get_conversation_context(
-        self, chat_id: str, max_messages: Optional[int] = None
-    ) -> str:
-        if chat_id not in self.contexts:
-            return ""
-        return self.contexts[chat_id].get_conversation_context(max_messages)
-
     # ── 历史管理 ──
-
-    def clear_history(self, chat_id: str) -> None:
-        if chat_id in self.contexts:
-            self.contexts[chat_id].clear_history()
-
-    def clear_chat_history(self, chat_id: str) -> None:
-        self.clear_history(chat_id)
 
     async def clear_chat_history_async(self, chat_id: str) -> None:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
-            self.clear_chat_history(chat_id)
+            context = await self._get_or_restore_context_locked(chat_id)
+            await context.clear_history_async()
 
     async def remove_last_user_message_if_async(
         self, chat_id: str, message_id: str
     ) -> bool:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
-            if chat_id not in self.contexts:
+            async with self._ctx_lock:
+                context = self.contexts.get(chat_id)
+            if context is None:
                 return False
-            return self.contexts[chat_id].remove_last_message_if("user", message_id)
+            return context.remove_last_message_if("user", message_id)
 
     async def with_chat_lock(self, chat_id: str, func):
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             return await func()
+
+    async def _with_context_locked(self, chat_id: str, func):
+        lock = await self._get_chat_lock(chat_id)
+        async with lock:
+            context = await self._get_or_restore_context_locked(chat_id)
+            return await func(context)
 
     @property
     def compaction_threshold_tokens(self) -> int:
@@ -252,71 +219,91 @@ class ChatContextManager:
 
     async def compact_history_if_needed(
         self, chat_id: str, force: bool = False
-    ) -> tuple[bool, Optional[Dict], "ChatContext"]:
+    ) -> tuple[bool, Optional[Dict], int]:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
-            context = await self.get_context_async(chat_id)
+            context = await self._get_or_restore_context_locked(chat_id)
             result = await self._compactor.compact(context.get_history(), force=force)
             if result.compacted:
                 context.set_messages(result.messages)
-            return result.compacted, result.usage, context
+            return result.compacted, result.usage, len(result.messages)
 
     # ── 上下文生命周期 ──
 
-    def remove_context(self, chat_id: str) -> None:
-        with self._ctx_sync_lock:
-            if chat_id in self.contexts:
-                del self.contexts[chat_id]
-        self._chat_locks.pop(chat_id, None)
-        self._store.release_file_lock(chat_id)
-
-    def cleanup_inactive_contexts(self, max_inactivity: int = 7200) -> List[str]:
-        removed = []
-        with self._ctx_sync_lock:
-            for chat_id, context in list(self.contexts.items()):
-                if context.get_inactivity_time() > max_inactivity:
-                    removed.append(chat_id)
-                    del self.contexts[chat_id]
-                    self._chat_locks.pop(chat_id, None)
-        for cid in removed:
-            self._store.release_file_lock(cid)
-        return removed
+    async def remove_context_async(self, chat_id: str) -> None:
+        lock = await self._get_chat_lock(chat_id)
+        try:
+            async with lock:
+                async with self._ctx_lock:
+                    context = self.contexts.pop(chat_id, None)
+                if context is not None:
+                    await context.wait_for_save_async()
+        finally:
+            self._store.release_file_lock(chat_id)
 
     async def cleanup_inactive_contexts_async(
         self, max_inactivity: int = 7200
     ) -> List[str]:
+        removed = []
         async with self._ctx_lock:
-            return self.cleanup_inactive_contexts(max_inactivity)
+            chat_ids = list(self.contexts)
+        for chat_id in chat_ids:
+            lock = await self._get_chat_lock(chat_id)
+            removed_context = False
+            try:
+                async with lock:
+                    async with self._ctx_lock:
+                        context = self.contexts.get(chat_id)
+                    if (
+                        context is None
+                        or context.get_inactivity_time() <= max_inactivity
+                    ):
+                        continue
+                    async with self._ctx_lock:
+                        removed_context = self.contexts.pop(chat_id, None) is not None
+                    if not removed_context:
+                        continue
+                    await context.wait_for_save_async()
+                    removed.append(chat_id)
+            finally:
+                if removed_context:
+                    self._store.release_file_lock(chat_id)
+        return removed
 
     # ── 统计与查询 ──
 
-    def get_all_chat_ids(self) -> List[str]:
-        return list(self.contexts.keys())
+    async def get_all_chat_ids_async(self) -> List[str]:
+        async with self._ctx_lock:
+            return list(self.contexts.keys())
 
-    def get_all_disk_chat_ids(self) -> List[str]:
-        disk_ids = self._store.get_all_disk_ids()
-        memory_ids = set(self.contexts.keys())
+    async def get_all_disk_chat_ids_async(self) -> List[str]:
+        disk_ids = await asyncio.to_thread(self._store.get_all_disk_ids)
+        async with self._ctx_lock:
+            memory_ids = set(self.contexts)
         return sorted(set(disk_ids) | memory_ids)
 
-    def get_all_chats(self) -> Dict[str, ChatContext]:
-        return self.contexts.copy()
-
-    def get_context_count(self) -> int:
-        return len(self.contexts)
-
-    def get_total_messages_count(self) -> int:
+    async def get_total_messages_count_async(self) -> int:
+        async with self._ctx_lock:
+            chat_ids = list(self.contexts)
         total = 0
-        for context in self.contexts.values():
-            total += len(context.history)
+        for chat_id in chat_ids:
+            history = await self.get_chat_history_async(chat_id)
+            total += len(history)
         return total
 
-    def get_archived_sessions_summary(self) -> Dict[str, int]:
-        return self._store.get_archived_summary()
+    async def get_context_count_async(self) -> int:
+        async with self._ctx_lock:
+            return len(self.contexts)
 
-    def get_archived_files(self, chat_id: str) -> List[dict]:
-        return self._store.list_archives(chat_id)
+    async def get_archived_sessions_summary_async(self) -> Dict[str, int]:
+        return await asyncio.to_thread(self._store.get_archived_summary)
 
-    def read_archived_messages(
+    async def get_archived_files_async(self, chat_id: str) -> List[dict]:
+        return await asyncio.to_thread(self._store.list_archives, chat_id)
+
+    async def read_archived_messages_async(
         self, file_path: str, max_messages: int = 200
     ) -> List[Dict]:
-        return self._store.read_archive(file_path, max_messages)
+        return await asyncio.to_thread(
+            self._store.read_archive, file_path, max_messages
+        )

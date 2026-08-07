@@ -14,13 +14,13 @@ async def test_history_command_compacts_through_context_manager():
     class ContextManager:
         compaction_threshold_tokens = 100
 
-        def get_context(self, chat_id):
+        async def get_chat_history_async(self, chat_id):
             assert chat_id == "chat_001"
-            return context
+            return [{"role": "user", "content": "one"}] * 2
 
         async def compact_history_if_needed(self, chat_id, force=False):
             calls.append((chat_id, force))
-            return True, None, context
+            return True, None, 1
 
     command = HistoryCommand(ContextManager())
     input_message = InputMessage(

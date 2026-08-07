@@ -16,11 +16,13 @@ async def status_page(request: Request):
     agent_engine = managers.get("agent_engine")
     if agent_engine and agent_engine.hindsight:
         await agent_engine.hindsight.health()
-    stats = agent_engine.get_stats() if agent_engine else {}
+    stats = await agent_engine.get_stats() if agent_engine else {}
 
     context_manager = managers.get("context_manager")
     archived_counts = (
-        context_manager.get_archived_sessions_summary() if context_manager else {}
+        await context_manager.get_archived_sessions_summary_async()
+        if context_manager
+        else {}
     )
 
     queue_details = list(stats.get("queue_sizes", {}).items())

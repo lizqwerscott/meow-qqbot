@@ -74,7 +74,9 @@ class MemoryBlockBuilder:
 
         if self._archive_manager:
             try:
-                summary_text = self._archive_manager.consume_summary(chat_id)
+                summary_text = await self._archive_manager.consume_summary_async(
+                    chat_id
+                )
             except Exception as e:
                 _log.warning("归档摘要注入失败 [%s..]: %s", chat_id[:12], e)
                 summary_text = None

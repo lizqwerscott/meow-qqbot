@@ -47,24 +47,31 @@ class HistoryCommand:
 
     async def _show_status(self, input_message: InputMessage) -> List[Dict[str, Any]]:
         chat_id = input_message.chat_id
-        ctx = self.context_manager.get_context(chat_id)
-        count = ctx.get_history_count()
-        last = ctx.get_last_message()
-        last_time = time.strftime("%H:%M:%S", time.localtime(ctx.last_activity))
+        history = await self.context_manager.get_chat_history_async(chat_id)
+        count = len(history)
+        last = history[-1] if history else None
+        last_time = (
+            time.strftime(
+                "%H:%M:%S", time.localtime(last.get("timestamp", time.time()))
+            )
+            if last
+            else "无"
+        )
         last_preview = (
-            (last.content[:80] + "…")
-            if last and len(last.content) > 80
-            else (last.content if last else "无")
+            (last.get("content", "")[:80] + "…")
+            if last and len(last.get("content", "")) > 80
+            else (last.get("content", "") if last else "无")
         )
         role_counts = {}
-        for m in ctx.history:
-            role_counts[m.role] = role_counts.get(m.role, 0) + 1
+        for message in history:
+            role = message.get("role", "unknown")
+            role_counts[role] = role_counts.get(role, 0) + 1
         parts = [
             f"会话: {chat_id[:24]}…" if len(chat_id) > 24 else f"会话: {chat_id}",
             f"消息数: {count} (用户 {role_counts.get('user', 0)}, 助手 {role_counts.get('assistant', 0)}, 工具 {role_counts.get('tool', 0)})",
             f"最近活动: {last_time}",
             f"最近消息: {last_preview}",
-            f"最大历史: {ctx.max_history} | 压缩阈值: {self.context_manager.compaction_threshold_tokens} tokens",
+            f"最大历史: {self.context_manager.max_history_per_chat} | 压缩阈值: {self.context_manager.compaction_threshold_tokens} tokens",
         ]
         return make_reply(input_message, "\n".join(parts))
 
@@ -73,7 +80,7 @@ class HistoryCommand:
     ) -> List[Dict[str, Any]]:
         target = chat_id or input_message.chat_id
         try:
-            history = self.context_manager.get_chat_history(target)
+            history = await self.context_manager.get_chat_history_async(target)
             lines = []
             for i, msg in enumerate(history, 1):
                 role = (
@@ -102,12 +109,10 @@ class HistoryCommand:
     ) -> List[Dict[str, Any]]:
         try:
             target = chat_id or input_message.chat_id
-            ctx = self.context_manager.get_context(target)
-            old_count = ctx.get_history_count()
-            compacted, _, ctx = await self.context_manager.compact_history_if_needed(
-                target, force=True
+            old_count = len(await self.context_manager.get_chat_history_async(target))
+            compacted, _, new_count = (
+                await self.context_manager.compact_history_if_needed(target, force=True)
             )
-            new_count = ctx.get_history_count()
             if compacted:
                 return make_reply(
                     input_message,
@@ -125,20 +130,26 @@ class HistoryCommand:
     ) -> List[Dict[str, Any]]:
         target = chat_id or input_message.chat_id
         try:
-            self.context_manager.clear_chat_history(target)
+            await self.context_manager.clear_chat_history_async(target)
             return make_reply(input_message, f"会话 {target[:24]}… 历史已清空。")
         except Exception as e:
             return make_reply(input_message, f"清空失败: {e}")
 
     async def _list_sessions(self, input_message: InputMessage) -> List[Dict[str, Any]]:
-        all_ids = self.context_manager.get_all_chat_ids()
+        all_ids = await self.context_manager.get_all_chat_ids_async()
         if not all_ids:
             return make_reply(input_message, "没有活跃的会话。")
         lines = []
         for cid in all_ids:
-            ctx = self.context_manager.get_context(cid)
-            count = ctx.get_history_count()
-            last_act = time.strftime("%H:%M", time.localtime(ctx.last_activity))
+            history = await self.context_manager.get_chat_history_async(cid)
+            count = len(history)
+            last_act = (
+                time.strftime(
+                    "%H:%M", time.localtime(history[-1].get("timestamp", time.time()))
+                )
+                if history
+                else "无"
+            )
             short = cid[:16] + "…" if len(cid) > 16 else cid
             lines.append(f"{short} ({count} 条, {last_act})")
         reply = f"活跃会话 ({len(all_ids)}):\n" + "\n".join(lines)

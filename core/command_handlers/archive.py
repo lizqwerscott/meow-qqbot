@@ -44,19 +44,19 @@ class ArchiveCommand:
 
     async def _show_status(self, input_message: InputMessage) -> List[Dict[str, Any]]:
         chat_id = input_message.chat_id
-        ctx = self.archive_manager._cm.get_context(chat_id)
-        count = ctx.get_history_count()
-        last_act = time.strftime("%H:%M", time.localtime(ctx.last_activity))
-        mem_dir = Path(self.archive_manager._memory_dir) / chat_id
-        archive_count = 0
-        if mem_dir.is_dir():
-            archive_count = len(list(mem_dir.glob("*.md")))
+        status = await self.archive_manager.get_session_status_async(chat_id)
+        count = status["message_count"]
+        last_act = (
+            time.strftime("%H:%M", time.localtime(status["last_activity"]))
+            if status["last_activity"]
+            else "无"
+        )
         return make_reply(
             input_message,
             f"会话: {chat_id[:24]}…\n"
             f"当前消息: {count} 条\n"
             f"最后活跃: {last_act}\n"
-            f"归档摘要: {archive_count} 个\n"
+            f"归档摘要: {status['archive_count']} 个\n"
             f"归档时间: 每日 {self.archive_manager._archive_hour}:00\n"
             f"回放: {self.archive_manager._replay_count} 条\n"
             f"摘要: {self.archive_manager._summary_count} 条",
@@ -66,13 +66,14 @@ class ArchiveCommand:
         self, input_message: InputMessage, chat_id: str
     ) -> List[Dict[str, Any]]:
         target = chat_id or input_message.chat_id
-        mem_dir = Path(self.archive_manager._memory_dir) / target
-        if not mem_dir.is_dir():
-            return make_reply(input_message, f"会话 {target[:24]}… 没有归档记录。")
-        files = sorted(mem_dir.glob("*.md"), reverse=True)
+        files = await self.archive_manager.list_archives_async(target)
         if not files:
             return make_reply(input_message, f"会话 {target[:24]}… 没有归档记录。")
-        lines = [f"{f.stem} ({f.stat().st_size} 字节)" for f in files[:20]]
+        files = sorted(files, key=lambda item: item.get("path", ""), reverse=True)
+        lines = [
+            f"{Path(item['path']).stem} ({item.get('size', 0)} 字节)"
+            for item in files[:20]
+        ]
         reply = f"归档摘要 ({len(files)} 个):\n" + "\n".join(lines)
         if len(files) > 20:
             reply += f"\n... (还有 {len(files) - 20} 个)"
@@ -82,7 +83,7 @@ class ArchiveCommand:
         self, input_message: InputMessage, chat_id: str
     ) -> List[Dict[str, Any]]:
         target = chat_id or input_message.chat_id
-        text = self.archive_manager.load_recent_summaries(target)
+        text = await self.archive_manager.load_recent_summaries_async(target)
         if not text:
             return make_reply(
                 input_message, f"会话 {target[:24]}… 没有可用的归档摘要。"
@@ -114,7 +115,7 @@ class ArchiveCommand:
         self, input_message: InputMessage
     ) -> List[Dict[str, Any]]:
         try:
-            removed = self.archive_manager.cleanup_old_archives()
+            removed = await self.archive_manager.cleanup_old_archives_async()
             return make_reply(input_message, f"归档清理完成，移除了 {removed} 个文件。")
         except Exception as e:
             return make_reply(input_message, f"清理失败: {e}")

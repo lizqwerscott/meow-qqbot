@@ -44,23 +44,24 @@ async def session_list(
     templates = request.app.state.templates
     context_manager = managers.get("context_manager")
 
-    all_chat_ids = context_manager.get_all_disk_chat_ids()
+    all_chat_ids = await context_manager.get_all_disk_chat_ids_async()
     if q:
         all_chat_ids = [cid for cid in all_chat_ids if q.lower() in cid.lower()]
 
-    archived_counts = context_manager.get_archived_sessions_summary()
+    archived_counts = await context_manager.get_archived_sessions_summary_async()
 
     sessions = []
     for cid in all_chat_ids:
-        ctx = context_manager.get_context(cid)
+        summary = await context_manager.get_session_summary_async(cid)
         sessions.append(
             {
                 "chat_id": cid,
-                "message_count": ctx.get_history_count(),
+                "message_count": summary["message_count"],
                 "last_activity": time.strftime(
-                    "%Y-%m-%d %H:%M:%S", time.localtime(ctx.last_activity)
+                    "%Y-%m-%d %H:%M:%S",
+                    time.localtime(summary["last_activity"]),
                 ),
-                "estimated_tokens": ctx.estimate_tokens_for_history(),
+                "estimated_tokens": summary["estimated_tokens"],
                 "archived_count": archived_counts.get(cid, 0),
             }
         )
@@ -88,14 +89,14 @@ async def archived_list(
     templates = request.app.state.templates
     context_manager = managers.get("context_manager")
 
-    archived_counts = context_manager.get_archived_sessions_summary()
+    archived_counts = await context_manager.get_archived_sessions_summary_async()
     all_archived_ids = sorted(archived_counts.keys())
     if q:
         all_archived_ids = [cid for cid in all_archived_ids if q.lower() in cid.lower()]
 
     sessions = []
     for cid in all_archived_ids:
-        files = context_manager.get_archived_files(cid)
+        files = await context_manager.get_archived_files_async(cid)
         sessions.append(
             {
                 "chat_id": cid,
@@ -134,28 +135,20 @@ async def archived_detail(
     context_manager = managers.get("context_manager")
     archive_manager = managers.get("archive_manager")
 
-    files = context_manager.get_archived_files(chat_id)
+    files = await context_manager.get_archived_files_async(chat_id)
     memory_dir = (
         Path(getattr(archive_manager, "_memory_dir", "data/archives/memory"))
         if archive_manager
         else Path("data/archives/memory")
     )
-    summaries = []
-    mem_path = memory_dir / chat_id
-    if mem_path.is_dir():
-        for f in sorted(mem_path.glob("*.md"), reverse=True):
-            summaries.append(
-                {
-                    "date": f.stem,
-                    "path": str(f),
-                    "size": f.stat().st_size,
-                }
-            )
+    summaries = await asyncio.to_thread(_list_memory_summaries, memory_dir, chat_id)
 
     messages_by_file = {}
     if tab == "messages":
         for f in files[:3]:
-            msgs = context_manager.read_archived_messages(f["path"], max_messages=100)
+            msgs = await context_manager.read_archived_messages_async(
+                f["path"], max_messages=100
+            )
             messages_by_file[f["timestamp_str"]] = msgs
 
     return templates.TemplateResponse(
@@ -181,7 +174,7 @@ async def archived_messages_full(request: Request, chat_id: str, timestamp: str)
     templates = request.app.state.templates
     context_manager = managers.get("context_manager")
 
-    files = context_manager.get_archived_files(chat_id)
+    files = await context_manager.get_archived_files_async(chat_id)
     target = None
     for f in files:
         if f["timestamp_str"] == timestamp:
@@ -193,7 +186,9 @@ async def archived_messages_full(request: Request, chat_id: str, timestamp: str)
             f"/sessions/archived/{chat_id}", "error", "未找到该归档文件"
         )
 
-    messages = context_manager.read_archived_messages(target["path"], max_messages=500)
+    messages = await context_manager.read_archived_messages_async(
+        target["path"], max_messages=500
+    )
 
     return templates.TemplateResponse(
         request,
@@ -244,7 +239,7 @@ async def archived_delete(request: Request, chat_id: str, timestamp: str):
     context_manager = managers.get("context_manager")
     archive_manager = managers.get("archive_manager")
 
-    files = context_manager.get_archived_files(chat_id)
+    files = await context_manager.get_archived_files_async(chat_id)
     target = None
     for f in files:
         if f["timestamp_str"] == timestamp:
@@ -257,14 +252,14 @@ async def archived_delete(request: Request, chat_id: str, timestamp: str):
         )
 
     try:
-        Path(target["path"]).unlink(missing_ok=True)
+        await asyncio.to_thread(Path(target["path"]).unlink, missing_ok=True)
         date_str = timestamp[:10]
         if archive_manager:
             memory_dir = Path(
                 getattr(archive_manager, "_memory_dir", "data/archives/memory")
             )
             summary_path = memory_dir / chat_id / f"{date_str}.md"
-            summary_path.unlink(missing_ok=True)
+            await asyncio.to_thread(summary_path.unlink, missing_ok=True)
         return _make_flash_redirect(
             f"/sessions/archived/{chat_id}", "success", f"已删除归档 {timestamp}"
         )
@@ -281,11 +276,10 @@ async def session_detail(request: Request, chat_id: str):
     templates = request.app.state.templates
     context_manager = managers.get("context_manager")
 
-    ctx = context_manager.get_context(chat_id)
-    history = ctx.get_history_as_dicts(max_messages=200)
+    history = await context_manager.get_chat_history_async(chat_id, max_messages=200)
     history.reverse()
 
-    archived_files = context_manager.get_archived_files(chat_id)
+    archived_files = await context_manager.get_archived_files_async(chat_id)
 
     return templates.TemplateResponse(
         request,
@@ -307,3 +301,13 @@ async def session_clear(request: Request, chat_id: str):
 
     await context_manager.clear_chat_history_async(chat_id)
     return _make_flash_redirect("/sessions", "success", "会话已清空")
+
+
+def _list_memory_summaries(memory_dir: Path, chat_id: str) -> list[dict]:
+    mem_path = memory_dir / chat_id
+    if not mem_path.is_dir():
+        return []
+    return [
+        {"date": path.stem, "path": str(path), "size": path.stat().st_size}
+        for path in sorted(mem_path.glob("*.md"), reverse=True)
+    ]

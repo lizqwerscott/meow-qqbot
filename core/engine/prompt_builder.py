@@ -138,17 +138,16 @@ class PromptBuilder:
         """
         # ── 1. Token 阈值触发 compaction ──
         try:
-            _, compact_usage, ctx = (
-                await self.context_manager.compact_history_if_needed(chat_id)
+            _, compact_usage, _ = await self.context_manager.compact_history_if_needed(
+                chat_id
             )
             if compact_usage and cost_tracker:
                 cost_tracker.record_turn(chat_id, self.ai_service.model, compact_usage)
         except Exception as e:
             _log.warning("历史压缩失败 [%s..]: %s", chat_id[:12], e)
-            ctx = await self.context_manager.get_context_async(chat_id)
 
         # ── 1b. 防御：清理 context 历史中孤立的 tool_calls ──
-        cleaned = ctx.remove_orphaned_tool_calls()
+        cleaned = await self.context_manager.remove_orphaned_tool_calls_async(chat_id)
         if cleaned:
             _log.info(f"清理了 {cleaned} 条孤立 tool_calls 消息 [{chat_id[:12]}..]")
 
@@ -219,7 +218,7 @@ class PromptBuilder:
             )
 
         # ── 4. 完整历史 ──
-        history = ctx.get_history_as_dicts_merged()
+        history = await self.context_manager.get_history_as_dicts_merged_async(chat_id)
 
         messages: List[dict] = [{"role": "system", "content": static_prompt}]
         messages.extend(history)

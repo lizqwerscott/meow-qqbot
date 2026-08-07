@@ -50,7 +50,7 @@ class HeartbeatCommand:
                 cm = getattr(self._agent_engine, "context_manager", None)
                 if cm:
                     await cm.clear_chat_history_async(chat_id)
-                    cm.remove_context(chat_id)
+                    await cm.remove_context_async(chat_id)
 
         if should_notify and text:
             return make_reply(input_message, f"[❤️ 心跳提醒]\n{text}")

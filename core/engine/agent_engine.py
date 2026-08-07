@@ -854,11 +854,11 @@ class AgentEngine:
 
     # ── 统计 ──
 
-    def get_stats(self) -> dict:
+    async def get_stats(self) -> dict:
         stats: dict = {
             "queue_sizes": self.session_manager.get_queue_sizes(),
-            "active_chats": self.context_manager.get_context_count(),
-            "total_messages": self.context_manager.get_total_messages_count(),
+            "active_chats": await self.context_manager.get_context_count_async(),
+            "total_messages": await self.context_manager.get_total_messages_count_async(),
         }
 
         if self.hindsight:

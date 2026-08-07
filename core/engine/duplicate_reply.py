@@ -28,13 +28,14 @@ class DuplicateReplyDetector:
         if input_message.msg_type != MessageType.TEXT:
             return False
 
-        context = await self._cm.get_context_async(input_message.chat_id)
-        user_msgs = [m for m in context.history if m.role == "user"]
-        if len(user_msgs) < 2:
+        user_contents = await self._cm.get_recent_user_contents_async(
+            input_message.chat_id
+        )
+        if len(user_contents) < 2:
             return False
 
-        last_content = user_msgs[-1].content.strip()
-        prev_content = user_msgs[-2].content.strip()
+        last_content = user_contents[-1].strip()
+        prev_content = user_contents[-2].strip()
         if not last_content:
             return False
         if last_content != prev_content:

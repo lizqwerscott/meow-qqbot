@@ -200,6 +200,27 @@ class ChatContext:
         self._restore_from_data(data)
         return True
 
+    async def wait_for_save_async(self) -> None:
+        """Wait until all saves scheduled for the current state have finished."""
+        while True:
+            task = self._save_task
+            if task is None:
+                return
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not task.done():
+                    await asyncio.shield(task)
+                raise
+            await asyncio.sleep(0)
+            if self._save_task is task and not self._save_pending:
+                return
+
+    async def clear_history_async(self) -> None:
+        await self.wait_for_save_async()
+        self.history.clear()
+        await asyncio.to_thread(self.store.delete, self.chat_id)
+
     def _restore_from_data(self, data: List[dict]) -> None:
         for item in data:
             try:
