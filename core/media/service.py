@@ -34,6 +34,9 @@ class MediaService:
         download_timeout=15,
         download_concurrency=4,
         max_total_bytes=2 * 1024 * 1024 * 1024,
+        preview_enabled=True,
+        preview_max_inline_bytes=50 * 1024 * 1024,
+        text_preview_max_chars=20_000,
     ):
         self.enabled = enabled
         self.http_client = http_client
@@ -52,6 +55,9 @@ class MediaService:
         self.download_sem = asyncio.Semaphore(max(1, int(download_concurrency)))
         self.vlm_sem = asyncio.Semaphore(max(1, int(cfg.get("concurrency", 2))))
         self.max_total_bytes = max_total_bytes
+        self.preview_enabled = bool(preview_enabled)
+        self.preview_max_inline_bytes = max(1, int(preview_max_inline_bytes))
+        self.text_preview_max_chars = max(1, int(text_preview_max_chars))
         self.store = MediaStore(storage_dir)
         self._opened = False
         self._inspection_cache: OrderedDict[tuple[str, str], str] = OrderedDict()
@@ -90,6 +96,59 @@ class MediaService:
             return []
         await self.open()
         return await self.store.list_objects(descending, limit)
+
+    async def get_media(self, media_id: str) -> dict | None:
+        if not self.enabled:
+            return None
+        await self.open()
+        return await self.store.get_object(media_id)
+
+    async def get_preview_path(self, media_id: str):
+        if not self.enabled or not self.preview_enabled:
+            return None
+        await self.open()
+        content = await self.store.get_content_info(media_id)
+        if not content:
+            return None
+        file_path, item = content
+        mime_type = item["mime_type"]
+        if not (
+            mime_type.startswith(("image/", "audio/", "video/"))
+            or mime_type == "text/plain"
+        ):
+            return None
+        if file_path.stat().st_size > self.preview_max_inline_bytes:
+            return None
+        return file_path, mime_type, item["filename"]
+
+    async def get_download_path(self, media_id: str):
+        if not self.enabled or not self.preview_enabled:
+            return None
+        await self.open()
+        content = await self.store.get_content_info(media_id)
+        if not content:
+            return None
+        file_path, item = content
+        return file_path, item["mime_type"], item["filename"]
+
+    async def get_text_preview(self, media_id: str, max_chars: int | None = None):
+        if not self.enabled or not self.preview_enabled:
+            return None
+        await self.open()
+        content = await self.store.get_content_info(media_id)
+        if not content:
+            return None
+        path, item = content
+        max_chars = max_chars or self.text_preview_max_chars
+        if (
+            item["mime_type"] != "text/plain"
+            or path.stat().st_size > self.preview_max_inline_bytes
+        ):
+            return None
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")[:max_chars]
+        except OSError:
+            return None
 
     async def delete_media(self, media_id: str) -> bool:
         if not self.enabled:
@@ -205,7 +264,10 @@ class MediaService:
             for _ in range(4):
                 current = await self._validate_url(current)
                 async with self.http_client.stream(
-                    "GET", current, timeout=self.download_timeout, follow_redirects=False
+                    "GET",
+                    current,
+                    timeout=self.download_timeout,
+                    follow_redirects=False,
                 ) as response:
                     self._check_peer_address(response)
                     if response.status_code in {301, 302, 303, 307, 308}:
@@ -226,7 +288,11 @@ class MediaService:
                         chunks.extend(chunk)
                     data = bytes(chunks)
                     mime = (
-                        (response.headers.get("content-type") or resource.mime_type or "")
+                        (
+                            response.headers.get("content-type")
+                            or resource.mime_type
+                            or ""
+                        )
                         .split(";", 1)[0]
                         .lower()
                     )
@@ -236,7 +302,9 @@ class MediaService:
                         and not mime.startswith("image/")
                     ):
                         raise ValueError("响应不是图片")
-                    if resource.resource_type == "image" and not self._image_signature(data):
+                    if resource.resource_type == "image" and not self._image_signature(
+                        data
+                    ):
                         raise ValueError("图片文件头校验失败")
                     return data, mime
             else:

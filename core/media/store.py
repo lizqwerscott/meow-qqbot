@@ -65,14 +65,6 @@ class MediaStore:
         if conn is None:
             return
         rows = conn.execute("SELECT media_id, local_path FROM media_objects").fetchall()
-        for row in rows:
-            if not Path(row["local_path"]).is_file():
-                conn.execute(
-                    "DELETE FROM media_messages WHERE media_id=?", (row["media_id"],)
-                )
-                conn.execute(
-                    "DELETE FROM media_objects WHERE media_id=?", (row["media_id"],)
-                )
         indexed = {Path(row["local_path"]).resolve() for row in rows}
         for path in self.inbound.rglob("*"):
             if path.is_file() and path.resolve() not in indexed:
@@ -313,16 +305,60 @@ class MediaStore:
             ).fetchone()
         return int(row[0]), int(row[1])
 
-    async def list_objects(self, descending: bool = True, limit: int = 200) -> list[dict]:
+    async def list_objects(
+        self, descending: bool = True, limit: int = 200
+    ) -> list[dict]:
         if self._conn is None:
             return []
         order = "DESC" if descending else "ASC"
         async with self._lock:
             rows = self._conn.execute(
-                f"SELECT media_id,mime_type,size,created_at,filename,summary FROM media_objects ORDER BY created_at {order} LIMIT ?",
+                f"SELECT media_id,mime_type,size,created_at,filename,summary,summary_model,local_path FROM media_objects ORDER BY created_at {order} LIMIT ?",
                 (max(1, min(limit, 1000)),),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._web_record_from_row(row) for row in rows]
+
+    async def get_object(self, media_id: str) -> dict | None:
+        if self._conn is None or not media_id or "/" in media_id:
+            return None
+        async with self._lock:
+            row = self._conn.execute(
+                "SELECT o.*, GROUP_CONCAT(m.chat_id || ':' || m.message_id || ':' || m.sender_id) AS references_ "
+                "FROM media_objects o LEFT JOIN media_messages m ON m.media_id=o.media_id "
+                "WHERE o.media_id=? GROUP BY o.media_id",
+                (media_id,),
+            ).fetchone()
+        return self._web_record_from_row(row) if row else None
+
+    async def get_content_info(self, media_id: str) -> tuple[Path, dict] | None:
+        if self._conn is None or not media_id or "/" in media_id:
+            return None
+        async with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM media_objects WHERE media_id=?", (media_id,)
+            ).fetchone()
+        if not row:
+            return None
+        path = Path(row["local_path"])
+        try:
+            path = path.resolve(strict=True)
+            if not path.is_relative_to(self.inbound.resolve()):
+                return None
+        except (OSError, RuntimeError):
+            return None
+        return path, dict(row)
+
+    @staticmethod
+    def _web_record_from_row(row) -> dict:
+        item = dict(row)
+        path = Path(item.pop("local_path"))
+        item["storage_status"] = "ready" if path.is_file() else "missing"
+        item["references"] = [
+            value for value in (item.pop("references_", "") or "").split(",") if value
+        ]
+        item["references_count"] = len(item["references"])
+        item["has_summary"] = bool(item.get("summary"))
+        return item
 
     async def delete_media(self, media_id: str) -> bool:
         if self._conn is None:
@@ -337,8 +373,12 @@ class MediaStore:
                 Path(row["local_path"]).unlink(missing_ok=True)
             except OSError:
                 return False
-            self._conn.execute("DELETE FROM media_messages WHERE media_id=?", (media_id,))
-            self._conn.execute("DELETE FROM media_objects WHERE media_id=?", (media_id,))
+            self._conn.execute(
+                "DELETE FROM media_messages WHERE media_id=?", (media_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM media_objects WHERE media_id=?", (media_id,)
+            )
             self._conn.commit()
             return True
 

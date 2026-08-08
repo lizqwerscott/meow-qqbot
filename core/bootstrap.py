@@ -163,6 +163,15 @@ class ServiceGraph:
             ),
             download_concurrency=media_config.get("download", {}).get("concurrency", 4),
             max_total_bytes=media_config.get("max_total_bytes", 2 * 1024 * 1024 * 1024),
+            preview_enabled=self.cfg.webui.get("media_preview", {}).get(
+                "enabled", True
+            ),
+            preview_max_inline_bytes=self.cfg.webui.get("media_preview", {}).get(
+                "max_inline_bytes", 50 * 1024 * 1024
+            ),
+            text_preview_max_chars=self.cfg.webui.get("media_preview", {}).get(
+                "text_preview_max_chars", 20_000
+            ),
         )
 
         # ── EmojiManager ──
