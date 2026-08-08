@@ -323,7 +323,8 @@ class MediaStore:
             return None
         async with self._lock:
             row = self._conn.execute(
-                "SELECT o.*, GROUP_CONCAT(m.chat_id || ':' || m.message_id || ':' || m.sender_id) AS references_ "
+                "SELECT o.*, MIN(m.chat_id) AS source_chat_id, MIN(m.message_id) AS source_message_id, "
+                "MIN(m.sender_id) AS source_sender_id, GROUP_CONCAT(m.chat_id || ':' || m.message_id || ':' || m.sender_id) AS references_ "
                 "FROM media_objects o LEFT JOIN media_messages m ON m.media_id=o.media_id "
                 "WHERE o.media_id=? GROUP BY o.media_id",
                 (media_id,),
@@ -358,6 +359,9 @@ class MediaStore:
         ]
         item["references_count"] = len(item["references"])
         item["has_summary"] = bool(item.get("summary"))
+        item.setdefault("source_chat_id", "")
+        item.setdefault("source_message_id", "")
+        item.setdefault("source_sender_id", "")
         return item
 
     async def delete_media(self, media_id: str) -> bool:

@@ -1,29 +1,33 @@
 {% extends "base.html" %}
 {% block title %}媒体详情 - 猫猫管理{% endblock %}
 {% block content %}
-<h2>媒体详情</h2>
-<p><a href="/media">返回媒体管理</a></p>
-<dl>
+<div class="media-detail-header"><div><p class="eyebrow">MEDIA DETAILS</p><h2>媒体详情</h2><p class="page-subtitle">查看文件预览、存储状态与关联消息。</p></div><a class="btn btn-ghost" href="/media">返回媒体管理</a></div>
+<div class="media-detail-grid">
+<section class="media-preview-card">
+{% if item.storage_status == "ready" and item.mime_type.startswith("image/") %}
+<img src="/media/{{ item.media_id }}/content" alt="媒体预览">
+{% elif item.storage_status == "ready" and item.mime_type.startswith("audio/") %}
+<audio controls src="/media/{{ item.media_id }}/content"></audio>
+{% elif item.storage_status == "ready" and item.mime_type.startswith("video/") %}
+<video controls src="/media/{{ item.media_id }}/content"></video>
+{% elif item.storage_status == "ready" and item.mime_type == "text/plain" and text_preview is not none %}
+<pre>{{ text_preview }}</pre>
+{% else %}<div class="media-unavailable"><span>◌</span><p>当前媒体不可预览</p><small>文件可能缺失、格式不支持或超过预览大小限制。</small></div>{% endif %}
+</section>
+<section class="media-meta-card"><div class="media-card-heading"><div><p class="eyebrow">METADATA</p><h3>文件信息</h3></div><span class="media-badge {{ item.storage_status }}">{{ '可用' if item.storage_status == 'ready' else '文件缺失' }}</span></div><dl>
 <dt>引用</dt><dd>{{ "media://inbound/" ~ item.media_id }}</dd>
 <dt>SHA-256</dt><dd>{{ item.sha256 }}</dd>
 <dt>创建时间</dt><dd>{{ item.created_at|format_timestamp }}</dd>
 <dt>类型</dt><dd>{{ item.mime_type }}</dd>
 <dt>大小</dt><dd>{{ item.size }} bytes</dd>
 <dt>文件名</dt><dd>{{ item.filename or "无" }}</dd>
+<dt>来源会话</dt><dd>{{ item.source_chat_id or "无" }}</dd>
+<dt>来源消息</dt><dd>{{ item.source_message_id or "无" }}</dd>
+<dt>发送者</dt><dd>{{ item.source_sender_id or "无" }}</dd>
 <dt>状态</dt><dd>{{ item.storage_status }}</dd>
 <dt>摘要</dt><dd>{{ item.summary or "暂无摘要" }}</dd>
 <dt>摘要模型</dt><dd>{{ item.summary_model or "无" }}</dd>
 <dt>关联消息</dt><dd>{{ item.references_count }} 条：{{ item.references|join(", ") or "无" }}</dd>
-</dl>
-{% if item.storage_status == "ready" and item.mime_type.startswith("image/") %}
-<img src="/media/{{ item.media_id }}/content" alt="媒体预览" style="max-width:100%;max-height:640px">
-{% elif item.storage_status == "ready" and item.mime_type.startswith("audio/") %}
-<audio controls src="/media/{{ item.media_id }}/content"></audio>
-{% elif item.storage_status == "ready" and item.mime_type.startswith("video/") %}
-<video controls src="/media/{{ item.media_id }}/content" style="max-width:100%;max-height:640px"></video>
-{% elif item.storage_status == "ready" and item.mime_type == "text/plain" and text_preview is not none %}
-<pre>{{ text_preview }}</pre>
-{% else %}<p>当前媒体不可预览。</p>{% endif %}
-{% if item.storage_status == "ready" %}<p><a href="/media/{{ item.media_id }}/content?download=true">下载原文件</a></p>{% endif %}
-<form method="post" action="/media/{{ item.media_id }}/delete" onsubmit="return confirm('确认删除此媒体？');"><button type="submit">删除</button></form>
+</dl><div class="media-detail-actions">{% if item.storage_status == "ready" %}<a class="btn btn-primary" href="/media/{{ item.media_id }}/content?download=true">下载原文件</a>{% endif %}<form method="post" action="/media/{{ item.media_id }}/delete" onsubmit="return confirm('确认删除此媒体？关联 {{ item.references_count }} 条消息将一并解除引用。');"><button class="btn btn-danger" type="submit">删除媒体</button></form></div></section>
+</div>
 {% endblock %}
