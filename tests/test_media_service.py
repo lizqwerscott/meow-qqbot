@@ -168,40 +168,6 @@ async def test_voice_transcription_preserves_voice_type_without_audio_mime(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_voice_transcription_restricts_tools_to_recent_media(tmp_path):
-    transcriber = FakeTranscriber()
-    service = MediaService(
-        http_client=AsyncMock(),
-        storage_dir=tmp_path,
-        recent_window_seconds=1,
-        voice_transcriber=transcriber,
-        voice_transcription={"enabled": True},
-    )
-    await service.open()
-    record = await service.store.save(
-        chat_id="g1",
-        message_id="m1",
-        sender_id="u1",
-        resource_type="voice",
-        source_url="https://example.test/voice.ogg",
-        mime_type="audio/ogg",
-        filename="voice.ogg",
-        data=b"voice",
-    )
-    service.store._conn.execute(
-        "UPDATE media_messages SET created_at=0 WHERE media_id=?", (record.media_id,)
-    )
-    service.store._conn.commit()
-
-    result = await service.transcribe_voice(
-        chat_id="g1", media_uri=record.media_uri, recent_only=True
-    )
-
-    assert result.error == "VOICE_NOT_RECENT"
-    transcriber.transcribe.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_voice_transcription_single_flight_for_concurrent_requests(tmp_path):
     transcriber = FakeTranscriber()
     started = asyncio.Event()

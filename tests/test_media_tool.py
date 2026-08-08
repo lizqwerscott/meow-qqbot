@@ -19,7 +19,7 @@ async def test_media_tools_expose_file_inspection_without_vision(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_media_tools_expose_voice_transcription(tmp_path):
+async def test_media_tools_do_not_expose_voice_transcription(tmp_path):
     transcriber = type("Transcriber", (), {"preload": AsyncMock()})()
     service = MediaService(
         http_client=AsyncMock(),
@@ -28,4 +28,4 @@ async def test_media_tools_expose_voice_transcription(tmp_path):
         voice_transcription={"enabled": True},
     )
     entries = create_media_entries(ToolDeps(media_service=service))
-    assert "transcribe_voice" in [entry.name for entry in entries]
+    assert "transcribe_voice" not in [entry.name for entry in entries]

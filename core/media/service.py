@@ -74,6 +74,7 @@ class MediaService:
         self.voice_transcriber = voice_transcriber
         self.voice_enabled = bool(
             voice_cfg.get("enabled", voice_transcriber is not None)
+            and voice_transcriber is not None
         )
         self.voice_timeout = max(1, float(voice_cfg.get("timeout_seconds", 120)))
         self.voice_max_chars = max(1, int(voice_cfg.get("max_chars", 4_000)))
@@ -89,7 +90,7 @@ class MediaService:
         if self.enabled and not self._opened:
             await self.store.open()
             try:
-                if self.voice_tools_enabled:
+                if self.voice_enabled:
                     await self.voice_transcriber.preload()
             except Exception:
                 await self.store.close()
@@ -102,11 +103,7 @@ class MediaService:
 
     @property
     def tools_enabled(self) -> bool:
-        return (
-            self.image_tools_enabled
-            or self.file_tools_enabled
-            or self.voice_tools_enabled
-        )
+        return self.image_tools_enabled or self.file_tools_enabled
 
     @property
     def image_tools_enabled(self) -> bool:
@@ -117,11 +114,6 @@ class MediaService:
         return self.enabled
 
     @property
-    def voice_tools_enabled(self) -> bool:
-        return (
-            self.enabled and self.voice_enabled and self.voice_transcriber is not None
-        )
-
     async def usage(self) -> tuple[int, int]:
         if not self.enabled:
             return 0, 0
@@ -603,13 +595,13 @@ class MediaService:
         )
 
     async def transcribe_voice(
-        self, *, chat_id: str, media_uri: str, recent_only: bool = False
+        self, *, chat_id: str, media_uri: str
     ) -> VoiceTranscription:
         if not media_uri.startswith("media://inbound/"):
             return VoiceTranscription(
                 media_uri, error="INVALID_MEDIA_URI", message="仅支持受控 media:// 引用"
             )
-        if not self.voice_tools_enabled:
+        if not self.voice_enabled:
             return VoiceTranscription(
                 media_uri, error="TRANSCRIPTION_FAILED", message="语音转写服务未启用"
             )
@@ -625,12 +617,6 @@ class MediaService:
         ):
             return VoiceTranscription(
                 media_uri, error="UNSUPPORTED_MEDIA_TYPE", message="该媒体不是语音"
-            )
-        if recent_only and record.created_at < time.time() - self.recent_window_seconds:
-            return VoiceTranscription(
-                media_uri,
-                error="VOICE_NOT_RECENT",
-                message="仅支持转写近期语音",
             )
         cached = await self.store.get_transcript(record.media_id)
         if cached:
