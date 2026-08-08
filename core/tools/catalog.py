@@ -16,7 +16,7 @@ SECTIONS: dict[str, set[str]] = {
     "heartbeat": {"heartbeat_respond"},
     "learner": {"define_jargon", "report_behavior_effect"},
     "message": {"send_message"},
-    "media": {"inspect_image"},
+    "media": {"inspect_image", "inspect_file", "transcribe_voice"},
 }
 
 _ALL_TOOLS: set[str] = set()

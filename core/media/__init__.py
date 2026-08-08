@@ -1,4 +1,19 @@
-from .models import ImageInspection, MediaRecord, MediaTurnContext
+from .models import (
+    FileInspection,
+    ImageInspection,
+    MediaRecord,
+    MediaTurnContext,
+    VoiceTranscription,
+)
 from .service import MediaService
+from .whisper_transcriber import WhisperTranscriber
 
-__all__ = ["ImageInspection", "MediaRecord", "MediaService", "MediaTurnContext"]
+__all__ = [
+    "FileInspection",
+    "ImageInspection",
+    "MediaRecord",
+    "MediaService",
+    "MediaTurnContext",
+    "VoiceTranscription",
+    "WhisperTranscriber",
+]

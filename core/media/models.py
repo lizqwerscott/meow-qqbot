@@ -40,6 +40,42 @@ class ImageInspection:
 
 
 @dataclass(frozen=True)
+class FileInspection:
+    media_uri: str
+    content: str = ""
+    truncated: bool = False
+    error: str = ""
+    message: str = ""
+
+    def as_dict(self) -> dict:
+        if self.error:
+            return {"error": self.error, "message": self.message}
+        return {
+            "media_uri": self.media_uri,
+            "content": self.content,
+            "truncated": self.truncated,
+        }
+
+
+@dataclass(frozen=True)
+class VoiceTranscription:
+    media_uri: str
+    transcript: str = ""
+    cached: bool = False
+    error: str = ""
+    message: str = ""
+
+    def as_dict(self) -> dict:
+        if self.error:
+            return {"error": self.error, "message": self.message}
+        return {
+            "media_uri": self.media_uri,
+            "transcript": self.transcript,
+            "cached": self.cached,
+        }
+
+
+@dataclass(frozen=True)
 class MediaTurnContext:
     current_blocks: tuple[str, ...] = field(default_factory=tuple)
     replied_blocks: tuple[str, ...] = field(default_factory=tuple)

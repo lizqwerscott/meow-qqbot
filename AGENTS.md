@@ -7,13 +7,15 @@ uv sync               # install deps (Python 3.11+)
 uv run python main.py # run the bot
 uv add <package>      # add a dependency
 uv run <script.py>    # run any script in the venv
+```
+
+- 新增、删除或更新 Python 依赖时，必须使用 `uv add` / `uv remove`；不要手动编辑 `pyproject.toml` 或 `uv.lock` 中的依赖版本与锁定条目。
 
 ## Formatting
 
 ```bash
 uv run isort <file>   # sort imports
 uv run black <file>   # format code
-```
 ```
 
 ## Entrypoint & Architecture

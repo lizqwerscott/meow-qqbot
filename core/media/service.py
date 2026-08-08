@@ -8,7 +8,13 @@ from urllib.parse import urlparse
 
 import httpx
 
-from core.media.models import ImageInspection, MediaRecord, MediaTurnContext
+from core.media.models import (
+    FileInspection,
+    ImageInspection,
+    MediaRecord,
+    MediaTurnContext,
+    VoiceTranscription,
+)
 from core.media.store import MediaStore
 from core.message import InputMessage, ResourceMeta
 
@@ -37,6 +43,10 @@ class MediaService:
         preview_enabled=True,
         preview_max_inline_bytes=50 * 1024 * 1024,
         text_preview_max_chars=20_000,
+        file_extract_max_chars=20_000,
+        file_context_max_chars=4_000,
+        voice_transcriber=None,
+        voice_transcription=None,
     ):
         self.enabled = enabled
         self.http_client = http_client
@@ -58,15 +68,32 @@ class MediaService:
         self.preview_enabled = bool(preview_enabled)
         self.preview_max_inline_bytes = max(1, int(preview_max_inline_bytes))
         self.text_preview_max_chars = max(1, int(text_preview_max_chars))
+        self.file_extract_max_chars = max(1, int(file_extract_max_chars))
+        self.file_context_max_chars = max(1, int(file_context_max_chars))
+        voice_cfg = voice_transcription or {}
+        self.voice_transcriber = voice_transcriber
+        self.voice_enabled = bool(
+            voice_cfg.get("enabled", voice_transcriber is not None)
+        )
+        self.voice_timeout = max(1, float(voice_cfg.get("timeout_seconds", 120)))
+        self.voice_max_chars = max(1, int(voice_cfg.get("max_chars", 4_000)))
+        self.voice_sem = asyncio.Semaphore(max(1, int(voice_cfg.get("concurrency", 1))))
         self.store = MediaStore(storage_dir)
         self._opened = False
         self._inspection_cache: OrderedDict[tuple[str, str], str] = OrderedDict()
         self._inspection_cache_max = 200
         self._summary_tasks: dict[str, asyncio.Task] = {}
+        self._transcription_tasks: dict[str, asyncio.Task] = {}
 
     async def open(self):
         if self.enabled and not self._opened:
             await self.store.open()
+            try:
+                if self.voice_tools_enabled:
+                    await self.voice_transcriber.preload()
+            except Exception:
+                await self.store.close()
+                raise
             self._opened = True
 
     async def close(self):
@@ -75,7 +102,25 @@ class MediaService:
 
     @property
     def tools_enabled(self) -> bool:
+        return (
+            self.image_tools_enabled
+            or self.file_tools_enabled
+            or self.voice_tools_enabled
+        )
+
+    @property
+    def image_tools_enabled(self) -> bool:
         return self.enabled and self.image_enabled and self.multimodal is not None
+
+    @property
+    def file_tools_enabled(self) -> bool:
+        return self.enabled
+
+    @property
+    def voice_tools_enabled(self) -> bool:
+        return (
+            self.enabled and self.voice_enabled and self.voice_transcriber is not None
+        )
 
     async def usage(self) -> tuple[int, int]:
         if not self.enabled:
@@ -378,6 +423,22 @@ class MediaService:
             )
             if block:
                 (current if label == "当前图片" else replied).append(block)
+        for resource in (*message.resources, *message.replied_resources):
+            if resource.resource_type != "file" or not resource.media_uri:
+                continue
+            label = "当前文件" if resource in message.resources else "引用文件"
+            block = await self._extract_file_context(message.chat_id, resource, label)
+            if block:
+                (current if label == "当前文件" else replied).append(block)
+        for resource in (*message.resources, *message.replied_resources):
+            if resource.resource_type != "voice" or not resource.media_uri:
+                continue
+            label = "当前语音" if resource in message.resources else "引用语音"
+            block = await self._transcribe_voice_context(
+                message.chat_id, resource, label
+            )
+            if block:
+                (current if label == "当前语音" else replied).append(block)
         used = {
             r.media_uri
             for r in message.resources + message.replied_resources
@@ -457,6 +518,164 @@ class MediaService:
         resource.extra["summary"] = summary
         return f"[{label} {number}]\n引用: {record.media_uri}\n摘要: {summary}\n[/{label} {number}]"
 
+    async def _extract_file_context(self, chat_id, resource, label):
+        inspection = await self.inspect_file(
+            chat_id=chat_id,
+            media_uri=resource.media_uri,
+            max_chars=self.file_context_max_chars,
+        )
+        if inspection.error:
+            return (
+                f"[{label}]\n引用: {resource.media_uri}\n文件: {resource.filename or '未命名'}\n"
+                f"提取: {inspection.message}\n[/{label}]"
+            )
+        suffix = (
+            "（已截断，可调用 inspect_file 查看更多）" if inspection.truncated else ""
+        )
+        return (
+            f"[{label}]\n引用: {inspection.media_uri}\n文件: {resource.filename or '未命名'}\n"
+            f"内容{suffix}:\n{inspection.content}\n[/{label}]"
+        )
+
+    async def inspect_file(
+        self, *, chat_id: str, media_uri: str, max_chars: int | None = None
+    ) -> FileInspection:
+        if not media_uri.startswith("media://inbound/"):
+            return FileInspection(
+                media_uri, error="INVALID_MEDIA_URI", message="仅支持受控 media:// 引用"
+            )
+        if not self.file_tools_enabled:
+            return FileInspection(
+                media_uri, error="ANALYSIS_FAILED", message="文件提取服务未启用"
+            )
+        record = await self.store.authorize(chat_id, media_uri)
+        if not record:
+            return FileInspection(
+                media_uri,
+                error="MEDIA_NOT_AVAILABLE",
+                message="文件已过期、保存失败或不属于当前会话",
+            )
+        if not self._is_supported_text_file(record):
+            return FileInspection(
+                media_uri,
+                error="UNSUPPORTED_MEDIA_TYPE",
+                message="仅支持 TXT、Markdown、JSON 和 CSV 文件",
+            )
+        limit = min(
+            max_chars or self.file_extract_max_chars, self.file_extract_max_chars
+        )
+        try:
+            data = record.local_path.read_bytes()
+        except OSError:
+            return FileInspection(
+                media_uri, error="MEDIA_NOT_AVAILABLE", message="文件不可用"
+            )
+        text = data.decode("utf-8", errors="replace")
+        return FileInspection(
+            media_uri, content=text[:limit], truncated=len(text) > limit
+        )
+
+    @staticmethod
+    def _is_supported_text_file(record: MediaRecord) -> bool:
+        if record.mime_type in {
+            "text/plain",
+            "text/markdown",
+            "text/csv",
+            "application/json",
+        }:
+            return True
+        return record.filename.lower().endswith(
+            (".txt", ".md", ".markdown", ".json", ".csv")
+        )
+
+    async def _transcribe_voice_context(self, chat_id, resource, label):
+        result = await self.transcribe_voice(
+            chat_id=chat_id, media_uri=resource.media_uri
+        )
+        if result.error:
+            return (
+                f"[{label}]\n引用: {resource.media_uri}\n"
+                f"转写: {result.message}\n[/{label}]"
+            )
+        return (
+            f"[{label}]\n引用: {result.media_uri}\n转写: {result.transcript}\n"
+            f"[/{label}]"
+        )
+
+    async def transcribe_voice(
+        self, *, chat_id: str, media_uri: str, recent_only: bool = False
+    ) -> VoiceTranscription:
+        if not media_uri.startswith("media://inbound/"):
+            return VoiceTranscription(
+                media_uri, error="INVALID_MEDIA_URI", message="仅支持受控 media:// 引用"
+            )
+        if not self.voice_tools_enabled:
+            return VoiceTranscription(
+                media_uri, error="TRANSCRIPTION_FAILED", message="语音转写服务未启用"
+            )
+        record = await self.store.authorize(chat_id, media_uri)
+        if not record:
+            return VoiceTranscription(
+                media_uri,
+                error="MEDIA_NOT_AVAILABLE",
+                message="语音已过期、保存失败或不属于当前会话",
+            )
+        if record.resource_type != "voice" and not record.mime_type.startswith(
+            "audio/"
+        ):
+            return VoiceTranscription(
+                media_uri, error="UNSUPPORTED_MEDIA_TYPE", message="该媒体不是语音"
+            )
+        if recent_only and record.created_at < time.time() - self.recent_window_seconds:
+            return VoiceTranscription(
+                media_uri,
+                error="VOICE_NOT_RECENT",
+                message="仅支持转写近期语音",
+            )
+        cached = await self.store.get_transcript(record.media_id)
+        if cached:
+            return VoiceTranscription(media_uri, transcript=cached[0], cached=True)
+        task = self._transcription_tasks.get(record.media_id)
+        if task is None:
+            task = asyncio.create_task(self._transcribe_record(record))
+            self._transcription_tasks[record.media_id] = task
+        try:
+            transcript, is_cached = await asyncio.shield(task)
+            return VoiceTranscription(
+                media_uri, transcript=transcript, cached=is_cached
+            )
+        except asyncio.TimeoutError:
+            return VoiceTranscription(
+                media_uri, error="TRANSCRIPTION_TIMEOUT", message="语音转写超时"
+            )
+        except Exception as exc:
+            _log.warning("语音转写失败: %s", exc)
+            return VoiceTranscription(
+                media_uri, error="TRANSCRIPTION_FAILED", message="语音转写失败"
+            )
+        finally:
+            if task.done() and self._transcription_tasks.get(record.media_id) is task:
+                self._transcription_tasks.pop(record.media_id, None)
+
+    async def _transcribe_record(self, record: MediaRecord) -> tuple[str, bool]:
+        async with self.voice_sem:
+            cached = await self.store.get_transcript(record.media_id)
+            if cached:
+                return cached[0], True
+            transcript = await asyncio.wait_for(
+                self.voice_transcriber.transcribe(str(record.local_path)),
+                timeout=self.voice_timeout,
+            )
+            transcript = (transcript or "").strip()[: self.voice_max_chars]
+            if not transcript:
+                raise ValueError("未能识别出语音内容")
+            await self.store.update_transcript(
+                record.media_id,
+                transcript,
+                getattr(self.voice_transcriber, "model_name", ""),
+            )
+        return transcript, False
+
     async def inspect_image(
         self, *, chat_id: str, media_uri: str, question: str
     ) -> ImageInspection:
@@ -468,7 +687,7 @@ class MediaService:
             return ImageInspection(
                 media_uri, error="ANALYSIS_FAILED", message="请提供具体问题"
             )
-        if not self.tools_enabled:
+        if not self.image_tools_enabled:
             return ImageInspection(
                 media_uri, error="ANALYSIS_FAILED", message="图片理解服务未启用"
             )

@@ -42,6 +42,7 @@ from core.managers.permission_manager import PermissionManager
 from core.managers.template_manager import TemplateManager
 from core.managers.workspace_manager import WorkspaceManager
 from core.media.service import MediaService
+from core.media.whisper_transcriber import WhisperTranscriber
 from core.plugins.manager import PluginManager
 from core.rule_router import RuleRouter
 from core.tasks import (
@@ -141,6 +142,14 @@ class ServiceGraph:
             _log.info("多模态服务未启用（enabled=false），跳过 VLM 图片分析")
 
         media_config = self.cfg.media
+        voice_config = media_config.get("voice_transcription", {})
+        voice_transcriber = None
+        if voice_config.get("enabled", False):
+            voice_transcriber = WhisperTranscriber(
+                model_name=voice_config.get("model", "small"),
+                language=voice_config.get("language", ""),
+                download_root=voice_config.get("download_root", "data/media/whisper"),
+            )
         self.media_service = MediaService(
             http_client=self.http_client,
             multimodal=self.multimodal_service,
@@ -172,6 +181,8 @@ class ServiceGraph:
             text_preview_max_chars=self.cfg.webui.get("media_preview", {}).get(
                 "text_preview_max_chars", 20_000
             ),
+            voice_transcriber=voice_transcriber,
+            voice_transcription=voice_config,
         )
 
         # ── EmojiManager ──

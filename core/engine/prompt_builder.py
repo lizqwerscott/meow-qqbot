@@ -241,15 +241,29 @@ class PromptBuilder:
             )
 
         if self.media_service and self.media_service.tools_enabled:
+            media_rules = []
+            if self.media_service.image_tools_enabled:
+                media_rules.append(
+                    "图片摘要足以回答时直接回答，不要重复调用工具；"
+                    "需要确认细节、文字或人物关系时调用 inspect_image。"
+                    "inspect_image 只能使用当前消息、引用消息或近期媒体目录中的 media:// 引用。"
+                )
+            if self.media_service.file_tools_enabled:
+                media_rules.append(
+                    "需要查看 TXT、Markdown、JSON 或 CSV 文件的完整内容时调用 inspect_file；"
+                    "inspect_file 只能使用当前消息、引用消息或近期媒体目录中的 media:// 引用。"
+                )
+            if self.media_service.voice_tools_enabled:
+                media_rules.append(
+                    "语音已自动转写时直接使用转写内容；"
+                    "需要转写近期语音时调用 transcribe_voice。"
+                    "transcribe_voice 只能使用当前消息、引用消息或近期媒体目录中的 media:// 引用。"
+                )
+            media_rules.append("多张媒体指代不清时先询问用户，不要猜测。")
             messages.append(
                 {
                     "role": "system",
-                    "content": (
-                        "媒体协作规则：图片摘要足以回答时直接回答，不要重复调用工具；"
-                        "需要确认细节、文字或人物关系时调用 inspect_image。"
-                        "inspect_image 只能使用当前消息、引用消息或近期媒体目录中的 media:// 引用；"
-                        "多张图片指代不清时先询问用户，不要猜测。"
-                    ),
+                    "content": "媒体协作规则：" + "".join(media_rules),
                 }
             )
 

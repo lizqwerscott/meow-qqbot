@@ -32,15 +32,88 @@ def create_media_entries(deps: ToolDeps) -> list[ToolEntry]:
         )
         return ToolResult(content=json.dumps(result.as_dict(), ensure_ascii=False))
 
-    return [
-        ToolEntry(
-            name="inspect_image",
-            section="media",
-            description=(
-                "查看当前会话中的一张图片。仅在摘要不足、需要识别细节、文字、关系，"
-                "或用户明确要求深入分析时调用。media_uri 必须来自媒体上下文。"
-            ),
-            parameters=params,
-            handler=_inspect,
-        )
-    ]
+    entries = []
+    if service := deps.media_service:
+        if service.image_tools_enabled:
+            entries.append(
+                ToolEntry(
+                    name="inspect_image",
+                    section="media",
+                    description=(
+                        "查看当前会话中的一张图片。仅在摘要不足、需要识别细节、文字、关系，"
+                        "或用户明确要求深入分析时调用。media_uri 必须来自媒体上下文。"
+                    ),
+                    parameters=params,
+                    handler=_inspect,
+                )
+            )
+
+        if service.file_tools_enabled:
+
+            async def _inspect_file(args: dict, ctx: ToolContext) -> ToolResult:
+                result = await service.inspect_file(
+                    chat_id=ctx.chat_id,
+                    media_uri=str(args.get("media_uri", "")),
+                )
+                return ToolResult(
+                    content=json.dumps(result.as_dict(), ensure_ascii=False)
+                )
+
+            entries.append(
+                ToolEntry(
+                    name="inspect_file",
+                    section="media",
+                    description=(
+                        "读取当前会话中 TXT、Markdown、JSON 或 CSV 文件的文本内容。"
+                        "media_uri 必须来自媒体上下文。"
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "media_uri": {
+                                "type": "string",
+                                "description": "当前会话中的 media://inbound/... 文件引用",
+                            }
+                        },
+                        "required": ["media_uri"],
+                        "additionalProperties": False,
+                    },
+                    handler=_inspect_file,
+                )
+            )
+
+        if service.voice_tools_enabled:
+
+            async def _transcribe_voice(args: dict, ctx: ToolContext) -> ToolResult:
+                result = await service.transcribe_voice(
+                    chat_id=ctx.chat_id,
+                    media_uri=str(args.get("media_uri", "")),
+                    recent_only=True,
+                )
+                return ToolResult(
+                    content=json.dumps(result.as_dict(), ensure_ascii=False)
+                )
+
+            entries.append(
+                ToolEntry(
+                    name="transcribe_voice",
+                    section="media",
+                    description=(
+                        "转写当前会话中一段语音为文本。"
+                        "media_uri 必须来自媒体上下文。"
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "media_uri": {
+                                "type": "string",
+                                "description": "当前会话中的 media://inbound/... 语音引用",
+                            }
+                        },
+                        "required": ["media_uri"],
+                        "additionalProperties": False,
+                    },
+                    handler=_transcribe_voice,
+                )
+            )
+    return entries

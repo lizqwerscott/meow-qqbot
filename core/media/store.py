@@ -37,15 +37,30 @@ class MediaStore:
                 expires_at REAL NOT NULL DEFAULT 0, filename TEXT NOT NULL DEFAULT '',
                 summary TEXT NOT NULL DEFAULT '', summary_model TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS media_transcripts (
+                media_id TEXT PRIMARY KEY,
+                transcript TEXT NOT NULL,
+                model TEXT NOT NULL DEFAULT '',
+                updated_at REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS media_messages (
                 chat_id TEXT NOT NULL, message_id TEXT NOT NULL,
                 sender_id TEXT NOT NULL, media_id TEXT NOT NULL,
+                resource_type TEXT NOT NULL DEFAULT '',
                 position INTEGER NOT NULL, created_at REAL NOT NULL,
                 PRIMARY KEY (chat_id, message_id, media_id)
             );
             CREATE INDEX IF NOT EXISTS idx_media_messages_recent
             ON media_messages(chat_id, created_at DESC);
             """)
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(media_messages)")
+        }
+        if "resource_type" not in columns:
+            conn.execute(
+                "ALTER TABLE media_messages "
+                "ADD COLUMN resource_type TEXT NOT NULL DEFAULT ''"
+            )
         conn.commit()
         return conn
 
@@ -169,8 +184,18 @@ class MediaStore:
             ),
         )
         conn.execute(
-            "INSERT OR REPLACE INTO media_messages(chat_id,message_id,sender_id,media_id,position,created_at) VALUES(?,?,?,?,?,?)",
-            (chat_id, message_id, sender_id, media_id, position, now),
+            "INSERT OR REPLACE INTO media_messages("
+            "chat_id,message_id,sender_id,media_id,resource_type,position,created_at"
+            ") VALUES(?,?,?,?,?,?,?)",
+            (
+                chat_id,
+                message_id,
+                sender_id,
+                media_id,
+                resource_type,
+                position,
+                now,
+            ),
         )
         conn.commit()
 
@@ -186,7 +211,10 @@ class MediaStore:
         media_id = media_uri.removeprefix("media://inbound/")
         async with self._lock:
             row = self._conn.execute(
-                "SELECT o.*, m.message_id, m.chat_id, m.sender_id FROM media_objects o JOIN media_messages m ON m.media_id=o.media_id WHERE o.media_id=? AND m.chat_id=? ORDER BY m.created_at DESC LIMIT 1",
+                "SELECT o.*, m.message_id, m.chat_id, m.sender_id, m.resource_type, "
+                "m.created_at AS message_created_at "
+                "FROM media_objects o JOIN media_messages m ON m.media_id=o.media_id "
+                "WHERE o.media_id=? AND m.chat_id=? ORDER BY m.created_at DESC LIMIT 1",
                 (media_id, chat_id),
             ).fetchone()
         if (
@@ -201,12 +229,12 @@ class MediaStore:
             row["chat_id"],
             row["message_id"],
             row["sender_id"],
-            row["mime_type"].split("/")[0],
+            self._resource_type_from_row(row),
             row["mime_type"],
             row["size"],
             row["sha256"],
             Path(row["local_path"]),
-            row["created_at"],
+            row["message_created_at"],
             row["expires_at"],
             row["filename"],
             row["summary"],
@@ -220,7 +248,8 @@ class MediaStore:
             return []
         async with self._lock:
             rows = self._conn.execute(
-                "SELECT o.*, m.message_id, m.chat_id, m.sender_id FROM media_objects o "
+                "SELECT o.*, m.message_id, m.chat_id, m.sender_id, m.resource_type, "
+                "m.created_at AS message_created_at FROM media_objects o "
                 "JOIN media_messages m ON m.media_id=o.media_id "
                 "WHERE m.chat_id=? AND m.message_id=? "
                 "ORDER BY m.position ASC",
@@ -233,6 +262,10 @@ class MediaStore:
         ]
 
     @staticmethod
+    def _resource_type_from_row(row) -> str:
+        return row["resource_type"] or row["mime_type"].split("/")[0]
+
+    @staticmethod
     def _record_from_row(row) -> MediaRecord:
         return MediaRecord(
             row["media_id"],
@@ -240,12 +273,12 @@ class MediaStore:
             row["chat_id"],
             row["message_id"],
             row["sender_id"],
-            row["mime_type"].split("/")[0],
+            MediaStore._resource_type_from_row(row),
             row["mime_type"],
             row["size"],
             row["sha256"],
             Path(row["local_path"]),
-            row["created_at"],
+            row["message_created_at"],
             row["expires_at"],
             row["filename"],
             row["summary"],
@@ -260,7 +293,11 @@ class MediaStore:
         cutoff = time.time() - max(0, window_seconds)
         async with self._lock:
             rows = self._conn.execute(
-                "SELECT o.*, m.message_id, m.chat_id, m.sender_id FROM media_objects o JOIN media_messages m ON m.media_id=o.media_id WHERE m.chat_id=? AND m.created_at>=? GROUP BY o.media_id ORDER BY MAX(m.created_at) DESC LIMIT ?",
+                "SELECT o.*, m.message_id, m.chat_id, m.sender_id, m.resource_type, "
+                "m.created_at AS message_created_at "
+                "FROM media_objects o JOIN media_messages m ON m.media_id=o.media_id "
+                "WHERE m.chat_id=? AND m.created_at>=? GROUP BY o.media_id "
+                "ORDER BY MAX(m.created_at) DESC LIMIT ?",
                 (chat_id, cutoff, max(0, limit)),
             ).fetchall()
         return [
@@ -270,12 +307,12 @@ class MediaStore:
                 r["chat_id"],
                 r["message_id"],
                 r["sender_id"],
-                r["mime_type"].split("/")[0],
+                self._resource_type_from_row(r),
                 r["mime_type"],
                 r["size"],
                 r["sha256"],
                 Path(r["local_path"]),
-                r["created_at"],
+                r["message_created_at"],
                 r["expires_at"],
                 r["filename"],
                 r["summary"],
@@ -293,6 +330,28 @@ class MediaStore:
             self._conn.execute(
                 "UPDATE media_objects SET summary=?, summary_model=? WHERE media_id=?",
                 (summary, model, media_id),
+            )
+            self._conn.commit()
+
+    async def get_transcript(self, media_id: str) -> tuple[str, str] | None:
+        if self._conn is None:
+            return None
+        async with self._lock:
+            row = self._conn.execute(
+                "SELECT transcript, model FROM media_transcripts WHERE media_id=?",
+                (media_id,),
+            ).fetchone()
+        return (row["transcript"], row["model"]) if row else None
+
+    async def update_transcript(
+        self, media_id: str, transcript: str, model: str = ""
+    ) -> None:
+        if self._conn is None:
+            return
+        async with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO media_transcripts(media_id,transcript,model,updated_at) VALUES(?,?,?,?)",
+                (media_id, transcript, model, time.time()),
             )
             self._conn.commit()
 
@@ -381,6 +440,9 @@ class MediaStore:
                 "DELETE FROM media_messages WHERE media_id=?", (media_id,)
             )
             self._conn.execute(
+                "DELETE FROM media_transcripts WHERE media_id=?", (media_id,)
+            )
+            self._conn.execute(
                 "DELETE FROM media_objects WHERE media_id=?", (media_id,)
             )
             self._conn.commit()
@@ -409,6 +471,10 @@ class MediaStore:
                 placeholders = ",".join("?" for _ in removed_ids)
                 self._conn.execute(
                     f"DELETE FROM media_messages WHERE media_id IN (SELECT media_id FROM media_objects WHERE local_path IN ({placeholders}))",
+                    removed_ids,
+                )
+                self._conn.execute(
+                    f"DELETE FROM media_transcripts WHERE media_id IN (SELECT media_id FROM media_objects WHERE local_path IN ({placeholders}))",
                     removed_ids,
                 )
                 self._conn.execute(

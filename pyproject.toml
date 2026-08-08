@@ -24,6 +24,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "tree-sitter>=0.25",
     "tree-sitter-bash>=0.23",
+    "openai-whisper>=20250625",
 ]
 
 [dependency-groups]
@@ -42,4 +43,3 @@ qqbot-agent-sdk = { git = "https://github.com/lizqwerscott/qqbot-agent-sdk", bra
 
 [tool.isort]
 profile = "black"  # 与 black 的 88 列行宽对齐，避免 import 换行冲突
-
