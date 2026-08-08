@@ -3,8 +3,29 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.engine.agent_engine import AgentEngine, _TurnRequest
+from core.ai.protocol import AssistantMessage, AssistantToolCall
+from core.engine.agent_engine import AgentEngine, BackgroundTaskResult, _TurnRequest
 from core.managers.session_manager import SessionTaskManager
+from core.tools._types import ToolResult
+from core.tools.tool_loop import ToolLoop
+
+
+def test_background_task_result_supports_legacy_tuple_unpacking():
+    result = BackgroundTaskResult(result="done", error=None)
+
+    value, error = result
+
+    assert value == "done"
+    assert error is None
+
+
+def test_legacy_tuple_result_shape_remains_supported():
+    execution = ("done", None)
+    assert getattr(execution, "result", None) is None
+    assert not hasattr(execution, "tool_delivered")
+    result, error = execution
+    assert result == "done"
+    assert error is None
 
 
 class FakeContextManager:
@@ -27,12 +48,23 @@ class FakeContextManager:
 
 
 class FakeToolLoop:
-    def __init__(self, *, error=None, pause=None, replies=None, on_run=None):
+    def __init__(
+        self,
+        *,
+        error=None,
+        pause=None,
+        replies=None,
+        on_run=None,
+        sends_tool_text=False,
+        final_reply_silent=False,
+    ):
         self.calls = []
         self.error = error
         self.pause = pause
         self.replies = ["reply"] if replies is None else replies
         self.on_run = on_run
+        self.sends_tool_text = sends_tool_text
+        self.final_reply_silent = final_reply_silent
 
     async def run(self, **kwargs):
         self.calls.append(kwargs)
@@ -49,6 +81,16 @@ class FakeToolLoop:
                 message_id=kwargs["reply_to"],
                 is_group=kwargs["is_group"],
             )
+        if self.sends_tool_text:
+            await kwargs["tool_reply_callback"](
+                chat_id=kwargs["chat_id"],
+                content="工具消息",
+                message_id="",
+                is_group=kwargs["is_group"],
+            )
+            await kwargs["delivery_state_callback"]()
+        if "reply_state_callback" in kwargs and self.final_reply_silent:
+            await kwargs["reply_state_callback"](True)
         return True, True
 
 
@@ -66,6 +108,95 @@ def make_engine(tool_loop, *, rule_router=None, model_registry=None):
     engine._admin_id = []
     engine._reply_callback = None
     return engine
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_isolates_send_message_callback_from_other_tools(monkeypatch):
+    class FakeAI:
+        model = "test"
+
+        def __init__(self):
+            self.responses = iter(
+                [
+                    AssistantMessage(
+                        content=None,
+                        tool_calls=[
+                            AssistantToolCall(
+                                "send", "send_message", '{"text":"sent"}'
+                            ),
+                            AssistantToolCall("other", "other_tool", "{}"),
+                        ],
+                    ),
+                    AssistantMessage(content="final"),
+                ]
+            )
+
+        async def chat_completion_with_tools(self, **kwargs):
+            return next(self.responses), None
+
+    class FakeContext:
+        async def add_assistant_message_async(self, *args, **kwargs):
+            return None
+
+        async def add_tool_result_async(self, *args, **kwargs):
+            return None
+
+    ai = FakeAI()
+    ctx = SimpleNamespace(
+        ai=SimpleNamespace(
+            ai_service=ai,
+            max_tool_rounds=3,
+            model_registry=None,
+            stream_reply=False,
+        ),
+        mgmt=SimpleNamespace(
+            permission_manager=None,
+            cost_tracker=None,
+            context_manager=FakeContext(),
+        ),
+        memory=SimpleNamespace(hindsight_memory=None),
+    )
+    loop = ToolLoop(ctx)
+    callback_calls = []
+
+    async def capture_callback(**kwargs):
+        callback_calls.append(("normal", kwargs["content"]))
+
+    async def tool_callback(**kwargs):
+        callback_calls.append(("special", kwargs["content"]))
+
+    async def fake_execute(name, args, tool_ctx, permission_manager):
+        if name == "send_message":
+            assert tool_ctx.reply_callback is tool_callback
+            await tool_ctx.reply_callback(
+                chat_id=tool_ctx.chat_id,
+                content="sent",
+                message_id="",
+                is_group=tool_ctx.is_group,
+            )
+            return ToolResult(content="ok", sent_text=True)
+        assert tool_ctx.reply_callback is capture_callback
+        await tool_ctx.reply_callback(
+            chat_id=tool_ctx.chat_id,
+            content="other output",
+            message_id=tool_ctx.reply_to,
+            is_group=tool_ctx.is_group,
+        )
+        return ToolResult(content="ok")
+
+    monkeypatch.setattr("core.tools.tool_loop.execute_tool", fake_execute)
+    await loop.run(
+        messages=[],
+        tools=[],
+        chat_id="task:1",
+        is_group=True,
+        reply_to="reply",
+        reply_callback=capture_callback,
+        tool_reply_callback=tool_callback,
+        tool_reply_names={"send_message"},
+    )
+
+    assert callback_calls == [("special", "sent"), ("normal", "other output")]
 
 
 def test_should_dispatch_to_ai_for_reply_to_bot():
@@ -537,7 +668,7 @@ async def test_background_task_preserves_error_conversion(error, expected):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("replies", "expected"),
-    [(["first", "second"], "first\nsecond"), ([], None)],
+    [(["first", "second"], "second"), ([], None)],
 )
 async def test_background_task_joins_multiple_replies_and_handles_no_reply(
     replies, expected
@@ -551,6 +682,61 @@ async def test_background_task_joins_multiple_replies_and_handles_no_reply(
     result, error = await engine.execute_background_task("task", "work", "system")
 
     assert (result, error) == (expected, None)
+
+
+@pytest.mark.asyncio
+async def test_background_task_does_not_treat_captured_tool_send_as_delivered():
+    engine = make_engine(FakeToolLoop(replies=["报告"]))
+
+    async def build_task_messages(**kwargs):
+        return [], []
+
+    engine.prompt_builder = SimpleNamespace(build_task_messages=build_task_messages)
+    result = await engine.execute_background_task("task", "work", "system")
+
+    assert result.tool_delivered is False
+
+
+@pytest.mark.asyncio
+async def test_background_task_delivers_tool_text_to_real_channel_once():
+    engine = make_engine(FakeToolLoop(sends_tool_text=True))
+    delivered = []
+
+    async def build_task_messages(**kwargs):
+        return [], []
+
+    async def reply_callback(**kwargs):
+        delivered.append(kwargs)
+
+    engine.prompt_builder = SimpleNamespace(build_task_messages=build_task_messages)
+    engine._reply_callback = reply_callback
+    result = await engine.execute_background_task(
+        "task", "work", "system", delivery_channel="user_001"
+    )
+
+    assert result.tool_delivered is True
+    assert delivered == [
+        {
+            "chat_id": "user_001",
+            "content": "工具消息",
+            "message_id": "",
+            "is_group": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_background_task_drops_intermediate_reply_when_final_round_is_silent():
+    engine = make_engine(FakeToolLoop(replies=["检测完成"], final_reply_silent=True))
+
+    async def build_task_messages(**kwargs):
+        return [], []
+
+    engine.prompt_builder = SimpleNamespace(build_task_messages=build_task_messages)
+    result = await engine.execute_background_task("task", "work", "system")
+
+    assert result.result is None
+    assert result.silent is True
 
 
 @pytest.mark.asyncio

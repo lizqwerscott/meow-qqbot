@@ -55,6 +55,15 @@ class TaskStatus(str, Enum):
         return {cls.LOST}
 
 
+class DeliveryStatus(str, Enum):
+    """任务结果的独立投递状态。"""
+
+    DELIVERED = "delivered"
+    NOT_DELIVERED = "not-delivered"
+    UNKNOWN = "unknown"
+    NOT_REQUESTED = "not-requested"
+
+
 def _now() -> float:
     return datetime.now(timezone.utc).timestamp()
 
@@ -83,6 +92,10 @@ class TaskRecord:
     result: Optional[str] = None  # AI 回复文本
     error: Optional[str] = None
     delivery_channel: Optional[str] = None  # 结果投递到的 chat_id
+    delivery_status: DeliveryStatus = DeliveryStatus.UNKNOWN
+    delivery_error: Optional[str] = None
+    tool_delivered: bool = False
+    silent: bool = False
     reply_to_message_id: str = ""  # 创建任务时的原始消息 ID（用于发消息时构造 msg_id）
 
     def __post_init__(self):
@@ -92,12 +105,16 @@ class TaskRecord:
     def to_dict(self) -> dict:
         d = asdict(self)
         d["status"] = self.status.value
+        d["delivery_status"] = self.delivery_status.value
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "TaskRecord":
         d = dict(d)
         d["status"] = TaskStatus(d.get("status", "pending"))
+        d["delivery_status"] = DeliveryStatus(
+            d.get("delivery_status", DeliveryStatus.UNKNOWN.value)
+        )
         return cls(**d)
 
 

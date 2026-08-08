@@ -83,6 +83,7 @@ class TasksCommand:
                 f"**任务详情** `{t.id}`",
                 f"- 类型: `{t.type}`",
                 f"- 状态: `{t.status.value}`",
+                f"- 投递: `{t.delivery_status.value}`",
                 f"- 创建: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t.created_at))}",
                 f"- 指令: {t.prompt}",
             ]
@@ -100,6 +101,8 @@ class TasksCommand:
                 lines.append(f"- 结果:\n```\n{t.result[:500]}\n```")
             if t.error:
                 lines.append(f"- 错误: `{t.error}`")
+            if t.delivery_error:
+                lines.append(f"- 投递错误: `{t.delivery_error}`")
             return make_reply(input_message, "\n".join(lines))
 
         elif subcmd == "cancel":

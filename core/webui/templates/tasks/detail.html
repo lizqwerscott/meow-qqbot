@@ -25,6 +25,17 @@
                 {% else %}❓ {{ task.status.value }}{% endif %}
             </td>
         </tr>
+        <tr>
+            <th>投递状态</th>
+            <td>
+                {% if task.delivery_status.value == "delivered" %}✅ 已投递
+                {% elif task.delivery_status.value == "not-delivered" %}❌ 投递失败
+                {% elif task.delivery_status.value == "not-requested" %}⏸ 未请求投递
+                {% else %}❓ 未知{% endif %}
+            </td>
+        </tr>
+        <tr><th>静默状态</th><td>{% if task.silent %}🔕 静默{% else %}🔔 正常{% endif %}</td></tr>
+        {% if task.delivery_error %}<tr><th>投递错误</th><td class="error">{{ task.delivery_error }}</td></tr>{% endif %}
         <tr><th>Session</th><td><code>{{ task.session_id }}</code></td></tr>
         <tr><th>指令</th><td>{{ task.prompt }}</td></tr>
         <tr><th>创建时间</th><td>{{ task.created_at|format_timestamp }}</td></tr>

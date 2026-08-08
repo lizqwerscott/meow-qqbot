@@ -724,7 +724,7 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
         },
         "enable_notify": {
             "type": "boolean",
-            "description": "是否投递执行结果到频道。默认为 true。",
+            "description": "是否允许投递执行结果到频道。默认为 true；仅当任务有最终可见结果时通知。空结果、NO_REPLY、HEARTBEAT_OK 或已由 send_message 工具发送的任务不会重复通知。",
         },
         "tools_allow": {
             "type": ["array", "null"],
@@ -758,6 +758,7 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
             "- disable: 暂停任务，提供 job_id\n"
             "- list: 列出所有定时任务，无需额外参数\n"
             "- get: 查看单个任务详情，提供 job_id\n"
+            "\n通知语义：任务执行成功不等于必须通知；只有最终可见结果才会发送。NO_REPLY/HEARTBEAT_OK 表示静默完成。"
         ),
     }
 

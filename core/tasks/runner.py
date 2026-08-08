@@ -23,7 +23,14 @@ from typing import Any, Callable, List, Optional
 import core.tasks.wake_coalescer as _wake_coalescer
 from core.tools.shell_env import build_exec_env_for
 
-from .models import CronJob, SessionMode, TaskRecord, TaskStatus
+from .delivery_policy import decide_cron_delivery
+from .models import (
+    CronJob,
+    DeliveryStatus,
+    SessionMode,
+    TaskRecord,
+    TaskStatus,
+)
 from .wake_mode import WakeMode
 
 # 系统事件注入的任务结果上限（防 prompt 膨胀，对齐 OpenClaw Child result 注入）
@@ -126,7 +133,7 @@ class BackgroundTaskRunner:
 
         try:
             # 在独立 session 中执行 prompt
-            result, error = await asyncio.wait_for(
+            execution = await asyncio.wait_for(
                 self._execute_prompt_cb(
                     chat_id=chat_id,
                     prompt=task.prompt,
@@ -138,6 +145,16 @@ class BackgroundTaskRunner:
                 ),
                 timeout=timeout,
             )
+            result = getattr(execution, "result", None)
+            error = getattr(execution, "error", None)
+            tool_delivered = bool(getattr(execution, "tool_delivered", False))
+            silent = bool(getattr(execution, "silent", False))
+            if (
+                result is None
+                and error is None
+                and not hasattr(execution, "tool_delivered")
+            ):
+                result, error = execution
 
             # 更新任务记录
             if error:
@@ -153,6 +170,10 @@ class BackgroundTaskRunner:
                     status=TaskStatus.SUCCESS,
                     result=result,
                 )
+            if task is not None:
+                task.tool_delivered = tool_delivered
+                task.silent = silent
+                await self._task_manager.update_task_record(task)
 
         except asyncio.TimeoutError:
             _log.warning(f"后台任务超时: id={task.id[:12]}.. timeout={timeout}s")
@@ -474,23 +495,41 @@ class BackgroundTaskRunner:
             )
 
         # 投递结果
-        if job.enable_notify and job.delivery_channel and task and self._delivery_cb:
-            content = task.result or task.error or ""
-            if content:
-                prefix = {
-                    "command": "🖥️",
-                    "system_event": "🔔",
-                    "message": "📋",
-                }.get(job.payload_type, "📋")
+        if task:
+            decision = decide_cron_delivery(
+                job, task, tool_delivered=task.tool_delivered
+            )
+            _log.debug(
+                "Cron 投递决策 [%s] task=%s reason=%s should_deliver=%s",
+                job.name,
+                task.id,
+                decision.reason,
+                decision.should_deliver,
+            )
+            if decision.should_deliver and self._delivery_cb:
                 try:
                     await self._delivery_cb(
                         chat_id=job.delivery_channel,
-                        content=f"{prefix} 定时任务 [{job.name}] 执行{'成功' if task.status == TaskStatus.SUCCESS else '失败'}：\n{content}",
+                        content=decision.content,
                         message_id="",
                         is_group=job.is_group,
                     )
+                    task.delivery_status = DeliveryStatus.DELIVERED
                 except Exception as e:
+                    task.delivery_status = DeliveryStatus.NOT_DELIVERED
+                    task.delivery_error = str(e)
                     _log.error(f"投递任务结果失败: {e}")
+            elif decision.reason in {"delivery_disabled", "system_event"}:
+                task.delivery_status = DeliveryStatus.NOT_REQUESTED
+            elif decision.reason == "already_delivered":
+                task.delivery_status = DeliveryStatus.DELIVERED
+            elif decision.reason == "silent_final_reply":
+                task.delivery_status = DeliveryStatus.NOT_REQUESTED
+            elif decision.should_deliver:
+                task.delivery_status = DeliveryStatus.UNKNOWN
+            else:
+                task.delivery_status = DeliveryStatus.NOT_DELIVERED
+            await self._task_manager.update_task_record(task)
 
         # 系统事件：message/command 任务完成后通知目标 session
         # system_event 类型由 _execute_system_event_payload 自行入队，不重复

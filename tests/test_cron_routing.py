@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from core.engine.agent_engine import BackgroundTaskResult
 from core.tasks.models import CronJob, TaskRecord, TaskStatus
 from core.tasks.runner import BackgroundTaskRunner
 
@@ -125,7 +126,7 @@ async def test_run_command_no_wake(runner):
     """command 类型 + session_target=isolated → 不 wake。"""
     runner._system_events = MagicMock()
     runner._wake_dispatcher = AsyncMock()
-    runner._delivery_cb = None
+    runner._delivery_cb = AsyncMock()
     runner._task_manager.create_task = AsyncMock(
         return_value=TaskRecord(id="t1", status=TaskStatus.PENDING)
     )
@@ -157,10 +158,142 @@ async def test_run_command_no_wake(runner):
         task = await runner.run_cron_job(job)
         assert task is not None
         assert task.status == TaskStatus.SUCCESS
+        runner._delivery_cb.assert_awaited_once()
+        delivery_kwargs = runner._delivery_cb.await_args.kwargs
+        assert delivery_kwargs["chat_id"] == "user_001"
+        assert delivery_kwargs["content"].endswith("ok")
         # command 类型 + isolated：不 wake 会话
         runner._wake_dispatcher.request.assert_not_called()
     finally:
         asyncio.create_subprocess_exec = original_create
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("execution", "expected_calls", "expected_status"),
+    [
+        (
+            BackgroundTaskResult(result="检测完成\nNO_REPLY", silent=True),
+            0,
+            "not-requested",
+        ),
+        (BackgroundTaskResult(result="最终报告"), 1, "delivered"),
+        (
+            BackgroundTaskResult(result="自动发送内容", tool_delivered=True),
+            0,
+            "delivered",
+        ),
+    ],
+)
+async def test_message_cron_delivery_uses_final_result_and_deduplicates(
+    runner, execution, expected_calls, expected_status
+):
+    runner._delivery_cb = AsyncMock()
+    runner._execute_prompt_cb = AsyncMock(return_value=execution)
+    runner._task_manager.create_task = AsyncMock(
+        return_value=TaskRecord(id="delivery", status=TaskStatus.PENDING, type="cron")
+    )
+    runner._task_manager.start_task = AsyncMock(
+        return_value=TaskRecord(id="delivery", status=TaskStatus.RUNNING, type="cron")
+    )
+    runner._task_manager.finish_task = AsyncMock(
+        side_effect=lambda task_id, **kwargs: TaskRecord(
+            id=task_id,
+            status=kwargs["status"],
+            result=kwargs.get("result"),
+            error=kwargs.get("error"),
+            type="cron",
+        )
+    )
+    runner._task_manager.update_task_record = AsyncMock()
+
+    job = CronJob(
+        name="delivery",
+        payload_type="message",
+        prompt="check",
+        delivery_channel="user_001",
+    )
+    task = await runner.run_cron_job(job)
+
+    assert task is not None
+    assert runner._delivery_cb.await_count == expected_calls
+    assert task.delivery_status.value == expected_status
+    if expected_calls:
+        assert runner._delivery_cb.await_args.kwargs["content"].endswith("最终报告")
+
+
+@pytest.mark.asyncio
+async def test_system_event_cron_is_not_requested_as_announce(runner):
+    runner._delivery_cb = AsyncMock()
+    runner._system_events = MagicMock()
+    runner._task_manager.create_task = AsyncMock(
+        return_value=TaskRecord(id="event", status=TaskStatus.PENDING, type="cron")
+    )
+    runner._task_manager.update_task_record = AsyncMock()
+
+    job = CronJob(
+        name="event",
+        payload_type="system_event",
+        prompt="ping",
+        delivery_channel="user_001",
+    )
+    task = await runner.run_cron_job(job)
+
+    assert task is not None
+    runner._delivery_cb.assert_not_awaited()
+    assert task.delivery_status.value == "not-requested"
+
+
+@pytest.mark.asyncio
+async def test_cron_delivery_failure_does_not_overwrite_execution_status(runner):
+    runner._delivery_cb = AsyncMock(side_effect=RuntimeError("delivery failed"))
+    runner._execute_prompt_cb = AsyncMock(
+        return_value=BackgroundTaskResult(result="final report")
+    )
+    runner._task_manager.create_task = AsyncMock(
+        return_value=TaskRecord(id="failure", status=TaskStatus.PENDING, type="cron")
+    )
+    runner._task_manager.start_task = AsyncMock(
+        return_value=TaskRecord(id="failure", status=TaskStatus.RUNNING, type="cron")
+    )
+    runner._task_manager.finish_task = AsyncMock(
+        side_effect=lambda task_id, **kwargs: TaskRecord(
+            id=task_id,
+            status=kwargs["status"],
+            result=kwargs.get("result"),
+            error=kwargs.get("error"),
+            type="cron",
+        )
+    )
+    runner._task_manager.update_task_record = AsyncMock()
+
+    task = await runner.run_cron_job(
+        CronJob(name="failure", prompt="check", delivery_channel="user_001")
+    )
+
+    assert task is not None
+    assert task.status == TaskStatus.SUCCESS
+    assert task.delivery_status.value == "not-delivered"
+    assert task.delivery_error == "delivery failed"
+    assert runner._delivery_cb.await_args.kwargs["content"].endswith("final report")
+
+
+def test_failed_task_keeps_independent_failure_notification_after_tool_delivery():
+    from core.tasks.delivery_policy import decide_cron_delivery
+
+    decision = decide_cron_delivery(
+        CronJob(name="failed", delivery_channel="user_001"),
+        TaskRecord(
+            status=TaskStatus.FAILED,
+            error="tool loop failed",
+            tool_delivered=True,
+        ),
+        tool_delivered=True,
+    )
+
+    assert decision.should_deliver is True
+    assert decision.reason == "execution_failure"
+    assert decision.content.endswith("tool loop failed")
 
 
 def test_wake_runner_cron_branch():
@@ -326,3 +459,26 @@ async def test_background_task_intent_immediate(runner):
     call_kwargs = runner._wake_dispatcher.request.call_args.kwargs
     assert call_kwargs["source"] == "background-task"
     assert call_kwargs["intent"] == "immediate"
+
+
+@pytest.mark.asyncio
+async def test_run_task_accepts_legacy_tuple_execution_result(runner):
+    runner._execute_prompt_cb = AsyncMock(return_value=("legacy result", None))
+    runner._task_manager.start_task = AsyncMock(
+        return_value=TaskRecord(id="legacy", status=TaskStatus.RUNNING)
+    )
+    runner._task_manager.finish_task = AsyncMock(
+        side_effect=lambda task_id, **kwargs: TaskRecord(
+            id=task_id,
+            status=kwargs["status"],
+            result=kwargs.get("result"),
+            error=kwargs.get("error"),
+        )
+    )
+    runner._task_manager.update_task_record = AsyncMock()
+
+    task = await runner.run_task(TaskRecord(id="legacy", prompt="check"))
+
+    assert task.status == TaskStatus.SUCCESS
+    assert task.result == "legacy result"
+    assert task.error is None

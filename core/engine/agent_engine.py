@@ -50,6 +50,10 @@ class _TurnRequest:
     serialize_session: bool = True
     rollback_message_id: str = ""
     stream_callback: Optional[Callable[[str], Awaitable[None]]] = None
+    track_tool_delivery: bool = True
+    tool_reply_callback: Optional[Callable] = None
+    tool_reply_names: frozenset[str] = frozenset()
+    reply_state_callback: Optional[Callable[[bool], Awaitable[None]]] = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +61,20 @@ class _TurnResult:
     replies: tuple[str, ...] = field(default_factory=tuple)
     sent_emoji: bool = False
     text_committed: bool = False
+    tool_text_delivered: bool = False
+    final_reply_silent: bool = False
+
+
+@dataclass(frozen=True)
+class BackgroundTaskResult:
+    result: Optional[str] = None
+    error: Optional[str] = None
+    tool_delivered: bool = False
+    silent: bool = False
+
+    def __iter__(self):
+        yield self.result
+        yield self.error
 
 
 def pick_final_notification_reply(
@@ -457,6 +475,18 @@ class AgentEngine:
     async def _run_turn(self, request: _TurnRequest) -> _TurnResult:
         """运行一次统一的 prompt、路由、工具循环编排。"""
         replies: list[str] = []
+        tool_text_delivered = False
+        final_reply_silent = False
+
+        async def _tool_delivery_callback() -> None:
+            nonlocal tool_text_delivered
+            tool_text_delivered = True
+
+        async def _reply_state_callback(silent: bool) -> None:
+            nonlocal final_reply_silent
+            final_reply_silent = silent
+            if request.reply_state_callback:
+                await request.reply_state_callback(silent)
 
         async def _capturing_reply_callback(*args, **kwargs) -> None:
             content = kwargs.get("content")
@@ -482,6 +512,9 @@ class AgentEngine:
                 is_group=request.is_group,
                 reply_to=request.reply_to,
                 reply_callback=_capturing_reply_callback,
+                tool_reply_callback=request.tool_reply_callback,
+                tool_reply_names=request.tool_reply_names,
+                reply_state_callback=_reply_state_callback,
                 sender_id=request.sender_id,
                 get_user_nickname=request.get_user_nickname,
                 delivery_channel=request.delivery_channel,
@@ -490,6 +523,9 @@ class AgentEngine:
                 binding_manager=self._session_binding,
                 tier=tier,
                 stream_callback=request.stream_callback,
+                delivery_state_callback=(
+                    _tool_delivery_callback if request.track_tool_delivery else None
+                ),
             )
             if request.timeout is not None:
                 sent_emoji, text_committed = await asyncio.wait_for(
@@ -501,6 +537,8 @@ class AgentEngine:
                 replies=tuple(replies),
                 sent_emoji=sent_emoji,
                 text_committed=text_committed,
+                tool_text_delivered=tool_text_delivered,
+                final_reply_silent=final_reply_silent,
             )
 
         async def _execute_with_rollback() -> _TurnResult:
@@ -599,7 +637,7 @@ class AgentEngine:
         delivery_channel: str = "",
         reply_to_message_id: str = "",
         tools_allow: Optional[List[str]] = None,
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> BackgroundTaskResult:
         """在独立会话中执行后台任务。
 
         创建一个合成 InputMessage 并走完整的 PromptBuilding + ToolLoop 流程，
@@ -615,7 +653,7 @@ class AgentEngine:
             tools_allow: 后台任务可用工具列表（None=默认，["*"]=全部，[]=仅announce）
 
         Returns:
-            (result_text, error_text)
+            BackgroundTaskResult，支持旧式二元解包。
         """
         _log.info(f"开始后台任务: chat_id={chat_id[:20]}.. prompt={prompt[:60]}")
 
@@ -626,6 +664,21 @@ class AgentEngine:
             is_group: bool,
         ) -> None:
             return None
+
+        async def deliver_tool_reply_callback(
+            chat_id: str,
+            content: str,
+            message_id: str,
+            is_group: bool,
+        ) -> None:
+            if not self._reply_callback or not delivery_channel:
+                raise RuntimeError("后台任务没有可用的消息投递目标")
+            await self._reply_callback(
+                chat_id=delivery_channel,
+                content=content,
+                message_id="",
+                is_group=is_group,
+            )
 
         # 创建合成 InputMessage
         msg = InputMessage(
@@ -666,25 +719,36 @@ class AgentEngine:
                     delivery_channel=delivery_channel,
                     reply_to_message_id=reply_to_message_id,
                     timeout=300,
+                    tool_reply_callback=deliver_tool_reply_callback,
+                    tool_reply_names=frozenset({"send_message"}),
                 )
             )
 
-            result = "\n".join(turn.replies) if turn.replies else None
+            result = (
+                None
+                if turn.final_reply_silent
+                else (turn.replies[-1] if turn.replies else None)
+            )
             _log.info(
                 f"后台任务完成: chat_id={chat_id[:20]}.. "
                 f"result_len={len(result or '')}"
             )
-            return result, None
+            return BackgroundTaskResult(
+                result=result,
+                error=None,
+                tool_delivered=turn.tool_text_delivered,
+                silent=turn.final_reply_silent,
+            )
 
         except asyncio.CancelledError:
             _log.warning(f"后台任务被取消: chat_id={chat_id[:20]}..")
-            return None, "任务被取消"
+            return BackgroundTaskResult(error="任务被取消")
         except Exception as e:
             _log.error(
                 f"后台任务异常: chat_id={chat_id[:20]}.. error={e}",
                 exc_info=True,
             )
-            return None, str(e)
+            return BackgroundTaskResult(error=str(e))
 
     async def run_wake_turn(
         self,

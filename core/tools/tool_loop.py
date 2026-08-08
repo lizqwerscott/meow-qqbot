@@ -119,6 +119,10 @@ class ToolLoop:
         binding_manager=None,
         tier: Optional[str] = None,
         stream_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+        delivery_state_callback: Optional[Callable[[], Awaitable[None]]] = None,
+        tool_reply_callback: Optional[Callable] = None,
+        tool_reply_names: Optional[set[str] | frozenset[str]] = None,
+        reply_state_callback: Optional[Callable[[bool], Awaitable[None]]] = None,
     ) -> tuple[bool, bool]:
         """执行工具调用循环。
 
@@ -463,6 +467,14 @@ class ToolLoop:
                     st.sent = len(response_text)
                     text_committed = True
 
+            if reply_state_callback:
+                await reply_state_callback(
+                    not response_text
+                    or _is_silent_reply_text(response_text)
+                    or suppress_reply
+                    or message_delivered
+                )
+
             if response_text or tool_calls:
                 await self.context_manager.add_assistant_message_async(
                     chat_id,
@@ -519,13 +531,27 @@ class ToolLoop:
                     continue
 
                 try:
-                    result = await execute_tool(tc.name, args, ctx, self._perm)
+                    if tool_reply_callback and tc.name in (tool_reply_names or ()):
+                        tool_ctx = ToolContext(
+                            chat_id=ctx.chat_id,
+                            is_group=ctx.is_group,
+                            reply_to=ctx.reply_to,
+                            sender_id=ctx.sender_id,
+                            reply_callback=tool_reply_callback,
+                            delivery_channel=ctx.delivery_channel,
+                            reply_to_message_id=ctx.reply_to_message_id,
+                        )
+                    else:
+                        tool_ctx = ctx
+                    result = await execute_tool(tc.name, args, tool_ctx, self._perm)
                     content = result.content
                     if result.sent_emoji:
                         sent_emoji = True
                     if result.sent_text:
                         text_committed = True
                         message_delivered = True
+                        if delivery_state_callback:
+                            await delivery_state_callback()
                     if result.no_reply:
                         suppress_reply = True
                 except asyncio.CancelledError:

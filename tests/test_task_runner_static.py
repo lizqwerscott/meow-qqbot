@@ -1,6 +1,13 @@
 """测试 BackgroundTaskRunner 的静态辅助函数。"""
 
-from core.tasks.models import CronJob, SessionMode
+from core.tasks.delivery_policy import decide_cron_delivery
+from core.tasks.models import (
+    CronJob,
+    DeliveryStatus,
+    SessionMode,
+    TaskRecord,
+    TaskStatus,
+)
 from core.tasks.runner import BackgroundTaskRunner
 
 # ── _resolve_session_id ──
@@ -138,27 +145,74 @@ def test_session_target_in_to_dict():
 
 def _mk_task(result=None, error=None):
     from core.tasks.models import TaskRecord
+
     return TaskRecord(id="t", prompt="", result=result, error=error)
 
 
 def test_format_result_event_text_with_result():
-    text = BackgroundTaskRunner._format_result_event_text("任务 '早安'已完成", _mk_task(result="头条1\n头条2"))
+    text = BackgroundTaskRunner._format_result_event_text(
+        "任务 '早安'已完成", _mk_task(result="头条1\n头条2")
+    )
     assert text == "任务 '早安'已完成\n\n执行结果:\n头条1\n头条2"
 
 
 def test_format_result_event_text_with_error():
-    text = BackgroundTaskRunner._format_result_event_text("任务 '早安'执行失败", _mk_task(error="exit 1"))
+    text = BackgroundTaskRunner._format_result_event_text(
+        "任务 '早安'执行失败", _mk_task(error="exit 1")
+    )
     assert text == "任务 '早安'执行失败\n\n执行结果:\nexit 1"
 
 
 def test_format_result_event_text_empty_body_keeps_prefix():
-    text = BackgroundTaskRunner._format_result_event_text("任务 '早安'已完成", _mk_task())
+    text = BackgroundTaskRunner._format_result_event_text(
+        "任务 '早安'已完成", _mk_task()
+    )
     assert text == "任务 '早安'已完成"
 
 
 def test_format_result_event_text_truncates_long_body():
-    text = BackgroundTaskRunner._format_result_event_text("P", _mk_task(result="x" * 3000))
+    text = BackgroundTaskRunner._format_result_event_text(
+        "P", _mk_task(result="x" * 3000)
+    )
     assert text.endswith("…[已截断]")
     # 结果体本身不超过上限（split 后含一个前导换行）
     body = text.split("执行结果:", 1)[1]
     assert len(body) <= 1 + 2000 + len("…[已截断]")
+
+
+def test_cron_delivery_skips_final_no_reply():
+    job = CronJob(name="check", delivery_channel="user")
+    task = TaskRecord(status=TaskStatus.SUCCESS, result="NO_REPLY")
+    decision = decide_cron_delivery(job, task)
+    assert not decision.should_deliver
+    assert decision.reason == "silent_final_reply"
+
+
+def test_cron_delivery_uses_only_final_report():
+    job = CronJob(name="check", delivery_channel="user")
+    task = TaskRecord(status=TaskStatus.SUCCESS, result="最终报告")
+    decision = decide_cron_delivery(job, task)
+    assert decision.should_deliver
+    assert "最终报告" in decision.content
+    assert "检测完成" not in decision.content
+
+
+def test_cron_delivery_skips_empty_success():
+    job = CronJob(name="check", delivery_channel="user")
+    task = TaskRecord(status=TaskStatus.SUCCESS)
+    decision = decide_cron_delivery(job, task)
+    assert not decision.should_deliver
+
+
+def test_cron_delivery_skips_after_tool_delivery():
+    job = CronJob(name="check", delivery_channel="user")
+    task = TaskRecord(status=TaskStatus.SUCCESS, result="报告")
+    decision = decide_cron_delivery(job, task, tool_delivered=True)
+    assert not decision.should_deliver
+    assert decision.reason == "already_delivered"
+
+
+def test_task_record_delivery_status_is_backward_compatible():
+    task = TaskRecord.from_dict({"id": "t", "status": "success"})
+    assert task.delivery_status == DeliveryStatus.UNKNOWN
+    assert task.to_dict()["delivery_status"] == "unknown"
