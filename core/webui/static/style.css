@@ -309,8 +309,16 @@ tr:hover td {
 
 .media-detail-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr); gap: 18px; align-items: start; }
 .media-preview-card { min-height: 420px; display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 18px; }
-.media-preview-card img,
-.media-preview-card video { max-height: 620px; max-width: 100%; object-fit: contain; border-radius: 8px; }
+.media-preview-image,
+.media-preview-card video {
+    border-radius: 8px;
+    display: block;
+    height: auto;
+    max-height: 620px;
+    max-width: 100%;
+    object-fit: contain;
+    width: auto;
+}
 .media-preview-card audio { width: min(100%, 520px); }
 .media-preview-card pre { background: #f7f9fc; border-radius: 8px; max-height: 600px; overflow: auto; padding: 18px; white-space: pre-wrap; width: 100%; }
 .media-unavailable { color: var(--text-secondary); padding: 64px 24px; text-align: center; }
@@ -319,9 +327,12 @@ tr:hover td {
 .media-card-heading { align-items: flex-start; display: flex; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
 .media-card-heading h3 { color: var(--accent); font-size: 17px; }
 .media-meta-card { padding: 22px; }
-.media-meta-card dl { display: grid; gap: 12px; grid-template-columns: 96px minmax(0, 1fr); }
+.media-meta-list { display: grid; gap: 0; }
+.media-meta-row { align-items: baseline; border-top: 1px solid #edf0f5; display: grid; gap: 16px; grid-template-columns: 92px minmax(0, 1fr); padding: 10px 0; }
+.media-meta-row:first-child { border-top: 0; padding-top: 0; }
 .media-meta-card dt { color: var(--text-secondary); font-size: 12px; }
-.media-meta-card dd { overflow-wrap: anywhere; }
+.media-meta-card dd { line-height: 1.5; overflow-wrap: anywhere; }
+.media-meta-row-wide { align-items: start; grid-template-columns: 1fr; gap: 4px; }
 .media-detail-actions { border-top: 1px solid #e7ebf1; display: flex; flex-wrap: wrap; gap: 12px; margin-top: 22px; padding-top: 18px; }
 .media-detail-actions form { margin: 0; }
 
@@ -702,5 +713,14 @@ tr:hover td {
 
     .media-meta-card {
         padding: 16px;
+    }
+
+    .media-meta-row {
+        gap: 8px;
+        grid-template-columns: 78px minmax(0, 1fr);
+    }
+
+    .media-meta-row-wide {
+        grid-template-columns: 1fr;
     }
 }
