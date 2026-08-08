@@ -35,7 +35,11 @@ class MediaStore:
                 local_path TEXT NOT NULL, mime_type TEXT NOT NULL,
                 size INTEGER NOT NULL, created_at REAL NOT NULL,
                 expires_at REAL NOT NULL DEFAULT 0, filename TEXT NOT NULL DEFAULT '',
-                summary TEXT NOT NULL DEFAULT '', summary_model TEXT NOT NULL DEFAULT ''
+                summary TEXT NOT NULL DEFAULT '', summary_model TEXT NOT NULL DEFAULT '',
+                summary_version TEXT NOT NULL DEFAULT '',
+                file_summary TEXT NOT NULL DEFAULT '',
+                file_summary_model TEXT NOT NULL DEFAULT '',
+                file_summary_version TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS media_transcripts (
                 media_id TEXT PRIMARY KEY,
@@ -61,6 +65,19 @@ class MediaStore:
                 "ALTER TABLE media_messages "
                 "ADD COLUMN resource_type TEXT NOT NULL DEFAULT ''"
             )
+        object_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(media_objects)")
+        }
+        if "summary_version" not in object_columns:
+            conn.execute(
+                "ALTER TABLE media_objects "
+                "ADD COLUMN summary_version TEXT NOT NULL DEFAULT ''"
+            )
+        for column in ("file_summary", "file_summary_model", "file_summary_version"):
+            if column not in object_columns:
+                conn.execute(
+                    f"ALTER TABLE media_objects ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
         conn.commit()
         return conn
 
@@ -202,12 +219,18 @@ class MediaStore:
     async def authorize(
         self, chat_id: str, media_uri: str, image_only: bool = False
     ) -> MediaRecord | None:
+        record, _ = await self.authorize_with_reason(chat_id, media_uri, image_only)
+        return record
+
+    async def authorize_with_reason(
+        self, chat_id: str, media_uri: str, image_only: bool = False
+    ) -> tuple[MediaRecord | None, str]:
         if self._conn is None:
-            return None
+            return None, "MEDIA_NOT_AVAILABLE"
         if not media_uri.startswith(
             "media://inbound/"
         ) or "/" in media_uri.removeprefix("media://inbound/"):
-            return None
+            return None, "INVALID_MEDIA_URI"
         media_id = media_uri.removeprefix("media://inbound/")
         async with self._lock:
             row = self._conn.execute(
@@ -217,28 +240,38 @@ class MediaStore:
                 "WHERE o.media_id=? AND m.chat_id=? ORDER BY m.created_at DESC LIMIT 1",
                 (media_id, chat_id),
             ).fetchone()
-        if (
-            not row
-            or not Path(row["local_path"]).is_file()
-            or (image_only and not row["mime_type"].startswith("image/"))
-        ):
-            return None
-        return MediaRecord(
-            row["media_id"],
-            media_uri,
-            row["chat_id"],
-            row["message_id"],
-            row["sender_id"],
-            self._resource_type_from_row(row),
-            row["mime_type"],
-            row["size"],
-            row["sha256"],
-            Path(row["local_path"]),
-            row["message_created_at"],
-            row["expires_at"],
-            row["filename"],
-            row["summary"],
-            row["summary_model"],
+        if not row:
+            exists = self._conn.execute(
+                "SELECT 1 FROM media_objects WHERE media_id=?", (media_id,)
+            ).fetchone()
+            return (None, "MEDIA_FORBIDDEN" if exists else "MEDIA_NOT_AVAILABLE")
+        if not Path(row["local_path"]).is_file():
+            return None, "MEDIA_NOT_AVAILABLE"
+        if image_only and not row["mime_type"].startswith("image/"):
+            return None, "UNSUPPORTED_MEDIA_TYPE"
+        return (
+            MediaRecord(
+                row["media_id"],
+                media_uri,
+                row["chat_id"],
+                row["message_id"],
+                row["sender_id"],
+                self._resource_type_from_row(row),
+                row["mime_type"],
+                row["size"],
+                row["sha256"],
+                Path(row["local_path"]),
+                row["message_created_at"],
+                row["expires_at"],
+                row["filename"],
+                row["summary"],
+                row["summary_model"],
+                row["summary_version"],
+                row["file_summary"],
+                row["file_summary_model"],
+                row["file_summary_version"],
+            ),
+            "",
         )
 
     async def find_message_media(
@@ -283,6 +316,10 @@ class MediaStore:
             row["filename"],
             row["summary"],
             row["summary_model"],
+            row["summary_version"],
+            row["file_summary"],
+            row["file_summary_model"],
+            row["file_summary_version"],
         )
 
     async def recent(
@@ -317,19 +354,35 @@ class MediaStore:
                 r["filename"],
                 r["summary"],
                 r["summary_model"],
+                r["summary_version"],
+                r["file_summary"],
+                r["file_summary_model"],
+                r["file_summary_version"],
             )
             for r in rows
         ]
 
     async def update_summary(
-        self, media_id: str, summary: str, model: str = ""
+        self, media_id: str, summary: str, model: str = "", version: str = ""
     ) -> None:
         if self._conn is None:
             return
         async with self._lock:
             self._conn.execute(
-                "UPDATE media_objects SET summary=?, summary_model=? WHERE media_id=?",
-                (summary, model, media_id),
+                "UPDATE media_objects SET summary=?, summary_model=?, summary_version=? WHERE media_id=?",
+                (summary, model, version, media_id),
+            )
+            self._conn.commit()
+
+    async def update_file_summary(
+        self, media_id: str, summary: str, model: str = "", version: str = ""
+    ) -> None:
+        if self._conn is None:
+            return
+        async with self._lock:
+            self._conn.execute(
+                "UPDATE media_objects SET file_summary=?, file_summary_model=?, file_summary_version=? WHERE media_id=?",
+                (summary, model, version, media_id),
             )
             self._conn.commit()
 

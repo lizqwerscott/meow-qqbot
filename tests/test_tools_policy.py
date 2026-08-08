@@ -8,7 +8,7 @@ import logging
 
 import pytest
 
-from core.tools.policy import ChatContext, _filter_task_allow
+from core.tools.policy import ChatContext, _filter_task_allow, build_tools
 
 
 def _ctx(**kw) -> ChatContext:
@@ -41,6 +41,30 @@ def test_filter_task_allow_empty_falls_back_to_announce():
 def test_filter_task_allow_wildcard_keeps_all():
     names = {"exec", "process", "announce"}
     assert _filter_task_allow(names, ["*"]) == names
+
+
+@pytest.mark.parametrize("profile", ["heartbeat", "cron", "task"])
+def test_restricted_profiles_do_not_gain_attachment_read_file(profile):
+    from core.tools.impl import registry
+
+    saved = dict(registry._tools)
+    try:
+        registry._tools.clear()
+        from core.tools._types import ToolEntry
+
+        registry.register(
+            ToolEntry(
+                name="read_file",
+                description="read",
+                parameters={},
+                handler=lambda *_: None,
+            )
+        )
+        tools = build_tools(profile, _ctx(has_media=True, has_workspace=False))
+        assert "read_file" not in {tool["function"]["name"] for tool in tools}
+    finally:
+        registry._tools.clear()
+        registry._tools.update(saved)
 
 
 def test_filter_task_allow_unknown_warns(caplog):

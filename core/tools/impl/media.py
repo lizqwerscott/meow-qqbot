@@ -21,7 +21,7 @@ def create_media_entries(deps: ToolDeps) -> list[ToolEntry]:
         "additionalProperties": False,
     }
 
-    async def _inspect(args: dict, ctx: ToolContext) -> ToolResult:
+    async def _image(args: dict, ctx: ToolContext) -> ToolResult:
         service = deps.media_service
         if service is None:
             return ToolResult(content=json.dumps({"error": "MEDIA_NOT_AVAILABLE"}))
@@ -37,23 +37,24 @@ def create_media_entries(deps: ToolDeps) -> list[ToolEntry]:
         if service.image_tools_enabled:
             entries.append(
                 ToolEntry(
-                    name="inspect_image",
+                    name="image",
                     section="media",
                     description=(
                         "查看当前会话中的一张图片。仅在摘要不足、需要识别细节、文字、关系，"
                         "或用户明确要求深入分析时调用。media_uri 必须来自媒体上下文。"
                     ),
                     parameters=params,
-                    handler=_inspect,
+                    handler=_image,
                 )
             )
 
-        if service.file_tools_enabled:
+        if service.pdf_tools_enabled:
 
-            async def _inspect_file(args: dict, ctx: ToolContext) -> ToolResult:
-                result = await service.inspect_file(
+            async def _pdf(args: dict, ctx: ToolContext) -> ToolResult:
+                result = await service.inspect_pdf(
                     chat_id=ctx.chat_id,
                     media_uri=str(args.get("media_uri", "")),
+                    prompt=str(args.get("prompt", "分析这份 PDF 文档。")),
                 )
                 return ToolResult(
                     content=json.dumps(result.as_dict(), ensure_ascii=False)
@@ -61,24 +62,27 @@ def create_media_entries(deps: ToolDeps) -> list[ToolEntry]:
 
             entries.append(
                 ToolEntry(
-                    name="inspect_file",
+                    name="pdf",
                     section="media",
                     description=(
-                        "读取当前会话中 TXT、Markdown、JSON 或 CSV 文件的文本内容。"
-                        "media_uri 必须来自媒体上下文。"
+                        "分析当前会话中的 PDF 文档。" "media_uri 必须来自媒体上下文。"
                     ),
                     parameters={
                         "type": "object",
                         "properties": {
                             "media_uri": {
                                 "type": "string",
-                                "description": "当前会话中的 media://inbound/... 文件引用",
-                            }
+                                "description": "当前会话中的 media://inbound/... PDF 引用",
+                            },
+                            "prompt": {
+                                "type": "string",
+                                "description": "希望从 PDF 中分析的问题或要求",
+                            },
                         },
                         "required": ["media_uri"],
                         "additionalProperties": False,
                     },
-                    handler=_inspect_file,
+                    handler=_pdf,
                 )
             )
 

@@ -9,6 +9,7 @@ from .models import (
     ImageInspection,
     MediaRecord,
     MediaTurnContext,
+    PdfInspection,
     VoiceTranscription,
 )
 from .service import MediaService
@@ -24,6 +25,7 @@ __all__ = [
     "MediaCapabilityTimeoutError",
     "MediaService",
     "MediaTurnContext",
+    "PdfInspection",
     "VoiceTranscription",
     "WhisperTranscriber",
 ]

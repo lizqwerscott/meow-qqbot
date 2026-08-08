@@ -19,6 +19,10 @@ class MediaRecord:
     filename: str = ""
     summary: str = ""
     summary_model: str = ""
+    summary_version: str = ""
+    file_summary: str = ""
+    file_summary_model: str = ""
+    file_summary_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,26 @@ class FileInspection:
             "media_uri": self.media_uri,
             "content": self.content,
             "truncated": self.truncated,
+        }
+
+
+@dataclass(frozen=True)
+class PdfInspection:
+    media_uri: str
+    analysis: str = ""
+    pages: int = 0
+    cached: bool = False
+    error: str = ""
+    message: str = ""
+
+    def as_dict(self) -> dict:
+        if self.error:
+            return {"error": self.error, "message": self.message}
+        return {
+            "media_uri": self.media_uri,
+            "analysis": self.analysis,
+            "pages": self.pages,
+            "cached": self.cached,
         }
 
 

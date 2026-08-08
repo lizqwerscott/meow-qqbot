@@ -183,6 +183,7 @@ class ServiceGraph:
             ),
             voice_transcriber=voice_transcriber,
             voice_transcription=voice_config,
+            ai_service=self.ai_service,
         )
 
         # ── EmojiManager ──

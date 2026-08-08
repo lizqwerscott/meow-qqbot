@@ -6,6 +6,7 @@ import time
 from urllib.parse import urlparse
 
 import httpx
+from pypdf import PdfReader
 
 from core.media.capabilities import MediaCapability, MediaCapabilityTimeoutError
 from core.media.models import (
@@ -13,12 +14,18 @@ from core.media.models import (
     ImageInspection,
     MediaRecord,
     MediaTurnContext,
+    PdfInspection,
     VoiceTranscription,
 )
 from core.media.store import MediaStore
 from core.message import InputMessage, ResourceMeta
 
 _log = logging.getLogger(__name__)
+
+_IMAGE_SUMMARY_PROMPT_VERSION = "v2"
+_IMAGE_INSPECTION_PROMPT_VERSION = "v2"
+_TEXT_EXTRACTION_VERSION = "v1"
+_FILE_SUMMARY_VERSION = "v1"
 
 
 class _MultimodalProvider:
@@ -50,7 +57,77 @@ class _TextExtractorProvider:
     model_name = ""
 
     async def execute(self, record: MediaRecord, **kwargs) -> str:
-        return record.local_path.read_bytes().decode("utf-8", errors="replace")
+        return await asyncio.to_thread(
+            self._read_text, record.local_path, kwargs["max_chars"]
+        )
+
+    @staticmethod
+    def _read_text(path, max_chars: int) -> str:
+        with path.open(encoding="utf-8", errors="replace") as file:
+            return file.read(max_chars)
+
+
+class _FileSummaryProvider:
+    name = "file_summary_llm"
+
+    def __init__(self, ai_service):
+        self.ai_service = ai_service
+        self.model_name = getattr(ai_service, "model", "")
+
+    async def execute(self, record: MediaRecord, **kwargs) -> str:
+        text = kwargs["text"]
+        summary, _ = await self.ai_service.chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是文件摘要助手。请用简洁中文概括文件内容，保留主题、关键事实、"
+                        "数字、日期、结论和待办事项。不要臆测，不要复述整段原文。"
+                    ),
+                },
+                {"role": "user", "content": f"请摘要以下文件内容：\n\n{text}"},
+            ],
+            max_tokens=kwargs.get("max_tokens", 400),
+        )
+        return summary or ""
+
+
+class _PdfProvider:
+    name = "pypdf"
+
+    def __init__(self, ai_service):
+        self.ai_service = ai_service
+        self.model_name = getattr(ai_service, "model", "")
+
+    async def execute(self, record: MediaRecord, **kwargs) -> str:
+        text, pages = await asyncio.to_thread(self._extract, record.local_path)
+        if not text.strip():
+            raise ValueError("PDF 没有可提取的文本")
+        prompt = kwargs.get("prompt") or "分析这份 PDF 文档。"
+        result, _ = await self.ai_service.chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是 PDF 文档分析助手。基于提供的文档内容回答用户问题，不要臆测。",
+                },
+                {"role": "user", "content": f"{prompt}\n\n文档内容：\n{text}"},
+            ],
+            max_tokens=kwargs.get("max_tokens", 800),
+        )
+        if not result:
+            raise ValueError("PDF 分析返回空内容")
+        return f"页数: {pages}\n{result}"
+
+    @staticmethod
+    def count_pages(path) -> int:
+        return len(PdfReader(str(path)).pages)
+
+    @staticmethod
+    def _extract(path) -> tuple[str, int]:
+        reader = PdfReader(str(path))
+        pages = len(reader.pages)
+        text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
+        return text[:100_000], pages
 
 
 class MediaService:
@@ -77,6 +154,14 @@ class MediaService:
         text_preview_max_chars=20_000,
         file_extract_max_chars=20_000,
         file_context_max_chars=4_000,
+        file_summary_max_chars=600,
+        file_summary_timeout=30,
+        file_summary_concurrency=1,
+        pdf_max_bytes=50 * 1024 * 1024,
+        pdf_max_pages=20,
+        pdf_timeout=60,
+        pdf_max_tokens=800,
+        ai_service=None,
         voice_transcriber=None,
         voice_transcription=None,
     ):
@@ -101,6 +186,10 @@ class MediaService:
         self.text_preview_max_chars = max(1, int(text_preview_max_chars))
         self.file_extract_max_chars = max(1, int(file_extract_max_chars))
         self.file_context_max_chars = max(1, int(file_context_max_chars))
+        self.file_summary_max_chars = max(20, int(file_summary_max_chars))
+        self.pdf_max_tokens = max(50, int(pdf_max_tokens))
+        self.pdf_max_pages = max(1, int(pdf_max_pages))
+        self.pdf_max_bytes = max(1, int(pdf_max_bytes))
         voice_cfg = voice_transcription or {}
         self.voice_transcriber = voice_transcriber
         self.voice_enabled = bool(
@@ -126,7 +215,25 @@ class MediaService:
             timeout=5,
             concurrency=1,
             providers=[_TextExtractorProvider()],
-            cache_size=0,
+            cache_size=10,
+        )
+        self.file_summary_capability = MediaCapability(
+            name="file_summary",
+            resource_types={"file"},
+            max_bytes=self.max_file_bytes,
+            timeout=file_summary_timeout,
+            concurrency=file_summary_concurrency,
+            providers=[_FileSummaryProvider(ai_service)] if ai_service else [],
+            cache_size=100,
+        )
+        self.pdf_capability = MediaCapability(
+            name="pdf_analysis",
+            resource_types={"file"},
+            max_bytes=self.pdf_max_bytes,
+            timeout=pdf_timeout,
+            concurrency=1,
+            providers=[_PdfProvider(ai_service)] if ai_service else [],
+            cache_size=50,
         )
         self.voice_capability = MediaCapability(
             name="voice_transcription",
@@ -158,7 +265,11 @@ class MediaService:
 
     @property
     def tools_enabled(self) -> bool:
-        return self.image_tools_enabled or self.file_tools_enabled
+        return self.enabled and (
+            self.file_tools_enabled
+            or self.image_tools_enabled
+            or self.pdf_tools_enabled
+        )
 
     @property
     def image_tools_enabled(self) -> bool:
@@ -167,6 +278,10 @@ class MediaService:
     @property
     def file_tools_enabled(self) -> bool:
         return self.enabled
+
+    @property
+    def pdf_tools_enabled(self) -> bool:
+        return self.enabled and self.pdf_capability.enabled
 
     @property
     async def usage(self) -> tuple[int, int]:
@@ -346,11 +461,15 @@ class MediaService:
 
     async def _download(self, url: str, resource: ResourceMeta) -> tuple[bytes, str]:
         parsed = await self._validate_url(url)
-        limit = (
-            self.max_image_bytes
-            if resource.resource_type == "image"
-            else self.max_file_bytes
-        )
+        if resource.resource_type == "image":
+            limit = self.max_image_bytes
+        elif (
+            resource.mime_type == "application/pdf"
+            or resource.filename.lower().endswith(".pdf")
+        ):
+            limit = self.pdf_max_bytes
+        else:
+            limit = self.max_file_bytes
         async with self.download_sem:
             current = parsed
             for _ in range(4):
@@ -398,6 +517,12 @@ class MediaService:
                         data
                     ):
                         raise ValueError("图片文件头校验失败")
+                    if (
+                        resource.mime_type == "application/pdf"
+                        or resource.filename.lower().endswith(".pdf")
+                        or mime == "application/pdf"
+                    ) and not self._pdf_signature(data):
+                        raise ValueError("PDF 文件头校验失败")
                     return data, mime
             else:
                 raise ValueError("重定向次数超过限制")
@@ -407,6 +532,10 @@ class MediaService:
         return data.startswith(
             (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n", b"GIF87a", b"GIF89a", b"RIFF")
         )
+
+    @staticmethod
+    def _pdf_signature(data: bytes) -> bool:
+        return data.startswith(b"%PDF-")
 
     async def _validate_url(self, url: str) -> str:
         parsed = urlparse(url.strip())
@@ -474,7 +603,7 @@ class MediaService:
             if resource.resource_type != "file" or not resource.media_uri:
                 continue
             label = "当前文件" if resource in message.resources else "引用文件"
-            block = await self._extract_file_context(message.chat_id, resource, label)
+            block = await self._summarize_file_context(message.chat_id, resource, label)
             if block:
                 (current if label == "当前文件" else replied).append(block)
         for resource in (*message.resources, *message.replied_resources):
@@ -503,7 +632,12 @@ class MediaService:
             lines = ["[近期媒体]"]
             for item in recent:
                 age = max(0, int((time.time() - item.created_at) / 60))
-                state = f"摘要: {item.summary}" if item.summary else "未分析"
+                state = (
+                    f"摘要: {item.summary}"
+                    if item.summary
+                    and item.summary_version == _IMAGE_SUMMARY_PROMPT_VERSION
+                    else "未分析"
+                )
                 lines.append(
                     f"- {item.media_uri} | {item.resource_type} | 消息 {item.message_id} | 发送者 {item.sender_id} | {age} 分钟前 | {state}"
                 )
@@ -532,26 +666,41 @@ class MediaService:
             chat_id, resource.media_uri, image_only=True
         )
         if not record:
-            return f"[{label} {number}]\n引用: {resource.media_uri}\n摘要: 图片不可用；如确有需要，可调用 inspect_image。\n[/{label} {number}]"
-        summary = record.summary
+            return f"[{label} {number}]\n引用: {resource.media_uri}\n摘要: 图片不可用；如确有需要，可调用 image。\n[/{label} {number}]"
+        summary = (
+            record.summary
+            if record.summary_version == _IMAGE_SUMMARY_PROMPT_VERSION
+            else ""
+        )
         if self.image_enabled and self.image_capability.enabled and not summary:
             try:
                 result = await self.image_capability.execute(
-                    record, cache_key=(record.sha256, "summary"), prompt=None
+                    record,
+                    cache_key=(
+                        record.sha256,
+                        "summary",
+                        _IMAGE_SUMMARY_PROMPT_VERSION,
+                    ),
+                    prompt=None,
                 )
                 summary = result.content
                 summary = (summary or "图片未能自动解析")[: self.summary_max_chars]
-                await self.store.update_summary(record.media_id, summary, result.model)
+                await self.store.update_summary(
+                    record.media_id,
+                    summary,
+                    result.model,
+                    _IMAGE_SUMMARY_PROMPT_VERSION,
+                )
                 resource.extra["summary"] = summary
             except Exception:
-                summary = "图片未能自动解析；如确有需要，可调用 inspect_image。"
+                summary = "图片未能自动解析；如确有需要，可调用 image。"
         elif not summary:
-            summary = "图片未自动分析；如确有需要，可调用 inspect_image。"
+            summary = "图片未自动分析；如确有需要，可调用 image。"
         resource.extra["summary"] = summary
         return f"[{label} {number}]\n引用: {record.media_uri}\n摘要: {summary}\n[/{label} {number}]"
 
     async def _extract_file_context(self, chat_id, resource, label):
-        inspection = await self.inspect_file(
+        inspection = await self.read_file(
             chat_id=chat_id,
             media_uri=resource.media_uri,
             max_chars=self.file_context_max_chars,
@@ -561,15 +710,64 @@ class MediaService:
                 f"[{label}]\n引用: {resource.media_uri}\n文件: {resource.filename or '未命名'}\n"
                 f"提取: {inspection.message}\n[/{label}]"
             )
-        suffix = (
-            "（已截断，可调用 inspect_file 查看更多）" if inspection.truncated else ""
-        )
+        suffix = "（已截断，可调用 read_file 查看更多）" if inspection.truncated else ""
         return (
             f"[{label}]\n引用: {inspection.media_uri}\n文件: {resource.filename or '未命名'}\n"
             f"内容{suffix}:\n{inspection.content}\n[/{label}]"
         )
 
-    async def inspect_file(
+    async def _summarize_file_context(self, chat_id, resource, label):
+        record = await self.store.authorize(chat_id, resource.media_uri)
+        if not record or not self._is_supported_text_file(record):
+            return self._file_summary_fallback(resource, "文件不可用或格式不支持")
+        if record.file_summary and record.file_summary_version == _FILE_SUMMARY_VERSION:
+            return self._file_summary_block(resource, record.file_summary)
+        if not self.file_summary_capability.enabled:
+            return self._file_summary_fallback(
+                resource, "文件未自动摘要，可调用 read_file"
+            )
+        try:
+            extracted = await self.file_capability.execute(
+                record,
+                cache_key=(
+                    record.sha256,
+                    "text",
+                    _TEXT_EXTRACTION_VERSION,
+                    str(self.file_extract_max_chars),
+                ),
+                max_chars=self.file_extract_max_chars,
+            )
+            result = await self.file_summary_capability.execute(
+                record,
+                cache_key=(record.sha256, "summary", _FILE_SUMMARY_VERSION),
+                text=extracted.content,
+                max_tokens=self.file_summary_max_chars,
+            )
+            summary = result.content[: self.file_summary_max_chars]
+            await self.store.update_file_summary(
+                record.media_id, summary, result.model, _FILE_SUMMARY_VERSION
+            )
+            return self._file_summary_block(resource, summary)
+        except Exception:
+            return self._file_summary_fallback(
+                resource, "文件未能自动摘要，可调用 read_file"
+            )
+
+    @staticmethod
+    def _file_summary_block(resource, summary):
+        return (
+            f"[文件摘要]\n引用: {resource.media_uri}\n文件: {resource.filename or '未命名'}\n"
+            f"摘要: {summary}\n[/文件摘要]"
+        )
+
+    @staticmethod
+    def _file_summary_fallback(resource, message):
+        return (
+            f"[文件摘要]\n引用: {resource.media_uri}\n文件: {resource.filename or '未命名'}\n"
+            f"摘要: {message}\n[/文件摘要]"
+        )
+
+    async def read_file(
         self, *, chat_id: str, media_uri: str, max_chars: int | None = None
     ) -> FileInspection:
         if not media_uri.startswith("media://inbound/"):
@@ -580,12 +778,16 @@ class MediaService:
             return FileInspection(
                 media_uri, error="ANALYSIS_FAILED", message="文件提取服务未启用"
             )
-        record = await self.store.authorize(chat_id, media_uri)
+        record, auth_error = await self.store.authorize_with_reason(chat_id, media_uri)
         if not record:
             return FileInspection(
                 media_uri,
-                error="MEDIA_NOT_AVAILABLE",
-                message="文件已过期、保存失败或不属于当前会话",
+                error=auth_error,
+                message=(
+                    "文件不属于当前会话"
+                    if auth_error == "MEDIA_FORBIDDEN"
+                    else "文件已过期或保存失败"
+                ),
             )
         if not self._is_supported_text_file(record):
             return FileInspection(
@@ -593,11 +795,19 @@ class MediaService:
                 error="UNSUPPORTED_MEDIA_TYPE",
                 message="仅支持 TXT、Markdown、JSON 和 CSV 文件",
             )
-        limit = min(
-            max_chars or self.file_extract_max_chars, self.file_extract_max_chars
-        )
+        requested_limit = int(max_chars or self.file_extract_max_chars)
+        limit = min(requested_limit, self.file_extract_max_chars)
         try:
-            result = await self.file_capability.execute(record)
+            result = await self.file_capability.execute(
+                record,
+                cache_key=(
+                    record.sha256,
+                    "text",
+                    _TEXT_EXTRACTION_VERSION,
+                    str(self.file_extract_max_chars),
+                ),
+                max_chars=self.file_extract_max_chars + 1,
+            )
         except Exception:
             return FileInspection(
                 media_uri, error="MEDIA_NOT_AVAILABLE", message="文件不可用"
@@ -606,6 +816,84 @@ class MediaService:
         return FileInspection(
             media_uri, content=text[:limit], truncated=len(text) > limit
         )
+
+    async def inspect_file(
+        self, *, chat_id: str, media_uri: str, max_chars: int | None = None
+    ) -> FileInspection:
+        return await self.read_file(
+            chat_id=chat_id, media_uri=media_uri, max_chars=max_chars
+        )
+
+    async def inspect_pdf(
+        self, *, chat_id: str, media_uri: str, prompt: str
+    ) -> PdfInspection:
+        if not media_uri.startswith("media://inbound/"):
+            return PdfInspection(
+                media_uri, error="INVALID_MEDIA_URI", message="仅支持受控 media:// 引用"
+            )
+        if not self.pdf_tools_enabled:
+            return PdfInspection(
+                media_uri, error="ANALYSIS_FAILED", message="PDF 分析服务未启用"
+            )
+        record, auth_error = await self.store.authorize_with_reason(chat_id, media_uri)
+        if not record:
+            return PdfInspection(
+                media_uri,
+                error=auth_error,
+                message=(
+                    "PDF 不属于当前会话"
+                    if auth_error == "MEDIA_FORBIDDEN"
+                    else "PDF 已过期或保存失败"
+                ),
+            )
+        if not self._is_pdf(record):
+            return PdfInspection(
+                media_uri, error="UNSUPPORTED_MEDIA_TYPE", message="该媒体不是 PDF"
+            )
+        if record.size > self.pdf_capability.max_bytes:
+            return PdfInspection(
+                media_uri, error="PDF_TOO_LARGE", message="PDF 超过大小限制"
+            )
+        try:
+            pages = await asyncio.to_thread(_PdfProvider.count_pages, record.local_path)
+        except Exception:
+            return PdfInspection(
+                media_uri, error="ANALYSIS_FAILED", message="PDF 文件不可解析"
+            )
+        if pages > self.pdf_max_pages:
+            return PdfInspection(
+                media_uri,
+                error="PDF_TOO_MANY_PAGES",
+                message=f"PDF 页数超过限制（最多 {self.pdf_max_pages} 页）",
+            )
+        normalized_prompt = " ".join((prompt or "").split())[:2_000]
+        try:
+            result = await self.pdf_capability.execute(
+                record,
+                cache_key=(record.sha256, "pdf", normalized_prompt),
+                prompt=normalized_prompt,
+                max_tokens=self.pdf_max_tokens,
+            )
+            pages, _, analysis = result.content.partition("\n")
+            return PdfInspection(
+                media_uri,
+                analysis=analysis or pages,
+                pages=int(pages.removeprefix("页数: ").strip() or 0),
+                cached=result.cached,
+            )
+        except MediaCapabilityTimeoutError:
+            return PdfInspection(
+                media_uri, error="ANALYSIS_TIMEOUT", message="PDF 分析超时"
+            )
+        except Exception as exc:
+            _log.warning("PDF 分析失败: %s", exc)
+            return PdfInspection(
+                media_uri, error="ANALYSIS_FAILED", message="PDF 分析失败"
+            )
+
+    @staticmethod
+    def _is_pdf(record: MediaRecord) -> bool:
+        return record.mime_type == "application/pdf"
 
     @staticmethod
     def _is_supported_text_file(record: MediaRecord) -> bool:
@@ -645,12 +933,16 @@ class MediaService:
             return VoiceTranscription(
                 media_uri, error="TRANSCRIPTION_FAILED", message="语音转写服务未启用"
             )
-        record = await self.store.authorize(chat_id, media_uri)
+        record, auth_error = await self.store.authorize_with_reason(chat_id, media_uri)
         if not record:
             return VoiceTranscription(
                 media_uri,
-                error="MEDIA_NOT_AVAILABLE",
-                message="语音已过期、保存失败或不属于当前会话",
+                error=auth_error,
+                message=(
+                    "语音不属于当前会话"
+                    if auth_error == "MEDIA_FORBIDDEN"
+                    else "语音已过期或保存失败"
+                ),
             )
         if record.resource_type != "voice" and not record.mime_type.startswith(
             "audio/"
@@ -697,12 +989,16 @@ class MediaService:
             return ImageInspection(
                 media_uri, error="ANALYSIS_FAILED", message="图片理解服务未启用"
             )
-        record = await self.store.authorize(chat_id, media_uri)
+        record, auth_error = await self.store.authorize_with_reason(chat_id, media_uri)
         if not record:
             return ImageInspection(
                 media_uri,
-                error="MEDIA_NOT_AVAILABLE",
-                message="图片已过期、保存失败或不属于当前会话",
+                error=auth_error,
+                message=(
+                    "图片不属于当前会话"
+                    if auth_error == "MEDIA_FORBIDDEN"
+                    else "图片已过期或保存失败"
+                ),
             )
         if not record.mime_type.startswith("image/"):
             return ImageInspection(
@@ -716,7 +1012,12 @@ class MediaService:
         try:
             result = await self.image_capability.execute(
                 record,
-                cache_key=(record.sha256, "inspect", normalized_question),
+                cache_key=(
+                    record.sha256,
+                    "inspect",
+                    normalized_question,
+                    _IMAGE_INSPECTION_PROMPT_VERSION,
+                ),
                 prompt=normalized_question,
             )
             return ImageInspection(

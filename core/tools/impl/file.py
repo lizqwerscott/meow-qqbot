@@ -226,6 +226,19 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
         )
 
     async def _read_file(args: dict, ctx: ToolContext) -> ToolResult:
+        media_uri = (args.get("media_uri") or "").strip()
+        if media_uri:
+            service = deps.media_service
+            if not service:
+                return ToolResult(
+                    content=json.dumps({"error": "媒体服务未就绪"}, ensure_ascii=False)
+                )
+            result = await service.read_file(
+                chat_id=ctx.chat_id,
+                media_uri=media_uri,
+                max_chars=args.get("max_chars"),
+            )
+            return ToolResult(content=json.dumps(result.as_dict(), ensure_ascii=False))
         wm = deps.workspace_manager
         if not wm:
             return ToolResult(
@@ -590,8 +603,16 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
                 "type": "string",
                 "description": "文件相对路径，例如 'note.txt' 或 'dir/file.md'。如果是目录请使用 list_dir 工具。",
             },
+            "media_uri": {
+                "type": "string",
+                "description": "当前会话中的受控附件引用，例如 media://inbound/abc123。",
+            },
+            "max_chars": {
+                "type": "integer",
+                "description": "读取附件时的最大字符数，默认使用服务限制。",
+            },
         },
-        "required": ["file_path"],
+        "anyOf": [{"required": ["file_path"]}, {"required": ["media_uri"]}],
     }
 
     LIST_DIR_PARAMS = {
@@ -652,7 +673,7 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
             name="read_file",
             section="file",
             description=(
-                "读取工作区文件内容。仅支持 1MB 以下的文本文件。"
+                "读取工作区文本文件或当前会话授权的文本附件。仅支持 1MB 以下的工作区文本文件。"
                 "不支持读取目录（使用 list_dir）。"
                 "优先使用本工具读取文件，不要使用 exec + cat/head/tail。"
                 "默认不支持路径穿越(..)，管理员可通过审批访问越界路径。"

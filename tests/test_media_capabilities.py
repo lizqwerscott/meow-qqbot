@@ -76,3 +76,24 @@ async def test_media_capability_reports_timeout_after_all_providers_timeout():
 
     with pytest.raises(MediaCapabilityTimeoutError):
         await capability.execute(record)
+
+
+@pytest.mark.asyncio
+async def test_text_extractor_reads_through_worker_thread(tmp_path, monkeypatch):
+    from core.media.service import _TextExtractorProvider
+
+    path = tmp_path / "notes.txt"
+    path.write_text("abcdef", encoding="utf-8")
+    calls = []
+
+    async def fake_to_thread(function, *args, **kwargs):
+        calls.append((function, args, kwargs))
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr("core.media.service.asyncio.to_thread", fake_to_thread)
+    result = await _TextExtractorProvider().execute(
+        SimpleNamespace(local_path=path), max_chars=4
+    )
+
+    assert result == "abcd"
+    assert calls

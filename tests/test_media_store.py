@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 
 from core.media.store import MediaStore
 
@@ -49,6 +50,69 @@ def test_media_store_rejects_invalid_uri(tmp_path):
             await store.authorize("group-a", "media://inbound/../x", image_only=True)
             is None
         )
+        await store.close()
+
+    asyncio.run(run())
+
+
+def test_media_store_migrates_summary_version(tmp_path):
+    async def run():
+        index_path = tmp_path / "index.sqlite3"
+        with sqlite3.connect(index_path) as connection:
+            connection.execute(
+                "CREATE TABLE media_objects ("
+                "media_id TEXT PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, "
+                "local_path TEXT NOT NULL, mime_type TEXT NOT NULL, "
+                "size INTEGER NOT NULL, created_at REAL NOT NULL, "
+                "expires_at REAL NOT NULL DEFAULT 0, filename TEXT NOT NULL DEFAULT '', "
+                "summary TEXT NOT NULL DEFAULT '', summary_model TEXT NOT NULL DEFAULT ''"
+                ")"
+            )
+
+        store = MediaStore(tmp_path)
+        await store.open()
+        columns = {
+            row["name"]
+            for row in store._conn.execute(
+                "PRAGMA table_info(media_objects)"
+            ).fetchall()
+        }
+
+        assert "summary_version" in columns
+        await store.close()
+
+    asyncio.run(run())
+
+
+def test_media_store_migrates_file_summary_columns(tmp_path):
+    async def run():
+        index_path = tmp_path / "index.sqlite3"
+        with sqlite3.connect(index_path) as connection:
+            connection.execute(
+                "CREATE TABLE media_objects ("
+                "media_id TEXT PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, "
+                "local_path TEXT NOT NULL, mime_type TEXT NOT NULL, "
+                "size INTEGER NOT NULL, created_at REAL NOT NULL, "
+                "expires_at REAL NOT NULL DEFAULT 0, filename TEXT NOT NULL DEFAULT '', "
+                "summary TEXT NOT NULL DEFAULT '', summary_model TEXT NOT NULL DEFAULT '', "
+                "summary_version TEXT NOT NULL DEFAULT ''"
+                ")"
+            )
+
+        store = MediaStore(tmp_path)
+        await store.open()
+        columns = {
+            row["name"]
+            for row in store._conn.execute(
+                "PRAGMA table_info(media_objects)"
+            ).fetchall()
+        }
+
+        assert {
+            "file_summary",
+            "file_summary_model",
+            "file_summary_version",
+        } <= columns
         await store.close()
 
     asyncio.run(run())

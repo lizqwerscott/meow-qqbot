@@ -16,7 +16,7 @@ SECTIONS: dict[str, set[str]] = {
     "heartbeat": {"heartbeat_respond"},
     "learner": {"define_jargon", "report_behavior_effect"},
     "message": {"send_message"},
-    "media": {"inspect_image", "inspect_file"},
+    "media": {"image", "pdf", "read_file"},
 }
 
 _ALL_TOOLS: set[str] = set()
@@ -36,7 +36,6 @@ PROFILES: dict[str, set[str]] = {
         "process",
         "search_content",
         "find_files",
-        "read_file",
         "write_file",
         "edit_file",
         "apply_patch",
@@ -51,7 +50,6 @@ PROFILES: dict[str, set[str]] = {
         "process",
         "search_content",
         "find_files",
-        "read_file",
         "write_file",
         "edit_file",
         "apply_patch",
@@ -63,7 +61,6 @@ PROFILES: dict[str, set[str]] = {
         "send_message",
         "memory",
         "mark_important",
-        "read_file",
         "write_file",
         "edit_file",
         "apply_patch",

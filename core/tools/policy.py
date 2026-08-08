@@ -55,6 +55,13 @@ def build_tools(
             for section in sections:
                 names -= SECTIONS.get(section, set())
 
+    if (
+        profile == "normal"
+        and ctx.has_media
+        and "read_file" in SECTIONS.get("media", set())
+    ):
+        names.add("read_file")
+
     # is_group + has_users 特殊处理（用户搜索仅在群聊且有用户数据时可用）
     if not ctx.is_group or not ctx.has_users:
         names -= SECTIONS.get("user", set())

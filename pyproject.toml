@@ -25,6 +25,7 @@ dependencies = [
     "tree-sitter>=0.25",
     "tree-sitter-bash>=0.23",
     "openai-whisper>=20250625",
+    "pypdf>=6.15.0",
 ]
 
 [dependency-groups]
