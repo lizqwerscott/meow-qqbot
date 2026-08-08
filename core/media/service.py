@@ -3,11 +3,11 @@ import ipaddress
 import logging
 import socket
 import time
-from collections import OrderedDict
 from urllib.parse import urlparse
 
 import httpx
 
+from core.media.capabilities import MediaCapability, MediaCapabilityTimeoutError
 from core.media.models import (
     FileInspection,
     ImageInspection,
@@ -19,6 +19,38 @@ from core.media.store import MediaStore
 from core.message import InputMessage, ResourceMeta
 
 _log = logging.getLogger(__name__)
+
+
+class _MultimodalProvider:
+    name = "multimodal"
+
+    def __init__(self, service):
+        self.service = service
+        self.model_name = getattr(service, "model", "")
+
+    async def execute(self, record: MediaRecord, **kwargs) -> str:
+        return await self.service.analyze_image(
+            str(record.local_path), prompt=kwargs.get("prompt")
+        )
+
+
+class _VoiceTranscriberProvider:
+    name = "local_whisper"
+
+    def __init__(self, transcriber):
+        self.transcriber = transcriber
+        self.model_name = getattr(transcriber, "model_name", "")
+
+    async def execute(self, record: MediaRecord, **kwargs) -> str:
+        return await self.transcriber.transcribe(str(record.local_path))
+
+
+class _TextExtractorProvider:
+    name = "builtin_text"
+    model_name = ""
+
+    async def execute(self, record: MediaRecord, **kwargs) -> str:
+        return record.local_path.read_bytes().decode("utf-8", errors="replace")
 
 
 class MediaService:
@@ -63,7 +95,6 @@ class MediaService:
         self.max_file_bytes = max(1, int(max_file_bytes))
         self.download_timeout = max(1, float(download_timeout))
         self.download_sem = asyncio.Semaphore(max(1, int(download_concurrency)))
-        self.vlm_sem = asyncio.Semaphore(max(1, int(cfg.get("concurrency", 2))))
         self.max_total_bytes = max_total_bytes
         self.preview_enabled = bool(preview_enabled)
         self.preview_max_inline_bytes = max(1, int(preview_max_inline_bytes))
@@ -78,19 +109,43 @@ class MediaService:
         )
         self.voice_timeout = max(1, float(voice_cfg.get("timeout_seconds", 120)))
         self.voice_max_chars = max(1, int(voice_cfg.get("max_chars", 4_000)))
-        self.voice_sem = asyncio.Semaphore(max(1, int(voice_cfg.get("concurrency", 1))))
         self.store = MediaStore(storage_dir)
         self._opened = False
-        self._inspection_cache: OrderedDict[tuple[str, str], str] = OrderedDict()
-        self._inspection_cache_max = 200
-        self._summary_tasks: dict[str, asyncio.Task] = {}
-        self._transcription_tasks: dict[str, asyncio.Task] = {}
+        self.image_capability = MediaCapability(
+            name="image_understanding",
+            resource_types={"image"},
+            max_bytes=self.max_image_bytes,
+            timeout=self.analysis_timeout,
+            concurrency=cfg.get("concurrency", 2),
+            providers=[_MultimodalProvider(multimodal)] if multimodal else [],
+        )
+        self.file_capability = MediaCapability(
+            name="text_extraction",
+            resource_types={"file"},
+            max_bytes=self.max_file_bytes,
+            timeout=5,
+            concurrency=1,
+            providers=[_TextExtractorProvider()],
+            cache_size=0,
+        )
+        self.voice_capability = MediaCapability(
+            name="voice_transcription",
+            resource_types={"voice"},
+            max_bytes=self.max_file_bytes,
+            timeout=self.voice_timeout,
+            concurrency=voice_cfg.get("concurrency", 1),
+            providers=(
+                [_VoiceTranscriberProvider(voice_transcriber)]
+                if voice_transcriber
+                else []
+            ),
+        )
 
     async def open(self):
         if self.enabled and not self._opened:
             await self.store.open()
             try:
-                if self.voice_enabled:
+                if self.voice_capability.enabled:
                     await self.voice_transcriber.preload()
             except Exception:
                 await self.store.close()
@@ -107,7 +162,7 @@ class MediaService:
 
     @property
     def image_tools_enabled(self) -> bool:
-        return self.enabled and self.image_enabled and self.multimodal is not None
+        return self.enabled and self.image_enabled and self.image_capability.enabled
 
     @property
     def file_tools_enabled(self) -> bool:
@@ -479,29 +534,14 @@ class MediaService:
         if not record:
             return f"[{label} {number}]\n引用: {resource.media_uri}\n摘要: 图片不可用；如确有需要，可调用 inspect_image。\n[/{label} {number}]"
         summary = record.summary
-        if self.image_enabled and self.multimodal and not summary:
+        if self.image_enabled and self.image_capability.enabled and not summary:
             try:
-                task = self._summary_tasks.get(record.media_id)
-                if task is None:
-
-                    async def _run_summary():
-                        async with self.vlm_sem:
-                            return await asyncio.wait_for(
-                                self.multimodal.analyze_image(str(record.local_path)),
-                                timeout=self.analysis_timeout,
-                            )
-
-                    task = asyncio.create_task(_run_summary())
-                    self._summary_tasks[record.media_id] = task
-                try:
-                    summary = await task
-                finally:
-                    if task.done():
-                        self._summary_tasks.pop(record.media_id, None)
-                summary = (summary or "图片未能自动解析")[: self.summary_max_chars]
-                await self.store.update_summary(
-                    record.media_id, summary, getattr(self.multimodal, "model", "")
+                result = await self.image_capability.execute(
+                    record, cache_key=(record.sha256, "summary"), prompt=None
                 )
+                summary = result.content
+                summary = (summary or "图片未能自动解析")[: self.summary_max_chars]
+                await self.store.update_summary(record.media_id, summary, result.model)
                 resource.extra["summary"] = summary
             except Exception:
                 summary = "图片未能自动解析；如确有需要，可调用 inspect_image。"
@@ -557,12 +597,12 @@ class MediaService:
             max_chars or self.file_extract_max_chars, self.file_extract_max_chars
         )
         try:
-            data = record.local_path.read_bytes()
-        except OSError:
+            result = await self.file_capability.execute(record)
+        except Exception:
             return FileInspection(
                 media_uri, error="MEDIA_NOT_AVAILABLE", message="文件不可用"
             )
-        text = data.decode("utf-8", errors="replace")
+        text = result.content
         return FileInspection(
             media_uri, content=text[:limit], truncated=len(text) > limit
         )
@@ -621,16 +661,18 @@ class MediaService:
         cached = await self.store.get_transcript(record.media_id)
         if cached:
             return VoiceTranscription(media_uri, transcript=cached[0], cached=True)
-        task = self._transcription_tasks.get(record.media_id)
-        if task is None:
-            task = asyncio.create_task(self._transcribe_record(record))
-            self._transcription_tasks[record.media_id] = task
         try:
-            transcript, is_cached = await asyncio.shield(task)
-            return VoiceTranscription(
-                media_uri, transcript=transcript, cached=is_cached
+            result = await self.voice_capability.execute(
+                record, cache_key=(record.sha256, "transcript")
             )
-        except asyncio.TimeoutError:
+            transcript = result.content[: self.voice_max_chars]
+            await self.store.update_transcript(
+                record.media_id, transcript, result.model
+            )
+            return VoiceTranscription(
+                media_uri, transcript=transcript, cached=result.cached
+            )
+        except MediaCapabilityTimeoutError:
             return VoiceTranscription(
                 media_uri, error="TRANSCRIPTION_TIMEOUT", message="语音转写超时"
             )
@@ -639,28 +681,6 @@ class MediaService:
             return VoiceTranscription(
                 media_uri, error="TRANSCRIPTION_FAILED", message="语音转写失败"
             )
-        finally:
-            if task.done() and self._transcription_tasks.get(record.media_id) is task:
-                self._transcription_tasks.pop(record.media_id, None)
-
-    async def _transcribe_record(self, record: MediaRecord) -> tuple[str, bool]:
-        async with self.voice_sem:
-            cached = await self.store.get_transcript(record.media_id)
-            if cached:
-                return cached[0], True
-            transcript = await asyncio.wait_for(
-                self.voice_transcriber.transcribe(str(record.local_path)),
-                timeout=self.voice_timeout,
-            )
-            transcript = (transcript or "").strip()[: self.voice_max_chars]
-            if not transcript:
-                raise ValueError("未能识别出语音内容")
-            await self.store.update_transcript(
-                record.media_id,
-                transcript,
-                getattr(self.voice_transcriber, "model_name", ""),
-            )
-        return transcript, False
 
     async def inspect_image(
         self, *, chat_id: str, media_uri: str, question: str
@@ -693,27 +713,16 @@ class MediaService:
                 media_uri, error="IMAGE_TOO_LARGE", message="图片超过大小限制"
             )
         normalized_question = " ".join(question.split())[:2000]
-        cache_key = (record.sha256, normalized_question)
-        if cache_key in self._inspection_cache:
-            self._inspection_cache.move_to_end(cache_key)
-            return ImageInspection(
-                media_uri, analysis=self._inspection_cache[cache_key], cached=True
-            )
         try:
-            async with self.vlm_sem:
-                result = await asyncio.wait_for(
-                    self.multimodal.analyze_image(
-                        str(record.local_path), prompt=normalized_question
-                    ),
-                    timeout=self.analysis_timeout,
-                )
-            analysis = (result or "").strip()
-            self._inspection_cache[cache_key] = analysis
-            self._inspection_cache.move_to_end(cache_key)
-            while len(self._inspection_cache) > self._inspection_cache_max:
-                self._inspection_cache.popitem(last=False)
-            return ImageInspection(media_uri, analysis=analysis)
-        except asyncio.TimeoutError:
+            result = await self.image_capability.execute(
+                record,
+                cache_key=(record.sha256, "inspect", normalized_question),
+                prompt=normalized_question,
+            )
+            return ImageInspection(
+                media_uri, analysis=result.content, cached=result.cached
+            )
+        except MediaCapabilityTimeoutError:
             return ImageInspection(
                 media_uri, error="ANALYSIS_TIMEOUT", message="图片分析超时"
             )
