@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -53,6 +54,25 @@ async def test_media_capability_falls_back_and_caches_result():
     assert not initial.cached
     assert cached.cached
     assert first.calls == second.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_media_capability_logs_underlying_provider_error(caplog):
+    capability = MediaCapability(
+        name="voice_transcription",
+        resource_types={"voice"},
+        max_bytes=100,
+        timeout=1,
+        concurrency=1,
+        providers=[FailingProvider()],
+    )
+    record = SimpleNamespace(resource_type="voice", size=10, media_id="media-1")
+
+    with caplog.at_level(logging.WARNING, logger="core.media.capabilities"):
+        with pytest.raises(RuntimeError, match="voice_transcription providers failed"):
+            await capability.execute(record)
+
+    assert "detail=unavailable" in caplog.text
 
 
 @pytest.mark.asyncio

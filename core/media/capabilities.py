@@ -138,13 +138,15 @@ class MediaCapability:
             except Exception as exc:
                 errors.append(exc)
                 _log.warning(
-                    "媒体能力失败 capability=%s provider=%s model=%s media_id=%s elapsed_ms=%d error=%s",
+                    "媒体能力失败 capability=%s provider=%s model=%s media_id=%s elapsed_ms=%d error=%s detail=%.500s",
                     self.name,
                     provider.name,
                     getattr(provider, "model_name", ""),
                     record.media_id,
                     (time.monotonic() - started) * 1000,
                     type(exc).__name__,
+                    str(exc),
+                    exc_info=True,
                 )
         if errors and all(isinstance(error, asyncio.TimeoutError) for error in errors):
             raise MediaCapabilityTimeoutError(f"{self.name} providers timed out")

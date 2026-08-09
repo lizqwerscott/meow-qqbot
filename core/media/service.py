@@ -969,7 +969,7 @@ class MediaService:
                 media_uri, error="TRANSCRIPTION_TIMEOUT", message="语音转写超时"
             )
         except Exception as exc:
-            _log.warning("语音转写失败: %s", exc)
+            _log.warning("语音转写失败: %s", exc, exc_info=True)
             return VoiceTranscription(
                 media_uri, error="TRANSCRIPTION_FAILED", message="语音转写失败"
             )
