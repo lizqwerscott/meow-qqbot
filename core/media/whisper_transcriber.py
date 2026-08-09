@@ -11,13 +11,13 @@ class WhisperTranscriber:
         model_name: str = "small",
         language: str = "",
         device: str = "cpu",
-        compute_type: str | None = None,
+        compute_type: str = "int8",
         download_root: str | Path = "data/media/whisper",
     ):
         self.model_name = model_name
         self.language = language.strip()
         self.device = device
-        self.compute_type = compute_type
+        self.compute_type = compute_type  # int8 = default CPU quantization
         self.download_root = Path(download_root)
         self._model = None
         self._load_lock = asyncio.Lock()
