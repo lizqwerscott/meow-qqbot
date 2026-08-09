@@ -3,10 +3,12 @@ import ipaddress
 import logging
 import socket
 import time
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
 from pypdf import PdfReader
+from qqbot_agent_sdk.audio import convert_audio_to_wav, looks_like_silk
 
 from core.media.capabilities import MediaCapability, MediaCapabilityTimeoutError
 from core.media.models import (
@@ -363,6 +365,70 @@ class MediaService:
         await self.open()
         return await self.store.delete_media(media_id)
 
+    async def _prepare_voice_data(
+        self, data: bytes, mime: str, resource: ResourceMeta, source_url: str
+    ) -> tuple[bytes, str, bytes | None]:
+        if resource.resource_type != "voice" or not (
+            looks_like_silk(data) or data.startswith(b"\x02#!SILK_V3")
+        ):
+            return data, mime, None
+        wav_path = None
+        try:
+            wav_path = await convert_audio_to_wav(
+                data, resource.filename or source_url, log_tag="MediaService"
+            )
+            if not wav_path:
+                return data, "audio/silk", None
+            wav_data = await asyncio.to_thread(Path(wav_path).read_bytes)
+            if not wav_data.startswith(b"RIFF"):
+                return data, "audio/silk", None
+            return wav_data, "audio/wav", data
+        except Exception as exc:
+            _log.warning("语音转换失败，保留原始 Silk: %s", exc)
+            return data, "audio/silk", None
+        finally:
+            if wav_path is not None:
+                try:
+                    await asyncio.to_thread(Path(wav_path).unlink, missing_ok=True)
+                except OSError:
+                    pass
+
+    async def _ingest_resource(
+        self,
+        resource: ResourceMeta,
+        source_url: str,
+        chat_id: str,
+        message_id: str,
+        sender_id: str,
+        position: int,
+    ) -> MediaRecord:
+        data, mime = await self._download(source_url, resource)
+        data, mime, original_data = await self._prepare_voice_data(
+            data, mime, resource, source_url
+        )
+        record = await self.store.save(
+            chat_id=chat_id,
+            message_id=message_id,
+            sender_id=sender_id,
+            resource_type=resource.resource_type,
+            source_url=source_url,
+            mime_type=mime or resource.mime_type,
+            filename=resource.filename,
+            data=data,
+            original_data=original_data,
+            position=position,
+        )
+        resource.media_id = record.media_id
+        resource.media_uri = record.media_uri
+        resource.resource_id = record.media_uri
+        resource.hash = record.sha256
+        resource.mime_type = record.mime_type
+        resource.size = record.size
+        resource.storage_status = "ready"
+        resource.source_url = ""
+        resource.extra["summary"] = record.summary
+        return record
+
     async def ingest_message(self, message: InputMessage) -> None:
         if not self.enabled:
             return
@@ -376,27 +442,15 @@ class MediaService:
                 resource.storage_status = "failed"
                 continue
             try:
-                data, mime = await self._download(source_url, resource)
-                record = await self.store.save(
-                    chat_id=message.chat_id,
-                    message_id=message.id,
-                    sender_id=message.sender_id,
-                    resource_type=resource.resource_type,
-                    source_url=source_url,
-                    mime_type=mime or resource.mime_type,
-                    filename=resource.filename,
-                    data=data,
-                    position=index,
+                record = await self._ingest_resource(
+                    resource,
+                    source_url,
+                    message.chat_id,
+                    message.id,
+                    message.sender_id,
+                    index,
                 )
-                resource.media_id = record.media_id
-                resource.media_uri = record.media_uri
-                resource.resource_id = record.media_uri
-                resource.hash = record.sha256
-                resource.mime_type = record.mime_type
-                resource.size = record.size
-                resource.storage_status = "ready"
                 resource.source_url = ""
-                resource.extra["summary"] = record.summary
             except Exception as exc:
                 resource.storage_status = "failed"
                 resource.source_url = ""
@@ -417,27 +471,15 @@ class MediaService:
             if resource.media_uri or not resource.source_url:
                 continue
             try:
-                data, mime = await self._download(resource.source_url, resource)
-                record = await self.store.save(
-                    chat_id=message.chat_id,
-                    message_id=message.replied_message_id or f"reply:{message.id}",
-                    sender_id=message.replied_author_id or message.sender_id,
-                    resource_type=resource.resource_type,
-                    source_url=resource.source_url,
-                    mime_type=mime or resource.mime_type,
-                    filename=resource.filename,
-                    data=data,
-                    position=index,
+                record = await self._ingest_resource(
+                    resource,
+                    resource.source_url,
+                    message.chat_id,
+                    message.replied_message_id or f"reply:{message.id}",
+                    message.replied_author_id or message.sender_id,
+                    index,
                 )
-                resource.media_id = record.media_id
-                resource.media_uri = record.media_uri
-                resource.resource_id = record.media_uri
-                resource.hash = record.sha256
-                resource.mime_type = record.mime_type
-                resource.size = record.size
-                resource.storage_status = "ready"
                 resource.source_url = ""
-                resource.extra["summary"] = record.summary
             except Exception as exc:
                 resource.storage_status = "failed"
                 resource.source_url = ""

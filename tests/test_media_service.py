@@ -19,6 +19,116 @@ class FakeTranscriber:
 
 
 @pytest.mark.asyncio
+async def test_user_silk_voice_is_saved_as_wav_with_source_sample(
+    tmp_path, monkeypatch
+):
+    service = MediaService(http_client=AsyncMock(), storage_dir=tmp_path)
+    await service.open()
+    converted_path = tmp_path / "converted.wav"
+    converted_path.write_bytes(b"RIFF\x00\x00\x00\x00WAVEconverted")
+    converter = AsyncMock(return_value=str(converted_path))
+    monkeypatch.setattr("core.media.service.convert_audio_to_wav", converter)
+    resource = ResourceMeta(
+        resource_type="voice",
+        source_url="https://example.test/voice.amr",
+        mime_type="audio/mp3",
+        filename="voice.amr",
+    )
+    message = InputMessage(
+        id="m1",
+        sender_id="u1",
+        chat_id="g1",
+        content="",
+        is_group=True,
+        resources=[resource],
+    )
+    service._download = AsyncMock(
+        return_value=(b"\x02#!SILK_V3\x11\x00raw", "audio/mp3")
+    )
+
+    await service.ingest_message(message)
+
+    converter.assert_awaited_once()
+    assert resource.mime_type == "audio/wav"
+    assert resource.storage_status == "ready"
+    record = await service.store.authorize("g1", resource.media_uri)
+    assert record is not None
+    assert record.local_path.suffix == ".wav"
+    assert record.local_path.read_bytes().startswith(b"RIFF")
+    assert (
+        record.local_path.with_name(f"{record.local_path.stem}.source.silk")
+        .read_bytes()
+        .startswith(b"\x02#!SILK_V3")
+    )
+
+
+@pytest.mark.asyncio
+async def test_voice_conversion_error_falls_back_to_raw_silk(tmp_path, monkeypatch):
+    service = MediaService(http_client=AsyncMock(), storage_dir=tmp_path)
+    await service.open()
+    converter = AsyncMock(side_effect=RuntimeError("decoder unavailable"))
+    monkeypatch.setattr("core.media.service.convert_audio_to_wav", converter)
+    resource = ResourceMeta(
+        resource_type="voice",
+        source_url="https://example.test/voice.amr",
+        mime_type="audio/mp3",
+        filename="voice.amr",
+    )
+    message = InputMessage(
+        id="m1",
+        sender_id="u1",
+        chat_id="g1",
+        content="",
+        is_group=True,
+        resources=[resource],
+    )
+    raw_data = b"\x02#!SILK_V3\x11\x00raw"
+    service._download = AsyncMock(return_value=(raw_data, "audio/mp3"))
+
+    await service.ingest_message(message)
+
+    assert resource.storage_status == "ready"
+    assert resource.mime_type == "audio/silk"
+    record = await service.store.authorize("g1", resource.media_uri)
+    assert record is not None
+    assert record.local_path.suffix == ".silk"
+    assert record.local_path.read_bytes() == raw_data
+
+
+@pytest.mark.asyncio
+async def test_file_silk_is_saved_without_conversion(tmp_path, monkeypatch):
+    service = MediaService(http_client=AsyncMock(), storage_dir=tmp_path)
+    await service.open()
+    converter = AsyncMock()
+    monkeypatch.setattr("core.media.service.convert_audio_to_wav", converter)
+    resource = ResourceMeta(
+        resource_type="file",
+        source_url="https://example.test/voice.amr",
+        mime_type="audio/mp3",
+        filename="voice.amr",
+    )
+    message = InputMessage(
+        id="m1",
+        sender_id="u1",
+        chat_id="g1",
+        content="",
+        is_group=True,
+        resources=[resource],
+    )
+    raw_data = b"\x02#!SILK_V3\x11\x00raw"
+    service._download = AsyncMock(return_value=(raw_data, "audio/mp3"))
+
+    await service.ingest_message(message)
+
+    converter.assert_not_awaited()
+    assert resource.mime_type == "audio/mp3"
+    record = await service.store.authorize("g1", resource.media_uri)
+    assert record is not None
+    assert record.local_path.suffix == ".amr"
+    assert record.local_path.read_bytes() == raw_data
+
+
+@pytest.mark.asyncio
 async def test_image_understanding_disabled_hides_tools(tmp_path):
     service = MediaService(
         http_client=AsyncMock(),

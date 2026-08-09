@@ -9,12 +9,15 @@ from urllib.parse import urlparse
 
 from core.media.models import MediaRecord
 
+_SILK_V3_HEADERS = (b"#!SILK_V3", b"\x02#!SILK_V3")
+_SILK_MIME_TYPE = "audio/silk"
+
 
 class MediaStore:
     """受控媒体文件与 SQLite 授权索引。"""
 
     def __init__(self, root: str | Path, retention_days: int | None = None):
-        self.root = Path(root)
+        self.root = Path(root).resolve()
         self.inbound = self.root / "inbound"
         self.index_path = self.root / "index.sqlite3"
         self._lock = asyncio.Lock()
@@ -24,7 +27,9 @@ class MediaStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.inbound.mkdir(parents=True, exist_ok=True)
         self._conn = self._open_sync()
+        self._normalize_local_paths_sync()
         self._repair_sync()
+        self._migrate_silk_metadata_sync()
 
     def _open_sync(self):
         conn = sqlite3.connect(self.index_path, check_same_thread=False)
@@ -91,13 +96,95 @@ class MediaStore:
             return
         async with self._lock:
             self._repair_sync()
+            self._migrate_silk_metadata_sync()
+
+    def _resolve_local_path(self, local_path: str) -> Path:
+        path = Path(local_path)
+        if path.is_absolute() or path.is_file():
+            return path.resolve()
+        try:
+            inbound_index = path.parts.index("inbound")
+        except ValueError:
+            return (self.root / path).resolve()
+        return (self.root / Path(*path.parts[inbound_index:])).resolve()
+
+    def _source_path(self, path: Path) -> Path:
+        return path.with_name(f"{path.stem}.source.silk")
+
+    def _normalize_local_paths_sync(self) -> None:
+        conn = self._conn
+        if conn is None:
+            return
+        rows = conn.execute("SELECT media_id, local_path FROM media_objects").fetchall()
+        for row in rows:
+            path = self._resolve_local_path(row["local_path"])
+            if str(path) != row["local_path"]:
+                conn.execute(
+                    "UPDATE media_objects SET local_path=? WHERE media_id=?",
+                    (str(path), row["media_id"]),
+                )
+        conn.commit()
+
+    def _migrate_silk_metadata_sync(self) -> None:
+        conn = self._conn
+        if conn is None:
+            return
+        rows = conn.execute(
+            "SELECT media_id, local_path FROM media_objects "
+            "WHERE EXISTS ("
+            "SELECT 1 FROM media_messages WHERE media_id=media_objects.media_id "
+            "AND resource_type='voice'"
+            ") OR ("
+            "NOT EXISTS ("
+            "SELECT 1 FROM media_messages WHERE media_id=media_objects.media_id "
+            "AND resource_type NOT IN ('', 'voice')"
+            ") AND lower(mime_type) IN ('audio/mp3', 'audio/amr') "
+            "AND lower(local_path) LIKE '%.amr'"
+            ")"
+        ).fetchall()
+        for row in rows:
+            path = self._resolve_local_path(row["local_path"])
+            try:
+                with path.open("rb") as file:
+                    is_silk = file.read(len(max(_SILK_V3_HEADERS, key=len))).startswith(
+                        _SILK_V3_HEADERS
+                    )
+            except OSError:
+                continue
+            if not is_silk:
+                continue
+            new_path = path.with_suffix(".silk")
+            if new_path != path:
+                if not new_path.exists():
+                    os.replace(path, new_path)
+                else:
+                    path.unlink(missing_ok=True)
+                path = new_path
+            conn.execute(
+                "UPDATE media_objects SET mime_type=?, local_path=? WHERE media_id=?",
+                (_SILK_MIME_TYPE, str(path), row["media_id"]),
+            )
+        conn.commit()
+
+    @staticmethod
+    def _normalize_audio_metadata(
+        data: bytes, mime_type: str, suffix: str, resource_type: str
+    ) -> tuple[str, str]:
+        if resource_type != "voice":
+            return mime_type, suffix
+        if data.startswith(_SILK_V3_HEADERS):
+            return _SILK_MIME_TYPE, ".silk"
+        if data.startswith(b"RIFF"):
+            return "audio/wav", ".wav"
+        return mime_type, suffix
 
     def _repair_sync(self) -> None:
         conn = self._conn
         if conn is None:
             return
         rows = conn.execute("SELECT media_id, local_path FROM media_objects").fetchall()
-        indexed = {Path(row["local_path"]).resolve() for row in rows}
+        indexed = {self._resolve_local_path(row["local_path"]) for row in rows}
+        indexed.update(self._source_path(path) for path in tuple(indexed))
         for path in self.inbound.rglob("*"):
             if path.is_file() and path.resolve() not in indexed:
                 try:
@@ -117,6 +204,7 @@ class MediaStore:
         mime_type: str,
         filename: str,
         data: bytes,
+        original_data: bytes | None = None,
         position: int = 0,
     ) -> MediaRecord:
         if self._conn is None:
@@ -131,6 +219,9 @@ class MediaStore:
         suffix = (
             suffix if len(suffix) <= 10 and suffix.replace(".", "").isalnum() else ""
         )
+        mime_type, suffix = self._normalize_audio_metadata(
+            data, mime_type, suffix, resource_type
+        )
         path = self.inbound / digest[:2] / f"{digest}{suffix}"
         path.parent.mkdir(parents=True, exist_ok=True)
         async with self._lock:
@@ -141,6 +232,7 @@ class MediaStore:
                 mime_type,
                 filename,
                 data,
+                original_data,
                 chat_id,
                 message_id,
                 sender_id,
@@ -174,6 +266,7 @@ class MediaStore:
         mime_type,
         filename,
         data,
+        original_data,
         chat_id,
         message_id,
         sender_id,
@@ -185,6 +278,12 @@ class MediaStore:
             temp = path.with_suffix(path.suffix + ".tmp")
             temp.write_bytes(data)
             os.replace(temp, path)
+        if original_data is not None:
+            source_path = self._source_path(path)
+            if not source_path.exists():
+                temp = source_path.with_suffix(source_path.suffix + ".tmp")
+                temp.write_bytes(original_data)
+                os.replace(temp, source_path)
         conn = self._conn
         assert conn is not None
         conn.execute(
@@ -476,6 +575,14 @@ class MediaStore:
         item.setdefault("source_sender_id", "")
         return item
 
+    def _remove_media_files(self, path: Path) -> bool:
+        try:
+            path.unlink(missing_ok=True)
+            self._source_path(path).unlink(missing_ok=True)
+        except OSError:
+            return False
+        return True
+
     async def delete_media(self, media_id: str) -> bool:
         if self._conn is None:
             return False
@@ -485,9 +592,7 @@ class MediaStore:
             ).fetchone()
             if not row:
                 return False
-            try:
-                Path(row["local_path"]).unlink(missing_ok=True)
-            except OSError:
+            if not self._remove_media_files(Path(row["local_path"])):
                 return False
             self._conn.execute(
                 "DELETE FROM media_messages WHERE media_id=?", (media_id,)
@@ -515,9 +620,7 @@ class MediaStore:
             rows = self._conn.execute("SELECT local_path FROM media_objects").fetchall()
             removed_ids = []
             for row in rows:
-                try:
-                    Path(row["local_path"]).unlink(missing_ok=True)
-                except OSError:
+                if not self._remove_media_files(Path(row["local_path"])):
                     continue
                 removed_ids.append(row["local_path"])
             if removed_ids:
@@ -544,9 +647,7 @@ class MediaStore:
             "SELECT media_id,local_path,size FROM media_objects WHERE media_id NOT IN (SELECT media_id FROM media_messages)",
         ).fetchall()
         for row in rows:
-            try:
-                Path(row["local_path"]).unlink(missing_ok=True)
-            except OSError:
+            if not self._remove_media_files(Path(row["local_path"])):
                 continue
             conn.execute(
                 "DELETE FROM media_objects WHERE media_id=?", (row["media_id"],)
