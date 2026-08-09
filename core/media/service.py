@@ -19,6 +19,7 @@ from core.media.models import (
     PdfInspection,
     VoiceTranscription,
 )
+from core.media.ocr import OcrEngine, OcrProvider, is_ocr_available
 from core.media.store import MediaStore
 from core.message import InputMessage, ResourceMeta
 
@@ -166,6 +167,7 @@ class MediaService:
         ai_service=None,
         voice_transcriber=None,
         voice_transcription=None,
+        ocr_engine=None,
     ):
         self.enabled = enabled
         self.http_client = http_client
@@ -175,6 +177,10 @@ class MediaService:
         self.max_auto_images = max(0, int(cfg.get("max_auto_images", 3)))
         self.analysis_timeout = max(1, float(cfg.get("analysis_timeout_seconds", 30)))
         self.summary_max_chars = max(20, int(cfg.get("summary_max_chars", 300)))
+        ocr_cfg = cfg.get("ocr", {}) or {}
+        self.ocr_enabled = bool(ocr_cfg.get("enabled", True))
+        self.ocr_min_chars = max(0, int(ocr_cfg.get("min_chars", 8)))
+        self.ocr_max_chars = max(1, int(ocr_cfg.get("max_chars", 2000)))
         self.recent_window_seconds = max(0, int(recent_window_seconds))
         self.recent_max_items = max(0, int(recent_max_items))
         self.max_attachments = max(1, int(max_attachments_per_message))
@@ -202,13 +208,36 @@ class MediaService:
         self.voice_max_chars = max(1, int(voice_cfg.get("max_chars", 4_000)))
         self.store = MediaStore(storage_dir)
         self._opened = False
+        vlm_provider = _MultimodalProvider(multimodal) if multimodal else None
+        ocr_provider = None
+        if self.ocr_enabled:
+            # 显式注入的引擎（测试/替换实现）直接采用；默认引擎要求 rapidocr 可导入
+            if ocr_engine is not None or is_ocr_available():
+                ocr_engine = ocr_engine or OcrEngine()
+                ocr_provider = OcrProvider(
+                    ocr_engine,
+                    min_chars=self.ocr_min_chars,
+                    max_chars=self.ocr_max_chars,
+                )
+            else:
+                _log.warning("OCR 已启用但 rapidocr 未安装，跳过本地 OCR provider")
+        # 自动摘要：OCR 优先（截图/带字表情包直接出文字摘要，省 VLM 费用）
         self.image_capability = MediaCapability(
             name="image_understanding",
             resource_types={"image"},
             max_bytes=self.max_image_bytes,
             timeout=self.analysis_timeout,
             concurrency=cfg.get("concurrency", 2),
-            providers=[_MultimodalProvider(multimodal)] if multimodal else [],
+            providers=[p for p in (ocr_provider, vlm_provider) if p],
+        )
+        # image 工具：VLM 优先（回答具体问题），OCR 兜底（VLM 不可用时至少给出文字）
+        self.image_inspect_capability = MediaCapability(
+            name="image_inspection",
+            resource_types={"image"},
+            max_bytes=self.max_image_bytes,
+            timeout=self.analysis_timeout,
+            concurrency=cfg.get("concurrency", 2),
+            providers=[p for p in (vlm_provider, ocr_provider) if p],
         )
         self.file_capability = MediaCapability(
             name="text_extraction",
@@ -275,7 +304,11 @@ class MediaService:
 
     @property
     def image_tools_enabled(self) -> bool:
-        return self.enabled and self.image_enabled and self.image_capability.enabled
+        return (
+            self.enabled
+            and self.image_enabled
+            and self.image_inspect_capability.enabled
+        )
 
     @property
     def file_tools_enabled(self) -> bool:
@@ -1052,7 +1085,7 @@ class MediaService:
             )
         normalized_question = " ".join(question.split())[:2000]
         try:
-            result = await self.image_capability.execute(
+            result = await self.image_inspect_capability.execute(
                 record,
                 cache_key=(
                     record.sha256,
@@ -1062,8 +1095,11 @@ class MediaService:
                 ),
                 prompt=normalized_question,
             )
+            note = ""
+            if result.provider == OcrProvider.name:
+                note = "视觉模型暂不可用，以下为图片文字识别（OCR）结果，不代表对画面的理解"
             return ImageInspection(
-                media_uri, analysis=result.content, cached=result.cached
+                media_uri, analysis=result.content, cached=result.cached, note=note
             )
         except MediaCapabilityTimeoutError:
             return ImageInspection(

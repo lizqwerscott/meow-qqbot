@@ -32,15 +32,19 @@ class ImageInspection:
     cached: bool = False
     error: str = ""
     message: str = ""
+    note: str = ""
 
     def as_dict(self) -> dict:
         if self.error:
             return {"error": self.error, "message": self.message}
-        return {
+        d = {
             "media_uri": self.media_uri,
             "analysis": self.analysis,
             "cached": self.cached,
         }
+        if self.note:
+            d["note"] = self.note
+        return d
 
 
 @dataclass(frozen=True)

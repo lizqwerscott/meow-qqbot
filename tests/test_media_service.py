@@ -18,6 +18,16 @@ class FakeTranscriber:
         self.transcribe = AsyncMock(return_value="你好 hello")
 
 
+class FakeOcrEngine:
+    def __init__(self, lines):
+        self._lines = lines
+        self.calls = []
+
+    async def recognize(self, image_path):
+        self.calls.append(image_path)
+        return list(self._lines)
+
+
 @pytest.mark.asyncio
 async def test_user_silk_voice_is_saved_as_wav_with_source_sample(
     tmp_path, monkeypatch
@@ -534,6 +544,234 @@ async def test_current_prompt_version_replaces_persisted_stale_summary(tmp_path)
     assert "新摘要" in context.as_text()
     assert refreshed.summary_version == "v2"
     multimodal.analyze_image.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_summary_uses_ocr_text_when_multimodal_absent(tmp_path):
+    ocr = FakeOcrEngine(["这是截图里的第一行", "这是第二行内容"])
+    service = MediaService(
+        http_client=AsyncMock(), storage_dir=tmp_path, ocr_engine=ocr
+    )
+    await service.open()
+    record = await service.store.save(
+        chat_id="g1",
+        message_id="m1",
+        sender_id="u1",
+        resource_type="image",
+        source_url="https://example.test/image.png",
+        mime_type="image/png",
+        filename="image.png",
+        data=b"image",
+    )
+    message = InputMessage(
+        id="m1",
+        sender_id="u1",
+        chat_id="g1",
+        content="看看图片",
+        is_group=True,
+        resources=[ResourceMeta(resource_type="image", media_uri=record.media_uri)],
+    )
+
+    context = await service.prepare_for_ai(message)
+    refreshed = await service.store.authorize("g1", record.media_uri, image_only=True)
+
+    assert "这是截图里的第一行" in context.as_text()
+    assert refreshed.summary_model == "PP-OCRv6-small"
+    assert ocr.calls  # OCR 被调用了
+
+
+@pytest.mark.asyncio
+async def test_summary_falls_through_to_vlm_when_ocr_finds_no_text(tmp_path):
+    multimodal = type("Multimodal", (), {})()
+    multimodal.model = "vision-model"
+    multimodal.analyze_image = AsyncMock(return_value="画面里有一只猫")
+    ocr = FakeOcrEngine([])  # OCR 无文字 → 回退 VLM
+    service = MediaService(
+        http_client=AsyncMock(),
+        multimodal=multimodal,
+        storage_dir=tmp_path,
+        ocr_engine=ocr,
+    )
+    await service.open()
+    record = await service.store.save(
+        chat_id="g1",
+        message_id="m1",
+        sender_id="u1",
+        resource_type="image",
+        source_url="https://example.test/image.png",
+        mime_type="image/png",
+        filename="image.png",
+        data=b"image",
+    )
+    message = InputMessage(
+        id="m1",
+        sender_id="u1",
+        chat_id="g1",
+        content="看看图片",
+        is_group=True,
+        resources=[ResourceMeta(resource_type="image", media_uri=record.media_uri)],
+    )
+
+    context = await service.prepare_for_ai(message)
+
+    assert "画面里有一只猫" in context.as_text()
+    multimodal.analyze_image.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_inspect_uses_vlm_first_and_skips_ocr(tmp_path):
+    multimodal = type("Multimodal", (), {})()
+    multimodal.model = "vision-model"
+    multimodal.analyze_image = AsyncMock(return_value="图片里的人在跑步")
+    ocr = FakeOcrEngine(["水印文字"])  # OCR 有文字也不应覆盖 VLM 答案
+    service = MediaService(
+        http_client=AsyncMock(),
+        multimodal=multimodal,
+        storage_dir=tmp_path,
+        ocr_engine=ocr,
+    )
+    await service.open()
+    record = await service.store.save(
+        chat_id="g1",
+        message_id="m1",
+        sender_id="u1",
+        resource_type="image",
+        source_url="https://example.test/image.png",
+        mime_type="image/png",
+        filename="image.png",
+        data=b"image",
+    )
+
+    result = await service.inspect_image(
+        chat_id="g1", media_uri=record.media_uri, question="这个人在做什么？"
+    )
+
+    assert result.analysis == "图片里的人在跑步"
+    assert not result.note  # 无降级 note
+    assert not ocr.calls  # VLM 成功时 OCR 不执行
+    assert result.as_dict() == {
+        "media_uri": record.media_uri,
+        "analysis": "图片里的人在跑步",
+        "cached": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_inspect_falls_back_to_ocr_when_vlm_fails(tmp_path):
+    multimodal = type("Multimodal", (), {})()
+    multimodal.model = "vision-model"
+    multimodal.analyze_image = AsyncMock(side_effect=RuntimeError("VLM 挂了"))
+    ocr = FakeOcrEngine(["验证码: A1B2", "请输入结果"])
+    service = MediaService(
+        http_client=AsyncMock(),
+        multimodal=multimodal,
+        storage_dir=tmp_path,
+        ocr_engine=ocr,
+    )
+    await service.open()
+    record = await service.store.save(
+        chat_id="g1",
+        message_id="m1",
+        sender_id="u1",
+        resource_type="image",
+        source_url="https://example.test/image.png",
+        mime_type="image/png",
+        filename="image.png",
+        data=b"image",
+    )
+
+    result = await service.inspect_image(
+        chat_id="g1", media_uri=record.media_uri, question="验证码是多少？"
+    )
+
+    assert result.analysis == "验证码: A1B2\n请输入结果"
+    assert "视觉模型暂不可用" in result.note
+    assert result.as_dict()["note"] == result.note
+    assert ocr.calls  # OCR 兜底被调用
+
+
+@pytest.mark.asyncio
+async def test_inspect_fails_honestly_when_both_unavailable(tmp_path):
+    multimodal = type("Multimodal", (), {})()
+    multimodal.model = "vision-model"
+    multimodal.analyze_image = AsyncMock(side_effect=RuntimeError("VLM 挂了"))
+    ocr = FakeOcrEngine([])  # OCR 也无文字
+    service = MediaService(
+        http_client=AsyncMock(),
+        multimodal=multimodal,
+        storage_dir=tmp_path,
+        ocr_engine=ocr,
+    )
+    await service.open()
+    record = await service.store.save(
+        chat_id="g1",
+        message_id="m1",
+        sender_id="u1",
+        resource_type="image",
+        source_url="https://example.test/image.png",
+        mime_type="image/png",
+        filename="image.png",
+        data=b"image",
+    )
+
+    result = await service.inspect_image(
+        chat_id="g1", media_uri=record.media_uri, question="这是什么？"
+    )
+
+    assert result.error == "ANALYSIS_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_image_tools_hidden_when_ocr_unavailable_and_no_vlm(
+    tmp_path, monkeypatch
+):
+    # rapidocr 不可导入 且 无 VLM → image 工具应保持隐藏（不暴露恒失败的工具）
+    monkeypatch.setattr("core.media.service.is_ocr_available", lambda: False)
+    service = MediaService(http_client=AsyncMock(), storage_dir=tmp_path)
+    assert service.image_tools_enabled is False
+    assert service.image_capability.providers == ()
+    assert service.image_inspect_capability.providers == ()
+
+
+@pytest.mark.asyncio
+async def test_ocr_disabled_via_config(tmp_path):
+    service = MediaService(
+        http_client=AsyncMock(),
+        storage_dir=tmp_path,
+        image_understanding={"ocr": {"enabled": False}},
+    )
+    assert service.ocr_enabled is False
+    assert service.image_capability.providers == ()
+    assert service.image_inspect_capability.providers == ()
+
+
+@pytest.mark.asyncio
+async def test_injected_ocr_engine_used_even_when_rapidocr_unavailable(
+    tmp_path, monkeypatch
+):
+    # 显式注入 ocr_engine 时，即使 rapidocr 不可导入也挂载 OCR provider
+    monkeypatch.setattr("core.media.service.is_ocr_available", lambda: False)
+    ocr = FakeOcrEngine(["这是注入引擎的识别文本内容"])
+    service = MediaService(
+        http_client=AsyncMock(), storage_dir=tmp_path, ocr_engine=ocr
+    )
+    assert [p.name for p in service.image_capability.providers] == ["rapidocr"]
+    assert service.image_tools_enabled is True
+    await service.open()
+    record = await service.store.save(
+        chat_id="g1",
+        message_id="m1",
+        sender_id="u1",
+        resource_type="image",
+        source_url="https://example.test/image.png",
+        mime_type="image/png",
+        filename="image.png",
+        data=b"image",
+    )
+    result = await service.inspect_image(
+        chat_id="g1", media_uri=record.media_uri, question="写了什么？"
+    )
+    assert result.analysis == "这是注入引擎的识别文本内容"
 
 
 @pytest.mark.asyncio

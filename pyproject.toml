@@ -27,6 +27,8 @@ dependencies = [
     "pypdf>=6.15.0",
     "faster-whisper>=1.1.0",
     "pilk>=0.2.4",
+    "rapidocr>=3.9.2",
+    "onnxruntime>=1.28.0",
 ]
 
 [dependency-groups]
