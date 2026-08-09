@@ -9,6 +9,20 @@ from core.webui.app import create_app
 
 
 @pytest.mark.asyncio
+async def test_media_webui_list_renders_usage(tmp_path):
+    service = MediaService(http_client=SimpleNamespace(), storage_dir=tmp_path)
+    await service.open()
+    app = create_app({"media_service": service}, {})
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/media")
+
+    assert response.status_code == 200
+    assert "媒体管理" in response.text
+
+
+@pytest.mark.asyncio
 async def test_media_webui_detail_and_preview(tmp_path):
     service = MediaService(http_client=SimpleNamespace(), storage_dir=tmp_path)
     await service.open()

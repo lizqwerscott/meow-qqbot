@@ -12,7 +12,7 @@ async def media_list(
 ):
     service = request.app.state.managers.get("media_service")
     items = await service.list_media(descending=order == "desc") if service else []
-    usage = await service.usage() if service else (0, 0)
+    usage = await service.usage if service else (0, 0)
     return request.app.state.templates.TemplateResponse(
         request,
         "media/list.html",
