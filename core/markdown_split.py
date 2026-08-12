@@ -7,9 +7,13 @@
    流式 block 转发时找不切断代码围栏/markdown 表格/列表项的切点。
 
 判定谓词（is_fence_line / is_table_* / is_list_marker / is_url_line /
-is_annotation_continuation）是两份状态机的公共基础，改动只需在本模块内同步。
+is_annotation_continuation / is_heading_line / is_continuation_line）是两份
+状态机的公共基础，改动只需在本模块内同步。
 列表项 = 标记行（`1.` / `-` / `*` 等）+ 续行（URL / 「——」注解 / 缩进行）：
 切点只落在项边界、空行与「——」注解行尾，绝不拆散条目。
+标题行（ATX `#` 或「短行 + 前一行不是续行」，见 is_heading_line）绑定其
+后内容（含标题后首个空行）：切点/块尾不落在标题行尾——标题与其列表同块，
+不孤悬块尾。
 超过单条字节上限（MARKDOWN_SAFE_CHUNK_BYTE_LIMIT）的列表项按行尾 /
 UTF-8 安全字节边界硬切——QQ 单条消息上限约束下的既定行为（宁断勿丢）。
 """
@@ -81,6 +85,63 @@ def is_list_marker(line: str) -> bool:
     后紧跟数字无空白）等普通文本。
     """
     return bool(_LIST_MARKER_RE.match(line))
+
+
+# 标题行判定：ATX 标题，或「短行 + 前一行不是续行」的启发式。
+_ATX_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+\S")
+_HEADING_MAX_LEN = 24  # 标题行字符上限（短行启发式）
+
+# 续行判定：URL / 表格行 / 围栏行 / 半截 | 行——这些行不结束一个块。
+# 供标题行判定（is_heading_line 的行内排除 + after_boundary 上下文）与
+# 拆块后置处理（_de_orphan_headings）共用，避免第三份复制漂移。
+
+
+def is_continuation_line(line: str) -> bool:
+    """续行判定：裸 URL / 表格行 / 表格分隔行 / 围栏行 / 半截 `|` 行。
+
+    这些行是前一结构的续行或结构行，不结束一个块——其后的行不构成
+    「新块」上下文（标题行判定的 after_boundary 不成立），拆块时也不会
+    被当作可移动的标题（is_heading_line 行内排除）。
+    """
+    if (
+        is_url_line(line)
+        or is_table_row(line)
+        or is_table_separator(line)
+        or is_fence_line(line)
+    ):
+        return True
+    return line.lstrip().startswith("|")
+
+
+def is_heading_line(line: str, after_boundary: bool = False) -> bool:
+    """标题行判定：ATX 标题（`# ` 开头，`## 每日推荐`）无条件成立；
+    普通短行（≤ _HEADING_MAX_LEN 字符、不以句末标点结尾）还需前一行
+    不是续行（after_boundary=True：空行 / 「——」注解 / 列表标记行 / 普通行 /
+    文本起点）——`🧠 机器之心（今日 3 篇）`、`📄 arXiv cs.AI（今日更新）`、
+    `🔧 实用求助/讨论：` 都落在「短行 + 前一行不是续行」上。
+
+    前一行必须是「非续行」而非严格块边界：无标记格式下模型在普通行（开场白）
+    后直接写段落标题，只认空行/注解会漏判（标题照旧孤悬块尾）。
+    「——」注解行与续行（URL / 表格行 / 围栏行 / 半截 `|` 行，is_continuation_line）
+    行内直接排除：注解是条目的收尾不是标题（防止短注解被当标题移走造成
+    注解孤儿——与流式状态机先判注解的顺序一致），条目标题跟在 URL 后
+    不构成标题。只短不行：无标记列表里条目也短（`ForestBench：…`），全判成
+    标题会把切点整体后移甚至失去安全切点；但状态机在标题行后把标志置 False，
+    短条目链上切点仍保持（隔行可切，宁多勿跑）；句末标点收尾的短行是
+    内容不是标题（`明白了！`）。
+    标题行绑定其后内容：拆块/切点不落在标题行尾——标题与其列表同气泡，
+    避免「标题孤悬块尾、列表在下一块」的视觉断裂（tmp/new_chat.txt 事故）。
+    """
+    if is_annotation_continuation(line) or is_continuation_line(line):
+        return False
+    if _ATX_HEADING_RE.match(line):
+        return True
+    stripped = line.strip()
+    if not stripped or len(stripped) > _HEADING_MAX_LEN:
+        return False
+    if stripped.endswith(("。", "！", "？", "!", "?")):
+        return False
+    return after_boundary
 
 
 def is_annotation_continuation(line: str) -> bool:
@@ -279,7 +340,12 @@ def split_markdown(
     def _flush_table_lines():
         nonlocal table_lines, in_table, pending_header, pending_header_cells
         if in_table or (pending_header and table_lines):
-            _flush_table(chunks, table_lines, max_bytes)
+            if len(table_lines) < 3:
+                # 表头+分隔行而无数据行（2 行）不构成表格：回归文本行，
+                # 不丢弃（宁断勿丢——否则这两行内容凭空消失）
+                text_lines.extend(table_lines)
+            else:
+                _flush_table(chunks, table_lines, max_bytes)
             in_table = False
             pending_header = None
             pending_header_cells = None
@@ -343,7 +409,51 @@ def split_markdown(
         _flush_fence_and_close()
     _flush_text_buf()
 
-    return chunks
+    return _de_orphan_headings(chunks, max_bytes)
+
+
+def _de_orphan_headings(chunks: list[str], max_bytes: int) -> list[str]:
+    """标题不孤悬块尾：块以标题行结尾（且存在后续块）时，把标题行移到
+    下一块开头——标题与其列表同块。
+
+    块内上下文：前一行不是续行（空行 / 「——」注解 / 列表标记行 / 普通行，
+    用 is_continuation_line 判定）或该块只有标题一行（单行块视同边界）；
+    复用 is_heading_line 短行启发式，与流式状态机的标题判定一致。注解 /
+    URL / 表格 / 围栏行不会被误移（is_heading_line 行内排除）。
+
+    字节上限不破：下一块接近 max_bytes 放不下标题时，先把其尾部行顺延到
+    再下一块（级联，保持顺序）腾出空间——任何块都不超过 max_bytes
+    （标题 ≤ 97B，顺延必然腾得出；极端单行块整体顺延后标题单独成块）。
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(chunks):
+        chunk = chunks[i]
+        lines = chunk.split("\n")
+        if i + 1 < len(chunks) and lines and lines[-1].strip():
+            last = lines[-1]
+            prev = lines[-2].strip() if len(lines) >= 2 else ""
+            prev_boundary = not prev or bool(prev and not is_continuation_line(prev))
+            if is_heading_line(last, prev_boundary):
+                lines.pop()
+                nxt_lines = chunks[i + 1].split("\n")
+                carried: list[str] = []
+                # 标题移入下一块；放不下则顺延其尾部行（逆序收集、正序拼接）
+                while nxt_lines and (
+                    utf8len(last) + 1 + utf8len("\n".join(nxt_lines)) > max_bytes
+                ):
+                    carried.insert(0, nxt_lines.pop())
+                if lines:
+                    # 补回被弹出的标题行后的换行：annotation\nheading → annotation\n
+                    out.append("\n".join(lines) + "\n")
+                chunks[i + 1] = last + "\n" + "\n".join(nxt_lines)
+                if carried:
+                    chunks.insert(i + 2, "\n".join(carried))
+                i += 1
+                continue
+        out.append(chunk)
+        i += 1
+    return out
 
 
 # ── 流式转发安全切点（tool_loop block 投递） ──
@@ -439,10 +549,13 @@ def markdown_safe_cut(
     in_table = initial.in_table if initial else False
     in_list_item = initial.in_list_item if initial else False
     pending_header = False
+    prev_boundary = True  # pending 首行：前一行不是续行（已发文本末行或文本起点）
+    heading_pending = False  # 刚处理过标题行：紧随的空行仍绑定标题（不设切点）
     lines = text.split("\n")
     for idx, line in enumerate(lines):
         if pos >= limit:
             break
+        this_is_heading = False
         # 下一行是「——」注解 → 本行是列表项的一部分，行尾不可切
         next_line = lines[idx + 1] if idx + 1 < len(lines) else ""
         marker = is_fence_line(line)
@@ -454,12 +567,14 @@ def markdown_safe_cut(
                 in_fence = False
                 fence_marker = None
                 safe = pos + len(line) + 1  # 围栏完整结束后可切（行尾）
+            prev_boundary = True  # 围栏开/闭行都是块边界
         elif in_fence:
-            pass  # 围栏体内不可切
+            prev_boundary = False  # 围栏体内：其后行不是块边界
         elif is_table_separator(line):
             in_table = True
             pending_header = False
             in_list_item = False
+            prev_boundary = True
         elif is_table_row(line):
             if in_table:
                 # 表内数据行：行尾可切（表格延续，行保持完整；表头在块首或上一块）
@@ -467,13 +582,15 @@ def markdown_safe_cut(
             else:
                 pending_header = True  # 表头候选：等分隔行确认（表头行尾不可切）
             in_list_item = False
+            prev_boundary = False
         elif line.strip().startswith("|"):
             # 以 | 开头但未闭合：流式生成中的半截表格行/表头 → 结构内，不可切
-            pass
+            prev_boundary = False
         elif in_list_item:
             if is_list_marker(line):
                 # 新列表项开始 → 上一项已完整结束，边界处可切（含行尾换行）
                 safe = pos
+                prev_boundary = True
             elif not line.strip() and pos + len(line) < len(text):
                 # 完整空行（有换行结尾）结束列表项：行尾可切。流式生成中的
                 # 半截空白行（如缩进写到一半的 "  "，无换行）必须按续行处理——
@@ -482,6 +599,7 @@ def markdown_safe_cut(
                 # 两份状态机的空行规则在「扫描完整行 vs 流式增量」下等价。）
                 safe = pos + len(line) + 1
                 in_list_item = False
+                prev_boundary = True
             elif is_annotation_continuation(line):
                 # 「——」注解行是条目收尾（边界语义，同 trailing_structure）：
                 # 其后为新条目/空行，完整注解行（有换行结尾）行尾可切；
@@ -490,34 +608,69 @@ def markdown_safe_cut(
                 if end <= len(text):
                     safe = end
                 in_list_item = False
-            # 其余为续行（URL/缩进）：不可切，避免拆散列表项
+                prev_boundary = True
+            else:
+                prev_boundary = False  # 其余为续行（URL/缩进）：非块边界
         else:
             # 普通行：表格/围栏结束，行尾即安全切点。半截行（流式生成中，
             # 无换行结尾）不更新 safe——否则切点 = len+1 超出文本长度，
             # 调用方不切，半截链接/单词会整段发出（QQ 半截链接的根因）。
             # 下一行是「——」注解或 URL 时本行行尾也不切（条目整体同气泡）。
+            # 标题行（ATX 或 短行+前一行是块边界）行尾也不切：标题与其
+            # 列表同气泡（标题不孤悬块尾，tmp/new_chat.txt 的 arXiv 标题事故）。
             in_table = False
             pending_header = False
             if is_list_marker(line):
                 in_list_item = True
-                safe = pos  # 标记行起点 = 上一行行尾（条目边界）
-            elif is_url_line(line):
-                pass  # 裸 URL：标题的续行，行尾不设切点
+                # 标记行起点 = 上一行行尾（条目边界）。标题仍在绑定时
+                # （标题+空行+首个标记行）不设切点——否则标题在标记前孤悬
+                if not heading_pending:
+                    safe = pos
+                prev_boundary = True
+            elif is_continuation_line(line):
+                # 续行（此处等价于裸 URL——围栏/表格/半截 | 行已在上方分支
+                # 拦截；共用谓词避免第三份复制漂移）：行尾不设切点
+                prev_boundary = False
             elif is_annotation_continuation(line):
                 # 「——」注解行（无标记格式的条目收尾）：完整行行尾即条目边界
                 end = pos + len(line) + 1
                 if end <= len(text):
                     safe = end
+                prev_boundary = True
+            elif is_heading_line(line, prev_boundary):
+                # 标题行绑定其后内容（含紧随的空行）：行尾不设切点
+                # （等列表内容确认，宁慢勿断）
+                prev_boundary = False
+                this_is_heading = True
             elif is_annotation_continuation(next_line) or is_url_line(next_line):
-                pass  # 本行是条目标题/内容（下一行是 URL/注解）——不可切
+                prev_boundary = False  # 本行是条目标题/内容（下一行是 URL/注解）
+            elif not line.strip():
+                # 空行：块边界，行尾可切（其后行按新块看待）。标题后第一个
+                # 空行除外——CommonMark 风格「标题 + 空行 + 列表」里空行被
+                # 标题绑定（标题跨空行粘住列表，不设切点，宁慢勿断）
+                if not heading_pending:
+                    end = pos + len(line) + 1
+                    if end < len(text):
+                        safe = end
+                    prev_boundary = True
             else:
                 # 普通行：行尾可切，但若它是 pending 的最后一行（其后尚无
                 # 任何内容），暂不设切点——它可能是列表条目标题，下一行可能
                 # 是 URL/注解（等后续行确认，宁慢勿断；收尾补发兜底）。
+                # 普通行后置 True：下一短行仍按标题候选（无标记格式的段落
+                # 标题常跟在开场白等普通行后）；标题行置 False 打断链条，
+                # 短条目列表的切点不整体消失（隔行可切）。
                 end = pos + len(line) + 1
                 if end < len(text):
                     safe = end
+                prev_boundary = True
         pos += len(line) + 1
+        # 标题绑定只存活到第一个非空行：标题行置 True，空行继承绑定
+        # （连续空行也绑定），其余非空行消费绑定
+        if this_is_heading:
+            heading_pending = True
+        elif line.strip():
+            heading_pending = False
     return safe
 
 

@@ -12,8 +12,10 @@
 - 任何气泡不以「——」注解或裸 URL 开头
 - 标记格式下，切点不落在列表项内部（标记行+续行+注解 必须同气泡）
 - 草稿格式下，条目标题后停顿不会让标题单独成块（标题+URL+注解整体）
+- 任何气泡不以标题行结尾（标题与其列表同气泡，不孤悬块尾）
 
-另含：断流补发（force）路径与 split_markdown 超长列表切分测试。
+另含：断流补发（force）路径、split_markdown 超长列表切分、标题跨空行绑定、
+后置处理约束（短注解不迁移 / 3600 字节上限不破）测试。
 
 用法: PYTHONPATH=. uv run python dev/test_list_split.py
 """
@@ -26,7 +28,12 @@ from types import SimpleNamespace as NS
 from core.ai.protocol import AssistantMessage
 from core.markdown_split import (
     is_annotation_continuation,
+    is_continuation_line,
+    is_fence_line,
+    is_heading_line,
     is_list_marker,
+    is_table_row,
+    is_table_separator,
     is_url_line,
     split_markdown,
 )
@@ -106,6 +113,31 @@ Question about ivy/counsel-fzf"""
 
 FINAL = FINAL_TEXT
 DRAFT = DRAFT_TEXT
+
+# 无标记格式 + 段落级标题（tmp/new_chat.txt 机器之心+arXiv 段，不含开场气泡）：
+# 📄 标题后停顿（流式增量只到第一行条目）是本次修复的事故断点——
+# 标题行不得孤悬块尾（标题与其列表同气泡）。
+HEADING_TEXT = (
+    "🧠 机器之心（今日 3 篇）\n"
+    "🎓 2026云程奖启动！我们要给「在校AI本硕博」发奖学金\n"
+    "jiqizhixin.com/articles/2026-08-12-7\n"
+    "—— 机器之心自己的奖学金项目，面向在校 AI 本硕博\n"
+    "🐧 终于！Linux用户等来了官方ChatGPT桌面版\n"
+    "jiqizhixin.com/articles/2026-08-12-6\n"
+    "—— ChatGPT 官方桌面版终于上 Linux 了！（用 Emacs 的 Linux 用户狂喜？）\n"
+    "⚖️ Agentic RL 后训练资源怎么分？港中文、恒生大学提出 Libra，吞吐最高提升 3 倍\n"
+    "jiqizhixin.com/articles/2026-08-12-5\n"
+    "—— 港中文等提出 Libra，优化 Agentic RL 后训练资源分配，吞吐最高 3 倍\n"
+    "📄 arXiv cs.AI（今日更新）\n"
+    "TongGuOCR：面向中国历史文献的布局感知 OCR 多模态大模型\n"
+    "Thought-Level Beam Search for Reasoning：思维级束搜索提升推理\n"
+    "StructReward：结构化过程奖励，用于多模态推理自纠错\n"
+    "SDDBMs：软去噪扩散桥模型（生成模型方向）\n"
+    "ForestBench：多智能体协作评估的统一图框架\n"
+    "Emotion2Skill：模型内部情绪信号驱动技能选择（挺有意思的方向！）\n"
+    "Entropy-based Code Adversarial Translation：基于熵的代码对抗翻译，用于真实仓库迁移\n"
+    "主人对哪篇感兴趣？猫猫可以深挖摘要！比如 ChatGPT Linux 桌面版或者 Libra 都挺热的喵～(ฅ´ω`ฅ)💕"
+)
 
 
 class MockCost:
@@ -276,8 +308,32 @@ def verify(label, text, blocks):
                 print(f"  ❌ 切点 {p} 落在列表项内部（{s},{e}）: 前一行 {prev[:30]!r}")
                 ok = False
 
+    # 3) 任何块不以标题行结尾（标题与其列表同气泡，不孤悬块尾）
+    def _is_trailing_heading(block):
+        lines = block.rstrip("\n").split("\n")
+        if not lines or not lines[-1].strip():
+            return False
+        last = lines[-1].strip()
+        if (
+            is_annotation_continuation(last)
+            or is_url_line(last)
+            or is_list_marker(last)
+        ):
+            return False
+        prev = lines[-2].strip() if len(lines) >= 2 else ""
+        prev_boundary = not prev or bool(prev and not is_continuation_line(prev))
+        return is_heading_line(last, prev_boundary)
+
+    for i, b in enumerate(blocks):
+        if _is_trailing_heading(b):
+            print(
+                f"  ❌ 块{i+1} 以标题行结尾（标题孤悬块尾）: "
+                f"{b.rstrip().splitlines()[-1]!r}"
+            )
+            ok = False
+
     if ok:
-        print("  ✅ 顺序完整、无注解孤儿、列表项整体未拆")
+        print("  ✅ 顺序完整、无注解孤儿、列表项整体未拆、标题不孤悬块尾")
     return ok
 
 
@@ -486,12 +542,228 @@ def test_predicates() -> bool:
     if "  - 嵌套子项 a" not in joined:
         print("  ❌ 嵌套列表缩进丢失")
         ok = False
+    # 4) 标题行判定：ATX 无条件；短行需「前一行不是续行」；句末标点/围栏/表行排除
+    assert is_heading_line("## 每日推荐")
+    assert is_heading_line("📄 arXiv cs.AI（今日更新）", after_boundary=True)
+    assert is_heading_line("🧠 机器之心（今日 3 篇）", after_boundary=True)
+    assert is_heading_line("🔧 实用求助/讨论：", after_boundary=True)
+    assert not is_heading_line(
+        "TongGuOCR：面向中国历史文献的布局感知 OCR 多模态大模型", after_boundary=True
+    )  # 太长
+    assert not is_heading_line(
+        "ForestBench：多智能体协作评估的统一图框架"
+    )  # 短但前一行是续行
+    assert not is_heading_line("明白了！", after_boundary=True)  # 句末标点收尾
+    assert not is_heading_line("```")
+    assert not is_heading_line("| a | b |", after_boundary=True)
+    # 5) 注解/URL 续行行内排除（短注解不被当标题移走；URL 不构成标题）
+    assert not is_heading_line("—— 不错", after_boundary=True)
+    assert not is_heading_line("a.co/x", after_boundary=True)
+    assert is_continuation_line("reddit.com/r/emacs/comments/1vl5lkv")
+    assert is_continuation_line("| a | b |")
+    assert not is_continuation_line("普通内容行")
     print("=== 谓词边界 ===")
     print(
-        "  ✅ 单/双破折号注解、裸 IP vs 带端口/路径 IP、嵌套缩进 全部符合预期"
+        "  ✅ 单/双破折号注解、裸 IP vs 带端口/路径 IP、嵌套缩进、标题行/续行判定 全部符合预期"
         if ok
         else "  ❌ 有断言失败"
     )
+    return ok
+
+
+def test_split_markdown_table_no_rows() -> bool:
+    """表头+分隔行而无数据行的表格（2 行）：回归文本行，不丢弃（宁断勿丢）。
+
+    模糊测试发现：`| a | b |` + `| --- | --- |` 后接非表行时，_flush_table
+    对不足 3 行的表格直接 return，表头两行凭空消失（丢内容）。
+    """
+    ok = True
+    # 中段：2 行表后接普通内容
+    t1 = "\n".join(
+        ["列表内容填充" * 30] * 10
+        + ["| a | b |", "| --- | --- |", "后面还有内容", "- 条目 X"]
+        + ["列表内容填充" * 30] * 10
+    )
+    c1 = split_markdown(t1)
+    flat1 = []
+    for c in c1:
+        parts = c.split("\n")
+        if parts and parts[-1] == "":
+            parts.pop()
+        flat1.extend(parts)
+    if flat1 != t1.split("\n"):
+        print(f"  ❌ 中段 2 行表丢失: {flat1 != t1.split(chr(10))}")
+        ok = False
+    # 尾部：文本以 2 行表结尾（EOF 路径）——表行恢复为文本行，
+    # 以段落边界（\n\n）衔接（非空行内容保全即可，空行插入无害）
+    t2 = "\n".join(["列表内容填充" * 30] * 10 + ["| a | b |", "| --- | --- |"])
+    c2 = split_markdown(t2)
+    flat2 = []
+    for c in c2:
+        parts = c.split("\n")
+        if parts and parts[-1] == "":
+            parts.pop()
+        flat2.extend(parts)
+    nb2 = [ln for ln in flat2 if ln.strip()]
+    if nb2 != [ln for ln in t2.split("\n") if ln.strip()]:
+        print("  ❌ EOF 2 行表丢失")
+        ok = False
+    # 正常 3 行表不受影响（仍按表格整体保留）
+    t3 = "\n".join(
+        ["列表内容填充" * 30] * 10 + ["| a | b |", "| --- | --- |", "| 1 | 2 |"]
+    )
+    c3 = split_markdown(t3)
+    if "| --- | --- |" not in "".join(c3):
+        print("  ❌ 正常 3 行表被破坏")
+        ok = False
+    print("=== 2 行表不丢弃 ===")
+    print("  ✅ 中段/EOF 2 行表回归文本行、3 行表正常" if ok else "  ❌ 有断言失败")
+    return ok
+
+
+def test_split_markdown_heading_cap() -> bool:
+    """后置处理两项约束（评审缺陷修复）：
+    1. 短「——」注解不被当标题移走（注解孤儿）——注解行内排除；
+    2. 标题移块不突破 3600 字节上限——下一块近满时尾部行级联顺延。
+    """
+    ok = True
+    filler = "填充内容" * 40  # 480B/行
+    annotation = "—— 不错"
+    heading = "📄 arXiv cs.AI（今日更新）"
+
+    def flatten(chunks):
+        """行级压平：块尾换行是块边界分隔不计入内容行（块内空行保留）。"""
+        out = []
+        for c in chunks:
+            parts = c.split("\n")
+            if parts and parts[-1] == "":
+                parts.pop()
+            out.extend(parts)
+        return out
+
+    # case1: 块 0 以短注解结尾（7×481B + 注解 14B = 3381 ≤ 3600，
+    # 条目 400B 放不下）→ 注解必须留在原块，不得移到下一块开头
+    item400 = "Y" * 399  # 400B/行
+    t1 = "\n".join([filler] * 7 + [annotation] + [item400] * 4)
+    c1 = split_markdown(t1)
+    if flatten(c1) != t1.split("\n"):
+        print("  ❌ case1 行级拼接不完整")
+        ok = False
+    if c1[0].rstrip("\n").splitlines()[-1] != annotation:
+        print(f"  ❌ case1 短注解被当标题移走: {c1[0].rstrip().splitlines()[-1]!r}")
+        ok = False
+    if c1[1].splitlines()[0] != item400:
+        print("  ❌ case1 下一块首行不是条目")
+        ok = False
+
+    # case2: 块 0 以标题结尾（7×481B + 标题 25B = 3392），块 1 已近满
+    # （16×224B = 3584，标题 25B 放不下 3609 > 3600）→ 尾部行顺延新块
+    item224 = "X" * 223  # 224B/行
+    t2 = "\n".join([filler] * 7 + [heading] + [item224] * 20)
+    c2 = split_markdown(t2)
+    sizes = [len(ch.encode("utf-8")) for ch in c2]
+    if flatten(c2) != t2.split("\n"):
+        print("  ❌ case2 行级拼接不完整")
+        ok = False
+    if max(sizes) > 3600:
+        print(f"  ❌ case2 块超 3600B: {sizes}")
+        ok = False
+    heads = [ch.splitlines()[0] for ch in c2]
+    if heading not in heads:
+        print("  ❌ case2 标题不在任何块开头")
+        ok = False
+    if any(ch.rstrip("\n").splitlines()[-1] == heading for ch in c2[:-1]):
+        print("  ❌ case2 标题孤悬块尾")
+        ok = False
+
+    print("=== 后置处理约束（注解不迁移 / 字节上限） ===")
+    print(f"  case1 注解留在原块末行: {c1[0].rstrip().splitlines()[-1]!r}")
+    print(f"  case2 块字节数: {sizes} (max {max(sizes)})")
+    print("  ✅ 全部符合" if ok else "  ❌ 有断言失败")
+    return ok
+
+
+def test_heading_blank_line() -> bool:
+    """CommonMark 风格「标题 + 空行 + 列表」：标题后第一个空行被标题绑定。
+
+    模型按 prompt 用规范 markdown 后常写「标题\n\n- 条目」：空行行尾与
+    标题后首个标记行起点都不设切点，否则标题在空行/标记前孤悬块尾。
+    """
+    from core.markdown_split import markdown_safe_cut, trailing_structure
+
+    ok = True
+    # 1) 标题+空行后停顿（列表尚未生成）→ 持有等待（cut=0，宁慢勿断）
+    c1 = markdown_safe_cut(
+        "📄 arXiv cs.AI（今日更新）\n\n",
+        len("📄 arXiv cs.AI（今日更新）\n\n"),
+        initial=trailing_structure(""),
+    )
+    # 2) 标题+空行+两列表项 → 切点在第二个标记行起点（标题+空行+首项同气泡）
+    t2 = (
+        "📄 arXiv cs.AI（今日更新）\n\n"
+        "- TongGuOCR：面向中国历史文献的布局感知 OCR 多模态大模型\n"
+        "- Thought-Level Beam Search for Reasoning：思维级束搜索提升推理"
+    )
+    c2 = markdown_safe_cut(t2, len(t2), initial=trailing_structure(""))
+    want2 = t2.index("- Thought-Level")
+    # 3) 普通（长）行 + 空行 → 空行仍是切点（非标题场景不受影响）
+    t3 = "这是一段比较长的普通段落文字内容超过二十四个字符的限制\n\n第二段内容\n"
+    c3 = markdown_safe_cut(t3, len(t3), initial=trailing_structure(""))
+    want3 = t3.index("\n\n") + 2
+    # 4) 无标题的普通列表 → 标记行起点照常可切（回归）
+    t4 = "- 条目一\n- 条目二\n"
+    c4 = markdown_safe_cut(t4, len(t4), initial=trailing_structure(""))
+    want4 = t4.index("- 条目二")
+    print("=== 标题跨空行绑定 ===")
+    print(
+        f"  标题+空行停顿 cut={c1}(期望0) | 标题+空行+列表 cut={c2}(期望{want2}) | "
+        f"普通空行 cut={c3}(期望{want3}) | 普通列表 cut={c4}(期望{want4})"
+    )
+    if c1 != 0 or c2 != want2 or c3 != want3 or c4 != want4:
+        print("  ❌ 有断言失败")
+        ok = False
+    else:
+        print("  ✅ 标题跨空行绑定、普通空行/列表切点不受影响")
+    return ok
+
+
+def test_split_markdown_heading() -> bool:
+    """split_markdown（>3600 字节）标题不孤悬块尾。
+
+    字节精确构造：17 个填充行 + 「——」注解 + 标题行 = 3439 字节（≤3600），
+    下一条目 217 字节放不下 → 标题本会落在块 0 末尾（孤悬）；修复后标题
+    移到块 1 开头，与其列表同块。
+    """
+    ok = True
+    filler = "列表内容填充" * 11  # 198 字节/行
+    annotation = "—— 以上是填充内容"
+    heading = "📄 arXiv cs.AI（今日更新）"
+    item = "TongGuOCR：面向中国历史文献的布局感知 OCR 多模态大模型" * 3  # 216 字节
+    lines = [filler] * 17 + [annotation, heading] + [item] * 8
+    text = "\n".join(lines)
+    chunks = split_markdown(text)
+    joined = "".join(chunks)
+    if joined != text:
+        print(f"  ❌ 拼接不完整: {len(joined)} != {len(text)}")
+        ok = False
+    # 标题不得是任何块（末块除外）的最后一行；且被移到下一块开头
+    for i, c in enumerate(chunks[:-1]):
+        last = c.rstrip("\n").split("\n")[-1]
+        if last.strip() == heading:
+            print(f"  ❌ 块{i+1} 以标题行结尾（孤悬）: {last!r}")
+            ok = False
+    if not chunks[1].startswith(heading + "\n"):
+        print(f"  ❌ 标题未移到块 2 开头: 块2 首行 {chunks[1].splitlines()[0]!r}")
+        ok = False
+    # 填充 + 注解仍留在块 0（注解不跟着标题走）
+    if not chunks[0].endswith(annotation + "\n"):
+        print(
+            "  ❌ 块 1 不应包含标题（标题已移走）: 末行",
+            chunks[0].splitlines()[-1][:20],
+        )
+        ok = False
+    print("=== split_markdown 标题不孤悬（%d 字节） ===" % len(text.encode("utf-8")))
+    print("  ✅ 标题与列表同块、注解留在原块、拼接完整" if ok else "  ❌ 有断言失败")
     return ok
 
 
@@ -533,10 +805,57 @@ async def main():
     # ── split_markdown 超长列表（>3600 字节）：块首必须是完整列表项 ──
     ok4 = test_split_markdown_big_list()
 
-    # ── 谓词边界（单/双破折号、裸 IP、嵌套缩进）──
+    # ── 标题不孤悬块尾（new_chat.txt 事故）：📄 标题后停顿 ──
+    hlines = HEADING_TEXT.split("\n")
+    hends = line_ends(HEADING_TEXT)
+    htargets = [
+        "—— 港中文等提出 Libra，优化 Agentic RL 后训练资源分配，吞吐最高 3 倍",
+        "📄 arXiv cs.AI（今日更新）",
+    ]
+    hpause = set()
+    for i, ln in enumerate(hlines):
+        if ln in htargets:
+            # 标题行尾 + 8 字符（第一行 arXiv 条目写到一半）——事故断点：
+            # 空闲 flush 时 pending 以标题行结尾，不得把标题单独发出
+            hpause.add(hends[i] + 8)
+    ok7 = verify(
+        "标题不孤悬（无标记格式，arXiv 断点）",
+        HEADING_TEXT,
+        await run_case("heading", HEADING_TEXT, sorted(hpause)),
+    )
+
+    # ── 谓词边界（单/双破折号、裸 IP、嵌套缩进、标题行判定）──
     ok6 = test_predicates()
 
-    return 0 if (ok1 and ok2 and ok3 and ok4 and ok5 and ok6) else 1
+    # ── split_markdown 标题不孤悬（>3600 字节字节精确构造）──
+    ok8 = test_split_markdown_heading()
+
+    # ── 标题跨空行绑定（CommonMark 风格「标题 + 空行 + 列表」）──
+    ok9 = test_heading_blank_line()
+
+    # ── 后置处理约束（注解不迁移 / 3600 字节上限不破）──
+    ok10 = test_split_markdown_heading_cap()
+
+    # ── 2 行表（表头+分隔行）不丢弃（宁断勿丢）──
+    ok11 = test_split_markdown_table_no_rows()
+
+    return (
+        0
+        if (
+            ok1
+            and ok2
+            and ok3
+            and ok4
+            and ok5
+            and ok6
+            and ok7
+            and ok8
+            and ok9
+            and ok10
+            and ok11
+        )
+        else 1
+    )
 
 
 if __name__ == "__main__":
