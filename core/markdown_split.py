@@ -10,6 +10,8 @@
 is_annotation_continuation）是两份状态机的公共基础，改动只需在本模块内同步。
 列表项 = 标记行（`1.` / `-` / `*` 等）+ 续行（URL / 「——」注解 / 缩进行）：
 切点只落在项边界、空行与「——」注解行尾，绝不拆散条目。
+超过单条字节上限（MARKDOWN_SAFE_CHUNK_BYTE_LIMIT）的列表项按行尾 /
+UTF-8 安全字节边界硬切——QQ 单条消息上限约束下的既定行为（宁断勿丢）。
 """
 
 from __future__ import annotations
@@ -82,20 +84,23 @@ def is_list_marker(line: str) -> bool:
 
 
 def is_annotation_continuation(line: str) -> bool:
-    """「——」开头的注解/续行（猫猫回复里列表项的点评行）。
+    """「—」/「——」开头的注解/续行（猫猫回复里列表项的点评行）。
 
     视为上一列表项的续行：切块时不允许把注解与其标题/链接拆到两个气泡。
-    仅匹配双 em-dash「——」：单「—」可能是对话/散文破折号开头，误粘会
-    拖累延迟（正确性由收尾补发兜底）。
+    单/双 em-dash 都匹配：单「—」注解不被保护会造成注解孤儿（视觉断裂），
+    而散文/对话破折号行被误粘只拖累延迟——正确性由收尾补发兜底，
+    误拆比误粘更伤体验。
     """
-    return line.lstrip().startswith("——")
+    return line.lstrip().startswith("—")
 
 
 _URL_LINE_RE = re.compile(
     r"^\s{0,4}"
     r"(?:"
     r"(?:https?://|www\.)?(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(?:/\S*)?"
-    r"|(?:(?:\d{1,3}\.){3}\d{1,3}(?:/\S*)?)"
+    # IPv4 仅带端口/路径时视为 URL——裸 IP 行（如 192.168.100.203）是
+    # 普通文本（服务器地址枚举），不应被当作不可切续行粘住
+    r"|(?:(?:\d{1,3}\.){3}\d{1,3}(?:(?::\d{1,5})|(?:/\S+)))"
     r")\s*$"
 )
 
@@ -152,7 +157,9 @@ def _chunk_text(t: str, max_bytes: int, chunks: list[str]):
             # 无标记的普通段落保持原行为（直接按句子拆）。
             pieces = re.split(_LIST_MARKER_SPLIT_RE, para)
             for piece in pieces:
-                piece = piece.strip()
+                # 只去换行不去缩进：列表项可能带缩进（嵌套列表），
+                # strip() 会把缩进吃掉（项被降级）
+                piece = piece.strip("\n")
                 if not piece:
                     continue
                 if utf8len(piece) <= max_bytes:

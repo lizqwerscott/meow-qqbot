@@ -461,6 +461,40 @@ async def run_hardcut_case() -> bool:
     return ok
 
 
+def test_predicates() -> bool:
+    """谓词边界行为（锁定三项修复的取舍）。"""
+    ok = True
+    # 1) 单/双 em-dash 都视为注解续行（单「—」注解不再成孤儿）
+    assert is_annotation_continuation("— 单破折号注解")
+    assert is_annotation_continuation("—— 双破折号注解")
+    assert not is_annotation_continuation("普通行")
+    # 2) 裸 IP 行不是 URL（普通文本）；带端口/路径的才是
+    assert not is_url_line("192.168.100.203")
+    assert is_url_line("192.168.100.203:8050")
+    assert is_url_line("192.168.100.203/status")
+    assert is_url_line("reddit.com/r/emacs/comments/1vl5lkv")
+    assert is_url_line("https://www.reddit.com/r/emacs/")
+    assert not is_url_line("192.168.100.203 会很搭喵～")
+    # 3) split_markdown 超限嵌套列表：缩进保留（strip("\n") 而非 strip()）
+    from core.markdown_split import split_markdown
+
+    nested = "\n".join(
+        ["- 顶层项 A", "  - 嵌套子项 a", "  - 嵌套子项 b", "- 顶层项 B"] * 30
+    )
+    chunks = split_markdown(nested)
+    joined = "".join(chunks)
+    if "  - 嵌套子项 a" not in joined:
+        print("  ❌ 嵌套列表缩进丢失")
+        ok = False
+    print("=== 谓词边界 ===")
+    print(
+        "  ✅ 单/双破折号注解、裸 IP vs 带端口/路径 IP、嵌套缩进 全部符合预期"
+        if ok
+        else "  ❌ 有断言失败"
+    )
+    return ok
+
+
 async def main():
     # ── 终稿（标记格式）：在 chat.txt 实际断点位置停顿 ──
     lines = FINAL.split("\n")
@@ -499,7 +533,10 @@ async def main():
     # ── split_markdown 超长列表（>3600 字节）：块首必须是完整列表项 ──
     ok4 = test_split_markdown_big_list()
 
-    return 0 if (ok1 and ok2 and ok3 and ok4 and ok5) else 1
+    # ── 谓词边界（单/双破折号、裸 IP、嵌套缩进）──
+    ok6 = test_predicates()
+
+    return 0 if (ok1 and ok2 and ok3 and ok4 and ok5 and ok6) else 1
 
 
 if __name__ == "__main__":
