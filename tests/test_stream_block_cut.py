@@ -123,10 +123,11 @@ class TestMarkdownSafeCut:
         assert markdown_safe_cut(t3, len(t3) + 1) == len("表格测试开始。\n")
 
     def test_complete_end_no_cut(self):
-        """末尾是完整行：切点 ≥ len（调用方不切，整块发出）。"""
+        """末尾是完整行：最后一行不设切点（宁慢勿断——它可能是条目标题，
+        等下一行确认；收尾补发兜底），cut 退回倒数第二行行尾。"""
         t = "第一行。\n第二行。\n"
         cut = markdown_safe_cut(t, len(t) + 5)
-        assert not (0 < cut < len(t))
+        assert cut == len("第一行。\n")
 
     def test_fence_body_never_cut(self):
         """limit 落在代码围栏体内：切点退回围栏前。"""
@@ -209,8 +210,13 @@ class _MockCtx:
 class _MockSvc:
     """逐字符喂 on_text，模拟真实 SSE 流式到达；支持断流/停顿。"""
 
-    def __init__(self, text="", throw_after=None, tail_sleep=0.0):
-        self.text, self.throw_after, self.tail_sleep = text, throw_after, tail_sleep
+    def __init__(self, text="", throw_after=None, tail_sleep=0.0, step=0.0):
+        self.text, self.throw_after, self.tail_sleep, self.step = (
+            text,
+            throw_after,
+            tail_sleep,
+            step,
+        )
 
     @property
     def model(self):
@@ -227,7 +233,7 @@ class _MockSvc:
     ):
         buf = ""
         for i, ch in enumerate(self.text):
-            await asyncio.sleep(0)
+            await asyncio.sleep(self.step)
             buf += ch
             if callbacks and callbacks.on_text:
                 await callbacks.on_text(buf)
@@ -346,10 +352,12 @@ class TestStreamBlockIntegration:
         回归：修复前断流时尾巴（st.text[st.sent:]）静默丢弃，用户丢失回复结尾；
         修复后已发前缀 + 补发尾巴 = 已生成的全部文本，且无重复。
         """
-        text = "这是一段会在探测期之后被打断的文本内容，流式转发此时已经开始工作。" * 5
+        text = (
+            "这是一段会在探测期之后被打断的文本内容，流式转发此时已经开始工作。\n" * 5
+        )
         throw_after = 130
         ret, sent, streamed = asyncio.run(
-            _run_case(_MockSvc(text=text, throw_after=throw_after))
+            _run_case(_MockSvc(text=text, throw_after=throw_after, step=0.01))
         )
         assert streamed != [] and ret == (False, True)
         delivered = "".join(streamed) + "".join(sent)
@@ -380,12 +388,15 @@ class TestStreamBlockIntegration:
 
     def test_idle_flush_after_pause(self):
         """空闲超时强制发块（未达块大小也不冷场）。"""
-        text = "空闲超时测试。" * 50
+        text = "空闲超时测试。\n" * 50
         ret, sent, streamed = asyncio.run(
             _run_case(_MockSvc(text=text, tail_sleep=0.15), idle_ms=50)
         )
         assert "".join(streamed) + "".join(sent) == text
-        assert len(streamed) == 2 and sent == []
+        # 空闲 flush 强制发块（streamed 非空）；末尾完整行受最后一行保护，
+        # 由收尾补发兜底（宁慢勿断）——sent 至多一行尾行
+        assert streamed, "空闲 flush 未触发"
+        assert len(sent) <= 1 and all(s.endswith("\n") for s in sent)
 
 
 # ── c1 主契约：模型链下断流回退决策（零转发→回退 / 已转发→终止） ──
@@ -522,8 +533,10 @@ class TestToolLoopAbortFallback:
 
     def test_abort_after_forward_terminates_no_fallback(self):
         """已转发部分文本后断流 → 终止：不回退、尾巴补发、记冷却。"""
-        text = "这是一段会在探测期之后被打断的文本内容，流式转发此时已经开始工作。" * 5
-        svc_a = _MockSvc(text=text, throw_after=130)
+        text = (
+            "这是一段会在探测期之后被打断的文本内容，流式转发此时已经开始工作。\n" * 5
+        )
+        svc_a = _MockSvc(text=text, throw_after=130, step=0.01)
         svc_b = _MockSvc(text="不应被调用的模型B")
         sent, streamed = [], []
         _, reg = self._run_chain(svc_a, svc_b, sent, streamed)
@@ -552,8 +565,8 @@ class _ReviseSvc:
         max_tokens=None,
         callbacks=None,
     ):
-        # 长草稿：> 112 字符探测期，会被实时转发（无法撤回）
-        draft = "这是很长很长的草稿内容，主人听我说。" * 8
+        # 长草稿：> 800 块大小，达块强制转发（无法撤回）
+        draft = "这是很长很长的草稿内容，主人听我说。\n" * 50
         buf = ""
         for ch in draft:
             await asyncio.sleep(0)  # 让出事件循环，空闲 flush 定时器才能跑
@@ -744,8 +757,8 @@ class TestToolLoopFlushRace:
         旧实现发送后才推进 st.sent，on_reset 把 sent 清零后再 += 在途块
         长度（0 + len(pending)）→ 偏移损坏 → 终稿开头被跳过/整条被吞。
         """
-        draft = "这是草稿内容。" * 23  # 161 字符：跨过 112 探测期后仍有 ~96ms
-        # 才到修订信号，首块 flush 发送（0.25s）在途窗口充足（旧 12ms 太窄）
+        draft = "这是草稿内容。\n" * 120  # 840 字符：达块强制转发，首块 flush
+        # 发送（0.25s）在途窗口充足（旧 12ms 太窄；短草稿从不转发）
         final = "这是终稿内容，主人辛苦啦。" * 8  # 104 字符，全程 < 探测期
         svc = _SteppedReviseSvc(draft=draft, final=final, step=0.002)
         ret, sent, streamed = asyncio.run(_run_case(svc, idle_ms=1000, cb_sleep=0.25))
