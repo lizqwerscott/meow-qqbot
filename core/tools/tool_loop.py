@@ -17,9 +17,12 @@ from typing import Any, Awaitable, Callable, List, Optional
 from core.ai.fallback_runner import FallbackRunner
 from core.ai.protocol import StreamCallbacks, ensure_messages_consistent
 from core.markdown_split import (
+    MARKDOWN_SAFE_CHUNK_BYTE_LIMIT,
     markdown_safe_cut,
     pending_starts_incomplete,
     trailing_structure,
+    utf8_prefix,
+    utf8len,
 )
 from core.message import InputMessage, MessageType
 from core.tools._types import ToolContext
@@ -50,6 +53,16 @@ class _StreamBlockState:
     text: str = ""
     last_flush: float | None = None
     timer: asyncio.Task | None = field(default=None, repr=False, compare=False)
+    # 是否有块正在发送（锁内 await 中）：发送期间抑制空闲定时器调度，
+    # 避免多个 flush 任务排队等锁、锁释放后连发（破坏空闲分块节奏）。
+    sending: bool = False
+    # 串行化所有块的发送。空闲 flush 是后台任务：timer 在任务开始时已置 None，
+    # 上一块 await 发送（QQ API 慢 / 重试退避 1s/2s/4s）期间 on_text 会调度新的
+    # 空闲定时器 → 两个发送同时在途，后发的块可能先到 → 气泡乱序（线上事故：
+    # 收尾句被插到列表中间）。锁保证同一轮内严格按生成顺序投递。
+    flush_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, repr=False, compare=False
+    )
 
     def cancel_timer(self) -> None:
         if self.timer is not None:
@@ -186,57 +199,93 @@ class ToolLoop:
                 # ── 流式转发状态（每轮新建，杜绝跨轮泄漏） ──
                 st = _StreamBlockState()
 
-                async def _flush_stream_block(allow_partial: bool = False) -> None:
+                async def _flush_stream_block(
+                    allow_partial: bool = False, flush_incomplete: bool = False
+                ) -> None:
                     """发送当前累积的 pending 文本（block 投递）。
 
                     allow_partial=True（达块大小）：用 markdown 安全切点切块，
                     不切断表格/代码围栏；allow_partial=False（空闲 flush）：
                     pending 以未完成结构开头时跳过（等流继续，收尾补发兜底）。
 
+                    flush_incomplete=True（断流收尾补发）：流已死不再增长，
+                    无视结构完整性直接发出剩余文本（否则 cut==0 跳过会死循环）。
+
                     先承诺后发送：取消竞态下（await 中注入 CancelledError）消息可能已
                     送达，sent 先递增可防止收尾补发把同一段再发一遍。
+
+                    注意：stream_callback 在持有 flush_lock 时被 await——回调不得
+                    同步调用本函数（asyncio.Lock 不可重入，会死锁）。
                     """
-                    nonlocal text_committed
-                    pending = st.text[st.sent :]
-                    if not pending or message_delivered:
-                        # message_delivered: send_message 等工具已投递过消息，
-                        # 流式文本与工具投递重复，跳过（收尾补发同样会被拦截）
-                        return
-                    if not allow_partial and pending_starts_incomplete(
-                        pending, st.text[: st.sent]
-                    ):
-                        return
-                    # 统一找安全切点：达块大小按 limit 切；空闲 flush/首块按当前全文
-                    # 扫描（末尾是半截表头/半截行时切回结构前，宁可少发）
-                    limit = self._stream_block_chars if allow_partial else len(pending)
-                    cut = markdown_safe_cut(
-                        pending,
-                        limit,
-                        initial=trailing_structure(st.text[: st.sent]),
-                    )
-                    if 0 < cut < len(pending):
-                        pending = pending[:cut]
-                    st.forwarded = True
-                    st.last_flush = time.monotonic()
-                    # 先承诺后发送：await 之前就推进 sent。
-                    # 重复气泡根因（18:59 线上事故）：旧实现发送后才推进，而
-                    # _idle_flush_task 在 flush 开始前已把 timer 置 None——发送
-                    # 在途期间 on_text 会再次调度空闲定时器，新 flush 以旧偏移
-                    # 二次捕获同一段文本（逐字节相同的重复气泡）；on_reset 在
-                    # 发送期间触发同样会把偏移算错（0 + len(pending)）。
-                    # 发送前推进后：任何并发 on_text / on_reset / 收尾补发看到的
-                    # 偏移都已是「本块已投递」，同一段文本不可能被再次捕获。
-                    # 发送失败/取消不回退：已承诺的文本无法撤回（与旧语义一致）。
-                    st.sent += len(pending)
-                    text_committed = True
-                    try:
-                        await stream_callback(pending)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        # 发送失败：与 reply_callback 失败同等对待（记录、不重发），
-                        # sent 已推进，后续 flush / 收尾补发不会重发同段。
-                        _log.warning("流式块发送失败 [%s]: %s", chat_id[:12], e)
+                    # 串行化：同一轮内只允许一个块在途。空闲 flush 是后台任务，
+                    # 不持锁会与后续 flush 并发 → 后发先至、气泡乱序（收尾句
+                    # 插到列表中间的线上事故）。on_text 的块 flush / 空闲 flush /
+                    # 断流收尾补发都走这一把锁。
+                    async with st.flush_lock:
+                        nonlocal text_committed
+                        pending = st.text[st.sent :]
+                        if not pending or message_delivered:
+                            # message_delivered: send_message 等工具已投递过消息，
+                            # 流式文本与工具投递重复，跳过（收尾补发同样会被拦截）
+                            return
+                        if not allow_partial and pending_starts_incomplete(
+                            pending, st.text[: st.sent]
+                        ):
+                            return
+                        # 统一找安全切点：达块大小按 limit 切；空闲 flush/首块按当前全文
+                        # 扫描（末尾是半截表头/半截行时切回结构前，宁可少发）
+                        limit = (
+                            self._stream_block_chars if allow_partial else len(pending)
+                        )
+                        cut = markdown_safe_cut(
+                            pending,
+                            limit,
+                            initial=trailing_structure(st.text[: st.sent]),
+                        )
+                        if cut == 0 and not flush_incomplete:
+                            # 整个 pending 都在列表项/表格/围栏内（无安全切点）：
+                            # 未达单条字节上限 → 跳过本次发送，等安全切点出现
+                            # （项后空行/新标记/围栏闭合）或收尾补发兜底——避免
+                            # 项内/中线切块（QQ 上列表项断成半截的根因之一）。
+                            # 已达字节上限 → 退化为行尾硬切（宁超块大小也不
+                            # 无限持有）；无换行可用（单行超限）时按 UTF-8 安全
+                            # 字节边界切——超限整行整段发出会被 SDK 截断（内容
+                            # 丢失），中线切块是上限约束下的唯一出路。
+                            if utf8len(pending) < MARKDOWN_SAFE_CHUNK_BYTE_LIMIT:
+                                return
+                            cut = pending.rfind("\n") + 1
+                            if cut <= 0:
+                                cut = utf8_prefix(
+                                    pending, MARKDOWN_SAFE_CHUNK_BYTE_LIMIT
+                                )
+                        if 0 < cut < len(pending):
+                            pending = pending[:cut]
+                        st.forwarded = True
+                        # 先承诺后发送：await 之前就推进 sent。
+                        # 重复气泡根因（18:59 线上事故）：旧实现发送后才推进，而
+                        # _idle_flush_task 在 flush 开始前已把 timer 置 None——发送
+                        # 在途期间 on_text 会再次调度空闲定时器，新 flush 以旧偏移
+                        # 二次捕获同一段文本（逐字节相同的重复气泡）；on_reset 在
+                        # 发送期间触发同样会把偏移算错（0 + len(pending)）。
+                        # 发送前推进后：任何并发 on_text / on_reset / 收尾补发看到的
+                        # 偏移都已是「本块已投递」，同一段文本不可能被再次捕获。
+                        # 发送失败/取消不回退：已承诺的文本无法撤回（与旧语义一致）。
+                        st.sent += len(pending)
+                        text_committed = True
+                        st.sending = True
+                        try:
+                            await stream_callback(pending)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:
+                            # 发送失败：与 reply_callback 失败同等对待（记录、不重发），
+                            # sent 已推进，后续 flush / 收尾补发不会重发同段。
+                            _log.warning("流式块发送失败 [%s]: %s", chat_id[:12], e)
+                        finally:
+                            st.sending = False
+                        # 空闲间隔从「发送完成」起算：排队 flush 不按发送开始时间
+                        # 计算延迟（避免锁释放后连发）
+                        st.last_flush = time.monotonic()
 
                 async def _idle_flush_task(delay: float) -> None:
                     try:
@@ -252,8 +301,12 @@ class ToolLoop:
                         _log.warning("空闲 flush 失败 [%s]: %s", chat_id[:12], e)
 
                 def _schedule_idle_flush() -> None:
-                    """安排空闲定时器：距上次转发 ≥ idle 时强制发一块（首块立即发）。"""
-                    if st.timer is not None:
+                    """安排空闲定时器：距上次转发 ≥ idle 时强制发一块（首块立即发）。
+
+                    发送在途（st.sending）时不调度——等待中的 flush 会在锁释放后
+                    连发，破坏空闲分块节奏；等本次发送完成后的增量再起定时器。
+                    """
+                    if st.timer is not None or st.sending:
                         return
                     now = time.monotonic()
                     last = st.last_flush or (now - self._stream_block_idle)
@@ -330,7 +383,9 @@ class ToolLoop:
                         # 这里尽力把剩余文本送达；失败也不再重试。
                         try:
                             while st.sent < len(st.text) and not message_delivered:
-                                await _flush_stream_block(allow_partial=True)
+                                await _flush_stream_block(
+                                    allow_partial=True, flush_incomplete=True
+                                )
                         except asyncio.CancelledError:
                             raise
                         except Exception as cb_err:
@@ -448,24 +503,31 @@ class ToolLoop:
                     else:
                         _log.info(f"[工具循环 第{round_idx + 1}轮] 静默回复，跳过发送")
                 else:
-                    # 流式已转发前缀 → 只发剩余部分，避免重复
-                    remaining = response_text[st.sent :]
-                    if remaining:
-                        try:
-                            await reply_callback(
-                                chat_id=chat_id,
-                                content=remaining,
-                                message_id=reply_to,
-                                is_group=is_group,
-                            )
-                        except Exception as cb_err:
-                            _log.warning(
-                                "回复 callback 失败 [%s]: %s", chat_id[:12], cb_err
-                            )
-                    # 同步 sent：即使补发走了 reply_callback，也标记已投递，
-                    # 防止残留定时器 flush 再次发送同段文本
-                    st.sent = len(response_text)
-                    text_committed = True
+                    # 收尾补发也走同一把锁：此刻可能有空闲 flush 仍在途
+                    # （await stream_callback 未返回），不串行化会再次乱序。
+                    # （同 _flush_stream_block：锁内 await reply_callback，
+                    # 回调不得同步重入本函数——锁不可重入会死锁。）
+                    async with st.flush_lock:
+                        # 流式已转发前缀 → 只发剩余部分，避免重复
+                        remaining = response_text[st.sent :]
+                        if remaining:
+                            try:
+                                await reply_callback(
+                                    chat_id=chat_id,
+                                    content=remaining,
+                                    message_id=reply_to,
+                                    is_group=is_group,
+                                )
+                            except Exception as cb_err:
+                                _log.warning(
+                                    "回复 callback 失败 [%s]: %s",
+                                    chat_id[:12],
+                                    cb_err,
+                                )
+                        # 同步 sent：即使补发走了 reply_callback，也标记已投递，
+                        # 防止残留定时器 flush 再次发送同段文本
+                        st.sent = len(response_text)
+                        text_committed = True
 
             if reply_state_callback:
                 await reply_state_callback(
