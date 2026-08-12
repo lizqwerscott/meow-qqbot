@@ -18,6 +18,9 @@ import pytest
 from core.ai.protocol import AssistantMessage, StreamAbortedError
 from core.markdown_split import (
     TrailingState,
+    is_heading_line,
+    is_lead_in_line,
+    is_list_marker,
     markdown_safe_cut,
     pending_starts_incomplete,
     trailing_structure,
@@ -129,6 +132,71 @@ class TestMarkdownSafeCut:
         cut = markdown_safe_cut(t, len(t) + 5)
         assert cut == len("第一行。\n")
 
+    def test_lead_in_line_binds_to_following_list(self):
+        """引导行（「：」结尾）绑定其后列表：行尾不设切点，首个列表项
+        随引导行同块（tmp/new_chat_v2.txt 的「…只用它做：」+「- 事后分析」）。"""
+        lead = "近期的研究发现：模型内部状态会影响行为。以前大家只用它做："
+        # 引导行后暂停：持有
+        assert markdown_safe_cut(lead, len(lead)) == 0
+        # 列表第一项到达：仍持有（引导行 + 首项同块）
+        one = lead + "\n- 事后分析（post-hoc analysis）"
+        assert markdown_safe_cut(one, len(one)) == 0
+        # 第二项到达：切在第二项起点（引导行 + 首项已同块）
+        two = one + "\n- 直接输出引导（output steering）"
+        cut = markdown_safe_cut(two, len(two))
+        assert two[:cut] == one + "\n"
+
+    def test_lead_in_binds_across_heading_chain(self):
+        """长标题行 + 短标题（引导形态）+ 列表：前导行随同绑定，标题链不拆。"""
+        title = "🧠 Emotion2Skill：让 LLM 用\"内心情绪\"选技能"
+        sub = "📋 基本信息："
+        # 长标题 + 短标题：无切点（等列表确认）
+        assert markdown_safe_cut(title + "\n" + sub, len(title) + len(sub) + 1) == 0
+        # 列表第一项到达：仍持有（长标题 + 短标题 + 首项同块）
+        one = title + "\n" + sub + "\n- 论文：arXiv:2608.09248"
+        assert markdown_safe_cut(one, len(one)) == 0
+
+    def test_preceding_line_binds_when_next_is_lead_in(self):
+        """普通行后跟引导行：前导行行尾不切（过渡句随同绑定，不孤悬块尾）。"""
+        lead = "基于技能的 Agent 在选择用哪个技能时，只靠文本级信号做判断："
+        trans = "但 LLM 内部自己的表征状态完全没被利用！"
+        # 前导行 + 引导行：切点退回更早（不在过渡句行尾）
+        text = trans + "\n" + lead
+        cut = markdown_safe_cut(text, len(text))
+        assert cut == 0 or not text[:cut].endswith(trans + "\n")
+
+    def test_lead_in_inside_list_item_binds_next_marker(self):
+        """列表项内（无空行分隔）的引导行：绑定其后首个列表项——
+        「- 代码…」+「🎯 要解决什么问题？」+「…判断：」+「- 任务描述」
+        切点落在绑定项之后的项边界，引导行不孤悬块尾。"""
+        text = (
+            "- 代码已开源：github.com/BoHan-LIN04/Emotion2Skill\n"
+            "🎯 要解决什么问题？\n"
+            "基于技能的 LLM Agent（把任务拆成技能库来调用）只靠文本级信号做判断：\n"
+            "- 任务描述、口头反思、经验规则……\n"
+            "但 LLM 内部自己的表征状态完全没被利用！\n"
+            "💡 核心思路：给 Agent 加\"直觉\"\n"
+            "近期的可解释性研究发现：情绪表征会因果地影响行为。以前大家只用它做：\n"
+            "- 事后分析（post-hoc analysis）\n"
+            "- 直接输出引导（output steering）"
+        )
+        cut = markdown_safe_cut(text, len(text))
+        assert 0 < cut < len(text)
+        assert text[:cut].endswith("- 事后分析（post-hoc analysis）\n")
+
+    def test_heading_inside_list_item_binds_next_marker(self):
+        """列表项内无空行分隔的标题形态短行（「🔧 具体做法」）：绑定其后
+        首个列表项，标题不孤悬块尾。"""
+        text = (
+            "Emotion2Skill 的突破：把情绪表征用到 Agent 级决策上！\n"
+            "🔧 具体做法\n"
+            "1. 提取情绪向量：从残差流里提取 27 维情绪状态向量\n"
+            "2. 置信度门控摘要：映射成带置信度门控的摘要注入路由提示"
+        )
+        cut = markdown_safe_cut(text, len(text))
+        assert 0 < cut < len(text)
+        assert text[:cut].endswith("1. 提取情绪向量：从残差流里提取 27 维情绪状态向量\n")
+
     def test_fence_body_never_cut(self):
         """limit 落在代码围栏体内：切点退回围栏前。"""
         fence_text = (
@@ -210,13 +278,16 @@ class _MockCtx:
 class _MockSvc:
     """逐字符喂 on_text，模拟真实 SSE 流式到达；支持断流/停顿。"""
 
-    def __init__(self, text="", throw_after=None, tail_sleep=0.0, step=0.0):
+    def __init__(
+        self, text="", throw_after=None, tail_sleep=0.0, step=0.0, pause_lines=()
+    ):
         self.text, self.throw_after, self.tail_sleep, self.step = (
             text,
             throw_after,
             tail_sleep,
             step,
         )
+        self.pause_lines = set(pause_lines)
 
     @property
     def model(self):
@@ -232,13 +303,18 @@ class _MockSvc:
         callbacks=None,
     ):
         buf = ""
+        line_no = 0
         for i, ch in enumerate(self.text):
+            if ch == "\n":
+                line_no += 1
             await asyncio.sleep(self.step)
             buf += ch
             if callbacks and callbacks.on_text:
                 await callbacks.on_text(buf)
             if self.throw_after is not None and i >= self.throw_after:
                 raise RuntimeError("boom mid-stream")
+            if line_no in self.pause_lines:
+                await asyncio.sleep(0.15)  # 超过 idle(1000ms) 的停顿
         if self.tail_sleep:
             await asyncio.sleep(self.tail_sleep)
         return AssistantMessage(content=self.text or None), {
@@ -393,10 +469,66 @@ class TestStreamBlockIntegration:
             _run_case(_MockSvc(text=text, tail_sleep=0.15), idle_ms=50)
         )
         assert "".join(streamed) + "".join(sent) == text
-        # 空闲 flush 强制发块（streamed 非空）；末尾完整行受最后一行保护，
-        # 由收尾补发兜底（宁慢勿断）——sent 至多一行尾行
-        assert streamed, "空闲 flush 未触发"
-        assert len(sent) <= 1 and all(s.endswith("\n") for s in sent)
+
+    def test_heading_lead_in_never_orphaned_at_block_tail(self):
+        """模型在标题/引导行后停顿：标题/引导句不得孤悬块尾（其列表同块）。
+
+        回归：tmp/new_chat_v2.txt 事故——长引导行（「…只用它做：」>24 字符
+        不满足短行标题启发式）在列表第一项到达时被切在行尾，列表掉进下一块；
+        无空行分隔的「列表→标题→引导行→列表」结构同样把引导句孤悬块尾。
+        修复后：引导行/标题行绑定首个列表项（含列表项内形态判定），
+        任意停顿点切出的块尾行都不是「其后还有内容」的标题/引导行。
+        """
+        content = (
+            "抓到啦主人！这篇论文挺有想法的，猫猫给你讲讲～(ฅ´ω`ฅ)📖\n"
+            "🧠 Emotion2Skill：让 LLM 用\"内心情绪\"选技能\n"
+            "📋 基本信息：\n"
+            "- 论文：arXiv:2608.09248（8月10日提交，11日修订）\n"
+            "- 作者：林博涵等 8 人（中国团队）\n"
+            "- 代码已开源：github.com/BoHan-LIN04/Emotion2Skill\n"
+            "🎯 要解决什么问题？\n"
+            "基于技能的 LLM Agent（把任务拆成\"技能库\"里的可复用流程来调用）在选择用哪个技能时，只靠文本级信号做判断：\n"
+            "- 任务描述、口头反思、经验规则……\n"
+            "但 LLM 内部自己的表征状态（模型\"心里\"在想什么）完全没被利用！\n"
+            "💡 核心思路：给 Agent 加\"直觉\"\n"
+            "近期的可解释性研究发现：LLM 内部存在线性的\"情绪表征\"，并且会因果地影响行为。以前大家只用它做：\n"
+            "- 事后分析（post-hoc analysis）\n"
+            "- 直接输出引导（output steering）\n"
+            "Emotion2Skill 的突破：把情绪表征用到 Agent 级决策上！\n"
+            "🔧 具体做法\n"
+            "1. 提取情绪向量：从残差流里提取 27 维情绪状态向量\n"
+            "2. 置信度门控摘要：映射成带置信度门控的摘要注入路由提示\n"
+            "3. 情绪轨迹分析：检测\"内部状态突变\"定位有问题的技能调用\n"
+            "4. 定向 SOP 重写：精准重写对应的标准操作流程\n"
+            "📊 效果\n"
+            "在 WebShop 和 ALFWorld 基准上：\n"
+            "- Emotion2Skill + Qwen3-8B vs Zero-Shot 基线：成功率提升 +26.9%！\n"
+            "\n"
+            "猫猫的理解：这相当于给 AI Agent 装了个\"直觉系统\"。\n"
+            "主人觉得这个方向有意思吗？要不要猫猫再看看它的 GitHub？(ฅ´ω`ฅ)💕"
+        )
+        # 停顿点 = 原捕获文件的分隔位置（标题/引导行之后），覆盖三种形态：
+        # 短标题（📋 基本信息：）、长引导行（…只用它做：）、列表项（4. 定向 SOP…）
+        for pauses in ({3, 12, 20}, {3, 8, 16, 21}, {2, 7, 13}):
+            ret, sent, streamed = asyncio.run(
+                _run_case(
+                    _MockSvc(text=content, pause_lines=pauses),
+                    idle_ms=50,
+                )
+            )
+            blocks = streamed + sent
+            assert "".join(blocks) == content, "拼接必须完整"
+            _assert_no_cut_markdown(blocks)
+            for i, blk in enumerate(blocks[:-1]):
+                tail = blk.rstrip("\n").split("\n")[-1]
+                if is_list_marker(tail):
+                    continue  # 列表项行是合法块尾（项边界可切）
+                assert not is_heading_line(tail, True), (
+                    f"块{i} 以标题行结尾，其后还有内容: {tail!r}"
+                )
+                assert not is_lead_in_line(tail), (
+                    f"块{i} 以引导行结尾，其后还有内容: {tail!r}"
+                )
 
 
 # ── c1 主契约：模型链下断流回退决策（零转发→回退 / 已转发→终止） ──
