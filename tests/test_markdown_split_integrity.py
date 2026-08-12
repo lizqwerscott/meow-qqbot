@@ -21,8 +21,6 @@
 """
 
 import asyncio
-import json
-import sys
 from types import SimpleNamespace as NS
 
 from core.ai.protocol import AssistantMessage
@@ -337,7 +335,7 @@ def verify(label, text, blocks):
     return ok
 
 
-async def run_abort_case() -> bool:
+async def test_stream_abort_tail_force():
     """断流补发（flush_incomplete=True）：生成到列表项中间断流。
 
     已转发的块（含安全切点）+ force 补发块（无视结构完整性）拼接后必须
@@ -408,7 +406,7 @@ async def run_abort_case() -> bool:
         print("  ✅ 已转发 + force 补发 == 断流点前全文，无死循环")
     else:
         print(f"  ❌ 补发不完整: {len(joined)} != {ABORT_AT}")
-    return ok
+    assert ok
 
 
 def test_split_markdown_big_list() -> bool:
@@ -455,10 +453,10 @@ def test_split_markdown_big_list() -> bool:
             f"    [{i+1}] {len(c.encode('utf-8')):4d}字节 | 首行 {c.split(chr(10))[0][:24]!r}"
         )
     print("  ✅ 所有列表项完整、块首均为完整列表项" if ok else "  ❌ 列表项被拆散")
-    return ok
+    assert ok
 
 
-async def run_hardcut_case() -> bool:
+async def test_stream_hardcut_oversized():
     """字节上限硬切（>3600 字节、无安全切点）分支测试。
 
     场景 1：单行无换行超长文本 → 无换行可用 → utf8_prefix 按 UTF-8 安全
@@ -514,7 +512,7 @@ async def run_hardcut_case() -> bool:
             print(
                 f"  ❌ 拼接={'OK' if ok_j else 'FAIL'} 字节上限={'OK' if ok_b else 'FAIL'}"
             )
-    return ok
+    assert ok
 
 
 def test_predicates() -> bool:
@@ -568,7 +566,7 @@ def test_predicates() -> bool:
         if ok
         else "  ❌ 有断言失败"
     )
-    return ok
+    assert ok
 
 
 def test_split_markdown_table_no_rows() -> bool:
@@ -618,7 +616,7 @@ def test_split_markdown_table_no_rows() -> bool:
         ok = False
     print("=== 2 行表不丢弃 ===")
     print("  ✅ 中段/EOF 2 行表回归文本行、3 行表正常" if ok else "  ❌ 有断言失败")
-    return ok
+    assert ok
 
 
 def test_split_markdown_heading_cap() -> bool:
@@ -680,7 +678,7 @@ def test_split_markdown_heading_cap() -> bool:
     print(f"  case1 注解留在原块末行: {c1[0].rstrip().splitlines()[-1]!r}")
     print(f"  case2 块字节数: {sizes} (max {max(sizes)})")
     print("  ✅ 全部符合" if ok else "  ❌ 有断言失败")
-    return ok
+    assert ok
 
 
 def test_heading_blank_line() -> bool:
@@ -724,7 +722,7 @@ def test_heading_blank_line() -> bool:
         ok = False
     else:
         print("  ✅ 标题跨空行绑定、普通空行/列表切点不受影响")
-    return ok
+    assert ok
 
 
 def test_split_markdown_heading() -> bool:
@@ -764,11 +762,15 @@ def test_split_markdown_heading() -> bool:
         ok = False
     print("=== split_markdown 标题不孤悬（%d 字节） ===" % len(text.encode("utf-8")))
     print("  ✅ 标题与列表同块、注解留在原块、拼接完整" if ok else "  ❌ 有断言失败")
-    return ok
+    assert ok
 
 
-async def main():
-    # ── 终稿（标记格式）：在 chat.txt 实际断点位置停顿 ──
+async def test_stream_full_suite():
+    """全量回归：断流补发 / 字节上限硬切 / 超长列表 / 谓词 / 标题 / 注解 / 2行表。"""
+
+
+async def test_stream_final_marked():
+    """终稿（标记格式）：在 chat.txt 实际断点位置停顿。"""
     lines = FINAL.split("\n")
     ends = line_ends(FINAL)
     # 断点：Tramp 注解行尾 / widget.el 注解行尾 / "乐子帖"标题后 / 求助第3项后
@@ -779,11 +781,13 @@ async def main():
         "Indentation on emacs?（nvim 转来的对齐问题）",
     ]
     pause_at = [ends[i] - 1 for i, ln in enumerate(lines) if ln in targets]
-    ok1 = verify(
+    assert verify(
         "终稿（标记格式，1881字符）", FINAL, await run_case("final", FINAL, pause_at)
     )
 
-    # ── 草稿（无标记格式）：Tramp URL 行尾（chat.txt 块3/块4 断点）停顿 ──
+
+async def test_stream_draft_unmarked():
+    """草稿（无标记格式）：Tramp URL 行尾停顿。"""
     dlines = DRAFT.split("\n")
     dends = line_ends(DRAFT)
     dtargets = [
@@ -792,18 +796,39 @@ async def main():
         "Tramp for Homelab? 🏠",  # 标题后停顿（URL 尚未生成）→ 标题不得单独成块
     ]
     dpause = [dends[i] - 1 for i, ln in enumerate(dlines) if ln in dtargets]
-    ok2 = verify(
+    assert verify(
         "草稿（无标记格式，1306字符）", DRAFT, await run_case("draft", DRAFT, dpause)
     )
 
+
+async def test_stream_heading_not_orphaned():
+    """标题不孤悬块尾（new_chat.txt 事故）：📄 标题后停顿。"""
+    hlines = HEADING_TEXT.split("\n")
+    hends = line_ends(HEADING_TEXT)
+    htargets = [
+        "—— 港中文等提出 Libra，优化 Agentic RL 后训练资源分配，吞吐最高 3 倍",
+        "📄 arXiv cs.AI（今日更新）",
+    ]
+    hpause = set()
+    for i, ln in enumerate(hlines):
+        if ln in htargets:
+            # 标题行尾 + 8 字符（第一行 arXiv 条目写到一半）——事故断点：
+            # 空闲 flush 时 pending 以标题行结尾，不得把标题单独发出
+            hpause.add(hends[i] + 8)
+    assert verify(
+        "标题不孤悬（无标记格式，arXiv 断点）",
+        HEADING_TEXT,
+        await run_case("heading", HEADING_TEXT, sorted(hpause)),
+    )
+
     # ── 断流补发（force 路径）：生成中途断流，已转发+补发 == 断流点前全文 ──
-    ok3 = await run_abort_case()
+    await test_stream_abort_tail_force()
 
     # ── 字节上限硬切（>3600 无安全切点）：单行 + 超限列表项 ──
-    ok5 = await run_hardcut_case()
+    await test_stream_hardcut_oversized()
 
     # ── split_markdown 超长列表（>3600 字节）：块首必须是完整列表项 ──
-    ok4 = test_split_markdown_big_list()
+    test_split_markdown_big_list()
 
     # ── 标题不孤悬块尾（new_chat.txt 事故）：📄 标题后停顿 ──
     hlines = HEADING_TEXT.split("\n")
@@ -825,38 +850,16 @@ async def main():
     )
 
     # ── 谓词边界（单/双破折号、裸 IP、嵌套缩进、标题行判定）──
-    ok6 = test_predicates()
+    test_predicates()
 
     # ── split_markdown 标题不孤悬（>3600 字节字节精确构造）──
-    ok8 = test_split_markdown_heading()
+    test_split_markdown_heading()
 
     # ── 标题跨空行绑定（CommonMark 风格「标题 + 空行 + 列表」）──
-    ok9 = test_heading_blank_line()
+    test_heading_blank_line()
 
     # ── 后置处理约束（注解不迁移 / 3600 字节上限不破）──
-    ok10 = test_split_markdown_heading_cap()
+    test_split_markdown_heading_cap()
 
     # ── 2 行表（表头+分隔行）不丢弃（宁断勿丢）──
-    ok11 = test_split_markdown_table_no_rows()
-
-    return (
-        0
-        if (
-            ok1
-            and ok2
-            and ok3
-            and ok4
-            and ok5
-            and ok6
-            and ok7
-            and ok8
-            and ok9
-            and ok10
-            and ok11
-        )
-        else 1
-    )
-
-
-if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    test_split_markdown_table_no_rows()

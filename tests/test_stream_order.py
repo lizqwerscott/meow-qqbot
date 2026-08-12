@@ -13,7 +13,6 @@ QQ API 发送慢 / 重试退避），紧接着输出收尾句（77 字符，发�
 """
 
 import asyncio
-import sys
 import time
 from types import SimpleNamespace as NS
 
@@ -91,7 +90,7 @@ class SlowCb:
         self.blocks.append(chunk)
 
 
-async def main():
+async def test_stream_blocks_serialized():
     ctx = NS(
         ai=NS(
             ai_service=BurstSvc(FULL, burst=300, pause=1.5),
@@ -155,11 +154,5 @@ async def main():
         print("  ⚠️ 只有 1 块流式，未演练并发窗口（测试编排失效）")
         ok = False
 
-    if ok:
-        print("✅ 串行化成立：后块进入时刻 >= 前块退出时刻，拼接完整，无中线切点")
-        return 0
-    return 1
-
-
-if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    assert ok, "流式块串行化失败：见上方 ❌ 诊断"
+    print("✅ 串行化成立：后块进入时刻 >= 前块退出时刻，拼接完整，无中线切点")
