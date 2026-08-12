@@ -424,6 +424,9 @@ def _de_orphan_headings(chunks: list[str], max_bytes: int) -> list[str]:
     字节上限不破：下一块接近 max_bytes 放不下标题时，先把其尾部行顺延到
     再下一块（级联，保持顺序）腾出空间——任何块都不超过 max_bytes
     （标题 ≤ 97B，顺延必然腾得出；极端单行块整体顺延后标题单独成块）。
+    结构块特殊处理：下一块是围栏块时放弃移动（pop 会拆散围栏，宁孤悬勿
+    断结构）；下一块是表格分页（表头+分隔行）时，顺延的表行要补表头
+    （原块保留表头 + 新块表头+行，表格分页语义不被孤立数据行破坏）。
     """
     out: list[str] = []
     i = 0
@@ -435,14 +438,25 @@ def _de_orphan_headings(chunks: list[str], max_bytes: int) -> list[str]:
             prev = lines[-2].strip() if len(lines) >= 2 else ""
             prev_boundary = not prev or bool(prev and not is_continuation_line(prev))
             if is_heading_line(last, prev_boundary):
-                lines.pop()
                 nxt_lines = chunks[i + 1].split("\n")
+                # 围栏块（开围栏开头）：pop 其末行会拆散围栏 → 放弃移动
+                # （标题孤悬块尾是视觉问题，围栏断裂是内容结构破坏）
+                if nxt_lines and is_fence_line(nxt_lines[0]):
+                    out.append(chunk)
+                    i += 1
+                    continue
+                lines.pop()
+                # 表格分页（≥2 行且次行是分隔行）：顺延的表行必须补表头
+                table_page = len(nxt_lines) >= 2 and is_table_separator(nxt_lines[1])
                 carried: list[str] = []
                 # 标题移入下一块；放不下则顺延其尾部行（逆序收集、正序拼接）
                 while nxt_lines and (
                     utf8len(last) + 1 + utf8len("\n".join(nxt_lines)) > max_bytes
                 ):
                     carried.insert(0, nxt_lines.pop())
+                if table_page and carried:
+                    # 表头跟随挤出的行：原块仍以表头开头，新块=表头+行
+                    carried = nxt_lines[0:2] + carried
                 if lines:
                     # 补回被弹出的标题行后的换行：annotation\nheading → annotation\n
                     out.append("\n".join(lines) + "\n")
@@ -563,11 +577,15 @@ def markdown_safe_cut(
             if not in_fence:
                 in_fence = True
                 fence_marker = marker
+                # 围栏开行 = 块边界：围栏前行尾总可切（标题启发式绑定的
+                # 「代码开始：」等引导行也能切回围栏前，围栏是独立结构）
+                safe = pos
+                prev_boundary = True
             elif is_closing_fence_line(line, fence_marker):
                 in_fence = False
                 fence_marker = None
                 safe = pos + len(line) + 1  # 围栏完整结束后可切（行尾）
-            prev_boundary = True  # 围栏开/闭行都是块边界
+                prev_boundary = True  # 围栏开/闭行都是块边界
         elif in_fence:
             prev_boundary = False  # 围栏体内：其后行不是块边界
         elif is_table_separator(line):
