@@ -57,6 +57,31 @@
 </div>
 
 <div class="card">
+    <h2>🧩 媒体 Provider</h2>
+    {% for capability, providers in stats.media_provider_status.items() %}
+    <h3>{{ capability }}</h3>
+    {% if providers %}
+    <div class="table-wrap">
+    <table>
+        <thead><tr><th>Provider ID</th><th>状态</th><th>最后错误分类</th></tr></thead>
+        <tbody>
+        {% for provider in providers %}
+        <tr>
+            <td><code>{{ provider.id }}</code></td>
+            <td>{{ provider.status }}</td>
+            <td>{{ provider.last_error_category or "—" }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p style="color:var(--text-secondary)">未配置可用 Provider</p>
+    {% endif %}
+    {% endfor %}
+</div>
+
+<div class="card">
     <h2>📋 活跃队列</h2>
     {% if stats.queue_details %}
     <div class="table-wrap">

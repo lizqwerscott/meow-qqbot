@@ -6,6 +6,7 @@
 import asyncio
 import logging
 import sys
+from collections.abc import Mapping
 
 import httpx
 
@@ -41,8 +42,11 @@ from core.managers.nickname_manager import NicknameManager
 from core.managers.permission_manager import PermissionManager
 from core.managers.template_manager import TemplateManager
 from core.managers.workspace_manager import WorkspaceManager
+from core.media.provider_factory import (
+    MediaProviderBuildContext,
+    MediaProviderFactory,
+)
 from core.media.service import MediaService
-from core.media.whisper_transcriber import WhisperTranscriber
 from core.plugins.manager import PluginManager
 from core.rule_router import RuleRouter
 from core.tasks import (
@@ -73,6 +77,11 @@ class ServiceGraph:
 
     def __init__(self, cfg: ConfigLoader):
         self.cfg = cfg
+        self.http_client = None
+        self.model_registry = None
+        self.media_service = None
+        self.bot_engine = None
+        self.webui_task = None
 
     # ── build: 三阶段构造 ──────────────────────────────────────────
 
@@ -142,35 +151,51 @@ class ServiceGraph:
             _log.info("多模态服务未启用（enabled=false），跳过 VLM 图片分析")
 
         media_config = self.cfg.media
-        voice_config = media_config.get("voice_transcription", {})
-        voice_transcriber = None
-        if voice_config.get("enabled", False):
-            voice_transcriber = WhisperTranscriber(
-                model_name=voice_config.get("model", "small"),
-                language=voice_config.get("language", ""),
-                download_root=voice_config.get("download_root", "data/media/whisper"),
+        media_config = media_config if isinstance(media_config, Mapping) else {}
+        voice_config = (
+            media_config.get("voice_transcription", {})
+            if isinstance(media_config, Mapping)
+            else {}
+        )
+        voice_config = voice_config if isinstance(voice_config, Mapping) else {}
+        image_config = (
+            media_config.get("image_understanding", {})
+            if isinstance(media_config, Mapping)
+            else {}
+        )
+        image_config = image_config if isinstance(image_config, Mapping) else {}
+        download_config = (
+            media_config.get("download", {})
+            if isinstance(media_config, Mapping)
+            else {}
+        )
+        download_config = (
+            download_config if isinstance(download_config, Mapping) else {}
+        )
+        provider_chains = MediaProviderFactory.build(
+            MediaProviderBuildContext(
+                model_registry=self.model_registry,
+                providers_config=providers_config,
+                media_config=media_config,
+                http_client=self.http_client,
+                multimodal=self.multimodal_service,
             )
+        )
         self.media_service = MediaService(
             http_client=self.http_client,
             multimodal=self.multimodal_service,
             storage_dir=media_config.get("storage_dir", "data/media"),
             enabled=media_config.get("enabled", True),
-            image_understanding=media_config.get("image_understanding", {}),
+            image_understanding=image_config,
             recent_window_seconds=media_config.get("recent_window_seconds", 600),
             recent_max_items=media_config.get("recent_max_items", 5),
             max_attachments_per_message=media_config.get(
                 "max_attachments_per_message", 5
             ),
-            max_image_bytes=media_config.get("download", {}).get(
-                "max_image_bytes", 10 * 1024 * 1024
-            ),
-            max_file_bytes=media_config.get("download", {}).get(
-                "max_file_bytes", 25 * 1024 * 1024
-            ),
-            download_timeout=media_config.get("download", {}).get(
-                "timeout_seconds", 15
-            ),
-            download_concurrency=media_config.get("download", {}).get("concurrency", 4),
+            max_image_bytes=download_config.get("max_image_bytes", 10 * 1024 * 1024),
+            max_file_bytes=download_config.get("max_file_bytes", 25 * 1024 * 1024),
+            download_timeout=download_config.get("timeout_seconds", 15),
+            download_concurrency=download_config.get("concurrency", 4),
             max_total_bytes=media_config.get("max_total_bytes", 2 * 1024 * 1024 * 1024),
             preview_enabled=self.cfg.webui.get("media_preview", {}).get(
                 "enabled", True
@@ -181,9 +206,10 @@ class ServiceGraph:
             text_preview_max_chars=self.cfg.webui.get("media_preview", {}).get(
                 "text_preview_max_chars", 20_000
             ),
-            voice_transcriber=voice_transcriber,
+            voice_transcriber=None,
             voice_transcription=voice_config,
             ai_service=self.ai_service,
+            provider_chains=provider_chains,
         )
 
         # ── EmojiManager ──
@@ -801,7 +827,7 @@ class ServiceGraph:
             _log.info("WebUI 管理面板将在 http://%s:%d 启动", _webui_host, _webui_port)
             if _webui_host in ("0.0.0.0", "::"):
                 _log.info("局域网内可通过 http://<本机IP>:%d 访问", _webui_port)
-            asyncio.create_task(start_webui(webui_app, webui_config))
+            self.webui_task = asyncio.create_task(start_webui(webui_app, webui_config))
 
     # ── Hindsight 健康检查（async，需单独调用） ────────────────────
 
@@ -895,19 +921,78 @@ class ServiceGraph:
 
         self.task_cleanup_task = asyncio.create_task(_periodic_cleanup())
 
+    async def _safe_cleanup(self, name, cleanup):
+        try:
+            await cleanup()
+        except asyncio.CancelledError:
+            _log.warning(
+                "服务关闭步骤取消 step=%s category=cancelled",
+                name,
+            )
+        except Exception as exc:
+            _log.warning(
+                "服务关闭步骤失败 step=%s category=%s",
+                name,
+                type(exc).__name__,
+            )
+
+    async def _cancel_task(self, name):
+        task = getattr(self, name, None)
+        setattr(self, name, None)
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            _log.warning(
+                "后台任务关闭失败 step=%s category=%s",
+                name,
+                type(exc).__name__,
+            )
+
     async def stop(self):
-        """优雅关闭。"""
-        await self.process_registry.stop()
-        if self.cron_scheduler:
-            await self.cron_scheduler.stop()
-        if self.heartbeat_manager:
-            await self.heartbeat_manager.stop()
-        if getattr(self, "media_service", None):
-            await self.media_service.close()
-        if self.task_cleanup_task:
-            self.task_cleanup_task.cancel()
-        if self.context_cleanup_task:
-            self.context_cleanup_task.cancel()
-        if self.tts_service:
-            await self.tts_service.close()
-        await self.bot_engine.stop()
+        """优雅关闭；单个步骤失败不阻断其他资源清理。"""
+        process_registry = getattr(self, "process_registry", None)
+        if process_registry:
+            await self._safe_cleanup("process_registry", process_registry.stop)
+
+        cron_scheduler = getattr(self, "cron_scheduler", None)
+        if cron_scheduler:
+            await self._safe_cleanup("cron_scheduler", cron_scheduler.stop)
+
+        heartbeat_manager = getattr(self, "heartbeat_manager", None)
+        if heartbeat_manager:
+            await self._safe_cleanup("heartbeat_manager", heartbeat_manager.stop)
+
+        bot_engine = getattr(self, "bot_engine", None)
+        self.bot_engine = None
+        if bot_engine:
+            await self._safe_cleanup("bot_engine", bot_engine.stop)
+
+        media_service = getattr(self, "media_service", None)
+        self.media_service = None
+        if media_service:
+            await self._safe_cleanup("media_service", media_service.close)
+
+        await self._cancel_task("task_cleanup_task")
+        await self._cancel_task("context_cleanup_task")
+        await self._cancel_task("webui_task")
+
+        tts_service = getattr(self, "tts_service", None)
+        self.tts_service = None
+        if tts_service:
+            await self._safe_cleanup("tts_service", tts_service.close)
+
+        model_registry = getattr(self, "model_registry", None)
+        self.model_registry = None
+        if model_registry:
+            await self._safe_cleanup("model_registry", model_registry.close)
+
+        http_client = getattr(self, "http_client", None)
+        self.http_client = None
+        if http_client is not None:
+            await self._safe_cleanup("http_client", http_client.aclose)

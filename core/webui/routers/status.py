@@ -29,6 +29,10 @@ async def status_page(request: Request):
     stats["queue_details"] = queue_details
     stats["queue_total"] = sum(q for _, q in queue_details)
     stats["archived_count"] = len(archived_counts)
+    media_service = managers.get("media_service")
+    stats["media_provider_status"] = (
+        media_service.provider_status() if media_service else {}
+    )
 
     return templates.TemplateResponse(
         request,

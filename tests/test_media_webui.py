@@ -1,11 +1,44 @@
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
 from core.media.service import MediaService
 from core.webui.app import create_app
+
+
+@pytest.mark.asyncio
+async def test_status_page_shows_media_provider_status(tmp_path):
+    service = MediaService(http_client=SimpleNamespace(), storage_dir=tmp_path)
+    app = create_app({"media_service": service}, {})
+    app.state.managers["agent_engine"] = SimpleNamespace(
+        hindsight=None,
+        get_stats=AsyncMock(
+            return_value={
+                "queue_sizes": {},
+                "active_chats": 0,
+                "total_messages": 0,
+                "hindsight_health": {"status": "disabled"},
+                "cost": {
+                    "turn_count": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cache_hit_rate": 0,
+                    "total_cost": 0,
+                },
+                "learners": {},
+            }
+        ),
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/status")
+
+    assert response.status_code == 200
+    assert "媒体 Provider" in response.text
+    assert "未配置可用 Provider" in response.text
 
 
 @pytest.mark.asyncio

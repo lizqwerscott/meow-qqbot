@@ -1,9 +1,10 @@
 import asyncio
 import logging
+
 from colorlog import ColoredFormatter
 
 from core.bootstrap import ServiceGraph
-from core.config_loader import ConfigLoader, ConfigError
+from core.config_loader import ConfigError, ConfigLoader
 
 
 def setup_logging() -> logging.Logger:
@@ -32,14 +33,29 @@ def setup_logging() -> logging.Logger:
 async def main() -> None:
     log = setup_logging()
 
+    services = None
+
+    async def _cleanup_after_startup_failure() -> None:
+        if services is None:
+            return
+        try:
+            await services.stop()
+        except BaseException as cleanup_exc:
+            log.warning(
+                "启动失败后的资源清理异常 category=%s",
+                type(cleanup_exc).__name__,
+            )
+
     try:
         services = ServiceGraph(ConfigLoader())
         await services.build()
         await services.start()
     except ConfigError as exc:
+        await _cleanup_after_startup_failure()
         log.critical(str(exc))
         return
     except Exception:
+        await _cleanup_after_startup_failure()
         log.critical("启动失败", exc_info=True)
         return
 

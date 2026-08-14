@@ -3,14 +3,20 @@ import ipaddress
 import logging
 import socket
 import time
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 from pypdf import PdfReader
 from qqbot_agent_sdk.audio import convert_audio_to_wav, looks_like_silk
 
-from core.media.capabilities import MediaCapability, MediaCapabilityTimeoutError
+from core.media.capabilities import (
+    MediaCapability,
+    MediaCapabilityTimeoutError,
+    safe_error_category,
+)
 from core.media.models import (
     FileInspection,
     ImageInspection,
@@ -20,6 +26,7 @@ from core.media.models import (
     VoiceTranscription,
 )
 from core.media.ocr import OcrEngine, OcrProvider, is_ocr_available
+from core.media.provider_factory import LegacyMultimodalProvider, LocalWhisperProvider
 from core.media.store import MediaStore
 from core.message import InputMessage, ResourceMeta
 
@@ -29,30 +36,6 @@ _IMAGE_SUMMARY_PROMPT_VERSION = "v2"
 _IMAGE_INSPECTION_PROMPT_VERSION = "v2"
 _TEXT_EXTRACTION_VERSION = "v1"
 _FILE_SUMMARY_VERSION = "v1"
-
-
-class _MultimodalProvider:
-    name = "multimodal"
-
-    def __init__(self, service):
-        self.service = service
-        self.model_name = getattr(service, "model", "")
-
-    async def execute(self, record: MediaRecord, **kwargs) -> str:
-        return await self.service.analyze_image(
-            str(record.local_path), prompt=kwargs.get("prompt")
-        )
-
-
-class _VoiceTranscriberProvider:
-    name = "local_whisper"
-
-    def __init__(self, transcriber):
-        self.transcriber = transcriber
-        self.model_name = getattr(transcriber, "model_name", "")
-
-    async def execute(self, record: MediaRecord, **kwargs) -> str:
-        return await self.transcriber.transcribe(str(record.local_path))
 
 
 class _TextExtractorProvider:
@@ -133,6 +116,18 @@ class _PdfProvider:
         return text[:100_000], pages
 
 
+def _safe_int(value: Any, default: int, minimum: int = 0) -> int:
+    try:
+        return max(minimum, int(value))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _safe_float(value: Any, default: float, minimum: float = 0.1) -> float:
+    try:
+        return max(minimum, float(value))
+    except (TypeError, ValueError, OverflowError):
+        return default
 class MediaService:
     """媒体生命周期模块：保存、授权、摘要和按需图片分析。"""
 
@@ -168,16 +163,18 @@ class MediaService:
         voice_transcriber=None,
         voice_transcription=None,
         ocr_engine=None,
+        provider_chains=None,
     ):
         self.enabled = enabled
         self.http_client = http_client
         self.multimodal = multimodal
-        cfg = image_understanding or {}
-        self.image_enabled = bool(cfg.get("enabled", True))
-        self.max_auto_images = max(0, int(cfg.get("max_auto_images", 3)))
-        self.analysis_timeout = max(1, float(cfg.get("analysis_timeout_seconds", 30)))
-        self.summary_max_chars = max(20, int(cfg.get("summary_max_chars", 300)))
-        ocr_cfg = cfg.get("ocr", {}) or {}
+        image_config = image_understanding if isinstance(image_understanding, Mapping) else {}
+        self.image_enabled = bool(image_config.get("enabled", True))
+        self.max_auto_images = _safe_int(image_config.get("max_auto_images", 3), 3)
+        self.analysis_timeout = _safe_float(image_config.get("analysis_timeout_seconds", 30), 30)
+        self.summary_max_chars = _safe_int(image_config.get("summary_max_chars", 300), 300, 20)
+        ocr_cfg = image_config.get("ocr", {})
+        ocr_cfg = ocr_cfg if isinstance(ocr_cfg, Mapping) else {}
         self.ocr_enabled = bool(ocr_cfg.get("enabled", True))
         self.ocr_min_chars = max(0, int(ocr_cfg.get("min_chars", 8)))
         self.ocr_max_chars = max(1, int(ocr_cfg.get("max_chars", 2000)))
@@ -186,8 +183,8 @@ class MediaService:
         self.max_attachments = max(1, int(max_attachments_per_message))
         self.max_image_bytes = max(1, int(max_image_bytes))
         self.max_file_bytes = max(1, int(max_file_bytes))
-        self.download_timeout = max(1, float(download_timeout))
-        self.download_sem = asyncio.Semaphore(max(1, int(download_concurrency)))
+        self.download_timeout = _safe_float(download_timeout, 15)
+        self.download_sem = asyncio.Semaphore(_safe_int(download_concurrency, 4, 1))
         self.max_total_bytes = max_total_bytes
         self.preview_enabled = bool(preview_enabled)
         self.preview_max_inline_bytes = max(1, int(preview_max_inline_bytes))
@@ -198,46 +195,70 @@ class MediaService:
         self.pdf_max_tokens = max(50, int(pdf_max_tokens))
         self.pdf_max_pages = max(1, int(pdf_max_pages))
         self.pdf_max_bytes = max(1, int(pdf_max_bytes))
-        voice_cfg = voice_transcription or {}
+        voice_cfg = voice_transcription if isinstance(voice_transcription, Mapping) else {}
         self.voice_transcriber = voice_transcriber
-        self.voice_enabled = bool(
-            voice_cfg.get("enabled", voice_transcriber is not None)
-            and voice_transcriber is not None
-        )
-        self.voice_timeout = max(1, float(voice_cfg.get("timeout_seconds", 120)))
-        self.voice_max_chars = max(1, int(voice_cfg.get("max_chars", 4_000)))
+        self.voice_timeout = _safe_float(voice_cfg.get("timeout_seconds", 120), 120)
+        self.voice_max_chars = _safe_int(voice_cfg.get("max_chars", 4_000), 4_000, 1)
         self.store = MediaStore(storage_dir)
         self._opened = False
-        vlm_provider = _MultimodalProvider(multimodal) if multimodal else None
-        ocr_provider = None
-        if self.ocr_enabled:
-            # 显式注入的引擎（测试/替换实现）直接采用；默认引擎要求 rapidocr 可导入
-            if ocr_engine is not None or is_ocr_available():
-                ocr_engine = ocr_engine or OcrEngine()
-                ocr_provider = OcrProvider(
-                    ocr_engine,
-                    min_chars=self.ocr_min_chars,
-                    max_chars=self.ocr_max_chars,
-                )
-            else:
-                _log.warning("OCR 已启用但 rapidocr 未安装，跳过本地 OCR provider")
-        # 自动摘要：OCR 优先（截图/带字表情包直接出文字摘要，省 VLM 费用）
+        if provider_chains is None:
+            vlm_provider = LegacyMultimodalProvider(multimodal) if multimodal else None
+            ocr_provider = None
+            if self.ocr_enabled:
+                # 显式注入的引擎（测试/替换实现）直接采用；默认引擎要求 rapidocr 可导入
+                if ocr_engine is not None or is_ocr_available():
+                    ocr_engine = ocr_engine or OcrEngine()
+                    ocr_provider = OcrProvider(
+                        ocr_engine,
+                        min_chars=self.ocr_min_chars,
+                        max_chars=self.ocr_max_chars,
+                    )
+                else:
+                    _log.warning("OCR 已启用但 rapidocr 未安装，跳过本地 OCR provider")
+            summary_providers = [p for p in (ocr_provider, vlm_provider) if p]
+            inspect_providers = [p for p in (vlm_provider, ocr_provider) if p]
+            voice_providers = (
+                [
+                    LocalWhisperProvider(
+                        voice_transcriber,
+                        preload_enabled=bool(voice_cfg.get("preload", True)),
+                    )
+                ]
+                if voice_transcriber
+                else []
+            )
+        else:
+            summary_providers = list(provider_chains.image_summary)
+            inspect_providers = list(provider_chains.image_inspect)
+            voice_providers = list(provider_chains.voice_transcription)
+        self.voice_enabled = bool(
+            voice_cfg.get("enabled", bool(voice_providers)) and voice_providers
+        )
+        # 自动摘要：provider factory 未配置时保留 OCR → legacy VLM 的兼容链
         self.image_capability = MediaCapability(
             name="image_understanding",
             resource_types={"image"},
             max_bytes=self.max_image_bytes,
             timeout=self.analysis_timeout,
-            concurrency=cfg.get("concurrency", 2),
-            providers=[p for p in (ocr_provider, vlm_provider) if p],
+            total_timeout=image_config.get("total_timeout_seconds"),
+            concurrency=image_config.get("concurrency", 2),
+            providers=summary_providers,
         )
-        # image 工具：VLM 优先（回答具体问题），OCR 兜底（VLM 不可用时至少给出文字）
+        # image 工具：provider factory 未配置时保留 legacy VLM → OCR 的兼容链
         self.image_inspect_capability = MediaCapability(
             name="image_inspection",
             resource_types={"image"},
             max_bytes=self.max_image_bytes,
             timeout=self.analysis_timeout,
-            concurrency=cfg.get("concurrency", 2),
-            providers=[p for p in (vlm_provider, ocr_provider) if p],
+            total_timeout=(
+                image_config.get("inspect", {}).get(
+                    "total_timeout_seconds", image_config.get("total_timeout_seconds")
+                )
+                if isinstance(image_config.get("inspect", {}), Mapping)
+                else image_config.get("total_timeout_seconds")
+            ),
+            concurrency=image_config.get("concurrency", 2),
+            providers=inspect_providers,
         )
         self.file_capability = MediaCapability(
             name="text_extraction",
@@ -271,23 +292,41 @@ class MediaService:
             resource_types={"voice"},
             max_bytes=self.max_file_bytes,
             timeout=self.voice_timeout,
+            total_timeout=voice_cfg.get("total_timeout_seconds"),
             concurrency=voice_cfg.get("concurrency", 1),
-            providers=(
-                [_VoiceTranscriberProvider(voice_transcriber)]
-                if voice_transcriber
-                else []
-            ),
+            providers=voice_providers,
         )
+
+    def provider_status(self) -> dict[str, list[dict[str, str]]]:
+        capabilities = {
+            "image_summary": self.image_capability,
+            "image_inspect": self.image_inspect_capability,
+            "voice_transcription": self.voice_capability,
+        }
+        result = {}
+        for capability_name, capability in capabilities.items():
+            health_details = capability.health.details()
+            providers = []
+            for provider in capability.providers:
+                provider_id = getattr(provider, "provider_id", provider.name)
+                details = health_details.get(
+                    provider_id,
+                    {"status": "available", "last_error_category": ""},
+                )
+                providers.append(
+                    {
+                        "id": provider_id,
+                        "status": details["status"],
+                        "last_error_category": details["last_error_category"],
+                    }
+                )
+            result[capability_name] = providers
+        return result
 
     async def open(self):
         if self.enabled and not self._opened:
             await self.store.open()
-            try:
-                if self.voice_capability.enabled:
-                    await self.voice_transcriber.preload()
-            except Exception:
-                await self.store.close()
-                raise
+            await self.voice_capability.preload()
             self._opened = True
 
     async def close(self):
@@ -417,7 +456,9 @@ class MediaService:
                 return data, "audio/silk", None
             return wav_data, "audio/wav", data
         except Exception as exc:
-            _log.warning("语音转换失败，保留原始 Silk: %s", exc)
+            _log.warning(
+                "语音转换失败，保留原始 Silk: category=%s", safe_error_category(exc)
+            )
             return data, "audio/silk", None
         finally:
             if wav_path is not None:
@@ -488,7 +529,11 @@ class MediaService:
                 resource.storage_status = "failed"
                 resource.source_url = ""
                 resource.resource_id = ""
-                _log.warning("媒体保存失败 [%s]: %s", message.id, exc)
+                _log.warning(
+                    "媒体保存失败 [%s]: category=%s",
+                    message.id,
+                    safe_error_category(exc),
+                )
         for resource in message.resources[self.max_attachments :]:
             resource.storage_status = "failed"
             resource.source_url = ""
@@ -517,7 +562,11 @@ class MediaService:
                 resource.storage_status = "failed"
                 resource.source_url = ""
                 resource.resource_id = ""
-                _log.warning("引用媒体保存失败 [%s]: %s", message.id, exc)
+                _log.warning(
+                    "引用媒体保存失败 [%s]: category=%s",
+                    message.id,
+                    safe_error_category(exc),
+                )
 
     async def resolve_replied_resources(self, message: InputMessage) -> None:
         if not message.replied_message_id:
@@ -632,13 +681,16 @@ class MediaService:
         return url.strip()
 
     async def _resolve_addresses(self, host: str):
-        try:
-            return [ipaddress.ip_address(host)]
-        except ValueError:
-            infos = await asyncio.get_running_loop().run_in_executor(
-                None, socket.getaddrinfo, host, None
-            )
-            return [ipaddress.ip_address(info[4][0]) for info in infos]
+        async def resolve():
+            try:
+                return [ipaddress.ip_address(host)]
+            except ValueError:
+                infos = await asyncio.get_running_loop().run_in_executor(
+                    None, socket.getaddrinfo, host, None
+                )
+                return [ipaddress.ip_address(info[4][0]) for info in infos]
+
+        return await asyncio.wait_for(resolve(), timeout=self.download_timeout)
 
     @staticmethod
     def _check_peer_address(response) -> None:
@@ -961,7 +1013,7 @@ class MediaService:
                 media_uri, error="ANALYSIS_TIMEOUT", message="PDF 分析超时"
             )
         except Exception as exc:
-            _log.warning("PDF 分析失败: %s", exc)
+            _log.warning("PDF 分析失败: category=%s", safe_error_category(exc))
             return PdfInspection(
                 media_uri, error="ANALYSIS_FAILED", message="PDF 分析失败"
             )
@@ -1044,7 +1096,7 @@ class MediaService:
                 media_uri, error="TRANSCRIPTION_TIMEOUT", message="语音转写超时"
             )
         except Exception as exc:
-            _log.warning("语音转写失败: %s", exc, exc_info=True)
+            _log.warning("语音转写失败: category=%s", safe_error_category(exc))
             return VoiceTranscription(
                 media_uri, error="TRANSCRIPTION_FAILED", message="语音转写失败"
             )
@@ -1106,7 +1158,7 @@ class MediaService:
                 media_uri, error="ANALYSIS_TIMEOUT", message="图片分析超时"
             )
         except Exception as exc:
-            _log.warning("图片分析失败: %s", exc)
+            _log.warning("图片分析失败: category=%s", safe_error_category(exc))
             return ImageInspection(
                 media_uri, error="ANALYSIS_FAILED", message="图片分析失败"
             )

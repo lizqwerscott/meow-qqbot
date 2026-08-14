@@ -233,6 +233,53 @@ def test_should_not_dispatch_to_ai_for_reply_to_other_user():
     assert engine._should_dispatch_to_ai(message) is False
 
 
+    engine = make_engine(FakeToolLoop())
+    from core.message import InputMessage, ResourceMeta
+
+    message = InputMessage(
+        "id",
+        "user",
+        "chat",
+        "",
+        False,
+        resources=[ResourceMeta(resource_type="image", media_uri="media://inbound/1")],
+    )
+
+    assert engine._should_dispatch_to_ai(message) is True
+
+
+def test_should_dispatch_to_ai_for_waking_group_image_message():
+    engine = make_engine(FakeToolLoop())
+    from core.message import InputMessage, ResourceMeta
+
+    message = InputMessage(
+        "id",
+        "user",
+        "chat",
+        "猫猫看看",
+        True,
+        resources=[ResourceMeta(resource_type="image", media_uri="media://inbound/1")],
+    )
+
+    assert engine._should_dispatch_to_ai(message) is True
+
+
+def test_should_not_dispatch_to_ai_for_unwoken_group_image_message():
+    engine = make_engine(FakeToolLoop())
+    from core.message import InputMessage, ResourceMeta
+
+    message = InputMessage(
+        "id",
+        "user",
+        "chat",
+        "",
+        True,
+        resources=[ResourceMeta(resource_type="image", media_uri="media://inbound/1")],
+    )
+
+    assert engine._should_dispatch_to_ai(message) is False
+
+
 @pytest.mark.asyncio
 async def test_run_turn_builds_routes_forwards_and_collects_replies():
     prompt_calls = 0

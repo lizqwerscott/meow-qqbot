@@ -12,6 +12,8 @@ import asyncio
 import logging
 from typing import Any, List, Optional
 
+from core.media.capabilities import safe_error_category
+
 _log = logging.getLogger(__name__)
 
 try:  # pragma: no cover - 依赖可选安装
@@ -60,7 +62,9 @@ class OcrEngine:
             self._init_failed = _IMPORT_ERROR or ImportError(
                 "rapidocr 未安装，请执行 uv add rapidocr onnxruntime"
             )
-            _log.warning("RapidOCR 不可用: %s", self._init_failed)
+            _log.warning(
+                "RapidOCR 不可用: category=%s", safe_error_category(self._init_failed)
+            )
             return
         try:
             # 构造时解析配置/校验模型文件，放线程避免阻塞事件循环
@@ -68,7 +72,7 @@ class OcrEngine:
             _log.info("RapidOCR 引擎就绪（PP-OCRv6 small）")
         except Exception as exc:
             self._init_failed = exc
-            _log.warning("RapidOCR 初始化失败: %s", exc)
+            _log.warning("RapidOCR 初始化失败: category=%s", safe_error_category(exc))
 
     async def recognize(self, image_path: str) -> List[str]:
         """返回识别的文本行（原始内容，不做清洗）；无文字时返回空列表。"""
@@ -99,12 +103,17 @@ class OcrProvider:
         self,
         engine: Optional[OcrEngine] = None,
         *,
+        name: str = "rapidocr",
         min_chars: int = 8,
         max_chars: int = 2000,
+        timeout_seconds: float | None = None,
     ) -> None:
+        self.name = name
+        self.provider_id = name
         self._engine = engine or OcrEngine()
         self.min_chars = max(0, int(min_chars))
         self.max_chars = max(1, int(max_chars))
+        self.timeout_seconds = timeout_seconds
 
     async def execute(self, record: Any, **kwargs: Any) -> str:
         lines = await self._engine.recognize(str(record.local_path))

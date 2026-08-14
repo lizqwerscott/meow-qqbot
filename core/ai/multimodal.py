@@ -72,7 +72,9 @@ class MultimodalService:
         )
 
         result = await self._call_vlm(base64_data, prompt, max_tokens=max_tokens)
-        result = (result or "图片").strip()
+        result = (result or "").strip()
+        if not result:
+            raise RuntimeError("VLM returned no image description")
 
         self._set_cache(cache_key, result, result, [])
         return result

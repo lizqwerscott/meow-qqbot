@@ -123,9 +123,9 @@ class BotEngine:
         self.approval_manager: Optional[Any] = None
         self._session_id: Optional[str] = None
         self._last_seq: Optional[int] = None
-        self._reply_delivery_states: dict[
-            tuple[str, str, str], _ReplyDeliveryState
-        ] = {}
+        self._reply_delivery_states: dict[tuple[str, str, str], _ReplyDeliveryState] = (
+            {}
+        )
 
         _log.info("BotEngine 已初始化")
 
@@ -225,18 +225,26 @@ class BotEngine:
         self.ws.start(gateway_url, main_loop)
 
     async def stop(self) -> None:
-        await self.nickname_manager.flush_save()
-        await self.nickname_manager.save_auto()
+        async def cleanup(label: str, operation) -> None:
+            try:
+                await operation()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log.warning("BotEngine %s 失败: %s", label, type(exc).__name__)
+
+        await cleanup("昵称保存", self.nickname_manager.flush_save)
+        await cleanup("自动昵称保存", self.nickname_manager.save_auto)
         # 审批白名单使用计数落盘（防抖窗口内最后一次，避免关机丢失）
         if self.approval_manager is not None:
             try:
                 self.approval_manager.flush()
-            except Exception as e:
-                _log.warning("审批白名单 flush 失败: %s", e)
-        await self.agent_engine.stop()
+            except Exception as exc:
+                _log.warning("BotEngine 审批白名单 flush 失败: %s", type(exc).__name__)
+        await cleanup("AgentEngine 停止", self.agent_engine.stop)
         if self.ws:
-            await self.ws.async_stop()
-        await self._http_client.aclose()
+            await cleanup("WebSocket 停止", self.ws.async_stop)
+        await cleanup("HTTP client 关闭", self._http_client.aclose)
 
     # ── 事件处理 ──
 
