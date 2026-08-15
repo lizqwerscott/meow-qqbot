@@ -29,6 +29,32 @@ async def test_whisper_preload_loads_model_once(tmp_path, monkeypatch):
     assert len(calls) == 1
     assert calls[0][1]["device"] == "cpu"
     assert calls[0][1]["download_root"] == str(tmp_path)
+    assert calls[0][1]["local_files_only"] is True
+
+
+@pytest.mark.asyncio
+async def test_whisper_preload_downloads_only_when_cache_is_missing(
+    tmp_path, monkeypatch
+):
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    calls = []
+
+    class FakeModel:
+        def __init__(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            if kwargs.get("local_files_only"):
+                raise LocalEntryNotFoundError("model cache is missing")
+
+    fake_module = types.SimpleNamespace(WhisperModel=FakeModel)
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+    transcriber = WhisperTranscriber(download_root=tmp_path)
+
+    await transcriber.preload()
+
+    assert len(calls) == 2
+    assert calls[0][1]["local_files_only"] is True
+    assert "local_files_only" not in calls[1][1]
 
 
 @pytest.mark.asyncio

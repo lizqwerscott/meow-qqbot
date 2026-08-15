@@ -39,16 +39,27 @@ class WhisperTranscriber:
                 return self._model
             try:
                 from faster_whisper import WhisperModel
+                from huggingface_hub.errors import LocalEntryNotFoundError
             except ImportError as exc:
                 raise RuntimeError("未安装 faster-whisper") from exc
             self.download_root.mkdir(parents=True, exist_ok=True)
-            self._model = await asyncio.to_thread(
-                WhisperModel,
-                self.model_name,
-                device=self.device,
-                compute_type=self.compute_type,
-                download_root=str(self.download_root),
-            )
+            try:
+                self._model = await asyncio.to_thread(
+                    WhisperModel,
+                    self.model_name,
+                    device=self.device,
+                    compute_type=self.compute_type,
+                    download_root=str(self.download_root),
+                    local_files_only=True,
+                )
+            except LocalEntryNotFoundError:
+                self._model = await asyncio.to_thread(
+                    WhisperModel,
+                    self.model_name,
+                    device=self.device,
+                    compute_type=self.compute_type,
+                    download_root=str(self.download_root),
+                )
         return self._model
 
     @staticmethod
