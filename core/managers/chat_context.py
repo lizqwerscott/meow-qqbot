@@ -47,11 +47,21 @@ class ChatContext:
         tool_name: Optional[str] = None,
         tool_calls: Optional[List[Dict]] = None,
         reasoning_content: Optional[str] = None,
-    ) -> None:
+        timestamp: Optional[float] = None,
+    ) -> bool:
+        if (
+            role == "user"
+            and message_id is not None
+            and any(
+                existing.role == "user" and existing.message_id == message_id
+                for existing in self.history
+            )
+        ):
+            return False
         message = ChatMessage(
             role=role,
             content=content,
-            timestamp=time.time(),
+            timestamp=timestamp if timestamp is not None else time.time(),
             message_id=message_id,
             sender_id=sender_id,
             name=name,
@@ -63,6 +73,7 @@ class ChatContext:
         self.history.append(message)
         self.last_activity = time.time()
         self._try_schedule_save()
+        return True
 
     def add_user_message(
         self,
@@ -70,8 +81,16 @@ class ChatContext:
         message_id: Optional[str] = None,
         sender_id: Optional[str] = None,
         name: Optional[str] = None,
-    ) -> None:
-        self.add_message("user", content, message_id, sender_id=sender_id, name=name)
+        timestamp: Optional[float] = None,
+    ) -> bool:
+        return self.add_message(
+            "user",
+            content,
+            message_id,
+            sender_id=sender_id,
+            name=name,
+            timestamp=timestamp,
+        )
 
     def add_assistant_message(
         self,
@@ -142,17 +161,24 @@ class ChatContext:
             return self.history[-1]
         return None
 
+    def remove_message_if(self, role: str, message_id: str) -> bool:
+        for index, message in enumerate(self.history):
+            if message.role == role and message.message_id == message_id:
+                del self.history[index]
+                self.last_activity = time.time()
+                self._try_schedule_save()
+                return True
+        return False
+
     def remove_last_message_if(self, role: str, message_id: str) -> bool:
         if not self.history:
             return False
         last = self.history[-1]
-        if last.role == role and last.message_id == message_id:
-            self.history.pop()
-            self.last_activity = time.time()
-            return True
-        return False
-
-    # ── 状态查询 ──
+        if last.role != role or last.message_id != message_id:
+            return False
+        self.history.pop()
+        self._try_schedule_save()
+        return True
 
     def estimate_tokens_for_history(self) -> int:
         total = 0

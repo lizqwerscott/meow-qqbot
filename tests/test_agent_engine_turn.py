@@ -5,12 +5,35 @@ import pytest
 
 from core.ai.protocol import AssistantMessage, AssistantToolCall
 from core.engine.agent_engine import AgentEngine, BackgroundTaskResult, _TurnRequest
-from core.managers.session_manager import SessionTaskManager
+from core.managers.session_manager import PendingInbound, SessionTaskManager
+from core.message import InputMessage
 from core.tools._types import ToolResult
 from core.tools.tool_loop import ToolLoop
 
 
-def test_background_task_result_supports_legacy_tuple_unpacking():
+@pytest.mark.asyncio
+async def test_admission_duplicate_history_does_not_produce_prompt_fragment():
+    class DuplicateContextManager(FakeContextManager):
+        async def add_user_message_async(self, *args, **kwargs):
+            return False
+
+    engine = make_engine(FakeToolLoop())
+    engine.context_manager = DuplicateContextManager()
+    pending = PendingInbound(
+        InputMessage("duplicate", "user", "chat", "hello", False),
+        "hello",
+        "agent",
+    )
+
+    admitted = await engine._admit_pending_message(
+        pending,
+        source="initial",
+        get_user_nickname=lambda sender_id: sender_id,
+    )
+
+    assert admitted is None
+    assert engine._admitted_ids == {}
+
     result = BackgroundTaskResult(result="done", error=None)
 
     value, error = result
@@ -106,7 +129,15 @@ def make_engine(tool_loop, *, rule_router=None, model_registry=None):
     engine.cost_tracker = object()
     engine._system_events = None
     engine._admin_id = []
-    engine._reply_callback = None
+    engine._archive_manager = None
+    engine.hindsight = None
+    engine.learners = None
+    engine._nm = None
+    engine._admitted_ids = __import__("collections").OrderedDict()
+    engine._admitted_side_effect_ids = set()
+    engine._processed_ids = __import__("collections").OrderedDict()
+    engine._max_processed_ids = 1000
+    engine._dedup_lock = asyncio.Lock()
     return engine
 
 
@@ -231,7 +262,6 @@ def test_should_not_dispatch_to_ai_for_reply_to_other_user():
     )
 
     assert engine._should_dispatch_to_ai(message) is False
-
 
     engine = make_engine(FakeToolLoop())
     from core.message import InputMessage, ResourceMeta
@@ -530,7 +560,7 @@ async def test_process_message_rolls_back_once_when_prompt_building_fails():
 
 
 @pytest.mark.asyncio
-async def test_consumer_sends_friendly_error_and_marks_session_done():
+async def test_consumer_sends_friendly_error_and_requeues_message():
     engine = make_engine(FakeToolLoop())
     delivered = []
     delivered_event = asyncio.Event()
@@ -543,17 +573,17 @@ async def test_consumer_sends_friendly_error_and_marks_session_done():
         delivered_event.set()
 
     engine._process_message = fail_process
-    queue = await engine.session_manager.get_queue("chat")
-    await queue.put(SimpleNamespace(id="message", is_group=True))
-    await engine.session_manager.try_start_consumer("chat")
+    message = InputMessage("message", "user", "chat", "hello", True)
+    pending = PendingInbound(message, "hello", "agent")
+    enqueued = await engine.session_manager.enqueue_and_claim_consumer("chat", pending)
     consumer = asyncio.create_task(
-        engine._consumer("chat", reply_callback, lambda sender_id: "name")
+        engine._consumer(
+            "chat", reply_callback, lambda sender_id: "name", enqueued.consumer_token
+        )
     )
 
     await delivered_event.wait()
-    consumer.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await consumer
+    await consumer
 
     assert delivered == [
         {
@@ -564,45 +594,44 @@ async def test_consumer_sends_friendly_error_and_marks_session_done():
         }
     ]
     assert engine.session_manager.has_active_consumer("chat") is False
+    assert engine.session_manager.get_queue_sizes() == {}
+    assert engine.session_manager.get_message_state("chat", "message") == "failed"
 
 
 @pytest.mark.asyncio
-async def test_consumer_leaves_steering_message_for_tool_loop_to_drain():
+async def test_consumer_keeps_pending_message_for_tool_loop_steering():
     engine = make_engine(FakeToolLoop())
     drained = []
     drained_event = asyncio.Event()
 
     async def drain_steering_message(kwargs):
-        queue = await engine.session_manager.get_queue(kwargs["chat_id"])
-        steering = queue.get_nowait()
-        drained.append(steering.id)
-        queue.task_done()
+        lease = await engine.session_manager.claim_pending_for_steer(kwargs["chat_id"])
+        steering = lease.items[0]
+        drained.append(steering.message.id)
+        await engine.session_manager.commit(lease, steering)
         drained_event.set()
 
     engine.tool_loop.on_run = drain_steering_message
     engine.prompt_builder = SimpleNamespace(build=lambda **kwargs: _empty_prompt())
-    queue = await engine.session_manager.get_queue("chat")
-    await queue.put(
-        SimpleNamespace(
-            id="first",
-            chat_id="chat",
-            sender_id="user",
-            is_group=False,
-            content="first",
-            model_chain=None,
-            tier=None,
-        )
+    first = InputMessage("first", "user", "chat", "first", False)
+    steering = InputMessage("steering", "user", "chat", "steering", False)
+    first_enqueued = await engine.session_manager.enqueue_and_claim_consumer(
+        "chat", PendingInbound(first, "first", "agent")
     )
-    await queue.put(SimpleNamespace(id="steering"))
-    await engine.session_manager.try_start_consumer("chat")
+    await engine.session_manager.enqueue_and_claim_consumer(
+        "chat", PendingInbound(steering, "steering", "agent")
+    )
 
     consumer = asyncio.create_task(
-        engine._consumer("chat", lambda **kwargs: _none(), lambda sender_id: "name")
+        engine._consumer(
+            "chat",
+            lambda **kwargs: _none(),
+            lambda sender_id: "name",
+            first_enqueued.consumer_token,
+        )
     )
     await drained_event.wait()
-    consumer.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await consumer
+    await consumer
 
     assert drained == ["steering"]
     assert len(engine.tool_loop.calls) == 1
@@ -638,6 +667,26 @@ async def test_background_task_serializes_context_build_and_reply_result():
     assert events == ["context", "prompt"]
     assert tool_loop.calls[0]["delivery_channel"] == "delivery"
     assert tool_loop.calls[0]["reply_to_message_id"] == "original"
+
+
+@pytest.mark.asyncio
+async def test_background_tasks_in_same_second_use_distinct_message_ids(monkeypatch):
+    engine = make_engine(FakeToolLoop())
+
+    async def build_task_messages(**kwargs):
+        return [], []
+
+    engine.prompt_builder = SimpleNamespace(build_task_messages=build_task_messages)
+    monkeypatch.setattr("core.engine.agent_engine.time.time", lambda: 1_000)
+
+    await asyncio.gather(
+        engine.execute_background_task("shared", "first task", "system"),
+        engine.execute_background_task("shared", "second task", "system"),
+    )
+
+    user_messages = engine.context_manager.user_messages
+    assert {message[1] for message in user_messages} == {"first task", "second task"}
+    assert len({message[2] for message in user_messages}) == 2
 
 
 @pytest.mark.asyncio
@@ -842,6 +891,199 @@ async def test_wake_turn_uses_prebuilt_prompt_and_captured_reply():
     assert result.should_notify is True
     assert tool_loop.calls[0]["messages"] == [{"role": "system", "content": "wake"}]
     assert tool_loop.calls[0]["tools"] == [{"name": "heartbeat_respond"}]
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_steers_pending_messages_only_after_full_tool_batch(
+    monkeypatch,
+):
+    class FakeAI:
+        model = "test"
+
+        def __init__(self):
+            self.requests = []
+            self.responses = iter(
+                [
+                    AssistantMessage(
+                        content="",
+                        tool_calls=[
+                            AssistantToolCall("one", "first", "{}"),
+                            AssistantToolCall("two", "second", "{}"),
+                        ],
+                    ),
+                    AssistantMessage(content="done"),
+                ]
+            )
+
+        async def chat_completion_with_tools(self, *, messages, tools):
+            self.requests.append([dict(message) for message in messages])
+            return next(self.responses), None
+
+    class FakeContext:
+        async def add_assistant_message_async(self, *args, **kwargs):
+            return None
+
+        async def add_tool_result_async(self, *args, **kwargs):
+            return None
+
+    ai = FakeAI()
+    session_manager = SessionTaskManager()
+    context = SimpleNamespace(
+        ai=SimpleNamespace(
+            ai_service=ai,
+            max_tool_rounds=3,
+            model_registry=None,
+            stream_reply=False,
+        ),
+        mgmt=SimpleNamespace(
+            permission_manager=None,
+            cost_tracker=None,
+            context_manager=FakeContext(),
+        ),
+        memory=SimpleNamespace(hindsight_memory=None),
+    )
+    loop = ToolLoop(context, session_manager=session_manager)
+    pending = PendingInbound(
+        InputMessage("steer", "user", "chat", "follow up", False),
+        "follow up",
+        "agent",
+    )
+
+    seen_tools = []
+
+    async def execute(name, args, tool_ctx, permission_manager):
+        seen_tools.append(name)
+        if name == "first":
+            await session_manager.enqueue_and_claim_consumer("chat", pending)
+        return ToolResult(content=name)
+
+    async def admit(item):
+        assert seen_tools == ["first", "second"]
+        return SimpleNamespace(
+            prompt_message={"role": "user", "content": item.prepared_content}
+        )
+
+    monkeypatch.setattr("core.tools.tool_loop.execute_tool", execute)
+    await loop.run(
+        messages=[{"role": "user", "content": "initial"}],
+        tools=[],
+        chat_id="chat",
+        is_group=False,
+        reply_to="reply",
+        reply_callback=lambda **kwargs: _none(),
+        steering_enabled=True,
+        steering_admission_callback=admit,
+    )
+
+    assert [request[-1]["content"] for request in ai.requests] == [
+        "initial",
+        "follow up",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_does_not_start_followup_for_passive_steering():
+    class FakeAI:
+        model = "test"
+
+        def __init__(self):
+            self.requests = 0
+
+        async def chat_completion_with_tools(self, **kwargs):
+            self.requests += 1
+            return AssistantMessage(content="done"), None
+
+    class FakeContext:
+        async def add_assistant_message_async(self, *args, **kwargs):
+            return None
+
+        async def add_tool_result_async(self, *args, **kwargs):
+            return None
+
+    ai = FakeAI()
+    session_manager = SessionTaskManager()
+    ctx = SimpleNamespace(
+        ai=SimpleNamespace(
+            ai_service=ai,
+            max_tool_rounds=2,
+            model_registry=None,
+            stream_reply=False,
+        ),
+        mgmt=SimpleNamespace(
+            permission_manager=None,
+            cost_tracker=None,
+            context_manager=FakeContext(),
+        ),
+        memory=SimpleNamespace(hindsight_memory=None),
+    )
+    loop = ToolLoop(ctx, session_manager=session_manager)
+    passive = PendingInbound(
+        InputMessage("passive", "user", "chat", "ambient", True),
+        "ambient",
+        "passive",
+    )
+    await session_manager.enqueue_and_claim_consumer("chat", passive)
+
+    admitted = []
+
+    async def admission_callback(item):
+        admitted.append(item.message.id)
+        return None
+
+    await loop._drain_steering_messages(
+        chat_id="chat",
+        admission_callback=admission_callback,
+    )
+
+    assert admitted == ["passive"]
+
+
+@pytest.mark.asyncio
+async def test_background_and_wake_turns_disable_steering():
+    tool_loop = FakeToolLoop()
+    engine = make_engine(tool_loop)
+    engine._reply_callback = object()
+
+    async def build_task_messages(**kwargs):
+        return [], []
+
+    engine.prompt_builder = SimpleNamespace(
+        build_task_messages=build_task_messages,
+        build_heartbeat_messages=lambda **kwargs: _empty_prompt(),
+    )
+    await engine.execute_background_task("background", "work", "system")
+    await engine.run_wake_turn(
+        source="system", session_key="wake", messages=[], tools=[]
+    )
+
+    assert [call["steering_enabled"] for call in tool_loop.calls] == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_consumer_cancellation_after_admission_commits_lease():
+    engine = make_engine(FakeToolLoop(error=asyncio.CancelledError()))
+    engine.prompt_builder = SimpleNamespace(build=lambda **kwargs: _empty_prompt())
+    pending = PendingInbound(
+        InputMessage("cancelled", "user", "chat", "hello", False),
+        "hello",
+        "agent",
+    )
+    enqueued = await engine.session_manager.enqueue_and_claim_consumer("chat", pending)
+    replies = []
+
+    async def reply_callback(**kwargs):
+        replies.append(kwargs)
+
+    consumer = asyncio.create_task(
+        engine._consumer(
+            "chat", reply_callback, lambda _: "user", enqueued.consumer_token
+        )
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    assert engine.session_manager.get_queue_sizes() == {}
+    assert engine.session_manager.get_message_state("chat", "cancelled") == "admitted"
 
 
 async def _empty_prompt():

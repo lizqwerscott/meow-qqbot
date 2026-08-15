@@ -62,10 +62,12 @@ def test_max_history_limit():
     assert ctx.history[-1].content == "msg4"
 
 
-# ── remove_last_message_if ──
+def test_chat_context_user_message_id_is_idempotent():
+    ctx, _ = make_ctx()
+    ctx.add_user_message("first", message_id="same")
+    ctx.add_user_message("duplicate", message_id="same")
+    assert [message.content for message in ctx.history] == ["first"]
 
-
-def test_remove_last_message_match():
     ctx, _ = make_ctx()
     ctx.add_user_message("hello", message_id="m1")
     assert ctx.remove_last_message_if("user", "m1") is True

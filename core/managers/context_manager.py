@@ -84,12 +84,17 @@ class ChatContextManager:
         message_id: Optional[str] = None,
         sender_id: Optional[str] = None,
         name: Optional[str] = None,
-    ) -> None:
+        timestamp: Optional[float] = None,
+    ) -> bool:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
-            context.add_user_message(
-                content, message_id, sender_id=sender_id, name=name
+            return context.add_user_message(
+                content,
+                message_id,
+                sender_id=sender_id,
+                name=name,
+                timestamp=timestamp,
             )
 
     async def add_assistant_message_async(
@@ -191,16 +196,18 @@ class ChatContextManager:
             context = await self._get_or_restore_context_locked(chat_id)
             await context.clear_history_async()
 
-    async def remove_last_user_message_if_async(
-        self, chat_id: str, message_id: str
+    async def remove_message_if_async(
+        self, chat_id: str, role: str, message_id: str
     ) -> bool:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
-            async with self._ctx_lock:
-                context = self.contexts.get(chat_id)
-            if context is None:
-                return False
-            return context.remove_last_message_if("user", message_id)
+            context = await self._get_or_restore_context_locked(chat_id)
+            return context.remove_message_if(role, message_id)
+
+    async def remove_last_user_message_if_async(
+        self, chat_id: str, message_id: str
+    ) -> bool:
+        return await self.remove_message_if_async(chat_id, "user", message_id)
 
     async def with_chat_lock(self, chat_id: str, func):
         lock = await self._get_chat_lock(chat_id)

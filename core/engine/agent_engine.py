@@ -14,14 +14,15 @@ import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, List, Optional, Set
+from typing import Any, Awaitable, Callable, List, Literal, Optional, Set
+from uuid import uuid4
 
 from core.engine.context import EngineContext
 from core.engine.prompt_builder import PromptBuilder
 from core.learners.base import sanitize_for_learners
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager
-from core.managers.session_manager import SessionTaskManager
+from core.managers.session_manager import PendingInbound, SessionTaskManager
 from core.message import InputMessage, MessageType
 from core.tasks.wake_coalescer import WakeTurnResult
 from core.tools.tool_loop import ToolLoop
@@ -30,6 +31,17 @@ _log = logging.getLogger(__name__)
 
 
 TurnPromptFactory = Callable[[], Awaitable[tuple[list[dict], Optional[list[dict]]]]]
+
+
+class _AdmissionAlreadyCommitted(Exception):
+    """Signal an inbound redelivery that is already present in local history."""
+
+
+@dataclass(frozen=True)
+class AdmittedMessage:
+    message_id: str
+    prompt_message: dict
+    additional_prompt_messages: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -54,6 +66,11 @@ class _TurnRequest:
     tool_reply_callback: Optional[Callable] = None
     tool_reply_names: frozenset[str] = frozenset()
     reply_state_callback: Optional[Callable[[bool], Awaitable[None]]] = None
+    rollback_after_prompt_failure_only: bool = False
+    steering_enabled: bool = False
+    steering_admission_callback: Optional[
+        Callable[[PendingInbound], Awaitable[Optional[AdmittedMessage]]]
+    ] = None
 
 
 @dataclass(frozen=True)
@@ -148,6 +165,11 @@ class AgentEngine:
         self._processed_ids: OrderedDict[str, bool] = OrderedDict()
         self._max_processed_ids = 1000
         self._dedup_lock = asyncio.Lock()
+        self._admitted_ids: OrderedDict[tuple[str, str], bool] = OrderedDict()
+        self._admission_side_effect_status: OrderedDict[
+            tuple[str, str], Dict[str, str]
+        ] = OrderedDict()
+        self._pending_ids: Set[str] = set()
 
         # ── 消费者管理 ──
         self._consumer_tasks: Set[asyncio.Task] = set()
@@ -248,152 +270,263 @@ class AgentEngine:
         get_user_nickname: Callable[[str], str],
     ) -> None:
         async with self._dedup_lock:
-            if input_message.id in self._processed_ids:
-                _log.debug(f"跳过重复消息: {input_message.id}")
+            if (
+                input_message.id in self._processed_ids
+                or input_message.id in self._pending_ids
+            ):
+                _log.debug("跳过重复消息: %s", input_message.id)
                 return
+            self._pending_ids.add(input_message.id)
+
+        chat_id = input_message.chat_id
+        if self._workspace_manager:
+            self._workspace_manager.sandbox_dir(input_message.is_group, chat_id)
+        self.last_active_chat = chat_id
+        self.last_active_time = time.time()
+
+        triggers_ai = (
+            input_message.msg_type != MessageType.EMOJI
+            and self._should_dispatch_to_ai(input_message)
+        )
+        needs_ai = triggers_ai
+        if needs_ai and self.rule_router and self.model_registry:
+            tier = self.rule_router.classify(input_message.content)
+            input_message.tier = tier
+            input_message.model_chain = self.model_registry.get_chain(tier) or None
+
+        try:
+            pending = await self._prepare_pending_inbound(
+                input_message,
+                dispatch_mode="agent" if triggers_ai else "passive",
+            )
+            enqueued = await self.session_manager.enqueue_with_dispatch_mode(
+                chat_id, pending, triggers_ai=triggers_ai
+            )
+        except BaseException:
+            async with self._dedup_lock:
+                self._pending_ids.discard(input_message.id)
+            raise
+        async with self._dedup_lock:
             self._processed_ids[input_message.id] = True
             self._processed_ids.move_to_end(input_message.id)
             if len(self._processed_ids) > self._max_processed_ids:
                 self._processed_ids.popitem(last=False)
-
-        chat_id = input_message.chat_id
-
-        # 自动创建工作区目录
-        if self._workspace_manager:
-            self._workspace_manager.sandbox_dir(input_message.is_group, chat_id)
-
-        # 记录活跃追踪（供心跳 busy 检测用）
-        self.last_active_chat = chat_id
-        self.last_active_time = time.time()
-
-        user_nickname = get_user_nickname(input_message.sender_id)
-
-        # ── 日期边界检查：跨天后归档旧会话（仅文本消息触发） ──
-        if self._archive_manager and input_message.msg_type == MessageType.TEXT:
-            try:
-                result = await self._archive_manager.archive_if_stale(
-                    chat_id, input_message.is_group
+            self._pending_ids.discard(input_message.id)
+        if enqueued.dropped:
+            _log.warning(
+                "会话 inbox 已满，丢弃最早未准入消息 [%s..]: %s",
+                chat_id[:12],
+                enqueued.dropped.message.id,
+            )
+            async with self._dedup_lock:
+                self._processed_ids.pop(enqueued.dropped.message.id, None)
+        _log.debug("消息已入 inbox [%s..]: %s", chat_id[:12], input_message.id)
+        if enqueued.should_start_consumer:
+            task = asyncio.create_task(
+                self._consumer(
+                    chat_id,
+                    reply_callback,
+                    get_user_nickname,
+                    enqueued.consumer_token,
                 )
-                if result:
-                    _log.info(
-                        "已归档会话 [%s..]: 摘要=%s 回放=%d条",
-                        chat_id[:12],
-                        result.summary_path or "无",
-                        result.replay_count,
-                    )
-            except Exception as e:
-                _log.warning("归档失败 [%s..]: %s", chat_id[:12], e)
+            )
+            self._consumer_tasks.add(task)
+            task.add_done_callback(self._consumer_tasks.discard)
+            _log.debug("已启动会话 %s.. 的消费者", chat_id[:12])
 
+    async def _prepare_pending_inbound(
+        self,
+        input_message: InputMessage,
+        *,
+        dispatch_mode: Literal["agent", "passive"],
+    ) -> PendingInbound:
+        """Build immutable media/reply context without mutating shared chat history."""
         media_history_text = ""
-        if self.media_service and self._should_dispatch_to_ai(input_message):
+        if self.media_service:
             try:
                 media_context = await self.media_service.prepare_for_ai(input_message)
                 media_history_text = "\n\n".join(
                     [*media_context.current_blocks, *media_context.replied_blocks]
                 )
             except Exception as exc:
-                _log.warning("媒体历史上下文构建失败 [%s..]: %s", chat_id[:12], exc)
+                _log.warning(
+                    "媒体历史上下文构建失败 [%s..]: %s", input_message.chat_id[:12], exc
+                )
 
-        content_with_context = input_message.content
+        content = input_message.content
         media_refs = [
             resource.media_uri
             for resource in (*input_message.resources, *input_message.replied_resources)
             if resource.media_uri
         ]
         if media_refs:
-            content_with_context += "\n[媒体引用: " + ", ".join(media_refs) + "]"
+            content += "\n[媒体引用: " + ", ".join(media_refs) + "]"
         if media_history_text:
-            content_with_context += "\n" + media_history_text
+            content += "\n" + media_history_text
         if input_message.replied_content:
-            if input_message.replied_author:
-                context_prefix = f"[正在回复 {input_message.replied_author}: {input_message.replied_content}]"
-            else:
-                context_prefix = f"[正在回复: {input_message.replied_content}]"
-            if content_with_context:
-                content_with_context = context_prefix + "\n" + content_with_context
-            else:
-                content_with_context = context_prefix
+            prefix = (
+                f"[正在回复 {input_message.replied_author}: {input_message.replied_content}]"
+                if input_message.replied_author
+                else f"[正在回复: {input_message.replied_content}]"
+            )
+            content = f"{prefix}\n{content}" if content else prefix
+        return PendingInbound(input_message, content, dispatch_mode)
 
-        await self.context_manager.add_user_message_async(
-            chat_id,
-            content_with_context,
-            input_message.id,
-            sender_id=input_message.sender_id,
-            name=input_message.sender_id,
+    async def _admit_pending_message(
+        self,
+        pending: PendingInbound,
+        *,
+        source: Literal["initial", "steer", "passive"],
+        get_user_nickname: Callable[[str], str],
+    ) -> Optional[AdmittedMessage]:
+        """Commit one leased inbound message to local history exactly once."""
+        message = pending.message
+        chat_id = message.chat_id
+        admission_key = (chat_id, message.id)
+        admitted_ids = getattr(self, "_admitted_ids", OrderedDict())
+        if admission_key not in admitted_ids:
+            if (
+                getattr(self, "_archive_manager", None)
+                and message.msg_type == MessageType.TEXT
+            ):
+                try:
+                    await self._archive_manager.archive_if_stale(
+                        chat_id, message.is_group
+                    )
+                except Exception as exc:
+                    _log.warning("归档失败 [%s..]: %s", chat_id[:12], exc)
+            nickname = get_user_nickname(message.sender_id) or message.sender_id
+            await self.context_manager.record_chat_type(chat_id, message.is_group)
+            committed = await self.context_manager.add_user_message_async(
+                chat_id,
+                pending.prepared_content,
+                message.id,
+                sender_id=message.sender_id,
+                name=nickname,
+                timestamp=message.timestamp,
+            )
+            if committed is False:
+                _log.info(
+                    "消息已存在于本地历史，跳过准入 [%s..]: id=%s",
+                    chat_id[:12],
+                    message.id,
+                )
+                return None
+            admitted_ids[admission_key] = True
+            admitted_ids.move_to_end(admission_key)
+            while len(admitted_ids) > getattr(self, "_max_processed_ids", 1000):
+                admitted_ids.popitem(last=False)
+            self._admitted_ids = admitted_ids
+            await self._run_admission_side_effects(pending, admission_key)
+            _log.debug(
+                "消息已准入 [%s..]: id=%s source=%s",
+                chat_id[:12],
+                message.id,
+                source,
+            )
+        nickname = get_user_nickname(message.sender_id) or message.sender_id
+        timestamp = time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.localtime(message.timestamp)
+        )
+        return AdmittedMessage(
+            message_id=message.id,
+            prompt_message={
+                "role": "user",
+                "content": f"[{nickname} 在 {timestamp}]: {pending.prepared_content}",
+            },
         )
 
-        if self.hindsight and input_message.msg_type != MessageType.CARD:
-            hs_content = self._format_hindsight_content(
-                content_with_context,
-                input_message.sender_id,
-                input_message.mentioned_ids,
-                nm=self._nm,
+    async def _rollback_admission(self, pending: PendingInbound) -> None:
+        admission_key = (pending.message.chat_id, pending.message.id)
+        try:
+            await self.context_manager.remove_message_if_async(
+                pending.message.chat_id, "user", pending.message.id
             )
-            await self.hindsight.add_message(
-                session_id=chat_id,
-                content=hs_content,
-                sender_id=input_message.sender_id,
-                context=self.hindsight.msg_type_to_context(input_message.msg_type),
-                timestamp=input_message.timestamp,
-                resources=input_message.resources,
-            )
+        finally:
+            self._admitted_ids.pop(admission_key, None)
 
-        # 学习系统观察（异步，不阻塞）
-        if self.learners and input_message.msg_type != MessageType.CARD:
-            text_for_learners = sanitize_for_learners(content_with_context)
-            if text_for_learners:
-                if input_message.replied_content:
-                    lines = text_for_learners.split("\n", 1)
-                    for prefix in ("猫猫", f"@{self._bot_id}"):
-                        if len(lines) == 2 and lines[1].strip().startswith(prefix):
-                            lines[1] = lines[1].strip()[len(prefix) :].lstrip()
-                            text_for_learners = "\n".join(lines)
-                            break
-                else:
-                    text_stripped = text_for_learners.strip()
-                    for prefix in ("猫猫", f"@{self._bot_id}"):
-                        if text_stripped.startswith(prefix):
-                            text_for_learners = text_stripped[len(prefix) :].lstrip()
-                            break
-
-                await self.learners.on_message(
-                    message_text=text_for_learners,
-                    chat_id=chat_id,
-                )
-
-        if input_message.msg_type == MessageType.EMOJI:
+    async def _run_admission_side_effects(
+        self, pending: PendingInbound, admission_key: tuple[str, str]
+    ) -> None:
+        status_map = getattr(self, "_admission_side_effect_status", None)
+        if status_map is None:
+            status_map = {}
+            self._admission_side_effect_status = status_map
+        statuses = status_map.setdefault(admission_key, {})
+        if hasattr(status_map, "move_to_end"):
+            status_map.move_to_end(admission_key)
+            while len(status_map) > getattr(self, "_max_processed_ids", 1000):
+                status_map.popitem(last=False)
+        if statuses.get("hindsight") in {"succeeded", "skipped"} and statuses.get(
+            "learner"
+        ) in {"succeeded", "skipped"}:
             return
-
-        needs_ai = self._should_dispatch_to_ai(input_message)
-
-        # ── 规则路由智能分级（ClawRouter 风格） ──
-        if needs_ai and self.rule_router and self.model_registry:
-            tier = self.rule_router.classify(input_message.content)
-            input_message.tier = tier
-            model_chain = self.model_registry.get_chain(tier)
-            input_message.model_chain = model_chain or None
-
-        if needs_ai:
-            queue = await self.session_manager.get_queue(chat_id)
+        message = pending.message
+        if (
+            getattr(self, "hindsight", None)
+            and message.msg_type != MessageType.CARD
+            and statuses.get("hindsight") != "succeeded"
+        ):
             try:
-                queue.put_nowait(input_message)
-            except asyncio.QueueFull:
-                _log.warning(f"会话 {chat_id[:12]}.. 队列已满，丢弃最早消息")
-                try:
-                    queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-                queue.put_nowait(input_message)
-            should_start = await self.session_manager.try_start_consumer(chat_id)
-            if should_start:
-                task = asyncio.create_task(
-                    self._consumer(chat_id, reply_callback, get_user_nickname)
+                await self.hindsight.add_message(
+                    session_id=message.chat_id,
+                    content=self._format_hindsight_content(
+                        pending.prepared_content,
+                        message.sender_id,
+                        message.mentioned_ids,
+                        nm=getattr(self, "_nm", None),
+                    ),
+                    sender_id=message.sender_id,
+                    context=self.hindsight.msg_type_to_context(message.msg_type),
+                    timestamp=message.timestamp,
+                    resources=message.resources,
                 )
-                self._consumer_tasks.add(task)
-                task.add_done_callback(self._consumer_tasks.discard)
-                _log.debug(f"已启动会话 {chat_id[:12]}.. 的消费者")
+                statuses["hindsight"] = "succeeded"
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                statuses["hindsight"] = "failed"
+                _log.warning(
+                    "Hindsight 准入副作用失败 [%s..]: %s", message.chat_id[:12], exc
+                )
         else:
-            await self._run_hooks(input_message, reply_callback, get_user_nickname)
+            statuses["hindsight"] = "skipped"
+        if (
+            getattr(self, "learners", None)
+            and message.msg_type != MessageType.CARD
+            and statuses.get("learner") != "succeeded"
+        ):
+            text = sanitize_for_learners(pending.prepared_content)
+            if message.replied_content:
+                lines = text.split("\n", 1)
+                for prefix in ("猫猫", f"@{self._bot_id}"):
+                    if len(lines) == 2 and lines[1].strip().startswith(prefix):
+                        lines[1] = lines[1].strip()[len(prefix) :].lstrip()
+                        text = "\n".join(lines)
+                        break
+            else:
+                stripped = text.strip()
+                for prefix in ("猫猫", f"@{self._bot_id}"):
+                    if stripped.startswith(prefix):
+                        text = stripped[len(prefix) :].lstrip()
+                        break
+            if text:
+                try:
+                    await self.learners.on_message(
+                        message_text=text, chat_id=message.chat_id
+                    )
+                    statuses["learner"] = "succeeded"
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    statuses["learner"] = "failed"
+                    _log.warning(
+                        "learner 准入副作用失败 [%s..]: %s", message.chat_id[:12], exc
+                    )
+            else:
+                statuses["learner"] = "skipped"
+        else:
+            statuses["learner"] = "skipped"
 
     def _should_dispatch_to_ai(self, input_message: InputMessage) -> bool:
         if not input_message.is_group:
@@ -429,46 +562,94 @@ class AgentEngine:
         chat_id: str,
         reply_callback: Callable,
         get_user_nickname: Callable[[str], str],
+        consumer_token: int,
     ) -> None:
         try:
             while True:
-                try:
-                    queue = await self.session_manager.get_queue(chat_id)
-                    input_message = await asyncio.wait_for(queue.get(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    queue = await self.session_manager.get_queue(chat_id)
-                    if queue.empty():
-                        break
+                lease = await self.session_manager.claim_next_for_consumer(
+                    chat_id, consumer_token
+                )
+                if lease is None:
+                    if await self.session_manager.release_consumer_if_idle(
+                        chat_id, consumer_token
+                    ):
+                        return
                     continue
 
+                pending = lease.items[0]
+                message = pending.message
                 try:
-                    await self._process_message(
-                        input_message, reply_callback, get_user_nickname
-                    )
+                    if pending.dispatch_mode == "agent":
+                        await self._process_message(
+                            pending, reply_callback, get_user_nickname
+                        )
+                    else:
+                        session_lock = await self.session_manager.get_lock(chat_id)
+                        async with session_lock:
+                            await self._admit_pending_message(
+                                pending,
+                                source="passive",
+                                get_user_nickname=get_user_nickname,
+                            )
+                            if message.msg_type != MessageType.EMOJI:
+                                await self._run_hooks(
+                                    message, reply_callback, get_user_nickname
+                                )
+                    await self.session_manager.commit(lease, pending)
                 except asyncio.CancelledError:
+                    state = self.session_manager.get_message_state(chat_id, message.id)
+                    admission_key = (chat_id, message.id)
+                    if state == "admitted" or admission_key in getattr(
+                        self, "_admitted_ids", {}
+                    ):
+                        await self.session_manager.commit(lease, pending)
+                    else:
+                        await self.session_manager.requeue_front(lease)
                     raise
-                except Exception as e:
+                except Exception as exc:
+                    admission_key = (chat_id, message.id)
+                    state = self.session_manager.get_message_state(chat_id, message.id)
+                    if state == "admitted" or admission_key in getattr(
+                        self, "_admitted_ids", {}
+                    ):
+                        await self.session_manager.commit(lease, pending)
+                    else:
+                        await self.session_manager.fail(lease, pending)
+                        async with self._dedup_lock:
+                            self._processed_ids.pop(message.id, None)
                     _log.error(
                         "消费者处理消息 %s 时出错: %s",
-                        input_message.id,
-                        e,
+                        message.id,
+                        exc,
                         exc_info=True,
                     )
                     try:
                         await reply_callback(
                             chat_id=chat_id,
                             content="抱歉，处理您的消息时出现了问题，请稍后再试。",
-                            message_id=input_message.id,
-                            is_group=input_message.is_group,
+                            message_id=message.id,
+                            is_group=message.is_group,
                         )
                     except Exception as reply_err:
                         _log.warning(
-                            "向用户发送错误回复失败 [%s..]: %s",
-                            chat_id[:12],
-                            reply_err,
+                            "向用户发送错误回复失败 [%s..]: %s", chat_id[:12], reply_err
                         )
+                    continue
         finally:
-            await self.session_manager.mark_consumer_done(chat_id)
+            replacement_token = await self.session_manager.handoff_consumer(
+                chat_id, consumer_token
+            )
+            if replacement_token is not None:
+                task = asyncio.create_task(
+                    self._consumer(
+                        chat_id,
+                        reply_callback,
+                        get_user_nickname,
+                        replacement_token,
+                    )
+                )
+                self._consumer_tasks.add(task)
+                task.add_done_callback(self._consumer_tasks.discard)
 
     # ── 消息处理 ──
 
@@ -496,8 +677,17 @@ class AgentEngine:
                 replies.append(content)
             await request.reply_callback(*args, **kwargs)
 
+        prompt_built = False
+
+        async def _steering_admission_callback(
+            pending: PendingInbound,
+        ) -> Optional[AdmittedMessage]:
+            return await request.steering_admission_callback(pending)
+
         async def _execute() -> _TurnResult:
+            nonlocal prompt_built
             messages, tools = await request.prompt_factory()
+            prompt_built = True
             model_chain = request.model_chain
             tier = request.tier
             if model_chain is None and tier is None:
@@ -515,6 +705,13 @@ class AgentEngine:
                 tool_reply_callback=request.tool_reply_callback,
                 tool_reply_names=request.tool_reply_names,
                 reply_state_callback=_reply_state_callback,
+                steering_enabled=request.steering_enabled,
+                steering_admission_callback=(
+                    _steering_admission_callback
+                    if request.steering_admission_callback
+                    else None
+                ),
+                inbound_message_ids=[request.reply_to] if request.reply_to else [],
                 sender_id=request.sender_id,
                 get_user_nickname=request.get_user_nickname,
                 delivery_channel=request.delivery_channel,
@@ -546,13 +743,33 @@ class AgentEngine:
                 return await _execute()
             except asyncio.CancelledError:
                 raise
+            except _AdmissionAlreadyCommitted:
+                raise
             except Exception:
-                if request.rollback_message_id:
+                if request.rollback_message_id and (
+                    not request.rollback_after_prompt_failure_only or not prompt_built
+                ):
                     try:
-                        await self.context_manager.remove_last_user_message_if_async(
-                            request.chat_id,
-                            request.rollback_message_id,
+                        remove_message = getattr(
+                            self.context_manager,
+                            "remove_message_if_async",
+                            None,
                         )
+                        if remove_message is not None:
+                            await remove_message(
+                                request.chat_id,
+                                "user",
+                                request.rollback_message_id,
+                            )
+                        else:
+                            await self.context_manager.remove_last_user_message_if_async(
+                                request.chat_id,
+                                request.rollback_message_id,
+                            )
+                        self._admitted_ids.pop(
+                            (request.chat_id, request.rollback_message_id), None
+                        )
+                        self._processed_ids.pop(request.rollback_message_id, None)
                     except Exception as rollback_err:
                         _log.warning(
                             "回滚上下文失败 [%s..]: %s",
@@ -570,17 +787,25 @@ class AgentEngine:
 
     async def _process_message(
         self,
-        input_message: InputMessage,
+        pending: PendingInbound,
         reply_callback: Callable,
         get_user_nickname: Callable[[str], str],
     ) -> None:
+        if isinstance(pending, InputMessage):
+            pending = PendingInbound(pending, pending.content, "agent")
+        input_message = pending.message
         chat_id = input_message.chat_id
         is_group = input_message.is_group
         user_nickname = get_user_nickname(input_message.sender_id)
 
-        await self.context_manager.record_chat_type(chat_id, is_group)
-
         async def _build_prompt() -> tuple[list[dict], Optional[list[dict]]]:
+            admitted = await self._admit_pending_message(
+                pending,
+                source="initial",
+                get_user_nickname=get_user_nickname,
+            )
+            if admitted is None:
+                raise _AdmissionAlreadyCommitted
             return await self.prompt_builder.build(
                 chat_id=chat_id,
                 is_group=is_group,
@@ -590,9 +815,41 @@ class AgentEngine:
                 cost_tracker=self.cost_tracker,
             )
 
-        # 6. 工具调用循环
+        async def _admit_steering(
+            steering: PendingInbound,
+        ) -> Optional[AdmittedMessage]:
+            admitted = await self._admit_pending_message(
+                steering,
+                source="steer",
+                get_user_nickname=get_user_nickname,
+            )
+            if admitted is None:
+                return None
+            additional_prompt_messages: tuple[dict, ...] = ()
+            if steering.message.sender_id != input_message.sender_id:
+                try:
+                    memory_context = await self.prompt_builder.build_memory_context(
+                        steering.message.sender_id, steering.message
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    _log.warning(
+                        "转向消息记忆上下文构建失败 [%s..]: %s",
+                        chat_id[:12],
+                        exc,
+                    )
+                else:
+                    if memory_context:
+                        additional_prompt_messages = (
+                            {"role": "system", "content": memory_context},
+                        )
+            return AdmittedMessage(
+                message_id=admitted.message_id,
+                prompt_message=admitted.prompt_message,
+                additional_prompt_messages=additional_prompt_messages,
+            )
 
-        # 流式转发包装：把 AI 实时生成的文本分片发给用户（QQ 无消息编辑，只能逐条发）
         async def _stream_deliver(chunk: str) -> None:
             try:
                 await reply_callback(
@@ -604,27 +861,32 @@ class AgentEngine:
             except Exception as cb_err:
                 _log.warning("流式转发失败 [%s..]: %s", chat_id[:12], cb_err)
 
-        await self._run_turn(
-            _TurnRequest(
-                chat_id=chat_id,
-                sender_id=input_message.sender_id,
-                is_group=is_group,
-                reply_to=input_message.id,
-                route_text=input_message.content,
-                prompt_factory=_build_prompt,
-                reply_callback=reply_callback,
-                get_user_nickname=get_user_nickname,
-                model_chain=input_message.model_chain,
-                tier=input_message.tier,
-                rollback_message_id=input_message.id,
-                stream_callback=_stream_deliver,
+        try:
+            await self._run_turn(
+                _TurnRequest(
+                    chat_id=chat_id,
+                    sender_id=input_message.sender_id,
+                    is_group=is_group,
+                    reply_to=input_message.id,
+                    route_text=input_message.content,
+                    prompt_factory=_build_prompt,
+                    reply_callback=reply_callback,
+                    get_user_nickname=get_user_nickname,
+                    model_chain=input_message.model_chain,
+                    tier=input_message.tier,
+                    rollback_message_id=input_message.id,
+                    stream_callback=_stream_deliver,
+                    steering_enabled=True,
+                    steering_admission_callback=_admit_steering,
+                    rollback_after_prompt_failure_only=True,
+                )
             )
-        )
+        except _AdmissionAlreadyCommitted:
+            _log.info("消息已在历史中，跳过重复 turn: %s", input_message.id)
 
         if self._system_events:
             self._system_events.drain_non_heartbeat(chat_id)
-
-        _log.info(f"消息处理完成: {input_message.id}")
+        _log.info("消息处理完成: %s", input_message.id)
 
     # ── 后台任务执行 ──
 
@@ -682,7 +944,7 @@ class AgentEngine:
 
         # 创建合成 InputMessage
         msg = InputMessage(
-            id=f"bg_{chat_id}_{int(time.time())}",
+            id=f"bg_{chat_id}_{uuid4().hex}",
             sender_id=sender_id,
             chat_id=chat_id,
             content=prompt,
@@ -693,13 +955,10 @@ class AgentEngine:
         try:
 
             async def _build_prompt() -> tuple[list[dict], Optional[list[dict]]]:
-                # 写入用户消息到上下文（便于查阅，但不作为历史注入）
-                await self.context_manager.add_user_message_async(
-                    chat_id,
-                    prompt,
-                    msg.id,
-                    sender_id=sender_id,
-                    name="system",
+                await self._admit_pending_message(
+                    PendingInbound(msg, prompt, "agent"),
+                    source="initial",
+                    get_user_nickname=lambda _: "system",
                 )
                 return await self.prompt_builder.build_task_messages(
                     chat_id=chat_id,
@@ -721,6 +980,7 @@ class AgentEngine:
                     timeout=300,
                     tool_reply_callback=deliver_tool_reply_callback,
                     tool_reply_names=frozenset({"send_message"}),
+                    steering_enabled=False,
                 )
             )
 
@@ -850,6 +1110,7 @@ class AgentEngine:
                     prompt_factory=_build_prompt,
                     reply_callback=_capture,
                     timeout=timeout,
+                    steering_enabled=False,
                 )
             )
 

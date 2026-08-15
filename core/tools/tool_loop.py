@@ -16,6 +16,7 @@ from typing import Any, Awaitable, Callable, List, Optional
 
 from core.ai.fallback_runner import FallbackRunner
 from core.ai.protocol import StreamCallbacks, ensure_messages_consistent
+from core.managers.session_manager import PendingInbound
 from core.markdown_split import (
     MARKDOWN_SAFE_CHUNK_BYTE_LIMIT,
     markdown_safe_cut,
@@ -24,7 +25,6 @@ from core.markdown_split import (
     utf8_prefix,
     utf8len,
 )
-from core.message import InputMessage, MessageType
 from core.tools._types import ToolContext
 from core.tools.impl import execute as execute_tool
 
@@ -136,6 +136,11 @@ class ToolLoop:
         tool_reply_callback: Optional[Callable] = None,
         tool_reply_names: Optional[set[str] | frozenset[str]] = None,
         reply_state_callback: Optional[Callable[[bool], Awaitable[None]]] = None,
+        steering_enabled: bool = False,
+        steering_admission_callback: Optional[
+            Callable[[PendingInbound], Awaitable[Any]]
+        ] = None,
+        inbound_message_ids: Optional[List[str]] = None,
     ) -> tuple[bool, bool]:
         """执行工具调用循环。
 
@@ -158,6 +163,7 @@ class ToolLoop:
         message_delivered = False
         current_model_name: Optional[str] = None
         suppress_reply = False
+        inbound_message_ids = list(inbound_message_ids or [])
 
         if self._max_tool_rounds == -1:
             _rounds: Any = itertools.count()
@@ -195,6 +201,13 @@ class ToolLoop:
                     _log.error("FallbackRunner: service() 返回 None，回退默认服务")
                     svc = self.ai_service
                 current_model_name = runner.current if runner else None
+
+                _log.debug(
+                    "provider payload [%s..] round=%d inbound_message_ids=%s",
+                    chat_id[:12],
+                    round_idx + 1,
+                    inbound_message_ids,
+                )
 
                 # ── 流式转发状态（每轮新建，杜绝跨轮泄漏） ──
                 st = _StreamBlockState()
@@ -344,19 +357,20 @@ class ToolLoop:
                     # 协议已声明 chat_completion_stream，直接调用（不防御式探测）
                     if self._stream_reply:
                         cb = None
+                        request_messages = list(messages)
                         if stream_callback is not None:
                             cb = StreamCallbacks(
                                 on_text=_on_stream_text,
                                 on_reset=_on_stream_reset,
                             )
                         message, usage = await svc.chat_completion_stream(
-                            messages=messages,
+                            messages=request_messages,
                             tools=tools,
                             callbacks=cb,
                         )
                     else:
                         message, usage = await svc.chat_completion_with_tools(
-                            messages=messages,
+                            messages=list(messages),
                             tools=tools,
                         )
                 except asyncio.CancelledError:
@@ -672,98 +686,63 @@ class ToolLoop:
                         reply_to,
                     )
 
-            if get_user_nickname:
+            if steering_enabled and steering_admission_callback:
                 steer_msgs = await self._drain_steering_messages(
                     chat_id=chat_id,
-                    current_sender_id=sender_id,
-                    messages=messages,
-                    get_user_nickname=get_user_nickname,
+                    admission_callback=steering_admission_callback,
+                    inbound_message_ids=inbound_message_ids,
                 )
                 if steer_msgs:
-                    suppress_reply = False  # 新用户消息注入后，重置静默标志
+                    suppress_reply = False
                     message_delivered = False
-                messages.extend(steer_msgs)
+                    messages.extend(steer_msgs)
 
         return sent_emoji, text_committed
 
     async def _drain_steering_messages(
         self,
+        *,
         chat_id: str,
-        current_sender_id: str,
-        messages: List[dict],
-        get_user_nickname: Callable[[str], str],
+        admission_callback: Callable[[PendingInbound], Awaitable[Any]],
+        inbound_message_ids: Optional[List[str]] = None,
     ) -> List[dict]:
-        """从会话队列中 drain 新消息，注入到当前工具循环。
-
-        同一用户 → 不注入记忆（减少冗余调用）
-        不同用户 → 走一次 build_memory_context
-        """
+        """Admit the leased pending batch after a complete tool batch only."""
         if not self.session_manager:
             return []
 
-        queue = await self.session_manager.get_queue(chat_id)
-        drained: List[InputMessage] = []
-        while not queue.empty():
-            try:
-                drained.append(queue.get_nowait())
-            except asyncio.QueueEmpty:
-                break
+        lease = await self.session_manager.claim_pending_for_steer(chat_id)
+        if lease is None:
+            return []
 
         steered: List[dict] = []
-        for msg in drained:
-            nick = get_user_nickname(msg.sender_id) or msg.sender_id
-            content = f"[来自 {nick} 的新消息]: {msg.content}"
-            user_msg: dict = {"role": "user", "content": content}
-            steered.append(user_msg)
+        try:
+            for pending in lease.items:
 
-            await self.context_manager.add_user_message_async(
-                chat_id,
-                content,
-                msg.id,
-                sender_id=msg.sender_id,
-                name=nick,
+                async def _admit_and_commit(item: PendingInbound) -> Any:
+                    admitted = await admission_callback(item)
+                    await self.session_manager.commit(lease, item)
+                    return admitted
+
+                admission_task = asyncio.create_task(_admit_and_commit(pending))
+                try:
+                    admitted = await asyncio.shield(admission_task)
+                except asyncio.CancelledError:
+                    await asyncio.shield(admission_task)
+                    raise
+                if inbound_message_ids is not None:
+                    inbound_message_ids.append(pending.message.id)
+                if admitted is not None:
+                    steered.append(admitted.prompt_message)
+                    steered.extend(getattr(admitted, "additional_prompt_messages", ()))
+        except asyncio.CancelledError:
+            await self.session_manager.requeue_front(lease)
+            raise
+        except Exception:
+            requeued = await self.session_manager.requeue_front(lease)
+            _log.warning(
+                "steering 准入失败，已恢复 %d 条消息 [%s..]",
+                requeued,
+                chat_id[:12],
+                exc_info=True,
             )
-
-            if self.hindsight and msg.msg_type != MessageType.CARD:
-                task = asyncio.ensure_future(
-                    self.hindsight.add_message(
-                        session_id=chat_id,
-                        sender_id=msg.sender_id,
-                        content=content,
-                        context=self.hindsight.msg_type_to_context(msg.msg_type),
-                        timestamp=msg.timestamp,
-                        resources=msg.resources,
-                    )
-                )
-                task.add_done_callback(
-                    lambda t: (
-                        _log.warning(
-                            "记录到 Hindsight 失败 [%s..]: %s",
-                            chat_id[:12],
-                            t.exception(),
-                        )
-                        if t.exception()
-                        else None
-                    )
-                )
-
-            if (
-                msg.sender_id != current_sender_id
-                and self.hindsight
-                and self.prompt_builder
-            ):
-                memory_text = await self.prompt_builder.build_memory_context(
-                    sender_id=msg.sender_id,
-                    input_message=msg,
-                )
-                if memory_text:
-                    steered.append(
-                        {
-                            "role": "system",
-                            "content": memory_text,
-                        }
-                    )
-
-            queue.task_done()
-
         return steered
