@@ -1,5 +1,6 @@
 """测试 cron 事件路由：session_target 决定 wake 目标。"""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -294,6 +295,53 @@ def test_failed_task_keeps_independent_failure_notification_after_tool_delivery(
     assert decision.should_deliver is True
     assert decision.reason == "execution_failure"
     assert decision.content.endswith("tool loop failed")
+
+
+@pytest.mark.asyncio
+async def test_user_target_cron_wake_uses_system_event_prompt():
+    """Cron 完成事件面向普通 chat 时也不能读取聊天历史。"""
+    from core.engine.system_events import SystemEventQueue
+    from core.tasks.wake_coalescer import SOURCE_CRON, PendingWake, WakeTurnResult
+    from core.tasks.wake_runner import WakeRunner
+
+    events = SystemEventQueue()
+    events.enqueue("user_001", "任务 'VRChat状态检测' 已完成", "task:cron-1")
+    system_messages = [{"role": "system", "content": "cron event"}]
+    build_system_event_messages = AsyncMock(return_value=(system_messages, []))
+    prompt_builder = SimpleNamespace(
+        build_system_event_messages=build_system_event_messages,
+        build=AsyncMock(
+            side_effect=AssertionError("cron wake must not build chat history")
+        ),
+    )
+    run_wake_turn = AsyncMock(return_value=WakeTurnResult())
+    agent = SimpleNamespace(
+        prompt_builder=prompt_builder,
+        run_wake_turn=run_wake_turn,
+        context_manager=None,
+        cost_tracker=None,
+    )
+    cooldown = SimpleNamespace(
+        should_defer=lambda **_: SimpleNamespace(defer=False),
+        record_run_start=lambda: None,
+    )
+    wake_runner = WakeRunner(agent, events, cooldown)
+
+    result = await wake_runner(
+        PendingWake(
+            source=SOURCE_CRON,
+            intent="event",
+            session_key="user_001",
+            delivery_target="user_001",
+        )
+    )
+
+    assert result.status == "ran"
+    build_system_event_messages.assert_awaited_once_with(
+        prompt="[系统事件]",
+        system_event_key="user_001",
+    )
+    assert run_wake_turn.await_args.kwargs["messages"] == system_messages
 
 
 def test_wake_runner_cron_branch():

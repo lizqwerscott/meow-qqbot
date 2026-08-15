@@ -133,8 +133,8 @@ class WakeRunner:
                 chat_id=chat_id,
                 system_event_key=event_key,
             )
-        elif pw.source == SOURCE_CRON and pw.session_key == "heartbeat:events":
-            # Main-session cron → system event path: 不加载聊天历史
+        elif pw.source == SOURCE_CRON:
+            # Cron 完成事件始终走 system event 路径，不能加载目标聊天历史。
             messages, tools = (
                 await self._agent.prompt_builder.build_system_event_messages(
                     prompt=pw.extra_prompt or "[系统事件]",
