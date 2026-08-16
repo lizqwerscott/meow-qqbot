@@ -423,6 +423,50 @@ async def test_interp_pnpm_exec_missing_bin_requires_approval(deps, tmp_path):
         assert "eslint" not in patterns
 
 
+async def test_interp_npx_flag_allow_always_not_persisted(deps, tmp_path):
+    """npx flags 使目标歧义：仅人工一次性审批，不能持久化。"""
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "eslint").write_text("#!/bin/sh\n# shim")
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-always", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(deps, "npx --yes eslint", ADMIN, workdir=str(tmp_path))
+        assert "error" not in r
+    patterns = [
+        e["pattern"] for e in deps.approval_manager.value._whitelist["allowlist"]
+    ]
+    assert "npx" not in patterns
+    assert "eslint" not in patterns
+
+
+async def test_interp_npm_exec_without_double_dash_not_persisted(deps, tmp_path):
+    """npm exec 缺少分隔符时仅人工一次性审批，不能持久化。"""
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "eslint").write_text("#!/bin/sh\n# shim")
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-always", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(deps, "npm exec eslint", ADMIN, workdir=str(tmp_path))
+        assert "error" not in r
+    patterns = [
+        e["pattern"] for e in deps.approval_manager.value._whitelist["allowlist"]
+    ]
+    assert "npm" not in patterns
+    assert "eslint" not in patterns
+
+
 async def test_interp_wrapper_inner_bound(deps, tmp_path):
     """timeout 包 node app.js：解释器绑定看内层（2.1 × 2.2 组合）。"""
     app = tmp_path / "app.js"

@@ -265,6 +265,26 @@ def _interpreter_script(argv: List[str]) -> Optional[str]:
     return argv[i]
 
 
+def _is_bare_bin_name(bin_name: str) -> bool:
+    """仅允许本地 ``node_modules/.bin`` 的单段命令名，拒绝路径与包标识。"""
+    separators = {os.sep}
+    if os.altsep:
+        separators.add(os.altsep)
+    return (
+        bool(bin_name)
+        and bin_name not in {".", ".."}
+        and "@" not in bin_name
+        and not any(separator in bin_name for separator in separators)
+    )
+
+
+def _package_name_matches_bin(package_name: object, bin_name: str) -> bool:
+    """字符串 ``bin`` 仅在 package name 能唯一标识请求命令时使用。"""
+    if not isinstance(package_name, str) or not package_name:
+        return False
+    return package_name.rsplit("/", 1)[-1] == bin_name
+
+
 def _resolve_package_bin_path(base: str, bin_path: object) -> Optional[str]:
     """解析 package.json#bin 的单一路径；非字符串或非普通文件视为未绑定。"""
     if not isinstance(bin_path, str) or not bin_path:
@@ -274,7 +294,10 @@ def _resolve_package_bin_path(base: str, bin_path: object) -> Optional[str]:
 
 
 def _find_local_bin(cwd: Optional[str], bin_name: str) -> Optional[str]:
-    """向上逐级查 node_modules/.bin/<bin>；未命中查 package.json#bin 唯一条目。"""
+    """将明确的裸命令名解析为唯一的本地 bin 文件。"""
+    if not _is_bare_bin_name(bin_name):
+        return None
+
     base = os.path.abspath(cwd or os.getcwd())
     d = base if os.path.isdir(base) else os.path.dirname(base)
     while True:
@@ -294,11 +317,14 @@ def _find_local_bin(cwd: Optional[str], bin_name: str) -> Optional[str]:
                 data = json.load(f)
         except Exception:
             return None
+        if not isinstance(data, dict):
+            return None
         bins = data.get("bin")
         if isinstance(bins, str):
-            return _resolve_package_bin_path(base, bins)
-        if isinstance(bins, dict) and len(bins) == 1:
-            return _resolve_package_bin_path(base, next(iter(bins.values())))
+            if _package_name_matches_bin(data.get("name"), bin_name):
+                return _resolve_package_bin_path(base, bins)
+        if isinstance(bins, dict) and bin_name in bins:
+            return _resolve_package_bin_path(base, bins[bin_name])
     return None
 
 
@@ -310,14 +336,11 @@ def _pkg_exec_bin(argv: List[str], cwd: Optional[str]) -> Optional[str]:
             return None
         return _find_local_bin(cwd, argv[2])
     if cmd == "npm":
-        if len(argv) < 3 or argv[1] != "exec":
+        if len(argv) < 4 or argv[1] != "exec" or argv[2] != "--":
             return None
-        j = 2
-        if argv[j] == "--":
-            j += 1
-        if j >= len(argv) or argv[j].startswith("-"):
+        if argv[3].startswith("-"):
             return None
-        return _find_local_bin(cwd, argv[j])
+        return _find_local_bin(cwd, argv[3])
     # npx
     if len(argv) < 2 or argv[1].startswith("-"):
         return None

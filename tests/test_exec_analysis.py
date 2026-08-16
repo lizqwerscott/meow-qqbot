@@ -460,7 +460,7 @@ def test_interp_pnpm_exec_binds_local_bin(tmp_path):
     shim = bin_dir / "eslint"
     shim.write_text("#!/bin/sh\necho eslint")
     target, unique = resolve_interpreter_target(
-        ["pnpm", "exec", "eslint"], cwd=str(tmp_path)
+        ["pnpm", "exec", "eslint", "--fix"], cwd=str(tmp_path)
     )
     assert unique is True
     assert target == os.path.realpath(str(shim))
@@ -473,16 +473,29 @@ def test_interp_pnpm_exec_missing_bin_not_bound(tmp_path):
     assert unique is False
 
 
-def test_interp_npm_exec_ddash_binds_bin(tmp_path):
+def test_interp_npm_exec_double_dash_binds_bin(tmp_path):
     bin_dir = tmp_path / "node_modules" / ".bin"
     bin_dir.mkdir(parents=True)
     shim = bin_dir / "prettier"
     shim.write_text("#!/bin/sh\n# shim")
     target, unique = resolve_interpreter_target(
-        ["npm", "exec", "--", "prettier"], cwd=str(tmp_path)
+        ["npm", "exec", "--", "prettier", "--write", "src"], cwd=str(tmp_path)
     )
     assert unique is True
     assert target == os.path.realpath(str(shim))
+
+
+def test_interp_npm_exec_without_double_dash_not_bound(tmp_path):
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "eslint").write_text("#!/bin/sh\n# shim")
+
+    target, unique = resolve_interpreter_target(
+        ["npm", "exec", "eslint"], cwd=str(tmp_path)
+    )
+
+    assert unique is False
+    assert target is None
 
 
 def test_interp_npx_binds_local_bin(tmp_path):
@@ -490,9 +503,39 @@ def test_interp_npx_binds_local_bin(tmp_path):
     bin_dir.mkdir(parents=True)
     shim = bin_dir / "tsc"
     shim.write_text("#!/bin/sh\n# shim")
-    target, unique = resolve_interpreter_target(["npx", "tsc"], cwd=str(tmp_path))
+    target, unique = resolve_interpreter_target(
+        ["npx", "tsc", "--noEmit"], cwd=str(tmp_path)
+    )
     assert unique is True
     assert target == os.path.realpath(str(shim))
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["pnpm", "exec", "--package", "eslint", "eslint"],
+        ["pnpm", "exec", "--", "eslint"],
+        ["npm", "exec", "eslint"],
+        ["npm", "exec", "--package", "eslint", "--", "eslint"],
+        ["npm", "exec", "--package=eslint", "--", "eslint"],
+        ["npm", "exec", "--"],
+        ["npx", "--yes", "eslint"],
+        ["npx", "--package", "eslint", "eslint"],
+        ["npx", "eslint@9"],
+        ["pnpm", "exec", "eslint@9"],
+        ["npm", "exec", "--", "eslint@9"],
+        ["npx", "../eslint"],
+    ],
+)
+def test_interp_package_exec_ambiguous_forms_not_bound(tmp_path, argv):
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "eslint").write_text("#!/bin/sh\n# shim")
+
+    target, unique = resolve_interpreter_target(argv, cwd=str(tmp_path))
+
+    assert unique is False
+    assert target is None
 
 
 def test_interp_npx_flag_fail_closed(tmp_path):
@@ -504,11 +547,15 @@ def test_interp_npx_flag_fail_closed(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "bin_config",
-    ["./bin/cli.js", {"cli": "./bin/cli.js"}],
+    "package_config",
+    [
+        {"name": "cli", "bin": "./bin/cli.js"},
+        {"bin": {"cli": "./bin/cli.js"}},
+        {"bin": {"cli": "./bin/cli.js", "other": "./bin/other.js"}},
+    ],
 )
-def test_interp_package_json_bin_fallback(tmp_path, bin_config):
-    (tmp_path / "package.json").write_text(json.dumps({"bin": bin_config}))
+def test_interp_package_json_bin_fallback(tmp_path, package_config):
+    (tmp_path / "package.json").write_text(json.dumps(package_config))
     cli = tmp_path / "bin" / "cli.js"
     cli.parent.mkdir()
     cli.write_text("#!/usr/bin/env node\n")
@@ -528,17 +575,55 @@ def test_interp_package_json_bin_fallback(tmp_path, bin_config):
         (123, False),
         (["./bin/cli.js"], False),
         ({"cli": None}, False),
+        ([], False),
         ({"cli": "./bin/cli.js", "other": "./bin/other.js"}, False),
     ],
 )
 def test_interp_package_json_bin_requires_existing_regular_file(
     tmp_path, bin_config, create_directory
 ):
-    (tmp_path / "package.json").write_text(json.dumps({"bin": bin_config}))
+    package_config = {"bin": bin_config}
+    if isinstance(bin_config, str):
+        package_config["name"] = "cli"
+    (tmp_path / "package.json").write_text(json.dumps(package_config))
     if create_directory:
         (tmp_path / "bin").mkdir()
 
     target, unique = resolve_interpreter_target(["npx", "cli"], cwd=str(tmp_path))
+
+    assert unique is False
+    assert target is None
+
+
+def test_interp_package_json_root_not_object_not_bound(tmp_path):
+    (tmp_path / "package.json").write_text(json.dumps([]))
+
+    target, unique = resolve_interpreter_target(["npx", "cli"], cwd=str(tmp_path))
+
+    assert unique is False
+    assert target is None
+
+
+def test_interp_package_json_bin_unknown_name_not_bound(tmp_path):
+    cli = tmp_path / "bin" / "cli.js"
+    cli.parent.mkdir()
+    cli.write_text("#!/usr/bin/env node\n")
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "cli", "bin": "./bin/cli.js"})
+    )
+
+    target, unique = resolve_interpreter_target(["npx", "unknown"], cwd=str(tmp_path))
+
+    assert unique is False
+    assert target is None
+
+
+def test_interp_package_exec_path_like_bin_not_bound(tmp_path):
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    (tmp_path / "node_modules" / "eslint").write_text("#!/bin/sh\n# shim")
+
+    target, unique = resolve_interpreter_target(["npx", "../eslint"], cwd=str(tmp_path))
 
     assert unique is False
     assert target is None
