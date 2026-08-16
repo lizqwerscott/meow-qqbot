@@ -540,6 +540,55 @@ async def test_nested_flock_payload_allow_always_not_persisted(deps, tmp_path):
     assert "flock" not in patterns
 
 
+async def test_shell_c_payload_allow_always_not_persisted(deps, tmp_path):
+    """bash -c shell payload 内容不可预测：allow-always 不落盘。"""
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-always", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(
+            deps,
+            "bash -c 'echo hello'",
+            ADMIN,
+            background=False,
+            workdir=str(tmp_path),
+        )
+        assert "error" not in r
+    patterns = [
+        e["pattern"] for e in deps.approval_manager.value._whitelist["allowlist"]
+    ]
+    assert "bash" not in patterns
+
+
+async def test_nested_shell_c_payload_allow_always_not_persisted(deps, tmp_path):
+    """嵌套 timeout → bash -c payload 同样不得持久化任一包装器。"""
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-always", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(
+            deps,
+            "timeout 5 bash -c 'echo hello'",
+            ADMIN,
+            background=False,
+            workdir=str(tmp_path),
+        )
+        assert "error" not in r
+    patterns = [
+        e["pattern"] for e in deps.approval_manager.value._whitelist["allowlist"]
+    ]
+    assert "timeout" not in patterns
+    assert "bash" not in patterns
+
+
 async def test_interp_wrapper_inner_bound(deps, tmp_path):
     """timeout 包 node app.js：解释器绑定看内层（2.1 × 2.2 组合）。"""
     app = tmp_path / "app.js"

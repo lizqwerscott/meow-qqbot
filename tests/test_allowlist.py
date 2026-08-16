@@ -269,10 +269,28 @@ def test_wrapper_arg_pattern_applies_to_inner_args():
 def test_analyzed_wrapper_matches_inner_entry():
     from core.tools.exec_analysis import analyze_command
 
-    segments = analyze_command("timeout 5 ls -la", env={"PATH": "/bin:/usr/bin"}, cwd="/")
+    segments = analyze_command(
+        "timeout 5 ls -la", env={"PATH": "/bin:/usr/bin"}, cwd="/"
+    )
     entries = [AllowlistEntry(pattern="ls")]
     satisfied, _ = match_allowlist(segments, entries)
     assert satisfied is True
+
+
+def test_wrapped_payload_requires_inner_and_nested():
+    """嵌套包装器 + payload：内层 flock 与 payload 内命令都必须命中。"""
+    from core.tools.exec_analysis import analyze_command
+
+    command = "timeout 5 flock /tmp/l -c 'ls -la'"
+    entries = [AllowlistEntry(pattern="flock"), AllowlistEntry(pattern="ls")]
+    segments = analyze_command(command, env={"PATH": "/bin:/usr/bin"}, cwd="/")
+    satisfied, _ = match_allowlist(segments, entries)
+    assert satisfied is True
+
+    only_outer = [AllowlistEntry(pattern="flock")]
+    segments2 = analyze_command(command, env={"PATH": "/bin:/usr/bin"}, cwd="/")
+    satisfied2, _ = match_allowlist(segments2, only_outer)
+    assert satisfied2 is False  # payload 内 ls 未授权 → miss
 
 
 def test_wrapper_inner_misses_safe_bin_outer_only():
