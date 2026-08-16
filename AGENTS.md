@@ -39,6 +39,7 @@ uv run black <file>   # format code
 - `core/plugins/` — plugin system (`PluginManager`, `BasePlugin`)
 - `core/learners/` — learning system (`LearningOrchestrator` + `JargonMiner`, `BehaviorLearner`, `ExpressionLearner`, `SceneClusterer`)
 - `core/markdown_split.py` — **Markdown 安全拆块**: 非流式发送前的字节级拆块（`split_markdown`，围栏/表格状态机）+ 流式转发安全切点（`markdown_safe_cut` / `trailing_structure` / `pending_starts_incomplete`）。两份状态机共用同一套 `is_fence_line`/`is_table_*` 判定谓词，改动只在本模块内同步
+- `core/text_paging.py` — **read_file 分页与窗口读共用模块**: 行级 `offset`/`limit`（1-based）+ 字符级 `max_chars` 上限（默认 20k，硬顶 1MB）。`paginate_text`（内存全文分页）与 `read_text_page`（磁盘窗口读，不整读文件；二进制快扫统计行数 + 流式读目标行段）行模型一致（universal newlines 归一 + split 语义末尾空行）；只保留完整行，单行超限给前缀并标记 `last_line_partial`；截断时附 `offset=N` 续读提示。工作区与媒体附件两处 `read_file` 共用，元数据经 `page_to_dict` / `FileInspection.from_page` 单一出口
 - `core/rule_router.py` — `RuleRouter`: 15-dimension scoring engine (ClawRouter-style) for model-tier routing
 - `core/router_model.py` — Lightweight router model (qwen2.5:7b) for smart tier routing: simple tasks reply directly, complex tasks mark `[ESCALATE]`
 - `core/message.py` — Unified message model (`MessageType`, `ResourceMeta`) for all resource types (emoji/image/voice/video/file)

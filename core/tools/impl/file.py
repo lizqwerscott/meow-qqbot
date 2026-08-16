@@ -3,6 +3,13 @@ import json
 import logging
 from pathlib import Path
 
+from core.text_paging import (
+    BinaryFileError,
+    OffsetOutOfRangeError,
+    build_pagination_hint,
+    page_to_dict,
+    read_text_page,
+)
 from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
 from core.tools.patch_parser import (
@@ -237,6 +244,8 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
                 chat_id=ctx.chat_id,
                 media_uri=media_uri,
                 max_chars=args.get("max_chars"),
+                offset=args.get("offset"),
+                limit=args.get("limit"),
             )
             return ToolResult(content=json.dumps(result.as_dict(), ensure_ascii=False))
         wm = deps.workspace_manager
@@ -249,6 +258,29 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
             return ToolResult(
                 content=json.dumps({"error": "请提供 file_path"}, ensure_ascii=False)
             )
+
+        # 分页参数（可选）：offset 起始行（1-based）、limit 行数、max_chars 字符上限
+        try:
+            offset = int(args["offset"]) if args.get("offset") is not None else None
+            limit = int(args["limit"]) if args.get("limit") is not None else None
+            max_chars = (
+                int(args["max_chars"]) if args.get("max_chars") is not None else None
+            )
+        except (TypeError, ValueError):
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "offset/limit/max_chars 必须为整数"}, ensure_ascii=False
+                )
+            )
+        if offset is not None and offset < 1:
+            return ToolResult(
+                content=json.dumps({"error": "offset 必须 >= 1"}, ensure_ascii=False)
+            )
+        if limit is not None and limit < 1:
+            return ToolResult(
+                content=json.dumps({"error": "limit 必须 >= 1"}, ensure_ascii=False)
+            )
+
         admin_override = is_admin_private(ctx, deps)
         try:
             target = sandbox_target(
@@ -291,20 +323,16 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
                     {"error": f"路径不是文件: {file_path}"}, ensure_ascii=False
                 )
             )
-        _MAX_FILE_SIZE = 1024 * 1024
         file_size = target.stat().st_size
-        if file_size > _MAX_FILE_SIZE:
-            return ToolResult(
-                content=json.dumps(
-                    {
-                        "error": f"文件过大（{file_size} bytes），超过 1MB 限制。请使用 exec 命令切片读取",
-                    },
-                    ensure_ascii=False,
-                )
-            )
         try:
-            content = await asyncio.to_thread(target.read_text, encoding="utf-8")
-        except UnicodeDecodeError:
+            page = await asyncio.to_thread(
+                read_text_page,
+                target,
+                offset=offset,
+                limit=limit,
+                max_chars=max_chars,
+            )
+        except BinaryFileError:
             return ToolResult(
                 content=json.dumps(
                     {
@@ -313,7 +341,11 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
                     ensure_ascii=False,
                 )
             )
-        except Exception as e:
+        except OffsetOutOfRangeError as exc:
+            return ToolResult(
+                content=json.dumps({"error": str(exc)}, ensure_ascii=False)
+            )
+        except OSError as e:
             return ToolResult(
                 content=json.dumps({"error": f"读取失败: {e}"}, ensure_ascii=False)
             )
@@ -321,8 +353,9 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
             content=json.dumps(
                 {
                     "success": True,
-                    "content": content,
+                    "content": page.content + build_pagination_hint(page),
                     "path": file_path,
+                    **page_to_dict(page),
                 },
                 ensure_ascii=False,
             )
@@ -609,7 +642,18 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
             },
             "max_chars": {
                 "type": "integer",
-                "description": "读取附件时的最大字符数，默认使用服务限制。",
+                "minimum": 1,
+                "description": "输出最大字符数，默认 20000。只保留完整行；单行超过上限时仅返回前缀并标记 last_line_partial。",
+            },
+            "offset": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "起始行号（1-based），默认从第 1 行开始。",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "最多读取的行数。",
             },
         },
         "anyOf": [{"required": ["file_path"]}, {"required": ["media_uri"]}],
@@ -673,7 +717,10 @@ def create_file_entries(deps: ToolDeps) -> list[ToolEntry]:
             name="read_file",
             section="file",
             description=(
-                "读取工作区文本文件或当前会话授权的文本附件。仅支持 1MB 以下的工作区文本文件。"
+                "读取工作区文本文件或当前会话授权的文本附件（TXT/Markdown/JSON/CSV）。"
+                "支持分页：offset 起始行号（1-based）、limit 最大行数、max_chars 输出字符上限（默认 20000）。"
+                "截断时返回 next_offset，使用 offset=next_offset 继续读取后续内容。"
+                "工作区文件无大小限制（窗口读，任意大小均可翻页）。"
                 "不支持读取目录（使用 list_dir）。"
                 "优先使用本工具读取文件，不要使用 exec + cat/head/tail。"
                 "默认不支持路径穿越(..)，管理员可通过审批访问越界路径。"

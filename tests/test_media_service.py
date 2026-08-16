@@ -151,7 +151,7 @@ async def test_image_understanding_disabled_hides_tools(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_inspect_file_authorizes_type_and_truncation(tmp_path):
+async def test_read_file_authorizes_type_and_truncation(tmp_path):
     service = MediaService(http_client=AsyncMock(), storage_dir=tmp_path)
     await service.open()
     record = await service.store.save(
@@ -164,11 +164,12 @@ async def test_inspect_file_authorizes_type_and_truncation(tmp_path):
         filename="notes.md",
         data=b"abcdef",
     )
-    result = await service.inspect_file(
+    result = await service.read_file(
         chat_id="g1", media_uri=record.media_uri, max_chars=4
     )
-    assert result.content == "abcd"
+    assert result.content.startswith("abcd")
     assert result.truncated
+    assert result.last_line_partial
     assert (
         await service.read_file(chat_id="g2", media_uri=record.media_uri)
     ).error == ("MEDIA_FORBIDDEN")
@@ -218,7 +219,7 @@ async def test_read_file_is_the_public_attachment_reader(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_inspect_file_rejects_unsupported_type(tmp_path):
+async def test_read_file_rejects_unsupported_type(tmp_path):
     service = MediaService(http_client=AsyncMock(), storage_dir=tmp_path)
     await service.open()
     record = await service.store.save(
@@ -231,7 +232,7 @@ async def test_inspect_file_rejects_unsupported_type(tmp_path):
         filename="archive.zip",
         data=b"not-a-zip",
     )
-    result = await service.inspect_file(chat_id="g1", media_uri=record.media_uri)
+    result = await service.read_file(chat_id="g1", media_uri=record.media_uri)
     assert result.error == "UNSUPPORTED_MEDIA_TYPE"
 
 
@@ -349,7 +350,8 @@ async def test_file_summary_failure_keeps_read_file_available(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_inspect_file_reuses_cached_text_extraction(tmp_path):
+async def test_read_file_reads_disk_directly_not_provider(tmp_path):
+    """read_file 直接窗口读本地文件，不再经过提取 provider 链/缓存。"""
     service = MediaService(http_client=AsyncMock(), storage_dir=tmp_path)
     await service.open()
     record = await service.store.save(
@@ -363,18 +365,47 @@ async def test_inspect_file_reuses_cached_text_extraction(tmp_path):
         data=b"abcdef",
     )
     provider = service.file_capability.providers[0]
-    execute = AsyncMock(return_value="abcdef")
-    provider.execute = execute
+    provider.execute = AsyncMock(side_effect=RuntimeError("不应经过 provider"))
 
-    first = await service.inspect_file(chat_id="g1", media_uri=record.media_uri)
-    second = await service.inspect_file(chat_id="g1", media_uri=record.media_uri)
+    first = await service.read_file(chat_id="g1", media_uri=record.media_uri)
+    second = await service.read_file(chat_id="g1", media_uri=record.media_uri)
 
     assert first.content == second.content == "abcdef"
-    execute.assert_awaited_once()
+    provider.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_concurrent_file_inspection_uses_single_flight(tmp_path):
+async def test_read_file_large_attachment_pages_beyond_extraction_window(tmp_path):
+    """附件无提取窗口：可翻页读取 20001 字符之后的内容。"""
+    service = MediaService(http_client=AsyncMock(), storage_dir=tmp_path)
+    await service.open()
+    body = "\n".join(f"row{i:05d}-{'x' * 40}" for i in range(2000))
+    record = await service.store.save(
+        chat_id="g1",
+        message_id="m1",
+        sender_id="u1",
+        resource_type="file",
+        source_url="https://example.test/big.log",
+        mime_type="text/plain",
+        filename="big.log",
+        data=body.encode(),
+    )
+    # 第一页只读前 100 行
+    page = await service.read_file(chat_id="g1", media_uri=record.media_uri, limit=100)
+    assert page.content.startswith("row00000-")
+    assert page.next_offset == 101
+    # 翻到第 500 行附近——旧实现（20001 字符提取窗口）读不到这里
+    deep = await service.read_file(
+        chat_id="g1", media_uri=record.media_uri, offset=500, limit=2
+    )
+    assert deep.content.startswith("row00499-")
+    assert deep.total_lines == 2000
+    assert deep.next_offset == 502
+
+
+@pytest.mark.asyncio
+async def test_concurrent_read_file_both_succeed(tmp_path):
+    """read_file 纯磁盘读，并发调用天然安全。"""
     service = MediaService(http_client=AsyncMock(), storage_dir=tmp_path)
     await service.open()
     record = await service.store.save(
@@ -387,29 +418,11 @@ async def test_concurrent_file_inspection_uses_single_flight(tmp_path):
         filename="notes.txt",
         data=b"abcdef",
     )
-    started = asyncio.Event()
-    release = asyncio.Event()
-
-    async def extract(*args, **kwargs):
-        started.set()
-        await release.wait()
-        return "abcdef"
-
-    provider = service.file_capability.providers[0]
-    provider.execute = AsyncMock(side_effect=extract)
-    first = asyncio.create_task(
-        service.inspect_file(chat_id="g1", media_uri=record.media_uri)
+    first_result, second_result = await asyncio.gather(
+        service.read_file(chat_id="g1", media_uri=record.media_uri),
+        service.read_file(chat_id="g1", media_uri=record.media_uri),
     )
-    await started.wait()
-    second = asyncio.create_task(
-        service.inspect_file(chat_id="g1", media_uri=record.media_uri)
-    )
-    release.set()
-
-    first_result, second_result = await asyncio.gather(first, second)
-
     assert first_result.content == second_result.content == "abcdef"
-    provider.execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio

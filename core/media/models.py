@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from core.text_paging import TextPage, build_pagination_hint
+
 
 @dataclass(frozen=True)
 class MediaRecord:
@@ -54,6 +56,28 @@ class FileInspection:
     truncated: bool = False
     error: str = ""
     message: str = ""
+    # 分页元数据（行级 offset/limit + 字符级 max_chars，语义见 core/text_paging.py）
+    start_line: int = 1
+    total_lines: int = 0
+    output_lines: int = 0
+    next_offset: int = 0  # 续读起点（1-based）；0 = 已读完全部
+    truncated_by: str = ""  # "" | "lines" | "chars"
+    last_line_partial: bool = False
+
+    @classmethod
+    def from_page(cls, media_uri: str, page: TextPage) -> "FileInspection":
+        """由 TextPage 构造（元数据簇单一来源，避免逐字段拷贝）。"""
+        return cls(
+            media_uri=media_uri,
+            content=page.content + build_pagination_hint(page),
+            truncated=page.truncated,
+            start_line=page.start_line,
+            total_lines=page.total_lines,
+            output_lines=page.output_lines,
+            next_offset=page.next_offset,
+            truncated_by=page.truncated_by.value,
+            last_line_partial=page.last_line_partial,
+        )
 
     def as_dict(self) -> dict:
         if self.error:
@@ -62,6 +86,12 @@ class FileInspection:
             "media_uri": self.media_uri,
             "content": self.content,
             "truncated": self.truncated,
+            "start_line": self.start_line,
+            "total_lines": self.total_lines,
+            "output_lines": self.output_lines,
+            "next_offset": self.next_offset,
+            "truncated_by": self.truncated_by,
+            "last_line_partial": self.last_line_partial,
         }
 
 

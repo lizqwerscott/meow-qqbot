@@ -29,6 +29,13 @@ from core.media.ocr import OcrEngine, OcrProvider, is_ocr_available
 from core.media.provider_factory import LegacyMultimodalProvider, LocalWhisperProvider
 from core.media.store import MediaStore
 from core.message import InputMessage, ResourceMeta
+from core.text_paging import (
+    DEFAULT_PAGE_CHARS,
+    MAX_PAGE_CHARS,
+    BinaryFileError,
+    OffsetOutOfRangeError,
+    read_text_page,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -128,6 +135,8 @@ def _safe_float(value: Any, default: float, minimum: float = 0.1) -> float:
         return max(minimum, float(value))
     except (TypeError, ValueError, OverflowError):
         return default
+
+
 class MediaService:
     """媒体生命周期模块：保存、授权、摘要和按需图片分析。"""
 
@@ -168,11 +177,17 @@ class MediaService:
         self.enabled = enabled
         self.http_client = http_client
         self.multimodal = multimodal
-        image_config = image_understanding if isinstance(image_understanding, Mapping) else {}
+        image_config = (
+            image_understanding if isinstance(image_understanding, Mapping) else {}
+        )
         self.image_enabled = bool(image_config.get("enabled", True))
         self.max_auto_images = _safe_int(image_config.get("max_auto_images", 3), 3)
-        self.analysis_timeout = _safe_float(image_config.get("analysis_timeout_seconds", 30), 30)
-        self.summary_max_chars = _safe_int(image_config.get("summary_max_chars", 300), 300, 20)
+        self.analysis_timeout = _safe_float(
+            image_config.get("analysis_timeout_seconds", 30), 30
+        )
+        self.summary_max_chars = _safe_int(
+            image_config.get("summary_max_chars", 300), 300, 20
+        )
         ocr_cfg = image_config.get("ocr", {})
         ocr_cfg = ocr_cfg if isinstance(ocr_cfg, Mapping) else {}
         self.ocr_enabled = bool(ocr_cfg.get("enabled", True))
@@ -195,7 +210,9 @@ class MediaService:
         self.pdf_max_tokens = max(50, int(pdf_max_tokens))
         self.pdf_max_pages = max(1, int(pdf_max_pages))
         self.pdf_max_bytes = max(1, int(pdf_max_bytes))
-        voice_cfg = voice_transcription if isinstance(voice_transcription, Mapping) else {}
+        voice_cfg = (
+            voice_transcription if isinstance(voice_transcription, Mapping) else {}
+        )
         self.voice_transcriber = voice_transcriber
         self.voice_timeout = _safe_float(voice_cfg.get("timeout_seconds", 120), 120)
         self.voice_max_chars = _safe_int(voice_cfg.get("max_chars", 4_000), 4_000, 1)
@@ -837,10 +854,10 @@ class MediaService:
                 f"[{label}]\n引用: {resource.media_uri}\n文件: {resource.filename or '未命名'}\n"
                 f"提取: {inspection.message}\n[/{label}]"
             )
-        suffix = "（已截断，可调用 read_file 查看更多）" if inspection.truncated else ""
+        # content 已含分页提示（截断时带 offset 续读指引）
         return (
             f"[{label}]\n引用: {inspection.media_uri}\n文件: {resource.filename or '未命名'}\n"
-            f"内容{suffix}:\n{inspection.content}\n[/{label}]"
+            f"内容:\n{inspection.content}\n[/{label}]"
         )
 
     async def _summarize_file_context(self, chat_id, resource, label):
@@ -895,7 +912,13 @@ class MediaService:
         )
 
     async def read_file(
-        self, *, chat_id: str, media_uri: str, max_chars: int | None = None
+        self,
+        *,
+        chat_id: str,
+        media_uri: str,
+        max_chars: int | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
     ) -> FileInspection:
         if not media_uri.startswith("media://inbound/"):
             return FileInspection(
@@ -922,34 +945,29 @@ class MediaService:
                 error="UNSUPPORTED_MEDIA_TYPE",
                 message="仅支持 TXT、Markdown、JSON 和 CSV 文件",
             )
-        requested_limit = int(max_chars or self.file_extract_max_chars)
-        limit = min(requested_limit, self.file_extract_max_chars)
+        requested_limit = int(max_chars or DEFAULT_PAGE_CHARS)
+        limit_chars = min(max(requested_limit, 1), MAX_PAGE_CHARS)
         try:
-            result = await self.file_capability.execute(
-                record,
-                cache_key=(
-                    record.sha256,
-                    "text",
-                    _TEXT_EXTRACTION_VERSION,
-                    str(self.file_extract_max_chars),
-                ),
-                max_chars=self.file_extract_max_chars + 1,
+            page = read_text_page(
+                record.local_path, offset=offset, limit=limit, max_chars=limit_chars
             )
-        except Exception:
+        except OffsetOutOfRangeError as exc:
+            return FileInspection(
+                media_uri, error="OFFSET_OUT_OF_RANGE", message=str(exc)
+            )
+        except BinaryFileError:
+            return FileInspection(
+                media_uri,
+                error="UNSUPPORTED_MEDIA_TYPE",
+                message="文件不是 UTF-8 文本（疑似二进制或非 UTF-8 编码）",
+            )
+        except ValueError as exc:
+            return FileInspection(media_uri, error="INVALID_OFFSET", message=str(exc))
+        except OSError:
             return FileInspection(
                 media_uri, error="MEDIA_NOT_AVAILABLE", message="文件不可用"
             )
-        text = result.content
-        return FileInspection(
-            media_uri, content=text[:limit], truncated=len(text) > limit
-        )
-
-    async def inspect_file(
-        self, *, chat_id: str, media_uri: str, max_chars: int | None = None
-    ) -> FileInspection:
-        return await self.read_file(
-            chat_id=chat_id, media_uri=media_uri, max_chars=max_chars
-        )
+        return FileInspection.from_page(media_uri, page)
 
     async def inspect_pdf(
         self, *, chat_id: str, media_uri: str, prompt: str
