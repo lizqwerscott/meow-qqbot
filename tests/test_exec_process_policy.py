@@ -620,6 +620,60 @@ async def test_interp_meta_command_no_unbound(deps):
     assert plans[0]["inner_file"] is None
 
 
+async def test_interp_multi_script_allow_always_not_persisted(deps, tmp_path):
+    """多段解释器无法用单个 inner_file 覆盖：allow-always 不落盘。"""
+    (tmp_path / "a.js").write_text("console.log(1)")
+    (tmp_path / "b.js").write_text("console.log(2)")
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-always", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(
+            deps,
+            "node a.js && node b.js",
+            ADMIN,
+            background=False,
+            workdir=str(tmp_path),
+        )
+        assert "error" not in r
+    patterns = [
+        e["pattern"] for e in deps.approval_manager.value._whitelist["allowlist"]
+    ]
+    assert "node" not in patterns
+    assert "a.js" not in patterns
+    assert "b.js" not in patterns
+
+
+async def test_interp_multi_script_plan_marks_unbound(deps, tmp_path):
+    """多段解释器 plan 记录 multi_interp_target 并保持 interp_unbound。"""
+    (tmp_path / "a.js").write_text("console.log(1)")
+    (tmp_path / "b.js").write_text("console.log(2)")
+    plans = []
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                plans.append(deps.approval_manager.value._pending_plans[key])
+                deps.approval_manager.value.resolve(key, "allow-once", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(
+            deps,
+            "node a.js && node b.js",
+            ADMIN,
+            background=False,
+            workdir=str(tmp_path),
+        )
+        assert "error" not in r
+    assert plans[0]["multi_interp_target"] is True
+    assert plans[0]["inner_file"] == os.path.realpath(str(tmp_path / "a.js"))
+
+
 # ── mode=auto（auto-reviewer）──
 
 

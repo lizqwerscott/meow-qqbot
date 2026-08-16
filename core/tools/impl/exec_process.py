@@ -264,6 +264,7 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
         # 包装器段（timeout 5 node app.js）看内层（2.1 × 2.2 组合）。
         inner_file: Optional[str] = None
         interp_unbound = False
+        multi_interp_target = False
         for seg in iter_all_segments(segments):
             target_argv = seg.inner_argv or seg.argv
             if target_argv and os.path.basename(target_argv[0]) in INTERPRETER_BINS:
@@ -271,9 +272,11 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                 if unique:
                     if inner_file is None:
                         inner_file = target
+                    elif target != inner_file:
+                        multi_interp_target = True
                 else:
                     interp_unbound = True
-        analysis_ok = analysis_ok and not interp_unbound
+        analysis_ok = analysis_ok and not interp_unbound and not multi_interp_target
         inline_hit = policy.strict_inline_eval and any(
             seg.inline_eval for seg in iter_all_segments(segments)
         )
@@ -328,6 +331,7 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
             # 2.2 解释器绑定：目标脚本文件（唯一确定时）+ 是否无法声称覆盖
             "inner_file": inner_file,
             "interp_unbound": interp_unbound,
+            "multi_interp_target": multi_interp_target,
         }
 
         if needs_ask:
@@ -343,6 +347,7 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                 and can_approve_in_ctx
                 and not inline_hit
                 and not interp_unbound  # 2.2：无法绑定的解释器直接转人工，不自动审查
+                and not multi_interp_target
                 and reviewer
                 and reviewer.available
             ):
@@ -362,6 +367,7 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                         persist=(
                             not inline_hit
                             and not interp_unbound
+                            and not multi_interp_target
                             and not wrapper_invalid
                             and not payload_wrapper_hit
                         ),
