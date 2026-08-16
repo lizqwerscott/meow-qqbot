@@ -245,11 +245,34 @@ def test_unwrap_timeout_with_flags():
         "python3",
         "x.py",
     ]
+    assert unwrap_wrapper(["timeout", "--signal=KILL", "--", "10", "ls"]) == ["ls"]
+    assert unwrap_wrapper(["timeout", "--bogus", "10", "ls"]) is None
+    assert unwrap_wrapper(["timeout", "-s"]) is None
 
 
 def test_unwrap_env_skips_assignments_and_flags():
     assert unwrap_wrapper(["env", "FOO=1", "BAR=2", "ls", "-la"]) == ["ls", "-la"]
     assert unwrap_wrapper(["env", "-u", "HOME", "ls"]) == ["ls"]
+    assert unwrap_wrapper(["env", "--unset=HOME", "--", "ls", "-la"]) == [
+        "ls",
+        "-la",
+    ]
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["env", "-S", "ls -la"], ["ls", "-la"]),
+        (["env", "-S", "FOO=1 python3 x.py"], ["python3", "x.py"]),
+        (["env", "--split-string=ls -la"], ["ls", "-la"]),
+        (["env", "-S"], None),
+        (["env", "-S", "'unclosed", "ls"], None),
+        (["env", "-Sls", "target"], None),
+        (["env", "--bogus", "ls"], None),
+    ],
+)
+def test_unwrap_env_split_string(argv, expected):
+    assert unwrap_wrapper(argv) == expected
 
 
 def test_unwrap_flock_skips_lockfile():
@@ -321,6 +344,13 @@ def test_analyze_flock_c_payload_nested():
     assert any(s.argv == ["python3", "x.py"] for s in nested)
 
 
+def test_analyze_flock_command_equals_payload_nested():
+    segments = analyze_command("flock /tmp/l --command='python3 x.py'", env=os.environ)
+    assert segments[0].inner_argv == []
+    nested = segments[0].nested_segments
+    assert any(s.argv == ["python3", "x.py"] for s in nested)
+
+
 def test_analyze_wrapped_flock_c_payload_nested():
     # 包装 flock -c：timeout 5 flock /tmp/l -c 'rm ...' → payload 内 rm 进嵌套段
     # （黑名单已移除，rm 必须参与 allowlist 匹配，否则 flock 命中即直跑）
@@ -375,6 +405,18 @@ def test_interp_python_m_module_not_bound(tmp_path):
         ["python3", "-m", "http.server"], cwd=str(tmp_path)
     )
     assert unique is False
+
+
+def test_interp_python_unknown_flag_not_bound(tmp_path):
+    script = tmp_path / "script.py"
+    script.write_text("print(1)")
+
+    target, unique = resolve_interpreter_target(
+        ["python3", "--unknown", "script.py"], cwd=str(tmp_path)
+    )
+
+    assert unique is False
+    assert target is None
 
 
 def test_interp_python_missing_file_not_bound(tmp_path):
@@ -618,12 +660,41 @@ def test_interp_package_json_bin_unknown_name_not_bound(tmp_path):
     assert target is None
 
 
+def test_interp_local_bin_symlink_outside_package_not_bound(tmp_path):
+    outside = tmp_path.parent / "outside-eslint"
+    outside.write_text("#!/bin/sh\n# shim")
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "eslint").symlink_to(outside)
+
+    target, unique = resolve_interpreter_target(["npx", "eslint"], cwd=str(tmp_path))
+
+    assert unique is False
+    assert target is None
+
+
 def test_interp_package_exec_path_like_bin_not_bound(tmp_path):
     bin_dir = tmp_path / "node_modules" / ".bin"
     bin_dir.mkdir(parents=True)
     (tmp_path / "node_modules" / "eslint").write_text("#!/bin/sh\n# shim")
 
     target, unique = resolve_interpreter_target(["npx", "../eslint"], cwd=str(tmp_path))
+
+    assert unique is False
+    assert target is None
+
+
+@pytest.mark.parametrize("bin_path", ["../outside-cli.js", "./bin/cli.js"])
+def test_interp_package_json_bin_outside_package_not_bound(tmp_path, bin_path):
+    outside = tmp_path.parent / "outside-cli.js"
+    outside.write_text("#!/usr/bin/env node\n")
+    if bin_path == "./bin/cli.js":
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "cli.js").symlink_to(outside)
+    (tmp_path / "package.json").write_text(json.dumps({"name": "cli", "bin": bin_path}))
+
+    target, unique = resolve_interpreter_target(["npx", "cli"], cwd=str(tmp_path))
 
     assert unique is False
     assert target is None

@@ -29,6 +29,7 @@ from core.tools.env_override_policy import validate_env_override
 from core.tools.exec_analysis import (
     INTERPRETER_BINS,
     analyze_command,
+    extract_wrapper_payloads,
     iter_all_segments,
     resolve_interpreter_target,
 )
@@ -98,6 +99,15 @@ def _persist_target(seg) -> str:
             return os.path.basename(res.resolved_path)
         return res.resolved_path
     return os.path.basename(seg.argv[0])
+
+
+def _has_payload_wrapper(seg) -> bool:
+    """递归判断是否含 shell-payload 包装器；这类命令不可安全持久化。"""
+    return bool(
+        extract_wrapper_payloads(seg.argv)
+        or (seg.inner_argv and extract_wrapper_payloads(seg.inner_argv))
+        or any(_has_payload_wrapper(nested) for nested in seg.nested_segments)
+    )
 
 
 def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
@@ -271,15 +281,30 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
         # shell=False 下 heredoc 本就不生效（token 当参数），且可嵌入任意多行
         # 脚本内容，因此即使 allowlist 命中也要走审批。
         heredoc_hit = any(seg.heredoc for seg in iter_all_segments(segments))
+        wrapper_invalid = any(
+            seg.wrapper_invalid for seg in iter_all_segments(segments)
+        )
+        # flock -c/--command 的实际可执行内容来自 shell payload；外层 segment
+        # 无法提供可持久化的唯一 argv，因此 allow-always 降级为一次性审批。
+        payload_wrapper_hit = any(_has_payload_wrapper(seg) for seg in segments)
 
         effective_allow = (
-            per_segment_ok and not inline_hit and not heredoc_hit and analysis_ok
+            per_segment_ok
+            and not inline_hit
+            and not heredoc_hit
+            and not wrapper_invalid
+            and analysis_ok
         )
         needs_ask = requires_approval(
             ask=policy.ask,
             security=policy.security,
             analysis_ok=analysis_ok,
-            allowlist_satisfied=per_segment_ok and not inline_hit and not heredoc_hit,
+            allowlist_satisfied=(
+                per_segment_ok
+                and not inline_hit
+                and not heredoc_hit
+                and not wrapper_invalid
+            ),
             durable_satisfied=effective_allow,
         )
 
@@ -334,7 +359,12 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                         ask_fallback=policy.ask_fallback,
                         # strictInlineEval：inline 命令的 allow-always 不落白名单；
                         # 2.2：interp_unbound（无法绑定唯一文件）同样不落白名单
-                        persist=not inline_hit and not interp_unbound,
+                        persist=(
+                            not inline_hit
+                            and not interp_unbound
+                            and not wrapper_invalid
+                            and not payload_wrapper_hit
+                        ),
                         timeout=policy.approval_timeout or 300,
                         return_session_key=True,
                     )

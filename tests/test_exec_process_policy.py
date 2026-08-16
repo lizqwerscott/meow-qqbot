@@ -467,6 +467,79 @@ async def test_interp_npm_exec_without_double_dash_not_persisted(deps, tmp_path)
     assert "eslint" not in patterns
 
 
+async def test_flock_command_payload_allow_always_not_persisted(deps, tmp_path):
+    """flock shell payload 无唯一外层 argv，allow-always 只能一次性执行。"""
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-always", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(
+            deps,
+            "flock /tmp/test.lock --command='echo hello'",
+            ADMIN,
+            background=False,
+            workdir=str(tmp_path),
+        )
+        assert "error" not in r
+    patterns = [
+        e["pattern"] for e in deps.approval_manager.value._whitelist["allowlist"]
+    ]
+    assert "flock" not in patterns
+
+
+async def test_invalid_timeout_wrapper_requires_approval_and_not_persisted(deps):
+    """外层 timeout 已授权也不能让未知 flag 绕过一次性审批。"""
+    deps.approval_manager.value._whitelist["allowlist"].append(
+        {"pattern": "timeout", "source": "allow-always"}
+    )
+    calls = []
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            calls.append(kw)
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-always", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(deps, "timeout --bogus 5 ls", ADMIN)
+        assert "error" not in r
+    assert calls
+    patterns = [
+        e["pattern"] for e in deps.approval_manager.value._whitelist["allowlist"]
+    ]
+    assert patterns.count("timeout") == 1
+
+
+async def test_nested_flock_payload_allow_always_not_persisted(deps, tmp_path):
+    """嵌套 timeout → flock payload 同样不得持久化任一包装器。"""
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-always", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(
+            deps,
+            "timeout 5 flock /tmp/test.lock --command='echo hello'",
+            ADMIN,
+            background=False,
+            workdir=str(tmp_path),
+        )
+        assert "error" not in r
+    patterns = [
+        e["pattern"] for e in deps.approval_manager.value._whitelist["allowlist"]
+    ]
+    assert "timeout" not in patterns
+    assert "flock" not in patterns
+
+
 async def test_interp_wrapper_inner_bound(deps, tmp_path):
     """timeout 包 node app.js：解释器绑定看内层（2.1 × 2.2 组合）。"""
     app = tmp_path / "app.js"

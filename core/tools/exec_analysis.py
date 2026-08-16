@@ -65,6 +65,28 @@ _WRAPPER_VALUE_FLAGS: Dict[str, frozenset] = {
     "stdbuf": frozenset({"-i", "--input", "-o", "--output", "-e", "--error"}),
     "env": frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}),
 }
+# wrapper 布尔 flags；未列出的 flag 一律不猜测，保持 fail-closed。
+_WRAPPER_BOOLEAN_FLAGS: Dict[str, frozenset] = {
+    "timeout": frozenset({"-v", "--verbose", "--foreground", "--preserve-status"}),
+    "flock": frozenset(
+        {
+            "-s",
+            "--shared",
+            "-x",
+            "--exclusive",
+            "-n",
+            "--nonblock",
+            "-o",
+            "--close",
+            "-v",
+            "--verbose",
+        }
+    ),
+    "nice": frozenset(),
+    "nohup": frozenset(),
+    "stdbuf": frozenset(),
+    "env": frozenset({"-i", "--ignore-environment", "-0", "--null", "-v", "--debug"}),
+}
 
 
 def _wrapper_inner_start(argv: List[str]) -> Optional[int]:
@@ -81,6 +103,11 @@ def _wrapper_inner_start(argv: List[str]) -> Optional[int]:
         return None
     cmd = os.path.basename(argv[0])
     value_flags = _WRAPPER_VALUE_FLAGS.get(cmd, frozenset())
+    boolean_flags = _WRAPPER_BOOLEAN_FLAGS.get(cmd, frozenset())
+    if cmd == "flock" and any(
+        arg in ("-c", "--command") or arg.startswith("--command=") for arg in argv[1:]
+    ):
+        return None
     i = 1
     n = len(argv)
     while i < n:
@@ -89,14 +116,35 @@ def _wrapper_inner_start(argv: List[str]) -> Optional[int]:
             i += 1
             continue
         if arg == "--":
-            return i + 1
+            i += 1
+            break
+        if arg.startswith("-S") and arg != "-S":
+            return None
         if arg.startswith("-") and arg != "-":
             flag = arg.split("=", 1)[0]
-            if flag in value_flags and "=" not in arg:
-                i += 2  # flag + 值
-            else:
+            short_value_flag = next(
+                (
+                    known
+                    for known in value_flags
+                    if known.startswith("-")
+                    and not known.startswith("--")
+                    and arg.startswith(known)
+                    and arg != known
+                ),
+                None,
+            )
+            if flag in value_flags:
+                if "=" not in arg and i + 1 >= n:
+                    return None
+                i += 2 if "=" not in arg else 1
+                continue
+            if short_value_flag is not None:
                 i += 1
-            continue
+                continue
+            if flag in boolean_flags:
+                i += 1
+                continue
+            return None
         break
     if cmd in ("timeout", "flock"):
         start = i + 1  # 跳过时长/锁文件
@@ -106,6 +154,38 @@ def _wrapper_inner_start(argv: List[str]) -> Optional[int]:
             return None
         return start
     return i
+
+
+def _unwrap_env_split_string(argv: List[str]) -> Optional[List[str]]:
+    """解析 ``env -S`` 的受控命令字符串；无法可靠拆分时保持未解包。"""
+    for index, arg in enumerate(argv[1:], start=1):
+        if arg in ("-S", "--split-string"):
+            if index + 1 >= len(argv):
+                return None
+            payload = argv[index + 1]
+        elif arg.startswith("--split-string="):
+            payload = arg.split("=", 1)[1]
+        else:
+            continue
+        try:
+            split = shlex.split(payload)
+        except ValueError:
+            return None
+        start = _wrapper_inner_start(["env", *split])
+        if start is None or start - 1 >= len(split):
+            return None
+        return split[start - 1 :]
+    return None
+
+
+def _has_env_split_string(argv: List[str]) -> bool:
+    return any(
+        arg == "-S"
+        or arg.startswith("-S")
+        or arg in ("--split-string",)
+        or arg.startswith("--split-string=")
+        for arg in argv[1:]
+    )
 
 
 def unwrap_wrapper(argv: List[str], _depth: int = 0) -> Optional[List[str]]:
@@ -126,10 +206,22 @@ def unwrap_wrapper(argv: List[str], _depth: int = 0) -> Optional[List[str]]:
         else:
             return None
     elif cmd in WRAPPER_BINS:
-        start = _wrapper_inner_start(argv)
-        if start is None or start >= len(argv):
-            return None
-        inner = list(argv[start:])
+        if cmd == "env":
+            split_inner = _unwrap_env_split_string(argv)
+            if split_inner is not None:
+                inner = split_inner
+            elif _has_env_split_string(argv):
+                return None
+            else:
+                start = _wrapper_inner_start(argv)
+                if start is None or start >= len(argv):
+                    return None
+                inner = list(argv[start:])
+        else:
+            start = _wrapper_inner_start(argv)
+            if start is None or start >= len(argv):
+                return None
+            inner = list(argv[start:])
     else:
         return None
     deeper = unwrap_wrapper(inner, _depth + 1)
@@ -142,10 +234,12 @@ def extract_wrapper_payloads(argv: List[str]) -> List[str]:
     flock 的 ``-c`` 值是一条 shell 命令字符串（flock 内部经 sh 执行），
     需递归分析内部命令（对齐 openclaw wrapper payload 处理）。
     """
-    if len(argv) >= 3 and os.path.basename(argv[0]) == "flock":
-        for j, arg in enumerate(argv[1:-1], start=1):
-            if arg in ("-c", "--command"):
+    if len(argv) >= 2 and os.path.basename(argv[0]) == "flock":
+        for j, arg in enumerate(argv[1:], start=1):
+            if arg in ("-c", "--command") and j + 1 < len(argv):
                 return [argv[j + 1]]
+            if arg.startswith("--command="):
+                return [arg.split("=", 1)[1]]
     return []
 
 
@@ -252,9 +346,7 @@ def _interpreter_script(argv: List[str]) -> Optional[str]:
             if flag in _PY_BOOL_FLAGS:
                 i += 1
                 continue
-            # 未识别的 python flag：保守跳过（fail-closed 由文件存在性兜底）
-            i += 1
-            continue
+            return None
         # node：多文件/求值形态不绑定；其余 flag 跳过
         if flag in _NODE_TERMINAL_FLAGS:
             return None
@@ -285,12 +377,26 @@ def _package_name_matches_bin(package_name: object, bin_name: str) -> bool:
     return package_name.rsplit("/", 1)[-1] == bin_name
 
 
+def _path_within(root: str, path: str) -> bool:
+    try:
+        return os.path.commonpath(
+            [os.path.realpath(root), os.path.realpath(path)]
+        ) == os.path.realpath(root)
+    except ValueError:
+        return False
+
+
 def _resolve_package_bin_path(base: str, bin_path: object) -> Optional[str]:
     """解析 package.json#bin 的单一路径；非字符串或非普通文件视为未绑定。"""
     if not isinstance(bin_path, str) or not bin_path:
         return None
-    candidate = os.path.realpath(os.path.join(base, bin_path))
-    return candidate if os.path.isfile(candidate) else None
+    package_root = os.path.realpath(base)
+    candidate = os.path.realpath(os.path.join(package_root, bin_path))
+    return (
+        candidate
+        if _path_within(package_root, candidate) and os.path.isfile(candidate)
+        else None
+    )
 
 
 def _find_local_bin(cwd: Optional[str], bin_name: str) -> Optional[str]:
@@ -302,8 +408,11 @@ def _find_local_bin(cwd: Optional[str], bin_name: str) -> Optional[str]:
     d = base if os.path.isdir(base) else os.path.dirname(base)
     while True:
         p = os.path.join(d, "node_modules", ".bin", bin_name)
-        if os.path.isfile(p):
-            return os.path.realpath(p)
+        candidate = os.path.realpath(p)
+        if os.path.isfile(candidate) and _path_within(
+            os.path.join(d, "node_modules"), candidate
+        ):
+            return candidate
         parent = os.path.dirname(d)
         if parent == d:
             break
@@ -422,6 +531,7 @@ class ExecSegment:
     heredoc: bool = (
         False  # 段内含 heredoc（<<EOF，对齐 openclaw reason: heredoc 审批触发）
     )
+    wrapper_invalid: bool = False  # 已识别 wrapper 但无法安全解包
     nested_segments: List["ExecSegment"] = field(default_factory=list)  # 内部命令段
     # 包装器解包（2.1）：argv[0] 为转发包装器（timeout/env/...）时，
     # inner_argv 为**最内层**命令 argv，inner_resolution 为其可执行文件解析。
@@ -565,6 +675,7 @@ def analyze_command(
             return []
         resolution = resolve_executable(argv, env=env, cwd=cwd)
         inner = unwrap_wrapper(argv)
+        is_wrapper = os.path.basename(argv[0]) in WRAPPER_BINS | MULTICALL_BINS
         seg = ExecSegment(
             raw=cseg.text,
             argv=argv,
@@ -574,6 +685,9 @@ def analyze_command(
             op=cseg.op,
             is_compound=cseg.is_compound,
             heredoc=cseg.has_heredoc,
+            wrapper_invalid=is_wrapper
+            and inner is None
+            and not extract_wrapper_payloads(argv),
         )
         if inner is not None:
             # 包装器解包：内层命令解析 + inline-eval 穿透（timeout 5 python3 -c ...）
