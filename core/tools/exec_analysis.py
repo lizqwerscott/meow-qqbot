@@ -265,6 +265,14 @@ def _interpreter_script(argv: List[str]) -> Optional[str]:
     return argv[i]
 
 
+def _resolve_package_bin_path(base: str, bin_path: object) -> Optional[str]:
+    """解析 package.json#bin 的单一路径；非字符串或非普通文件视为未绑定。"""
+    if not isinstance(bin_path, str) or not bin_path:
+        return None
+    candidate = os.path.realpath(os.path.join(base, bin_path))
+    return candidate if os.path.isfile(candidate) else None
+
+
 def _find_local_bin(cwd: Optional[str], bin_name: str) -> Optional[str]:
     """向上逐级查 node_modules/.bin/<bin>；未命中查 package.json#bin 唯一条目。"""
     base = os.path.abspath(cwd or os.getcwd())
@@ -288,9 +296,9 @@ def _find_local_bin(cwd: Optional[str], bin_name: str) -> Optional[str]:
             return None
         bins = data.get("bin")
         if isinstance(bins, str):
-            return os.path.realpath(os.path.join(base, bins))
+            return _resolve_package_bin_path(base, bins)
         if isinstance(bins, dict) and len(bins) == 1:
-            return os.path.realpath(os.path.join(base, next(iter(bins.values()))))
+            return _resolve_package_bin_path(base, next(iter(bins.values())))
     return None
 
 

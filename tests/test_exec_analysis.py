@@ -497,15 +497,48 @@ def test_interp_npx_binds_local_bin(tmp_path):
 
 def test_interp_npx_flag_fail_closed(tmp_path):
     # npx -y 等 flags：不声称覆盖 → 审批
-    target, unique = resolve_interpreter_target(["npx", "-y", "eslint"], cwd=str(tmp_path))
+    target, unique = resolve_interpreter_target(
+        ["npx", "-y", "eslint"], cwd=str(tmp_path)
+    )
     assert unique is False
 
 
-def test_interp_package_json_bin_fallback(tmp_path):
-    (tmp_path / "package.json").write_text(json.dumps({"bin": "./bin/cli.js"}))
+@pytest.mark.parametrize(
+    "bin_config",
+    ["./bin/cli.js", {"cli": "./bin/cli.js"}],
+)
+def test_interp_package_json_bin_fallback(tmp_path, bin_config):
+    (tmp_path / "package.json").write_text(json.dumps({"bin": bin_config}))
     cli = tmp_path / "bin" / "cli.js"
     cli.parent.mkdir()
     cli.write_text("#!/usr/bin/env node\n")
     target, unique = resolve_interpreter_target(["npx", "cli"], cwd=str(tmp_path))
     assert unique is True
     assert target == os.path.realpath(str(cli))
+
+
+@pytest.mark.parametrize(
+    "bin_config, create_directory",
+    [
+        ("./bin/missing.js", False),
+        ("./bin", True),
+        ({"cli": "./bin/missing.js"}, False),
+        ({"cli": "./bin"}, True),
+        ("", False),
+        (123, False),
+        (["./bin/cli.js"], False),
+        ({"cli": None}, False),
+        ({"cli": "./bin/cli.js", "other": "./bin/other.js"}, False),
+    ],
+)
+def test_interp_package_json_bin_requires_existing_regular_file(
+    tmp_path, bin_config, create_directory
+):
+    (tmp_path / "package.json").write_text(json.dumps({"bin": bin_config}))
+    if create_directory:
+        (tmp_path / "bin").mkdir()
+
+    target, unique = resolve_interpreter_target(["npx", "cli"], cwd=str(tmp_path))
+
+    assert unique is False
+    assert target is None
