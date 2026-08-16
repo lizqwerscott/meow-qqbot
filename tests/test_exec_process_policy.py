@@ -272,6 +272,34 @@ async def test_allow_always_wrapper_persists_inner(deps):
         assert "timeout" not in patterns
 
 
+async def test_allow_always_nested_wrapper_persists_innermost(deps):
+    """两层包装器 allow-always 记最内层真实可执行，不记 timeout/nice。"""
+    from core.tools.exec_analysis import resolve_executable
+
+    resolved = resolve_executable(["vim"], env=os.environ)
+    assert resolved.resolved_path is not None
+    inner_name = os.path.basename(
+        resolved.resolved_path
+    )  # vim.basic 等 alternatives 真实名
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key, future in list(deps.approval_manager.value._pending.items()):
+                deps.approval_manager.value.resolve(key, "allow-always", ADMIN)
+            return True
+
+        FakeSender.return_value.send = fake_send
+        r = await _exec(deps, "timeout 5 nice -n 5 vim x.txt", ADMIN)
+        assert "error" not in r
+        patterns = [
+            e["pattern"] for e in deps.approval_manager.value._whitelist["allowlist"]
+        ]
+        assert inner_name in patterns
+        assert "timeout" not in patterns
+        assert "nice" not in patterns
+        assert "vim" not in patterns
+
+
 async def test_allow_always_chain_persists_all_segments(deps):
     """链式命令 allow-always 持久化所有顶层段（不再只记第一条）。"""
     from core.tools.exec_analysis import resolve_executable

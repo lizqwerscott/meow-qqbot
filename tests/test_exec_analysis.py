@@ -288,6 +288,26 @@ def test_unwrap_nice_nohup_stdbuf():
     assert unwrap_wrapper(["stdbuf", "-oL", "grep", "x"]) == ["grep", "x"]
 
 
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["nice", "-n", "5", "--", "ls"], ["ls"]),
+        (["nohup", "--", "python3", "x.py"], ["python3", "x.py"]),
+        (["stdbuf", "-i0", "-o0", "--", "grep", "x"], ["grep", "x"]),
+        (
+            ["stdbuf", "--input=0", "--output=0", "--", "grep", "x"],
+            ["grep", "x"],
+        ),
+        (["busybox", "sh", "-c", "ls"], ["sh", "-c", "ls"]),
+        (["nice", "--bogus", "5", "ls"], None),
+        (["stdbuf", "-oL", "--bogus", "grep", "x"], None),
+        (["nohup", "--bogus", "ls"], None),
+    ],
+)
+def test_unwrap_wrapper_combination_matrix(argv, expected):
+    assert unwrap_wrapper(argv) == expected
+
+
 def test_unwrap_busybox_applet():
     assert unwrap_wrapper(["busybox", "rm", "-rf", "/"]) == ["rm", "-rf", "/"]
     # busybox 元操作不解包
