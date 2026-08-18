@@ -3,7 +3,9 @@
 当前只保留黑话 (Jargon) 学习系统。
 """
 
+import asyncio
 import logging
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 from core.learners.base import LearnerConfig, config_from_dict
@@ -25,6 +27,9 @@ class LearningOrchestrator:
     ):
         self._cfg: LearnerConfig = config_from_dict(config)
         self._ai = ai_service
+        self._seen_message_keys: OrderedDict[str, None] = OrderedDict()
+        self._seen_message_keys_limit = 10_000
+        self._message_key_lock = asyncio.Lock()
 
         self.jargon: JargonMiner
 
@@ -51,14 +56,37 @@ class LearningOrchestrator:
         message_text: str,
         chat_id: str,
         sender_id: str = "",
-    ) -> None:
-        """轻量消息观察，dispatch() 中调用。"""
+        message_id: str = "",
+        idempotency_key: str = "",
+    ) -> bool:
+        """轻量消息观察，返回是否成功。"""
         if not self._cfg.enabled:
-            return
+            return True
+        effect_key = idempotency_key or (
+            f"message:{chat_id}:{message_id}" if message_id else ""
+        )
+        if effect_key:
+            async with self._message_key_lock:
+                if effect_key in self._seen_message_keys:
+                    return True
+                self._seen_message_keys[effect_key] = None
+                self._seen_message_keys.move_to_end(effect_key)
+                while len(self._seen_message_keys) > self._seen_message_keys_limit:
+                    self._seen_message_keys.popitem(last=False)
         try:
             await self.jargon.observe(message_text, chat_id)
+        except asyncio.CancelledError:
+            if effect_key:
+                async with self._message_key_lock:
+                    self._seen_message_keys.pop(effect_key, None)
+            raise
         except Exception as e:
+            if effect_key:
+                async with self._message_key_lock:
+                    self._seen_message_keys.pop(effect_key, None)
             _log.warning("学习系统观察消息失败 [%s..]: %s", chat_id[:12], e)
+            return False
+        return True
 
     # ── Prompt 注入 ──
 

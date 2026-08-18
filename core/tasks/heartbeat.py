@@ -349,20 +349,26 @@ class HeartbeatManager:
         self._last_text = text
         self._last_sent = time.time()
 
-    async def deliver_to_admin(self, text: str):
+    async def deliver_to_admin(self, text: str) -> bool:
         if not self._running or not self._admin_ids or not self._api:
-            return
+            return False
         admin_id = self._admin_ids[0]
         content = f"[❤️ 心跳提醒]\n{text}"
         try:
             await self._api.send_text("c2c", admin_id, content, reply_to=None)
-            _log.info(f"心跳提醒已投递到管理员 {admin_id[:12]}..")
-            if self._context_manager:
+        except Exception as e:
+            _log.error(f"心跳投递失败: {e}")
+            return False
+
+        _log.info(f"心跳提醒已投递到管理员 {admin_id[:12]}..")
+        if self._context_manager:
+            try:
                 await self._context_manager.add_assistant_message_async(
                     admin_id, content, f"hb_{int(time.time())}"
                 )
-        except Exception as e:
-            _log.error(f"心跳投递失败: {e}")
+            except Exception as e:
+                _log.warning(f"心跳投递后的上下文记录失败: {e}")
+        return True
 
     # ── 上下文清理 ──
 

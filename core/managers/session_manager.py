@@ -246,6 +246,21 @@ class SessionTaskManager:
             self._steering_active.discard(chat_id)
             return True
 
+    async def claim_existing_consumers(
+        self, chat_ids: Set[str]
+    ) -> list[tuple[str, int]]:
+        """Claim consumers for preserved inboxes after an engine restart."""
+        async with self._lock:
+            claims: list[tuple[str, int]] = []
+            for chat_id in sorted(chat_ids):
+                if chat_id in self._running or not self._inboxes.get(chat_id):
+                    continue
+                self._next_consumer_token += 1
+                token = self._next_consumer_token
+                self._running[chat_id] = token
+                claims.append((chat_id, token))
+            return claims
+
     def get_queue_sizes(self) -> Dict[str, int]:
         return {
             chat_id: len(inbox) for chat_id, inbox in self._inboxes.items() if inbox
@@ -262,10 +277,11 @@ class SessionTaskManager:
             self._locks.pop(chat_id, None)
             self._running.pop(chat_id, None)
 
-    async def cleanup_all(self) -> None:
+    async def cleanup_all(self, *, preserve_inboxes: bool = False) -> None:
         async with self._lock:
             self._steering_active.clear()
-            self._inboxes.clear()
+            if not preserve_inboxes:
+                self._inboxes.clear()
             self._leased_counts.clear()
             self._locks.clear()
             self._running.clear()

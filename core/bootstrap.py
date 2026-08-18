@@ -90,6 +90,7 @@ class ServiceGraph:
         self._build_bot_engine()
         self._wire_callbacks()
         self._setup_extras()
+        await self.agent_engine.start()
         return self
 
     # ── 阶段 1: 构造所有服务 ───────────────────────────────────────

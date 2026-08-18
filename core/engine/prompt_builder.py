@@ -387,10 +387,10 @@ class PromptBuilder:
 
         # ── 系统事件（心跳触发时注入） ──
         if self._system_events:
-            events = self._system_events.peek_and_snapshot(system_event_key)
-            if events:
+            lease = self._system_events.claim_snapshot(system_event_key)
+            if lease:
                 lines = []
-                for e in events:
+                for e in lease.events:
                     ts = time.strftime("%H:%M:%S", time.localtime(e.ts))
                     lines.append(f"System: [{ts}] {e.text}")
                 lines.append("")
@@ -510,10 +510,10 @@ class PromptBuilder:
 
         # 系统事件注入
         if self._system_events:
-            events = self._system_events.peek_and_snapshot(system_event_key)
-            if events:
+            lease = self._system_events.claim_snapshot(system_event_key)
+            if lease:
                 lines = []
-                for e in events:
+                for e in lease.events:
                     ts = time.strftime("%H:%M:%S", time.localtime(e.ts))
                     lines.append(f"System: [{ts}] {e.text}")
                 lines.append("")

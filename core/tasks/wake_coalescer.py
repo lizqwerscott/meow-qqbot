@@ -102,6 +102,7 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 DEFAULT_COALESCE_MS = 250
 DEFAULT_RETRY_MS = 1000
 MAX_RETRY_COUNT = 10
+RETRY_EXHAUSTED_MS = 30_000
 
 # ── 内部 ──
 
@@ -133,6 +134,12 @@ def _merge_pending(key: str, pw: PendingWake) -> None:
         return
     new_prio = _INTENT_PRIORITY.get(pw.intent, 99)
     old_prio = _INTENT_PRIORITY.get(existing.intent, 99)
+    if existing.source == SOURCE_EXEC or pw.source == SOURCE_EXEC:
+        prompts = [
+            prompt for prompt in (existing.extra_prompt, pw.extra_prompt) if prompt
+        ]
+        if prompts:
+            pw.extra_prompt = "\n\n".join(dict.fromkeys(prompts))
     if new_prio < old_prio or (
         new_prio == old_prio and pw.timestamp >= existing.timestamp
     ):
@@ -151,11 +158,14 @@ async def _drain_pending() -> None:
     global _running
     gen = _handler_generation
     _running = True
+    batch: list[PendingWake] = []
+    current_index = 0
     try:
         batch = list(_pending.values())
         _pending.clear()
         _log.info("[Coalescer] _drain_pending: batch=%d", len(batch))
         for idx, pw in enumerate(batch):
+            current_index = idx
             if _handler_generation != gen:
                 # handler 已替换，剩余未处理项重新入队
                 remaining = batch[idx:]
@@ -177,11 +187,14 @@ async def _drain_pending() -> None:
                 retries = _retry_count.get(key, 0) + 1
                 if retries > MAX_RETRY_COUNT:
                     _log.warning(
-                        "[Coalescer] handler 重试超限: key=%s retries=%d → 丢弃",
+                        "[Coalescer] handler 重试超限: key=%s retries=%d → 延长重试间隔",
                         key[:24],
                         retries - 1,
                     )
-                    _retry_count.pop(key, None)
+                    _retry_count[key] = MAX_RETRY_COUNT
+                    pw.timestamp = time.time()
+                    _merge_pending(key, pw)
+                    _schedule(RETRY_EXHAUSTED_MS)
                 else:
                     _retry_count[key] = retries
                     pw.timestamp = time.time()
@@ -202,13 +215,16 @@ async def _drain_pending() -> None:
                 retries = _retry_count.get(key, 0) + 1
                 if retries > MAX_RETRY_COUNT:
                     _log.warning(
-                        "[Coalescer] 重试超限: key=%s source=%s intent=%s retries=%d → 丢弃",
+                        "[Coalescer] 重试超限: key=%s source=%s intent=%s retries=%d → 延长重试间隔",
                         key[:24],
                         pw.source,
                         pw.intent,
                         retries - 1,
                     )
-                    _retry_count.pop(key, None)
+                    _retry_count[key] = MAX_RETRY_COUNT
+                    pw.timestamp = time.time()
+                    _merge_pending(key, pw)
+                    _schedule(RETRY_EXHAUSTED_MS)
                     continue
                 _retry_count[key] = retries
                 pw.timestamp = time.time()  # 更新重试时间戳，避免被新请求覆盖
@@ -224,6 +240,10 @@ async def _drain_pending() -> None:
             else:
                 key = _target_key(pw)
                 _retry_count.pop(key, None)
+    except asyncio.CancelledError:
+        for pending in batch[current_index:]:
+            _merge_pending(_target_key(pending), pending)
+        raise
     finally:
         _running = False
         if _pending:
@@ -250,10 +270,19 @@ def _schedule(coalesce_ms: int) -> None:
         _timer.cancel()
     loop = _ensure_loop()
     _timer_due_at = due_at
-    _timer = loop.call_later(
-        coalesce_ms / 1000,
-        lambda: asyncio.ensure_future(_drain_pending(), loop=loop),
-    )
+
+    handle: asyncio.TimerHandle
+
+    def fire() -> None:
+        global _timer, _timer_due_at
+        if _timer is not handle:
+            return
+        _timer = None
+        _timer_due_at = 0
+        asyncio.ensure_future(_drain_pending(), loop=loop)
+
+    handle = loop.call_later(coalesce_ms / 1000, fire)
+    _timer = handle
     _log.debug("[Coalescer] 调度 _drain_pending: %dms 后", coalesce_ms)
 
 

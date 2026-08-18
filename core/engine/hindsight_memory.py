@@ -8,6 +8,7 @@
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +30,9 @@ class HindsightMemory:
         self._health_cache: Optional[Dict[str, Any]] = None
         self._health_cache_time: float = 0.0
         self._health_cache_ttl: float = 10.0
+        self._seen_idempotency_keys: OrderedDict[str, None] = OrderedDict()
+        self._seen_idempotency_limit = 10_000
+        self._idempotency_lock = asyncio.Lock()
 
         _log.info(f"HindsightMemory 已初始化 (bank={bank_id}, url={base_url})")
 
@@ -58,10 +62,19 @@ class HindsightMemory:
         timestamp: Optional[float] = None,
         context: Optional[str] = None,
         resources: Optional[List[ResourceMeta]] = None,
-    ) -> None:
-        """保留一条消息到记忆库。同一 session 共享 document_id 持续追加。
+        idempotency_key: Optional[str] = None,
+    ) -> bool:
+        """保留一条消息到记忆库，并返回是否成功提交。同一 session 共享 document_id 持续追加。
         content 已由调用方（agent_engine）预格式化，格式为 [ID(别名)]: 消息正文。
         """
+        if idempotency_key:
+            async with self._idempotency_lock:
+                if idempotency_key in self._seen_idempotency_keys:
+                    return True
+                self._seen_idempotency_keys[idempotency_key] = None
+                self._seen_idempotency_keys.move_to_end(idempotency_key)
+                while len(self._seen_idempotency_keys) > self._seen_idempotency_limit:
+                    self._seen_idempotency_keys.popitem(last=False)
         try:
             kwargs: dict = dict(
                 bank_id=self._bank_id,
@@ -72,27 +85,40 @@ class HindsightMemory:
                 timestamp=self._to_datetime(timestamp),
                 retain_async=True,
             )
+            metadata: Dict[str, str] = {}
+            if idempotency_key:
+                metadata["idempotency_key"] = idempotency_key
             if context:
                 kwargs["context"] = context
             if resources:
                 r = resources[0]
-                meta: Dict[str, str] = {}
                 if r.resource_type:
-                    meta["res_type"] = r.resource_type
+                    metadata["res_type"] = r.resource_type
                 if r.hash:
-                    meta["res_hash"] = r.hash
+                    metadata["res_hash"] = r.hash
                 if r.resource_id:
-                    meta["res_id"] = r.resource_id
+                    metadata["res_id"] = r.resource_id
                 if r.filename:
-                    meta["res_filename"] = r.filename
+                    metadata["res_filename"] = r.filename
                 if r.mime_type:
-                    meta["res_mime"] = r.mime_type
-                kwargs["metadata"] = meta
+                    metadata["res_mime"] = r.mime_type
+            if metadata:
+                kwargs["metadata"] = metadata
             await self._client.aretain(**kwargs)
             self._cache_health({"status": "ok"})
+            return True
+        except asyncio.CancelledError:
+            if idempotency_key:
+                async with self._idempotency_lock:
+                    self._seen_idempotency_keys.pop(idempotency_key, None)
+            raise
         except Exception as e:
+            if idempotency_key:
+                async with self._idempotency_lock:
+                    self._seen_idempotency_keys.pop(idempotency_key, None)
             self._cache_health({"status": "unreachable", "error": str(e)})
             _log.warning(f"Hindsight add_message 失败: {e!r}")
+            return False
 
     @staticmethod
     def msg_type_to_context(msg_type: MessageType) -> Optional[str]:

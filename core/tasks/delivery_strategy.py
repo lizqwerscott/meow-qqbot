@@ -73,12 +73,16 @@ class HeartbeatDeliveryStrategy(DeliveryStrategy):
                 _log.info(
                     "[Delivery] Heartbeat 发送DM: len=%d text=%.60s", len(text), text
                 )
-                await self._hb.deliver_to_admin(text)
+                delivered = await self._hb.deliver_to_admin(text)
+                if not delivered:
+                    raise RuntimeError("heartbeat admin delivery was not confirmed")
                 self._hb.record_notification(text)
         elif self._show_ok:
             self._hb.record_delivery_start()
             _log.debug("[Delivery] Heartbeat 发送静默确认: ok")
-            await self._hb.deliver_to_admin("一切正常，无需关注。")
+            delivered = await self._hb.deliver_to_admin("一切正常，无需关注。")
+            if not delivered:
+                raise RuntimeError("heartbeat admin delivery was not confirmed")
 
 
 class ChatReplyDeliveryStrategy(DeliveryStrategy):

@@ -42,6 +42,57 @@ async def test_admission_duplicate_history_does_not_produce_prompt_fragment():
     assert error is None
 
 
+@pytest.mark.asyncio
+async def test_duplicate_admission_keeps_pending_outbox_effects():
+    class DuplicateContextManager(FakeContextManager):
+        async def add_user_message_async(self, *args, **kwargs):
+            return False
+
+        async def get_chat_history_async(self, *args, **kwargs):
+            return [{"role": "user", "message_id": "duplicate"}]
+
+    class Outbox:
+        def __init__(self):
+            self.prepared = False
+            self.cancelled = False
+
+        async def prepare(self, *args, **kwargs):
+            self.prepared = True
+            return False
+
+        async def cancel(self, *args, **kwargs):
+            self.cancelled = True
+
+    class ProcessTracker:
+        def __init__(self):
+            self.calls = 0
+
+        async def __call__(self):
+            self.calls += 1
+
+    engine = make_engine(FakeToolLoop())
+    engine.context_manager = DuplicateContextManager()
+    engine._admission_outbox = Outbox()
+    process_tracker = ProcessTracker()
+    engine._process_admission_outbox = process_tracker
+    pending = PendingInbound(
+        InputMessage("duplicate", "user", "chat", "hello", False),
+        "hello",
+        "agent",
+    )
+
+    admitted = await engine._admit_pending_message(
+        pending,
+        source="initial",
+        get_user_nickname=lambda sender_id: sender_id,
+    )
+
+    assert admitted is None
+    assert engine._admission_outbox.prepared is False
+    assert engine._admission_outbox.cancelled is False
+    assert process_tracker.calls == 1
+
+
 def test_legacy_tuple_result_shape_remains_supported():
     execution = ("done", None)
     assert getattr(execution, "result", None) is None
@@ -138,6 +189,7 @@ def make_engine(tool_loop, *, rule_router=None, model_registry=None):
     engine._processed_ids = __import__("collections").OrderedDict()
     engine._max_processed_ids = 1000
     engine._dedup_lock = asyncio.Lock()
+    engine._admission_in_progress = set()
     return engine
 
 
@@ -515,7 +567,10 @@ async def test_process_message_preserves_prompt_stream_and_system_event_adapters
     prompt_calls = []
     system_events = []
     engine._system_events = SimpleNamespace(
-        drain_non_heartbeat=lambda chat_id: system_events.append(chat_id)
+        peek_non_heartbeat=lambda chat_id: [SimpleNamespace(text="event")],
+        drain_non_heartbeat=lambda chat_id, expected_events=None: system_events.append(
+            (chat_id, expected_events)
+        ),
     )
 
     async def build(**kwargs):
@@ -538,7 +593,43 @@ async def test_process_message_preserves_prompt_stream_and_system_event_adapters
     assert delivered[0]["message_id"] == "id"
     assert tool_loop.calls[0]["get_user_nickname"]("user") == "name"
     assert tool_loop.calls[0]["stream_callback"] is not None
-    assert system_events == ["chat"]
+    assert system_events[0][0] == "chat"
+
+
+@pytest.mark.asyncio
+async def test_process_message_snapshots_events_after_admission():
+    from core.engine.system_events import SystemEventQueue
+
+    engine = make_engine(FakeToolLoop())
+    events = SystemEventQueue()
+    engine._system_events = events
+    admission_started = asyncio.Event()
+    release_admission = asyncio.Event()
+
+    async def add_user_message(*args, **kwargs):
+        admission_started.set()
+        await release_admission.wait()
+
+    engine.context_manager.add_user_message_async = add_user_message
+
+    async def build(**kwargs):
+        assert [event.text for event in events.peek("chat")] == ["arrived"]
+        return [], []
+
+    engine.prompt_builder = SimpleNamespace(build=build)
+    task = asyncio.create_task(
+        engine._process_message(
+            InputMessage("id", "user", "chat", "hello", False),
+            lambda **kwargs: _none(),
+            lambda _: "name",
+        )
+    )
+    await admission_started.wait()
+    events.enqueue("chat", "arrived", "event")
+    release_admission.set()
+    await task
+
+    assert events.peek("chat") == []
 
 
 @pytest.mark.asyncio

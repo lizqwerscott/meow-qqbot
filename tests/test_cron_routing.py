@@ -1,5 +1,6 @@
 """测试 cron 事件路由：session_target 决定 wake 目标。"""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -356,6 +357,147 @@ def test_wake_runner_cron_branch():
     for src in (SOURCE_CRON, SOURCE_EXEC, SOURCE_TASK):
         pw = PendingWake(source=src, intent="immediate", session_key="user_001")
         assert pw.source in (SOURCE_CRON, SOURCE_EXEC, SOURCE_TASK)
+
+
+@pytest.mark.asyncio
+async def test_wake_runner_retries_when_turn_returns_error():
+    from core.engine.system_events import SystemEventQueue
+    from core.tasks.wake_coalescer import SOURCE_CRON, PendingWake, WakeTurnResult
+    from core.tasks.wake_runner import WakeRunner
+
+    events = SystemEventQueue()
+    events.enqueue("chat", "pending", "event")
+    agent = SimpleNamespace(
+        prompt_builder=SimpleNamespace(
+            build_system_event_messages=AsyncMock(
+                return_value=([{"role": "system"}], [])
+            )
+        ),
+        run_wake_turn=AsyncMock(return_value=WakeTurnResult(error="failed")),
+        context_manager=None,
+        cost_tracker=None,
+    )
+    cooldown = SimpleNamespace(
+        record_run_start=lambda: None,
+        should_defer=lambda **kwargs: SimpleNamespace(defer=False, reason=""),
+    )
+    runner = WakeRunner(agent, events, cooldown)
+
+    with pytest.raises(RuntimeError, match="failed"):
+        await runner(PendingWake(source=SOURCE_CRON, session_key="chat"))
+    assert [event.text for event in events.peek("chat")] == ["pending"]
+
+
+@pytest.mark.asyncio
+async def test_wake_runner_releases_lease_when_prompt_build_fails():
+    from core.engine.system_events import SystemEventQueue
+    from core.tasks.wake_coalescer import SOURCE_CRON, PendingWake
+    from core.tasks.wake_runner import WakeRunner
+
+    events = SystemEventQueue()
+    events.enqueue("chat", "pending", "event")
+    agent = SimpleNamespace(
+        prompt_builder=SimpleNamespace(
+            build_system_event_messages=AsyncMock(
+                side_effect=RuntimeError("build failed")
+            )
+        ),
+        context_manager=None,
+        cost_tracker=None,
+    )
+    cooldown = SimpleNamespace(
+        record_run_start=lambda: None,
+        should_defer=lambda **kwargs: SimpleNamespace(defer=False, reason=""),
+    )
+    runner = WakeRunner(agent, events, cooldown)
+
+    with pytest.raises(RuntimeError, match="build failed"):
+        await runner(PendingWake(source=SOURCE_CRON, session_key="chat"))
+    assert events.claim_snapshot("chat") is not None
+
+
+@pytest.mark.asyncio
+async def test_wake_runner_releases_lease_when_turn_is_cancelled():
+    from core.engine.system_events import SystemEventQueue
+    from core.tasks.wake_coalescer import SOURCE_CRON, PendingWake
+    from core.tasks.wake_runner import WakeRunner
+
+    events = SystemEventQueue()
+    events.enqueue("chat", "pending", "event")
+    agent = SimpleNamespace(
+        prompt_builder=SimpleNamespace(
+            build_system_event_messages=AsyncMock(
+                return_value=([{"role": "system"}], [])
+            )
+        ),
+        run_wake_turn=AsyncMock(side_effect=asyncio.CancelledError),
+        context_manager=None,
+        cost_tracker=None,
+    )
+    cooldown = SimpleNamespace(
+        record_run_start=lambda: None,
+        should_defer=lambda **kwargs: SimpleNamespace(defer=False, reason=""),
+    )
+    runner = WakeRunner(agent, events, cooldown)
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner(PendingWake(source=SOURCE_CRON, session_key="chat"))
+
+    lease = events.claim_snapshot("chat")
+    assert lease is not None
+    events.release_snapshot(lease)
+
+
+@pytest.mark.asyncio
+async def test_wake_runner_skips_when_same_session_lease_is_busy():
+    from core.engine.system_events import SystemEventBusy, SystemEventQueue
+    from core.tasks.wake_coalescer import SOURCE_CRON, PendingWake
+    from core.tasks.wake_runner import WakeRunner
+
+    events = SystemEventQueue()
+    events.enqueue("chat", "pending", "event")
+    lease = events.claim_snapshot("chat")
+    assert lease is not None
+    agent = SimpleNamespace(
+        prompt_builder=SimpleNamespace(
+            build_system_event_messages=AsyncMock(side_effect=SystemEventBusy("chat"))
+        ),
+        context_manager=None,
+        cost_tracker=None,
+    )
+    cooldown = SimpleNamespace(
+        record_run_start=lambda: None,
+        should_defer=lambda **kwargs: SimpleNamespace(defer=False, reason=""),
+    )
+    runner = WakeRunner(agent, events, cooldown)
+
+    result = await runner(PendingWake(source=SOURCE_CRON, session_key="chat"))
+
+    assert result.status == "skipped"
+    assert result.skip_reason == "requests-in-flight"
+    events.release_snapshot(lease)
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_delivery_failure_does_not_record_notification():
+    from core.tasks.delivery_strategy import HeartbeatDeliveryStrategy
+
+    record_notification = MagicMock()
+    heartbeat = SimpleNamespace(
+        should_suppress=lambda text: False,
+        record_delivery_start=MagicMock(),
+        record_notification=record_notification,
+        deliver_to_admin=AsyncMock(return_value=False),
+        _cooldown_hours=12,
+    )
+    strategy = HeartbeatDeliveryStrategy(heartbeat, show_alerts=True)
+
+    with pytest.raises(RuntimeError, match="not confirmed"):
+        await strategy.deliver(
+            SimpleNamespace(should_notify=True, notification_text="alert")
+        )
+
+    record_notification.assert_not_called()
 
 
 def test_wake_turn_result_deliver_to_user():

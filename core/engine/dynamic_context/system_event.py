@@ -14,7 +14,7 @@ class SystemEventBlockBuilder:
     async def build(self, *, chat_id: str) -> Optional[str]:
         if not self._system_events:
             return None
-        events = self._system_events.peek_and_snapshot(chat_id)
+        events = self._system_events.peek(chat_id)
         if not events:
             return None
         lines = []
