@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Iterable
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from openai.types.chat import ChatCompletionMessageParam
 
@@ -115,65 +116,197 @@ def log_llm_error(
 
 @dataclass
 class StreamCallbacks:
-    """流式回调：on_text / on_reasoning 收到的是**累计文本**（非增量）。
+    """版本化流回调：快照携带当前 generation 的累计值。"""
 
-    传累计文本而非原始 delta，是为了让调用方（如 ToolLoop 分片发送）
-    无需自己拼接，直接按累计长度切片即可。
+    on_snapshot: Callable[["StreamSnapshot"], Awaitable[None]] | None = None
+    on_reset: Callable[["StreamReset"], Awaitable[None]] | None = None
 
-    on_reset：服务内部降级重试（全新生成）前触发，累计文本将从零重新开始；
-    调用方须归零自己的转发偏移（如 st.sent），否则新文本会从旧偏移切片。
-    """
 
-    on_text: Callable[[str], Awaitable[None]] | None = None
-    on_reasoning: Callable[[str], Awaitable[None]] | None = None
-    on_reset: Callable[[], Awaitable[None]] | None = None
+StreamResetReason = Literal["retry", "provider_revision"]
+
+
+@dataclass(frozen=True)
+class StreamSnapshot:
+    """当前 generation 的累计文本快照。"""
+
+    generation: int
+    text: str
+    reasoning: str | None
+
+
+@dataclass(frozen=True)
+class StreamReset:
+    """一次 generation 替换事件。"""
+
+    previous_generation: int
+    generation: int
+    reason: StreamResetReason
 
 
 @dataclass
-class StreamBuffer:
-    """流式聚合缓冲（各 provider 服务共用，消灭平行 list 参数组）。
+class _StreamToolCallState:
+    key: str
+    call_id: str | None = None
+    name: str | None = None
+    arguments: str = ""
+    complete: bool = False
 
-    - text_parts / reasoning_parts：增量文本与思维链片段（累计拼接）。
-    - tool_calls：按出现顺序聚合的 AssistantToolCall（chat-completions 按
-      delta 下标增量填充；Responses API 侧在收尾时一次性灌入）。
-    - assemble()：把缓冲拼成完整 AssistantMessage，无内容时返回 (None, usage)。
+
+@dataclass
+class StreamState:
+    """流语义深模块：拥有 generation、文本、工具调用和 usage 的唯一状态。
+
+    provider adapter 只需将事件翻译为本模块的操作；投递、Markdown 和网络错误
+    不属于本模块。``StreamSnapshot`` 与最终消息都复制内部值，避免调用方修改
+    快照或消息后污染后续状态。回调不得重入本对象的写入方法；重入会 fail-fast。
     """
 
-    text_parts: list[str] = field(default_factory=list)
-    reasoning_parts: list[str] = field(default_factory=list)
-    tool_calls: list[AssistantToolCall] = field(default_factory=list)
+    callbacks: StreamCallbacks | None = None
+    _generation: int = field(default=0, init=False)
+    _text_parts: list[str] = field(default_factory=list, init=False)
+    _reasoning_parts: list[str] = field(default_factory=list, init=False)
+    _tool_calls: dict[str, _StreamToolCallState] = field(
+        default_factory=dict, init=False
+    )
+    _tool_call_order: list[str] = field(default_factory=list, init=False)
+    _usage: dict[str, Any] | None = field(default=None, init=False)
+    _callback_active: bool = field(default=False, init=False, repr=False)
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    @property
+    def has_output(self) -> bool:
+        return bool(self._text_parts or self._reasoning_parts or self._tool_call_order)
 
     @property
     def content(self) -> str | None:
-        return "".join(self.text_parts) or None
+        return "".join(self._text_parts) or None
 
     @property
     def reasoning_content(self) -> str | None:
-        return "".join(self.reasoning_parts) or None
+        return "".join(self._reasoning_parts) or None
 
-    def reset(self) -> None:
-        """清空全部缓冲（降级重试是全新生成，旧增量必须丢弃）。"""
-        self.text_parts.clear()
-        self.reasoning_parts.clear()
-        self.tool_calls.clear()
+    async def append_text(self, delta: str) -> None:
+        self._ensure_not_reentrant()
+        if not delta:
+            return
+        self._text_parts.append(delta)
+        await self._emit_snapshot()
+
+    async def append_reasoning(self, delta: str) -> None:
+        self._ensure_not_reentrant()
+        if not delta:
+            return
+        self._reasoning_parts.append(delta)
+        await self._emit_snapshot()
+
+    async def upsert_tool_call(
+        self,
+        key: str,
+        *,
+        call_id: str | None = None,
+        name: str | None = None,
+        arguments_delta: str | None = None,
+        arguments_complete: str | None = None,
+    ) -> None:
+        """按稳定 key 合并工具调用；工具参数变化不触发用户文本快照。"""
+        self._ensure_not_reentrant()
+        state = self._tool_calls.get(key)
+        if state is None:
+            state = _StreamToolCallState(key=key)
+            self._tool_calls[key] = state
+            self._tool_call_order.append(key)
+        if call_id is not None:
+            state.call_id = call_id
+        if name is not None:
+            state.name = name
+        if arguments_delta is not None:
+            state.arguments += arguments_delta
+        if arguments_complete is not None:
+            state.arguments = arguments_complete
+
+    def finalize_tool_call(self, key: str) -> None:
+        self._ensure_not_reentrant()
+        state = self._tool_calls.get(key)
+        if state is not None:
+            state.complete = True
+
+    def finalize_all_tool_calls(self) -> None:
+        self._ensure_not_reentrant()
+        for state in self._tool_calls.values():
+            state.complete = True
+
+    async def replace_generation(self, reason: StreamResetReason) -> None:
+        self._ensure_not_reentrant()
+        previous_generation = self._generation
+        self._generation += 1
+        self._text_parts.clear()
+        self._reasoning_parts.clear()
+        self._tool_calls.clear()
+        self._tool_call_order.clear()
+        self._usage = None
+        callback = self.callbacks.on_reset if self.callbacks else None
+        if callback is not None:
+            event = StreamReset(
+                previous_generation=previous_generation,
+                generation=self._generation,
+                reason=reason,
+            )
+            self._callback_active = True
+            try:
+                await callback(event)
+            finally:
+                self._callback_active = False
+
+    def set_usage(self, usage: dict[str, Any] | None) -> None:
+        self._ensure_not_reentrant()
+        self._usage = deepcopy(usage) if usage is not None else None
 
     def assemble(
-        self, usage: dict[str, Any] | None
+        self,
     ) -> tuple[AssistantMessage | None, dict[str, Any] | None]:
-        """拼装最终消息：无文本/思维链/完整工具调用时返回 (None, usage)。"""
+        tool_calls = [
+            AssistantToolCall(
+                id=state.call_id or state.key,
+                name=state.name or "",
+                arguments=state.arguments,
+            )
+            for key in self._tool_call_order
+            if (state := self._tool_calls[key]).complete and state.name
+        ]
         content = self.content
         reasoning_content = self.reasoning_content
-        tool_calls = [tc for tc in self.tool_calls if tc.name] or None
         if content or reasoning_content or tool_calls:
             return (
                 AssistantMessage(
                     content=content,
-                    tool_calls=tool_calls,
+                    tool_calls=tool_calls or None,
                     reasoning_content=reasoning_content,
                 ),
-                usage,
+                deepcopy(self._usage),
             )
-        return None, usage
+        return None, deepcopy(self._usage)
+
+    async def _emit_snapshot(self) -> None:
+        callback = self.callbacks.on_snapshot if self.callbacks else None
+        if callback is not None:
+            self._callback_active = True
+            try:
+                await callback(
+                    StreamSnapshot(
+                        generation=self._generation,
+                        text="".join(self._text_parts),
+                        reasoning=self.reasoning_content,
+                    )
+                )
+            finally:
+                self._callback_active = False
+
+    def _ensure_not_reentrant(self) -> None:
+        if self._callback_active:
+            raise RuntimeError("StreamState callback reentrancy is not supported")
 
 
 class LLMService(Protocol):
@@ -183,8 +316,9 @@ class LLMService(Protocol):
     新增 provider 必须实现这些方法 + close，否则静态检查报错。
 
     流式方法 chat_completion_stream 返回的 AssistantMessage 与非流式
-    chat_completion_with_tools 完全一致（内部聚合 delta），调用方可按
-    callbacks 是否提供决定要不要实时转发文本。
+    chat_completion_with_tools 完全一致（内部聚合 delta）。提供 callbacks
+    时，on_snapshot 收到当前 generation 的累计文本/reasoning 快照，on_reset
+    收到携带新 generation 的 StreamReset；返回值只代表最终 generation。
 
     流式中途失败（断流/API 侧 failed）时抛 StreamAbortedError——返回值
     只表示「正常完成」，半截聚合不得冒充完整结果。

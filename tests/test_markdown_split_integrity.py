@@ -36,6 +36,7 @@ from core.markdown_split import (
     split_markdown,
 )
 from core.tools.tool_loop import ToolLoop
+from tests.stream_test_helpers import emit_snapshot
 
 # ── 测试数据内嵌（不依赖 tmp/，测试自包含）──
 # FINAL_TEXT = 事故当次回复的终稿（jsonl 第 365 条，1881 字符，标记格式）
@@ -149,7 +150,7 @@ class MockCtx:
 
 
 class MockSvc:
-    """逐字符喂 on_text；在 pause_at（字符下标）处停顿 > idle_ms，模拟模型节奏。"""
+    """逐字符喂 snapshot；在 pause_at（字符下标）处停顿 > idle_ms，模拟模型节奏。"""
 
     def __init__(self, text, pause_at):
         self.text = text
@@ -173,8 +174,7 @@ class MockSvc:
             if i in self.pause_at:
                 await asyncio.sleep(1.5)  # > stream_block_idle_ms(1000)
             buf += ch
-            if callbacks and callbacks.on_text:
-                await callbacks.on_text(buf)
+            await emit_snapshot(callbacks, buf)
         return AssistantMessage(content=self.text or None), None
 
 
@@ -364,8 +364,7 @@ async def test_stream_abort_tail_force():
                 if i == ABORT_AT:
                     raise RuntimeError("模拟断流")
                 buf += ch
-                if callbacks and callbacks.on_text:
-                    await callbacks.on_text(buf)
+                await emit_snapshot(callbacks, buf)
 
     ctx = NS(
         ai=NS(

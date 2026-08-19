@@ -5,7 +5,8 @@ import pytest
 from core.ai.protocol import (
     AssistantMessage,
     AssistantToolCall,
-    StreamBuffer,
+    StreamCallbacks,
+    StreamState,
     ensure_messages_consistent,
     log_llm_error,
 )
@@ -126,44 +127,128 @@ class TestEnsureMessagesConsistent:
         assert messages[0]["role"] == "user"
 
 
-class TestStreamBuffer:
-    """流式聚合缓冲：消灭服务层平行 list 参数组后的唯一拼装点。"""
+class TestStreamState:
+    """版本化流状态的 interface 测试。"""
 
-    def test_assemble_full_message(self):
-        """文本 + 思维链 + 工具调用 → 完整 AssistantMessage。"""
-        buf = StreamBuffer()
-        buf.text_parts.extend(["你好", "世界"])
-        buf.reasoning_parts.append("思考中")
-        buf.tool_calls.append(
-            AssistantToolCall(id="c1", name="web_search", arguments="{}")
+    @pytest.mark.asyncio
+    async def test_snapshots_are_cumulative_and_previous_values_are_stable(self):
+        snapshots = []
+
+        async def on_snapshot(snapshot):
+            snapshots.append(snapshot)
+
+        state = StreamState(StreamCallbacks(on_snapshot=on_snapshot))
+        await state.append_text("旧")
+        await state.append_text("内容")
+        await state.append_reasoning("思考")
+
+        assert [(item.generation, item.text, item.reasoning) for item in snapshots] == [
+            (0, "旧", None),
+            (0, "旧内容", None),
+            (0, "旧内容", "思考"),
+        ]
+        assert snapshots[0].text == "旧"
+        assert state.content == "旧内容"
+        assert state.reasoning_content == "思考"
+
+    @pytest.mark.asyncio
+    async def test_replace_generation_clears_all_state_and_emits_event(self):
+        resets = []
+
+        async def on_reset(event):
+            resets.append(event)
+
+        state = StreamState(StreamCallbacks(on_reset=on_reset))
+        await state.append_text("草稿")
+        await state.upsert_tool_call("0", call_id="draft", name="search")
+        state.finalize_tool_call("0")
+        state.set_usage({"completion_tokens": 3})
+
+        await state.replace_generation("provider_revision")
+
+        assert state.generation == 1
+        assert not state.has_output
+        assert state.assemble() == (None, None)
+        assert resets[0].previous_generation == 0
+        assert resets[0].generation == 1
+        assert resets[0].reason == "provider_revision"
+
+    @pytest.mark.asyncio
+    async def test_tool_calls_require_completion_and_preserve_order(self):
+        state = StreamState()
+        await state.upsert_tool_call(
+            "first", call_id="call-1", name="search", arguments_delta='{"q":'
         )
-        message, usage = buf.assemble({"prompt_tokens": 1})
+        await state.upsert_tool_call("second", name="emoji", arguments_complete="")
+        await state.upsert_tool_call("first", arguments_delta='"cats"}')
+
+        message, usage = state.assemble()
+        assert message is None
+        assert usage is None
+        assert state.has_output
+
+        state.finalize_tool_call("second")
+        state.finalize_tool_call("first")
+        message, _ = state.assemble()
         assert message is not None
-        assert message.content == "你好世界"
-        assert message.reasoning_content == "思考中"
-        assert message.tool_calls[0].name == "web_search"
-        assert usage == {"prompt_tokens": 1}
+        assert [
+            (call.id, call.name, call.arguments) for call in message.tool_calls
+        ] == [
+            ("call-1", "search", '{"q":"cats"}'),
+            ("second", "emoji", ""),
+        ]
 
-    def test_assemble_empty_returns_none(self):
-        """无任何内容 → (None, usage)，调用方走失败/回退路径。"""
-        message, usage = StreamBuffer().assemble(None)
-        assert message is None and usage is None
+    @pytest.mark.asyncio
+    async def test_finalize_all_and_usage_are_isolated(self):
+        usage = {"prompt_tokens": {"cached": 2}}
+        state = StreamState()
+        await state.upsert_tool_call("0", name="search", arguments_delta="{}")
+        state.set_usage(usage)
+        usage["prompt_tokens"]["cached"] = 99
+        state.finalize_all_tool_calls()
 
-    def test_assemble_drops_incomplete_tool_calls(self):
-        """无 name 的未完成调用被过滤（对齐旧 _assemble_stream_result 语义）。"""
-        buf = StreamBuffer()
-        buf.tool_calls.append(AssistantToolCall(id="c1", name="", arguments=""))
-        message, usage = buf.assemble(None)
-        assert message is None
+        message, result_usage = state.assemble()
+        assert message is not None
+        assert result_usage == {"prompt_tokens": {"cached": 2}}
+        result_usage["prompt_tokens"]["cached"] = 100
+        message.tool_calls[0].arguments = "mutated"
+        message_again, usage_again = state.assemble()
+        assert message_again.tool_calls[0].arguments == "{}"
+        assert usage_again == {"prompt_tokens": {"cached": 2}}
 
-    def test_reset_clears_all(self):
-        """reset：降级重试前清空（重试是全新生成）。"""
-        buf = StreamBuffer()
-        buf.text_parts.append("旧内容")
-        buf.tool_calls.append(AssistantToolCall(id="c1", name="t", arguments=""))
-        buf.reset()
-        message, usage = buf.assemble(None)
-        assert message is None
+    @pytest.mark.asyncio
+    async def test_callback_failure_does_not_roll_back_state(self):
+        async def on_snapshot(_snapshot):
+            raise RuntimeError("callback failed")
+
+        state = StreamState(StreamCallbacks(on_snapshot=on_snapshot))
+        with pytest.raises(RuntimeError, match="callback failed"):
+            await state.append_text("已写入")
+        assert state.content == "已写入"
+
+    @pytest.mark.asyncio
+    async def test_callback_reentrancy_fails_fast(self):
+        state = None
+
+        async def on_snapshot(_snapshot):
+            await state.append_text("重入")
+
+        state = StreamState(StreamCallbacks(on_snapshot=on_snapshot))
+        with pytest.raises(RuntimeError, match="callback reentrancy"):
+            await state.append_text("外层")
+        assert state.content == "外层"
+
+    @pytest.mark.asyncio
+    async def test_reset_callback_reentrancy_fails_fast(self):
+        state = None
+
+        async def on_reset(_event):
+            await state.replace_generation("retry")
+
+        state = StreamState(StreamCallbacks(on_reset=on_reset))
+        with pytest.raises(RuntimeError, match="callback reentrancy"):
+            await state.replace_generation("retry")
+        assert state.generation == 1
 
 
 class TestLogLlmError:

@@ -15,7 +15,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from core.ai.protocol import AssistantMessage, StreamAbortedError
+from core.ai.protocol import (
+    AssistantMessage,
+    StreamAbortedError,
+    StreamReset,
+)
 from core.markdown_split import (
     TrailingState,
     is_heading_line,
@@ -26,6 +30,7 @@ from core.markdown_split import (
     trailing_structure,
 )
 from core.tools.tool_loop import ToolLoop
+from tests.stream_test_helpers import emit_snapshot
 
 # ── 线上真实消息（2026-08-04 16:19 FreshRSS r/emacs 推送，jsonl 原文） ──
 REAL_R_EMACS_MESSAGE = (
@@ -148,7 +153,7 @@ class TestMarkdownSafeCut:
 
     def test_lead_in_binds_across_heading_chain(self):
         """长标题行 + 短标题（引导形态）+ 列表：前导行随同绑定，标题链不拆。"""
-        title = "🧠 Emotion2Skill：让 LLM 用\"内心情绪\"选技能"
+        title = '🧠 Emotion2Skill：让 LLM 用"内心情绪"选技能'
         sub = "📋 基本信息："
         # 长标题 + 短标题：无切点（等列表确认）
         assert markdown_safe_cut(title + "\n" + sub, len(title) + len(sub) + 1) == 0
@@ -175,7 +180,7 @@ class TestMarkdownSafeCut:
             "基于技能的 LLM Agent（把任务拆成技能库来调用）只靠文本级信号做判断：\n"
             "- 任务描述、口头反思、经验规则……\n"
             "但 LLM 内部自己的表征状态完全没被利用！\n"
-            "💡 核心思路：给 Agent 加\"直觉\"\n"
+            '💡 核心思路：给 Agent 加"直觉"\n'
             "近期的可解释性研究发现：情绪表征会因果地影响行为。以前大家只用它做：\n"
             "- 事后分析（post-hoc analysis）\n"
             "- 直接输出引导（output steering）"
@@ -195,7 +200,9 @@ class TestMarkdownSafeCut:
         )
         cut = markdown_safe_cut(text, len(text))
         assert 0 < cut < len(text)
-        assert text[:cut].endswith("1. 提取情绪向量：从残差流里提取 27 维情绪状态向量\n")
+        assert text[:cut].endswith(
+            "1. 提取情绪向量：从残差流里提取 27 维情绪状态向量\n"
+        )
 
     def test_fence_body_never_cut(self):
         """limit 落在代码围栏体内：切点退回围栏前。"""
@@ -275,8 +282,15 @@ class _MockCtx:
         pass
 
 
+async def _emit_reset(callbacks, reason):
+    if callbacks and callbacks.on_reset:
+        await callbacks.on_reset(
+            StreamReset(previous_generation=0, generation=1, reason=reason)
+        )
+
+
 class _MockSvc:
-    """逐字符喂 on_text，模拟真实 SSE 流式到达；支持断流/停顿。"""
+    """逐字符喂 snapshot，模拟真实 SSE 流式到达；支持断流/停顿。"""
 
     def __init__(
         self, text="", throw_after=None, tail_sleep=0.0, step=0.0, pause_lines=()
@@ -309,8 +323,7 @@ class _MockSvc:
                 line_no += 1
             await asyncio.sleep(self.step)
             buf += ch
-            if callbacks and callbacks.on_text:
-                await callbacks.on_text(buf)
+            await emit_snapshot(callbacks, buf)
             if self.throw_after is not None and i >= self.throw_after:
                 raise RuntimeError("boom mid-stream")
             if line_no in self.pause_lines:
@@ -481,30 +494,30 @@ class TestStreamBlockIntegration:
         """
         content = (
             "抓到啦主人！这篇论文挺有想法的，猫猫给你讲讲～(ฅ´ω`ฅ)📖\n"
-            "🧠 Emotion2Skill：让 LLM 用\"内心情绪\"选技能\n"
+            '🧠 Emotion2Skill：让 LLM 用"内心情绪"选技能\n'
             "📋 基本信息：\n"
             "- 论文：arXiv:2608.09248（8月10日提交，11日修订）\n"
             "- 作者：林博涵等 8 人（中国团队）\n"
             "- 代码已开源：github.com/BoHan-LIN04/Emotion2Skill\n"
             "🎯 要解决什么问题？\n"
-            "基于技能的 LLM Agent（把任务拆成\"技能库\"里的可复用流程来调用）在选择用哪个技能时，只靠文本级信号做判断：\n"
+            '基于技能的 LLM Agent（把任务拆成"技能库"里的可复用流程来调用）在选择用哪个技能时，只靠文本级信号做判断：\n'
             "- 任务描述、口头反思、经验规则……\n"
-            "但 LLM 内部自己的表征状态（模型\"心里\"在想什么）完全没被利用！\n"
-            "💡 核心思路：给 Agent 加\"直觉\"\n"
-            "近期的可解释性研究发现：LLM 内部存在线性的\"情绪表征\"，并且会因果地影响行为。以前大家只用它做：\n"
+            '但 LLM 内部自己的表征状态（模型"心里"在想什么）完全没被利用！\n'
+            '💡 核心思路：给 Agent 加"直觉"\n'
+            '近期的可解释性研究发现：LLM 内部存在线性的"情绪表征"，并且会因果地影响行为。以前大家只用它做：\n'
             "- 事后分析（post-hoc analysis）\n"
             "- 直接输出引导（output steering）\n"
             "Emotion2Skill 的突破：把情绪表征用到 Agent 级决策上！\n"
             "🔧 具体做法\n"
             "1. 提取情绪向量：从残差流里提取 27 维情绪状态向量\n"
             "2. 置信度门控摘要：映射成带置信度门控的摘要注入路由提示\n"
-            "3. 情绪轨迹分析：检测\"内部状态突变\"定位有问题的技能调用\n"
+            '3. 情绪轨迹分析：检测"内部状态突变"定位有问题的技能调用\n'
             "4. 定向 SOP 重写：精准重写对应的标准操作流程\n"
             "📊 效果\n"
             "在 WebShop 和 ALFWorld 基准上：\n"
             "- Emotion2Skill + Qwen3-8B vs Zero-Shot 基线：成功率提升 +26.9%！\n"
             "\n"
-            "猫猫的理解：这相当于给 AI Agent 装了个\"直觉系统\"。\n"
+            '猫猫的理解：这相当于给 AI Agent 装了个"直觉系统"。\n'
             "主人觉得这个方向有意思吗？要不要猫猫再看看它的 GitHub？(ฅ´ω`ฅ)💕"
         )
         # 停顿点 = 原捕获文件的分隔位置（标题/引导行之后），覆盖三种形态：
@@ -523,12 +536,12 @@ class TestStreamBlockIntegration:
                 tail = blk.rstrip("\n").split("\n")[-1]
                 if is_list_marker(tail):
                     continue  # 列表项行是合法块尾（项边界可切）
-                assert not is_heading_line(tail, True), (
-                    f"块{i} 以标题行结尾，其后还有内容: {tail!r}"
-                )
-                assert not is_lead_in_line(tail), (
-                    f"块{i} 以引导行结尾，其后还有内容: {tail!r}"
-                )
+                assert not is_heading_line(
+                    tail, True
+                ), f"块{i} 以标题行结尾，其后还有内容: {tail!r}"
+                assert not is_lead_in_line(
+                    tail
+                ), f"块{i} 以引导行结尾，其后还有内容: {tail!r}"
 
 
 # ── c1 主契约：模型链下断流回退决策（零转发→回退 / 已转发→终止） ──
@@ -571,20 +584,19 @@ class _ResetSvc:
     ):
         # 第一次生成：半截（流中途失败前已触发回调）
         buf = ""
+        generation = 0
         for ch in "半截内容会被丢弃":
             buf += ch
-            if callbacks and callbacks.on_text:
-                await callbacks.on_text(buf)
+            await emit_snapshot(callbacks, buf, generation)
         # 服务内部重试
-        if callbacks and callbacks.on_reset:
-            await callbacks.on_reset()
+        await _emit_reset(callbacks, "retry")
+        generation += 1
         # 第二次生成（全新）
         buf = ""
         full = "这是重试后的完整回复内容，长度足以越过静默探测期。" * 3
         for ch in full:
             buf += ch
-            if callbacks and callbacks.on_text:
-                await callbacks.on_text(buf)
+            await emit_snapshot(callbacks, buf, generation)
         return AssistantMessage(content=buf), {
             "prompt_tokens": 1,
             "completion_tokens": 1,
@@ -700,22 +712,21 @@ class _ReviseSvc:
         # 长草稿：> 800 块大小，达块强制转发（无法撤回）
         draft = "这是很长很长的草稿内容，主人听我说。\n" * 50
         buf = ""
+        generation = 0
         for ch in draft:
             await asyncio.sleep(0)  # 让出事件循环，空闲 flush 定时器才能跑
             buf += ch
-            if callbacks and callbacks.on_text:
-                await callbacks.on_text(buf)
+            await emit_snapshot(callbacks, buf, generation)
         # 模型修订：触发 on_reset（真实 DeepSeek 服务在终稿 message item 时触发）
-        if callbacks and callbacks.on_reset:
-            await callbacks.on_reset()
+        await _emit_reset(callbacks, "provider_revision")
+        generation += 1
         # 终稿：全新生成
         buf = ""
         final = "这是终稿的完整回复内容，主人下班辛苦了好好休息。" * 5
         for ch in final:
             await asyncio.sleep(0)
             buf += ch
-            if callbacks and callbacks.on_text:
-                await callbacks.on_text(buf)
+            await emit_snapshot(callbacks, buf, generation)
         return AssistantMessage(content=buf), {
             "prompt_tokens": 1,
             "completion_tokens": 1,
@@ -752,7 +763,7 @@ class TestToolLoopStreamReset:
 
 class _SteppedStreamSvc:
     """逐字符流式服务（可指定字符步进间隔），配合 _run_case 的 cb_sleep
-    复现「发送在途时 on_text / on_reset 并发」的竞态窗口。
+    复现「发送在途时 snapshot / reset 并发」的竞态窗口。
     """
 
     def __init__(self, text: str, step: float = 0.002):
@@ -773,11 +784,11 @@ class _SteppedStreamSvc:
         callbacks=None,
     ):
         buf = ""
+        generation = 0
         for ch in self.text:
             await asyncio.sleep(self.step)
             buf += ch
-            if callbacks and callbacks.on_text:
-                await callbacks.on_text(buf)
+            await emit_snapshot(callbacks, buf, generation)
         return AssistantMessage(content=buf), {
             "prompt_tokens": 1,
             "completion_tokens": 1,
@@ -801,19 +812,18 @@ class _SteppedReviseSvc(_SteppedStreamSvc):
         callbacks=None,
     ):
         buf = ""
+        generation = 0
         for ch in self.text:  # 草稿（基类 text）
             await asyncio.sleep(self.step)
             buf += ch
-            if callbacks and callbacks.on_text:
-                await callbacks.on_text(buf)
-        if callbacks and callbacks.on_reset:
-            await callbacks.on_reset()
+            await emit_snapshot(callbacks, buf, generation)
+        await _emit_reset(callbacks, "provider_revision")
+        generation += 1
         buf = ""
         for ch in self.final:
             await asyncio.sleep(self.step)
             buf += ch
-            if callbacks and callbacks.on_text:
-                await callbacks.on_text(buf)
+            await emit_snapshot(callbacks, buf, generation)
         return AssistantMessage(content=buf), {
             "prompt_tokens": 1,
             "completion_tokens": 1,
@@ -843,8 +853,7 @@ class _PauseFlushSvc:
         for ch in first:
             await asyncio.sleep(0.001)
             buf += ch
-            if callbacks and callbacks.on_text:
-                await callbacks.on_text(buf)
+            await emit_snapshot(callbacks, buf)
         # 停顿：首块 flush 的发送（0.2s）在途期间，空闲定时器（50ms）
         # 必然触发第二次 flush —— 旧实现以旧偏移二次捕获同一段文本
         await asyncio.sleep(0.3)
@@ -853,9 +862,37 @@ class _PauseFlushSvc:
         for ch in rest:
             await asyncio.sleep(0.001)
             buf += ch
-            if callbacks and callbacks.on_text:
-                await callbacks.on_text(buf)
+            await emit_snapshot(callbacks, buf)
         return AssistantMessage(content=first + rest), {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+        }
+
+
+class _ConcurrentResetSvc:
+    """空闲 flush 发送在途时触发 reset，再发送新 generation。"""
+
+    @property
+    def model(self):
+        return "mock"
+
+    async def chat_completion_stream(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        temperature=None,
+        max_tokens=None,
+        callbacks=None,
+    ):
+        draft = "草稿内容，不能推进终稿游标。\n" * 10
+        await emit_snapshot(callbacks, draft, 0)
+        # idle=50ms 的 flush 获得运行机会，并在 stream_callback 中等待。
+        await asyncio.sleep(0.08)
+        await _emit_reset(callbacks, "provider_revision")
+        final = "终稿从零开始，不能被旧 generation 吞掉。" * 4
+        await emit_snapshot(callbacks, final, 1)
+        return AssistantMessage(content=final), {
             "prompt_tokens": 1,
             "completion_tokens": 1,
         }
@@ -867,10 +904,10 @@ class TestToolLoopFlushRace:
     def test_second_idle_flush_never_recaptures_inflight_segment(self):
         """18:59 重复气泡事故回归。
 
-        旧实现发送完成才推进 st.sent；发送在途时 on_text 会再次调度空闲
+        旧实现发送完成才推进 st.sent；发送在途时 snapshot 会再次调度空闲
         定时器，新 flush 以旧偏移二次捕获同一段文本（逐字节相同的重复
         气泡，用户看到 [P1][P2][P2][P3]，而上下文历史只有一份）。
-        发送前推进后，任何并发 on_text 看到的偏移都已包含在途块，
+        发送前推进后，任何并发 snapshot 看到的偏移都已包含在途块，
         同一段不可能再被捕获。
         """
         line = "这是第一段完整内容，主人下班辛苦啦。\n"
@@ -900,3 +937,14 @@ class TestToolLoopFlushRace:
             f"修订后的终稿必须从头完整投递（不得被旧偏移吞掉）："
             f"delivered={delivered!r}"
         )
+
+    def test_reset_replaces_generation_while_idle_flush_is_inflight(self):
+        """旧 generation 的在途 flush 不得推进终稿 generation 的游标。"""
+        ret, sent, streamed = asyncio.run(
+            _run_case(_ConcurrentResetSvc(), idle_ms=50, cb_sleep=0.25)
+        )
+        final = "终稿从零开始，不能被旧 generation 吞掉。" * 4
+        delivered = "".join(streamed) + "".join(sent)
+        assert streamed, "旧 generation 应已开始发送"
+        assert delivered.endswith(final)
+        assert delivered.count(final) == 1

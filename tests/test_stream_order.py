@@ -18,6 +18,7 @@ from types import SimpleNamespace as NS
 
 from core.ai.protocol import AssistantMessage
 from core.tools.tool_loop import ToolLoop
+from tests.stream_test_helpers import emit_snapshot
 
 # 纯段落文本：每行一句、行尾切点恒存在 → 空闲 flush 不会被列表保护跳过
 FULL = (
@@ -65,8 +66,7 @@ class BurstSvc:
             if i > 0 and i % self.burst == 0:
                 await asyncio.sleep(self.pause)
             buf += ch
-            if callbacks and callbacks.on_text:
-                await callbacks.on_text(buf)
+            await emit_snapshot(callbacks, buf)
         return AssistantMessage(content=self.text or None), None
 
 

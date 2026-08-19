@@ -15,7 +15,12 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, List, Optional
 
 from core.ai.fallback_runner import FallbackRunner
-from core.ai.protocol import StreamCallbacks, ensure_messages_consistent
+from core.ai.protocol import (
+    StreamCallbacks,
+    StreamReset,
+    StreamSnapshot,
+    ensure_messages_consistent,
+)
 from core.managers.session_manager import PendingInbound
 from core.markdown_split import (
     MARKDOWN_SAFE_CHUNK_BYTE_LIMIT,
@@ -38,28 +43,15 @@ _STREAM_PROBE_CHARS = _ACK_MAX_CHARS + 12
 
 
 @dataclass
-class _StreamBlockState:
-    """block 流式转发状态（工具循环每轮新建，杜绝跨轮泄漏）。
+class _StreamGenerationDelivery:
+    """单个回复 generation 的投递游标和在途 flush 状态。"""
 
-    sent: 已承诺/已转发的字符数（相对最新累计文本的索引）
-    forwarded: 是否转发过任何块
-    text: 最新累计文本（on_text 回调更新）
-    last_flush: 上次转发时刻 (monotonic)
-    timer: 空闲 flush 任务（流结束/异常时须 cancel，防幽灵文本）
-    """
-
-    sent: int = 0
-    forwarded: bool = False
+    generation: int = 0
     text: str = ""
+    sent: int = 0
     last_flush: float | None = None
     timer: asyncio.Task | None = field(default=None, repr=False, compare=False)
-    # 是否有块正在发送（锁内 await 中）：发送期间抑制空闲定时器调度，
-    # 避免多个 flush 任务排队等锁、锁释放后连发（破坏空闲分块节奏）。
     sending: bool = False
-    # 串行化所有块的发送。空闲 flush 是后台任务：timer 在任务开始时已置 None，
-    # 上一块 await 发送（QQ API 慢 / 重试退避 1s/2s/4s）期间 on_text 会调度新的
-    # 空闲定时器 → 两个发送同时在途，后发的块可能先到 → 气泡乱序（线上事故：
-    # 收尾句被插到列表中间）。锁保证同一轮内严格按生成顺序投递。
     flush_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock, repr=False, compare=False
     )
@@ -68,6 +60,16 @@ class _StreamBlockState:
         if self.timer is not None:
             self.timer.cancel()
             self.timer = None
+
+
+@dataclass
+class _StreamDeliveryState:
+    """当前 generation 的投递状态，以及跨 generation 的转发事实。"""
+
+    current: _StreamGenerationDelivery = field(
+        default_factory=_StreamGenerationDelivery
+    )
+    forwarded: bool = False
 
 
 def _is_silent_reply_text(text: str) -> bool:
@@ -210,10 +212,12 @@ class ToolLoop:
                 )
 
                 # ── 流式转发状态（每轮新建，杜绝跨轮泄漏） ──
-                st = _StreamBlockState()
+                delivery = _StreamDeliveryState()
 
                 async def _flush_stream_block(
-                    allow_partial: bool = False, flush_incomplete: bool = False
+                    generation_state: _StreamGenerationDelivery,
+                    allow_partial: bool = False,
+                    flush_incomplete: bool = False,
                 ) -> None:
                     """发送当前累积的 pending 文本（block 投递）。
 
@@ -230,19 +234,23 @@ class ToolLoop:
                     注意：stream_callback 在持有 flush_lock 时被 await——回调不得
                     同步调用本函数（asyncio.Lock 不可重入，会死锁）。
                     """
-                    # 串行化：同一轮内只允许一个块在途。空闲 flush 是后台任务，
+                    # 串行化：同一 generation 内只允许一个块在途。空闲 flush 是后台任务，
                     # 不持锁会与后续 flush 并发 → 后发先至、气泡乱序（收尾句
-                    # 插到列表中间的线上事故）。on_text 的块 flush / 空闲 flush /
+                    # 插到列表中间的线上事故）。snapshot 的块 flush / 空闲 flush /
                     # 断流收尾补发都走这一把锁。
-                    async with st.flush_lock:
+                    async with generation_state.flush_lock:
                         nonlocal text_committed
-                        pending = st.text[st.sent :]
+                        # reset 后尚未开始的旧 flush 不能发送草稿；检查放在
+                        # 获取锁之后，覆盖排队等待锁期间发生 reset 的竞态。
+                        if generation_state is not delivery.current:
+                            return
+                        pending = generation_state.text[generation_state.sent :]
                         if not pending or message_delivered:
                             # message_delivered: send_message 等工具已投递过消息，
                             # 流式文本与工具投递重复，跳过（收尾补发同样会被拦截）
                             return
                         if not allow_partial and pending_starts_incomplete(
-                            pending, st.text[: st.sent]
+                            pending, generation_state.text[: generation_state.sent]
                         ):
                             return
                         # 统一找安全切点：达块大小按 limit 切；空闲 flush/首块按当前全文
@@ -253,7 +261,9 @@ class ToolLoop:
                         cut = markdown_safe_cut(
                             pending,
                             limit,
-                            initial=trailing_structure(st.text[: st.sent]),
+                            initial=trailing_structure(
+                                generation_state.text[: generation_state.sent]
+                            ),
                         )
                         if cut == 0 and not flush_incomplete:
                             # 整个 pending 都在列表项/表格/围栏内（无安全切点）：
@@ -273,19 +283,19 @@ class ToolLoop:
                                 )
                         if 0 < cut < len(pending):
                             pending = pending[:cut]
-                        st.forwarded = True
+                        delivery.forwarded = True
                         # 先承诺后发送：await 之前就推进 sent。
                         # 重复气泡根因（18:59 线上事故）：旧实现发送后才推进，而
                         # _idle_flush_task 在 flush 开始前已把 timer 置 None——发送
-                        # 在途期间 on_text 会再次调度空闲定时器，新 flush 以旧偏移
-                        # 二次捕获同一段文本（逐字节相同的重复气泡）；on_reset 在
+                        # 在途期间 snapshot 会再次调度空闲定时器，新 flush 以旧偏移
+                        # 二次捕获同一段文本（逐字节相同的重复气泡）；reset 在
                         # 发送期间触发同样会把偏移算错（0 + len(pending)）。
-                        # 发送前推进后：任何并发 on_text / on_reset / 收尾补发看到的
+                        # 发送前推进后：任何并发 snapshot / reset / 收尾补发看到的
                         # 偏移都已是「本块已投递」，同一段文本不可能被再次捕获。
                         # 发送失败/取消不回退：已承诺的文本无法撤回（与旧语义一致）。
-                        st.sent += len(pending)
+                        generation_state.sent += len(pending)
                         text_committed = True
-                        st.sending = True
+                        generation_state.sending = True
                         try:
                             await stream_callback(pending)
                         except asyncio.CancelledError:
@@ -295,62 +305,84 @@ class ToolLoop:
                             # sent 已推进，后续 flush / 收尾补发不会重发同段。
                             _log.warning("流式块发送失败 [%s]: %s", chat_id[:12], e)
                         finally:
-                            st.sending = False
+                            generation_state.sending = False
                         # 空闲间隔从「发送完成」起算：排队 flush 不按发送开始时间
                         # 计算延迟（避免锁释放后连发）
-                        st.last_flush = time.monotonic()
+                        generation_state.last_flush = time.monotonic()
 
-                async def _idle_flush_task(delay: float) -> None:
+                async def _idle_flush_task(
+                    generation_state: _StreamGenerationDelivery, delay: float
+                ) -> None:
                     try:
                         await asyncio.sleep(delay)
                     except asyncio.CancelledError:
                         return
-                    st.timer = None
+                    if generation_state.timer is asyncio.current_task():
+                        generation_state.timer = None
                     try:
-                        await _flush_stream_block()
+                        await _flush_stream_block(generation_state)
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
                         _log.warning("空闲 flush 失败 [%s]: %s", chat_id[:12], e)
 
-                def _schedule_idle_flush() -> None:
+                def _schedule_idle_flush(
+                    generation_state: _StreamGenerationDelivery,
+                ) -> None:
                     """安排空闲定时器：距上次转发 ≥ idle 时强制发一块（首块立即发）。
 
-                    发送在途（st.sending）时不调度——等待中的 flush 会在锁释放后
+                    发送在途（generation_state.sending）时不调度——等待中的 flush 会在锁释放后
                     连发，破坏空闲分块节奏；等本次发送完成后的增量再起定时器。
                     """
-                    if st.timer is not None or st.sending:
+                    if (
+                        generation_state is not delivery.current
+                        or generation_state.timer is not None
+                        or generation_state.sending
+                    ):
                         return
                     now = time.monotonic()
-                    last = st.last_flush or (now - self._stream_block_idle)
+                    last = generation_state.last_flush or (
+                        now - self._stream_block_idle
+                    )
                     delay = max(0.0, self._stream_block_idle - (now - last))
-                    st.timer = asyncio.create_task(_idle_flush_task(delay))
+                    generation_state.timer = asyncio.create_task(
+                        _idle_flush_task(generation_state, delay)
+                    )
 
-                async def _on_stream_text(text_so_far: str) -> None:
-                    """block 聚合：达块大小立即发，否则空闲超时触发；静默探测期内不发。"""
-                    st.text = text_so_far
-                    pending = text_so_far[st.sent :]
+                async def _on_stream_snapshot(snapshot: StreamSnapshot) -> None:
+                    """消费当前 generation 的累计快照并协调 block 投递。"""
+                    generation_state = delivery.current
+                    if snapshot.generation != generation_state.generation:
+                        _log.debug(
+                            "忽略过期流快照 [%s]: got=%s current=%s",
+                            chat_id[:12],
+                            snapshot.generation,
+                            generation_state.generation,
+                        )
+                        return
+                    generation_state.text = snapshot.text
+                    pending = snapshot.text[generation_state.sent :]
                     if not pending:
                         return
                     # 静默探测期（对 strip 后长度判定，防前导空白绕过）：绝不转发
-                    if len(text_so_far.strip()) <= _STREAM_PROBE_CHARS:
+                    if len(snapshot.text.strip()) <= _STREAM_PROBE_CHARS:
                         return
                     if len(pending) >= self._stream_block_chars:
-                        await _flush_stream_block(allow_partial=True)
+                        await _flush_stream_block(generation_state, allow_partial=True)
                     else:
-                        _schedule_idle_flush()
+                        _schedule_idle_flush(generation_state)
 
-                async def _on_stream_reset() -> None:
-                    """服务内部降级重试（全新生成）：转发状态归零。
+                async def _on_stream_reset(reset: StreamReset) -> None:
+                    """服务内部重试或 provider revision：替换当前 generation。
 
-                    首尝试的增量可能已流过 on_text，st.sent 停在旧文本偏移上；
-                    不归零的话新文本会从错误偏移切片（开头被跳过或整条被吞）。
-                    注意：不重置 st.forwarded——旧尝试已转发的块无法撤回，
-                    后续若再断流仍需按「已转发」终止而非回退（防双回复）。
+                    旧 generation 的在途 callback 可以完成，但新 generation
+                    必须拥有独立文本和游标；全局 forwarded 不归零。
                     """
-                    st.cancel_timer()
-                    st.sent = 0
-                    st.text = ""
+                    old_generation = delivery.current
+                    old_generation.cancel_timer()
+                    delivery.current = _StreamGenerationDelivery(
+                        generation=reset.generation
+                    )
 
                 was_exception = False
                 try:
@@ -360,7 +392,7 @@ class ToolLoop:
                         request_messages = list(messages)
                         if stream_callback is not None:
                             cb = StreamCallbacks(
-                                on_text=_on_stream_text,
+                                on_snapshot=_on_stream_snapshot,
                                 on_reset=_on_stream_reset,
                             )
                         message, usage = await svc.chat_completion_stream(
@@ -379,10 +411,10 @@ class ToolLoop:
                     was_exception = True
                     _log.warning(f"模型 [{current_model_name}] 调用异常: {e}")
                     message, usage = None, None
-                    # 无条件取消空闲定时器：即使尚未转发，timer 也引用本轮的 st，
+                    # 无条件取消当前 generation 的空闲定时器：即使尚未转发，timer 也引用本轮状态，
                     # 不取消会在 fallback 到下一模型后触发幽灵文本（双回复）
-                    st.cancel_timer()
-                    if st.forwarded:
+                    delivery.current.cancel_timer()
+                    if delivery.forwarded:
                         # 已实时转发过部分文本：无法干净回退（会双回复），记冷却后终止
                         if runner:
                             await runner.mark_failure(record_cooldown=True)
@@ -396,9 +428,13 @@ class ToolLoop:
                         # 已实时转发过部分文本无法干净回退（会双回复），
                         # 这里尽力把剩余文本送达；失败也不再重试。
                         try:
-                            while st.sent < len(st.text) and not message_delivered:
+                            while not message_delivered and delivery.current.sent < len(
+                                delivery.current.text
+                            ):
                                 await _flush_stream_block(
-                                    allow_partial=True, flush_incomplete=True
+                                    delivery.current,
+                                    allow_partial=True,
+                                    flush_incomplete=True,
                                 )
                         except asyncio.CancelledError:
                             raise
@@ -462,8 +498,8 @@ class ToolLoop:
                 self.cost_tracker.record_turn(chat_id, model_for_cost, usage)
 
             # 流式已转发部分文本但调用异常：终止整个循环（部分文本已送达）
-            if st.forwarded and message is None:
-                st.cancel_timer()
+            if delivery.forwarded and message is None:
+                delivery.current.cancel_timer()
                 return sent_emoji, True
 
             if message is None:
@@ -478,7 +514,8 @@ class ToolLoop:
             tool_calls = message.tool_calls or []
 
             # 流已结束：取消挂起的空闲定时器，剩余文本由下方收尾逻辑一次性补发
-            st.cancel_timer()
+            current_delivery = delivery.current
+            current_delivery.cancel_timer()
 
             reasoning = message.reasoning_content
             if reasoning:
@@ -508,7 +545,7 @@ class ToolLoop:
                         f"[工具循环 第{round_idx + 1}轮] send_message 已投递，跳过后续文本发送"
                     )
                 elif _is_silent_reply_text(response_text) or suppress_reply:
-                    if st.forwarded:
+                    if delivery.forwarded:
                         # 探测期内不应发生；若发生（超长静默追加），已转发部分无法撤回
                         _log.warning(
                             f"[工具循环 第{round_idx + 1}轮] 静默回复但流式已转发部分文本，"
@@ -521,9 +558,9 @@ class ToolLoop:
                     # （await stream_callback 未返回），不串行化会再次乱序。
                     # （同 _flush_stream_block：锁内 await reply_callback，
                     # 回调不得同步重入本函数——锁不可重入会死锁。）
-                    async with st.flush_lock:
+                    async with current_delivery.flush_lock:
                         # 流式已转发前缀 → 只发剩余部分，避免重复
-                        remaining = response_text[st.sent :]
+                        remaining = response_text[current_delivery.sent :]
                         if remaining:
                             try:
                                 await reply_callback(
@@ -540,7 +577,7 @@ class ToolLoop:
                                 )
                         # 同步 sent：即使补发走了 reply_callback，也标记已投递，
                         # 防止残留定时器 flush 再次发送同段文本
-                        st.sent = len(response_text)
+                        current_delivery.sent = len(response_text)
                         text_committed = True
 
             if reply_state_callback:

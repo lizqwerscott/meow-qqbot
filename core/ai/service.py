@@ -9,10 +9,9 @@ from openai.types.chat import ChatCompletionMessageParam
 
 from core.ai.protocol import (
     AssistantMessage,
-    AssistantToolCall,
     StreamAbortedError,
-    StreamBuffer,
     StreamCallbacks,
+    StreamState,
     ensure_messages_consistent,
     log_llm_error,
 )
@@ -22,43 +21,33 @@ _log = logging.getLogger(__name__)
 
 async def _consume_chunk_stream(
     stream: Any,
-    callbacks: StreamCallbacks | None,
-    buffer: StreamBuffer,
-) -> dict[str, Any] | None:
-    """迭代 chat-completions SSE 流，把增量聚合进缓冲；返回 usage（若有）。
+    state: StreamState,
+) -> None:
+    """迭代 chat-completions SSE 流，将事件翻译为 ``StreamState`` 操作。
 
     主路径与 stream_options 降级重试路径共用，保证两处聚合语义一致。
     """
     async for chunk in stream:
         if not chunk.choices and chunk.usage:
-            return chunk.usage.model_dump()
+            state.set_usage(chunk.usage.model_dump())
+            return
         delta = chunk.choices[0].delta if chunk.choices else None
         if delta is None:
             continue
         if getattr(delta, "content", None):
-            buffer.text_parts.append(delta.content)
-            if callbacks and callbacks.on_text:
-                await callbacks.on_text("".join(buffer.text_parts))
+            await state.append_text(delta.content)
         reasoning = getattr(delta, "reasoning_content", None)
         if reasoning:
-            buffer.reasoning_parts.append(reasoning)
-            if callbacks and callbacks.on_reasoning:
-                await callbacks.on_reasoning("".join(buffer.reasoning_parts))
+            await state.append_reasoning(reasoning)
         for tc in getattr(delta, "tool_calls", None) or []:
             idx = tc.index or 0
-            while len(buffer.tool_calls) <= idx:
-                buffer.tool_calls.append(
-                    AssistantToolCall(id="", name="", arguments="")
-                )
-            target = buffer.tool_calls[idx]
-            if tc.id:
-                target.id = tc.id
-            if tc.function:
-                if tc.function.name:
-                    target.name = tc.function.name
-                if tc.function.arguments:
-                    target.arguments += tc.function.arguments
-    return None
+            function = tc.function
+            await state.upsert_tool_call(
+                str(idx),
+                call_id=tc.id or None,
+                name=function.name if function else None,
+                arguments_delta=(function.arguments if function else None),
+            )
 
 
 class AIService:
@@ -175,15 +164,15 @@ class AIService:
         """流式版 chat_completion_with_tools（chat-completions SSE）。
 
         内部聚合增量片段，返回的 AssistantMessage 与非流式完全一致；
-        callbacks 收到的是**累计文本**（含 reasoning），调用方按需转发。
+        callbacks.on_snapshot 收到当前 generation 的累计文本（含 reasoning），
+        callbacks.on_reset 收到 generation 替换事件，调用方按需转发。
         """
         model_to_use = model or self.model
         max_tokens_to_use = max_tokens if max_tokens is not None else self.max_tokens
         is_reasoning = self._is_reasoning_model(model_to_use)
 
-        # 聚合缓冲放 try 外：create() 早期抛异常时 except 分支也要能引用（断流抛错）
-        buffer = StreamBuffer()
-        usage: dict[str, Any] | None = None
+        # 状态放 try 外：create() 早期抛异常时，降级重试仍复用同一 generation 管理器
+        state = StreamState(callbacks)
 
         try:
             msgs = list(messages)
@@ -215,13 +204,14 @@ class AIService:
 
             stream = await self.client.chat.completions.create(**kwargs)
             try:
-                usage = await _consume_chunk_stream(stream, callbacks, buffer)
+                await _consume_chunk_stream(stream, state)
             finally:
                 close_fn = getattr(stream, "close", None)
                 if close_fn is not None:
                     await close_fn()
 
-            return buffer.assemble(usage)
+            state.finalize_all_tool_calls()
+            return state.assemble()
         except asyncio.CancelledError:
             raise
         except StreamAbortedError:
@@ -236,18 +226,12 @@ class AIService:
                 or "unrecognized" in low
             ):
                 kwargs.pop("stream_options", None)
-                # 重试前清空聚合缓冲：重试是一次全新的生成，旧增量必须丢弃
-                # （防御：网关在流中途才拒绝该参数时，缓冲里已有半截内容）。
-                buffer.reset()
-                usage = None
-                # 通知调用方同样归零转发偏移：首尝试的增量可能已流过 on_text，
-                # ToolLoop 的 st.sent 还停在旧文本上，新文本会从错误偏移切片。
-                if callbacks and callbacks.on_reset:
-                    await callbacks.on_reset()
+                # 重试是一次全新的 generation：旧增量与工具调用必须丢弃，并通知投递层归零偏移。
+                await state.replace_generation("retry")
                 try:
                     stream = await self.client.chat.completions.create(**kwargs)
                     try:
-                        usage = await _consume_chunk_stream(stream, callbacks, buffer)
+                        await _consume_chunk_stream(stream, state)
                     finally:
                         close_fn = getattr(stream, "close", None)
                         if close_fn is not None:
@@ -258,7 +242,8 @@ class AIService:
                     # 降级重试也失败：与主路径一致抛错，由上层决定回退/终止
                     _log.error("流式降级重试也失败 [%s]: %s", model_to_use, e2)
                     raise StreamAbortedError(f"流式降级重试失败: {e2}") from e2
-                return buffer.assemble(usage)
+                state.finalize_all_tool_calls()
+                return state.assemble()
             log_llm_error(e, model_to_use, tag="（流式）")
             # 聚合到一半断流：不把半截结果当完整返回——上层会误判成功、跳过
             # fallback、投递截断回复。抛 StreamAbortedError，由 ToolLoop 依

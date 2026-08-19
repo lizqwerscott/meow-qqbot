@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import OrderedDict
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -28,8 +28,8 @@ from core.ai.protocol import (
     AssistantMessage,
     AssistantToolCall,
     StreamAbortedError,
-    StreamBuffer,
     StreamCallbacks,
+    StreamState,
     ensure_messages_consistent,
     log_llm_error,
 )
@@ -37,6 +37,19 @@ from core.ai.protocol import (
 _log = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
+
+
+@dataclass
+class _DeepSeekStreamContext:
+    """Responses 事件关联状态，隔离 revision 与 reasoning 的 provider 语义。"""
+
+    message_item_seen: bool = False
+    active_message_item_id: str | None = None
+    call_key_by_reference: dict[str, str] = field(default_factory=dict)
+    known_reasoning_item_ids: set[str] = field(default_factory=set)
+    pending_reasoning: list[str] = field(default_factory=list)
+    pending_reasoning_item: bool = False
+    active_output_item_type: str | None = None
 
 
 def _messages_to_input(
@@ -176,38 +189,50 @@ def _normalize_usage(usage: Any) -> dict[str, Any] | None:
     }
 
 
+def _select_latest_output_items(output: list[Any]) -> list[Any]:
+    """选择最新 message generation，并保留紧邻其前的 reasoning items。"""
+    message_indexes = [
+        index
+        for index, item in enumerate(output)
+        if getattr(item, "type", None) == "message"
+    ]
+    if not message_indexes:
+        return list(output)
+    start = message_indexes[-1]
+    while start > 0 and getattr(output[start - 1], "type", None) == "reasoning":
+        start -= 1
+    return list(output[start:])
+
+
 def _parse_output(response: Any) -> AssistantMessage | None:
     """非流式响应 output items → AssistantMessage。
 
-    与流式路径共用修订语义（AGENTS.md「非流式/流式共用同一套消息转换」）：
-    新 message item 开始 = 模型修订输出，之前的文本与工具调用全部丢弃，
-    只保留最新 item 的内容。
+    与流式路径共用修订语义：只保留最新 message generation，以及紧邻其前的
+    reasoning items；没有 message item 时保留完整输出（例如纯工具调用）。
     """
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_calls: list[AssistantToolCall] = []
-    for item in getattr(response, "output", None) or []:
+    output = list(getattr(response, "output", None) or [])
+    for item in _select_latest_output_items(output):
         t = getattr(item, "type", None)
         if t == "message":
-            # 修订语义：新 message item 取代之前的草稿（文本 + 工具调用）
-            content_parts.clear()
-            tool_calls.clear()
             for part in getattr(item, "content", None) or []:
                 if getattr(part, "type", None) == "output_text" and getattr(
                     part, "text", None
                 ):
                     content_parts.append(part.text)
         elif t == "function_call":
-            tool_calls.append(
-                AssistantToolCall(
-                    id=getattr(item, "call_id", None) or getattr(item, "id", ""),
-                    name=getattr(item, "name", ""),
-                    arguments=getattr(item, "arguments", ""),
+            name = getattr(item, "name", None)
+            if name:
+                tool_calls.append(
+                    AssistantToolCall(
+                        id=getattr(item, "call_id", None) or getattr(item, "id", ""),
+                        name=name,
+                        arguments=getattr(item, "arguments", "") or "",
+                    )
                 )
-            )
         elif t == "reasoning":
-            # 修订后的新 reasoning item：旧思维链丢弃（仅日志用途）
-            reasoning_parts.clear()
             for part in getattr(item, "content", None) or []:
                 text = getattr(part, "text", None)
                 if text:
@@ -377,18 +402,8 @@ class DeepSeekResponsesService:
         """
         model_to_use = model or self.model
 
-        # 聚合缓冲放 try 外：create() 早期抛异常时 except 分支也要能引用（断流抛错）
-        buffer = StreamBuffer()
-        # item_id -> [name, arguments_buf]（保持出现顺序）
-        tool_calls: OrderedDict[str, list[str]] = OrderedDict()
-        # item_id/call_id -> function name。
-        # DeepSeek 实测：function_call_arguments.done 事件的 name 为 None，
-        # name 只在 output_item.added/done 的 item 上；双 key 兼容两种情况。
-        call_names: dict[str, str] = {}
-        # item_id/call_id -> 真实 call_id（对齐非流式 _parse_output 的 call_id 优先；
-        # 若服务端 item_id ≠ call_id，回注 function_call_output 需用 call_id 关联）
-        call_ids: dict[str, str] = {}
-        usage: dict[str, Any] | None = None
+        state = StreamState(callbacks)
+        context = _DeepSeekStreamContext()
 
         try:
             msgs = list(messages)
@@ -408,68 +423,157 @@ class DeepSeekResponsesService:
                         item = getattr(event, "item", None)
                         itype = getattr(item, "type", None) if item else None
                         if itype == "function_call":
+                            context.active_output_item_type = itype
                             name = getattr(item, "name", None)
-                            # done 事件的 item 可能缺 call_id：只记录显式 call_id，
-                            # 否则 done 会用 item_id 覆盖 added 已记录的正确映射
-                            # （回注 function_call_output 时用错 id 会 400）。
                             raw_call_id = getattr(item, "call_id", None)
-                            call_id = raw_call_id or getattr(item, "id", None)
-                            if name:
-                                call_names[getattr(item, "id", None)] = name
-                                call_names[call_id] = name
-                            if raw_call_id:
-                                call_ids[getattr(item, "id", None)] = raw_call_id
-                                call_ids[raw_call_id] = raw_call_id
+                            item_key = getattr(item, "id", None) or raw_call_id or ""
+                            canonical_key = str(item_key)
+                            for reference in (getattr(item, "id", None), raw_call_id):
+                                if reference:
+                                    context.call_key_by_reference[str(reference)] = (
+                                        canonical_key
+                                    )
+                            await state.upsert_tool_call(
+                                canonical_key,
+                                call_id=raw_call_id or None,
+                                name=name or None,
+                            )
                         elif itype == "message" and et == "response.output_item.added":
-                            # 模型修订输出（草稿→终稿）：新 message item 取代旧 item，
-                            # 旧文本/工具调用必须丢弃——否则草稿+终稿拼接翻倍
-                            # （线上事故），草稿工具调用还会被幽灵执行。
-                            discarded = bool(buffer.text_parts) or bool(tool_calls)
-                            buffer.text_parts.clear()
-                            tool_calls.clear()
-                            call_names.clear()
-                            call_ids.clear()
-                            # 累计文本将从零重新开始：调用方（ToolLoop）转发偏移必须
-                            # 同步归零（st.sent 停在草稿长度会让终稿从旧偏移切片/整条
-                            # 被吞）。仅在真有内容被丢弃时触发——首个 message item 是
-                            # 空转，不打扰调用方；on_reset 保留 forwarded 标志，草稿
-                            # 若已转发，后续断流仍按已转发终止（防双回复）。
-                            if discarded and callbacks and callbacks.on_reset:
-                                await callbacks.on_reset()
+                            item_id = getattr(item, "id", None)
+                            has_prior_output = state.has_output or bool(
+                                context.pending_reasoning
+                            )
+                            if (
+                                context.message_item_seen
+                                and has_prior_output
+                                and (
+                                    item_id is None
+                                    or context.active_message_item_id is None
+                                    or item_id != context.active_message_item_id
+                                )
+                            ):
+                                await state.replace_generation("provider_revision")
+                                context.call_key_by_reference.clear()
+                                if context.pending_reasoning:
+                                    await state.append_reasoning(
+                                        "".join(context.pending_reasoning)
+                                    )
+                                    context.pending_reasoning.clear()
+                                context.pending_reasoning_item = False
+                            elif (
+                                not context.message_item_seen
+                                and context.pending_reasoning
+                            ):
+                                await state.append_reasoning(
+                                    "".join(context.pending_reasoning)
+                                )
+                                context.pending_reasoning.clear()
+                                context.pending_reasoning_item = False
+                            context.message_item_seen = True
+                            context.active_message_item_id = item_id
+                            context.active_output_item_type = itype
                         elif (
                             itype == "reasoning" and et == "response.output_item.added"
                         ):
-                            # 修订后的新 reasoning item：旧思维链丢弃（仅日志用途）
-                            buffer.reasoning_parts.clear()
-                    elif et == "response.output_text.delta":
-                        buffer.text_parts.append(event.delta)
-                        if callbacks and callbacks.on_text:
-                            await callbacks.on_text("".join(buffer.text_parts))
-                    elif et == "response.reasoning_text.delta":
-                        buffer.reasoning_parts.append(event.delta)
-                        if callbacks and callbacks.on_reasoning:
-                            await callbacks.on_reasoning(
-                                "".join(buffer.reasoning_parts)
+                            item_id = getattr(item, "id", None)
+                            if item_id is not None:
+                                context.known_reasoning_item_ids.add(str(item_id))
+                            context.active_output_item_type = itype
+                            context.pending_reasoning_item = bool(
+                                context.message_item_seen and state.has_output
                             )
-                    elif et == "response.function_call_arguments.delta":
-                        buf = tool_calls.setdefault(event.item_id, ["", ""])
-                        buf[1] += event.delta
-                    elif et == "response.function_call_arguments.done":
-                        buf = tool_calls.setdefault(event.item_id, ["", ""])
-                        name = getattr(event, "name", None) or call_names.get(
-                            event.item_id
+                    elif et == "response.output_text.delta":
+                        await state.append_text(event.delta)
+                    elif et == "response.reasoning_text.delta":
+                        item_id = getattr(event, "item_id", None) or getattr(
+                            event, "output_item_id", None
                         )
-                        if name:
-                            buf[0] = name
-                        if getattr(event, "arguments", None) and not buf[1]:
-                            buf[1] = event.arguments
+                        if (
+                            item_id is not None
+                            and str(item_id) not in context.known_reasoning_item_ids
+                        ):
+                            error = (
+                                "DeepSeek reasoning delta 引用了未知 output item；"
+                                "拒绝静默归入当前 generation"
+                            )
+                            _log.error(
+                                "Responses API 流式适配失败 [%s]: %s (item_id=%s)",
+                                model_to_use,
+                                error,
+                                item_id,
+                            )
+                            raise StreamAbortedError(error)
+                        ambiguous_reasoning = (
+                            context.message_item_seen
+                            and state.has_output
+                            and item_id is None
+                            and not context.pending_reasoning_item
+                            and context.active_output_item_type != "function_call"
+                        )
+                        if ambiguous_reasoning:
+                            error = (
+                                "DeepSeek reasoning delta 无法关联到 output item；"
+                                "拒绝静默归入当前 generation"
+                            )
+                            _log.error(
+                                "Responses API 流式适配失败 [%s]: %s",
+                                model_to_use,
+                                error,
+                            )
+                            raise StreamAbortedError(error)
+                        if (
+                            context.message_item_seen
+                            and state.has_output
+                            and (
+                                context.pending_reasoning_item
+                                or (
+                                    item_id is not None
+                                    and item_id != context.active_message_item_id
+                                )
+                                or (
+                                    item_id is None
+                                    and context.active_output_item_type
+                                    == "function_call"
+                                )
+                            )
+                        ):
+                            context.pending_reasoning.append(event.delta)
+                        else:
+                            await state.append_reasoning(event.delta)
+                    elif et == "response.function_call_arguments.delta":
+                        item_key = context.call_key_by_reference.get(
+                            str(event.item_id), str(event.item_id)
+                        )
+                        await state.upsert_tool_call(
+                            item_key, arguments_delta=event.delta
+                        )
+                    elif et == "response.function_call_arguments.done":
+                        arguments = getattr(event, "arguments", None)
+                        name = getattr(event, "name", None)
+                        item_key = context.call_key_by_reference.get(
+                            str(event.item_id), str(event.item_id)
+                        )
+                        await state.upsert_tool_call(
+                            item_key,
+                            name=name or None,
+                            arguments_complete=arguments,
+                        )
+                        state.finalize_tool_call(item_key)
                     elif et in (
                         "response.completed",
                         "response.incomplete",
                     ):
+                        if context.pending_reasoning:
+                            await state.append_reasoning(
+                                "".join(context.pending_reasoning)
+                            )
+                            context.pending_reasoning.clear()
+                            context.pending_reasoning_item = False
                         resp = getattr(event, "response", None)
                         if resp is not None:
-                            usage = _normalize_usage(getattr(resp, "usage", None))
+                            state.set_usage(
+                                _normalize_usage(getattr(resp, "usage", None))
+                            )
                     elif et == "response.failed":
                         resp = getattr(event, "response", None)
                         err = getattr(resp, "error", None) if resp else None
@@ -481,16 +585,7 @@ class DeepSeekResponsesService:
                 if close_fn is not None:
                     await close_fn()
 
-            buffer.tool_calls = [
-                AssistantToolCall(
-                    id=call_ids.get(item_id, item_id),
-                    name=buf[0],
-                    arguments=buf[1],
-                )
-                for item_id, buf in tool_calls.items()
-                if buf[0]
-            ]
-            return buffer.assemble(usage)
+            return state.assemble()
         except asyncio.CancelledError:
             raise
         except StreamAbortedError:
