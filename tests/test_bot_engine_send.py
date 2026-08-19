@@ -5,8 +5,8 @@ import pytest
 
 from core.engine.client import (
     BotEngine,
-    _ReplyDeliveryState,
     _is_passive_reply_limit_error,
+    _ReplyDeliveryState,
 )
 
 
@@ -31,8 +31,47 @@ def make_api():
 
 def test_passive_reply_limit_error_is_narrow():
     assert _is_passive_reply_limit_error(RuntimeError("被动回复时间或者次数超过限制"))
+    assert _is_passive_reply_limit_error(
+        RuntimeError(
+            "QQ Bot API error [400] /v2/groups/abc/messages: 回复消息msg_id已过期"
+        )
+    )
+    assert _is_passive_reply_limit_error(
+        RuntimeError(
+            "QQ Bot API error [400] /v2/groups/abc/messages: 回复消息msg_id已失效"
+        )
+    )
+    assert _is_passive_reply_limit_error(
+        RuntimeError(
+            "QQ Bot API error [400] /v2/users/abc/messages: 回复消息msg_id不存在"
+        )
+    )
     assert not _is_passive_reply_limit_error(RuntimeError("QQ Bot API timeout"))
     assert not _is_passive_reply_limit_error(RuntimeError("bad request"))
+    # msg_id 本身失效应降级主动发送，但普通协议错误不能误判
+    assert not _is_passive_reply_limit_error(
+        RuntimeError("QQ Bot API error [400] /v2/groups/abc/messages: 参数错误")
+    )
+
+
+@pytest.mark.asyncio
+async def test_expired_reply_msgid_falls_back_proactively():
+    api = make_api()
+    api.send_text.side_effect = RuntimeError(
+        "QQ Bot API error [400] /v2/groups/abc/messages: 回复消息msg_id已过期"
+    )
+    engine = make_engine(api)
+
+    await engine._send("group-1", "hello", reply_to="message-1", is_group=True)
+
+    # 第一次以 reply_to=message-1 被动发送失败，msg_id 过期，应降级为不带 msg_id 的主动发送
+    api.send_text.assert_awaited_once_with(
+        "group", "group-1", "hello", reply_to="message-1", markdown=True, retries=1
+    )
+    api.post_group_message.assert_awaited_once()
+    sent_msg = api.post_group_message.await_args.args[1]
+    assert sent_msg.msg_id is None
+    assert sent_msg.content == "hello"
 
 
 @pytest.mark.asyncio
@@ -69,9 +108,13 @@ async def test_passive_limit_switches_all_following_chunks_to_proactive():
 
     assert api.send_text.await_count == 1
     assert api.post_group_message.await_count == 2
-    sent_contents = [call.args[1].content for call in api.post_group_message.await_args_list]
+    sent_contents = [
+        call.args[1].content for call in api.post_group_message.await_args_list
+    ]
     assert sent_contents == ["[1/2]\none", "[2/2]\ntwo"]
-    assert all(call.args[1].msg_id is None for call in api.post_group_message.await_args_list)
+    assert all(
+        call.args[1].msg_id is None for call in api.post_group_message.await_args_list
+    )
 
 
 @pytest.mark.asyncio

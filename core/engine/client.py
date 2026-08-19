@@ -55,10 +55,15 @@ def _is_passive_reply_limit_error(exc: BaseException) -> bool:
 
     text = " ".join(messages)
     return (
+        # QQ 标准被动回复超限错误
         "被动回复时间或者次数超过限制" in text
         or "passive reply" in text
         and ("time" in text or "count" in text)
         and ("limit" in text or "exceed" in text)
+        # 被回复的消息 msg_id 已过期/失效/不存在 —— 被动回复窗口已关闭，
+        # 需降级为主动发送（不带 reply_to）才能送达。
+        or ("msg_id" in text or "msgid" in text)
+        and any(k in text for k in ("过期", "失效", "无效", "不存在"))
     )
 
 
