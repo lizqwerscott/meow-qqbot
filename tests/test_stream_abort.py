@@ -253,6 +253,50 @@ def _ev(t, **kw):
 
 
 class TestDeepSeekStreamAbort:
+    def test_messages_to_input_preserves_reasoning_for_tool_turn(self):
+        """带工具调用的 assistant turn 必须完整重放 reasoning。"""
+        from core.ai.deepseek_service import _messages_to_input
+
+        instructions, items = _messages_to_input(
+            [
+                {"role": "system", "content": "系统约束"},
+                {"role": "user", "content": "查一下天气"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "先确认城市，再调用工具。",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "weather",
+                                "arguments": '{"city":"上海"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "content": '{"temperature":28}',
+                },
+            ]
+        )
+
+        assert instructions == "系统约束"
+        assert [item["type"] for item in items] == [
+            "message",
+            "reasoning",
+            "function_call",
+            "function_call_output",
+        ]
+        assert items[1]["content"] == [
+            {"type": "reasoning_text", "text": "先确认城市，再调用工具。"}
+        ]
+        assert items[2]["call_id"] == "call-1"
+        assert items[2]["arguments"] == '{"city":"上海"}'
+
     def test_failed_event_raises(self):
         """response.failed 事件 → StreamAbortedError（API 侧失败不算正常完成）。"""
 
