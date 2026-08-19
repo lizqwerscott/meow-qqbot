@@ -17,6 +17,7 @@ import pytest
 
 from core.ai.protocol import (
     AssistantMessage,
+    AssistantToolCall,
     StreamAbortedError,
     StreamReset,
 )
@@ -29,6 +30,8 @@ from core.markdown_split import (
     pending_starts_incomplete,
     trailing_structure,
 )
+from core.tools import tool_loop as tool_loop_module
+from core.tools._types import ToolResult
 from core.tools.tool_loop import ToolLoop
 from tests.stream_test_helpers import emit_snapshot
 
@@ -336,6 +339,37 @@ class _MockSvc:
         }
 
 
+class _SuppressReplySvc(_MockSvc):
+    def __init__(self, text):
+        super().__init__(text=text)
+        self.calls = 0
+
+    async def chat_completion_stream(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        temperature=None,
+        max_tokens=None,
+        callbacks=None,
+    ):
+        self.calls += 1
+        if self.calls > 1:
+            return AssistantMessage(), {"prompt_tokens": 1, "completion_tokens": 1}
+
+        await emit_snapshot(callbacks, self.text)
+        return AssistantMessage(
+            content=self.text,
+            tool_calls=[
+                AssistantToolCall(
+                    id="call-1",
+                    name="heartbeat_respond",
+                    arguments='{"notify": false}',
+                )
+            ],
+        ), {"prompt_tokens": 1, "completion_tokens": 1}
+
+
 def _make_loop(svc, block_chars=800, idle_ms=1000):
     ctx = NS(
         ai=NS(
@@ -433,6 +467,37 @@ class TestStreamBlockIntegration:
         ret, sent, streamed = asyncio.run(_run_case(_MockSvc(text="NO_REPLY")))
         assert streamed == [] and sent == []
         ret, sent, streamed = asyncio.run(_run_case(_MockSvc(text="   NO_REPLY")))
+        assert streamed == [] and sent == []
+
+    def test_suppressed_reply_cancels_idle_flush(self, monkeypatch):
+        """抑制回复的工具轮次不得遗留流式 idle timer。"""
+        svc = _SuppressReplySvc("抑制回复的流式文本" * 20)
+        loop = _make_loop(svc, idle_ms=50)
+        streamed, sent = [], []
+
+        async def reply_cb(chat_id, content, message_id, is_group):
+            sent.append(content)
+
+        async def stream_cb(chunk):
+            streamed.append(chunk)
+
+        async def execute_suppressed(*args, **kwargs):
+            await asyncio.sleep(0.1)
+            return ToolResult(content="ok", no_reply=True)
+
+        monkeypatch.setattr(tool_loop_module, "execute_tool", execute_suppressed)
+        ret = asyncio.run(
+            loop.run(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=None,
+                chat_id="c1",
+                is_group=True,
+                reply_to="m1",
+                reply_callback=reply_cb,
+                stream_callback=stream_cb,
+            )
+        )
+        assert ret == (False, False)
         assert streamed == [] and sent == []
 
     def test_abort_after_probe_stops_loop(self):

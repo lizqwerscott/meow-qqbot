@@ -1189,7 +1189,7 @@ class AgentEngine:
         import time as _time
 
         from core.tools.impl.heartbeat import heartbeat_response as _heartbeat_response
-        from core.tools.tool_loop import _is_silent_reply_text as _check_silent
+        from core.tools.stream_delivery import is_silent_reply_text as _check_silent
 
         result = WakeTurnResult()
 
