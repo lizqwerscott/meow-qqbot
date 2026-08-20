@@ -57,9 +57,9 @@ class ArchiveCommand:
             f"当前消息: {count} 条\n"
             f"最后活跃: {last_act}\n"
             f"归档摘要: {status['archive_count']} 个\n"
-            f"归档时间: 每日 {self.archive_manager._archive_hour}:00\n"
-            f"回放: {self.archive_manager._replay_count} 条\n"
-            f"摘要: {self.archive_manager._summary_count} 条",
+            f"归档触发: 跨天首条消息（按消息时间戳）\n"
+            f"回放: {self.archive_manager.replay_count} 条\n"
+            f"摘要: {self.archive_manager.summary_count} 条",
         )
 
     async def _list_archives(

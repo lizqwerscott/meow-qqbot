@@ -1,16 +1,20 @@
 """ArchiveManager — 会话归档 + 自动摘要 + 上下文回放
 
-消息驱动触发：每 dispatch() 检查日期边界，跨天则：
+消息驱动触发：每条 TEXT 消息前检查消息流中是否存在"今天之前"的消息
+（按消息时间戳判断跨天，不依赖 last_activity），跨天则归档一次（同一天
+内只归档一次，状态持久化跨重启）：
 1. 重命名 JSONL → .archived.<timestamp>（保留全部原始消息）
-2. 提取最后 N 条 user/assistant 消息 → 写入 .md 摘要
-3. 最近 M 条消息回放到新 session
+2. 今天之前（被归档）的消息中取最后 N 条 user/assistant 消息 → 写入 .md 摘要
+3. 最近 M 条消息回放到新 session（不看时间，只看消息数量）
 4. 首次 build() 时注入归档摘要（仅一次，后续不再重复）
 """
 
 import asyncio
+import json
 import logging
+import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -34,20 +38,6 @@ _DEFAULT_RETENTION_DAYS = 30
 def _format_archive_timestamp(t: Optional[float] = None) -> str:
     dt = datetime.fromtimestamp(t or time.time())
     return dt.strftime("%Y-%m-%dT%H-%M-%S")
-
-
-def _daily_reset_at(hour: int, t: Optional[float] = None) -> float:
-    ts = t or time.time()
-    dt = datetime.fromtimestamp(ts)
-    try:
-        today_reset = dt.replace(hour=hour, minute=0, second=0, microsecond=0)
-    except ValueError:
-        today_reset = dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(
-            hours=hour
-        )
-    if today_reset.timestamp() > ts:
-        today_reset -= timedelta(days=1)
-    return today_reset.timestamp()
 
 
 def _date_str(t: Optional[float] = None) -> str:
@@ -107,10 +97,47 @@ class ArchiveManager:
         self.merge_window_seconds = merge_window_seconds
 
         self._pending_injection: Set[str] = set()
+        # chat_id → 上次自动归档的日期（防止同一天重复归档；持久化跨重启）
+        self._last_daily_archive: Dict[str, str] = {}
+        self._daily_state_lock = threading.Lock()
+        self._daily_state_path = Path(memory_dir).parent / "daily_archive_state.json"
+        self._load_daily_state()
 
     @property
     def _store(self):
         return self._cm.store
+
+    @property
+    def replay_count(self) -> int:
+        """回放保留的消息条数（最近 N 条，不看时间）。"""
+        return self._replay_count
+
+    @property
+    def summary_count(self) -> int:
+        """摘要取最近 N 条有效消息。"""
+        return self._summary_count
+
+    # ── 同日归档状态持久化 ──
+
+    def _load_daily_state(self) -> None:
+        """从磁盘恢复 {chat_id: 归档日期}，保证重启后同一天仍只归档一次。"""
+        try:
+            if self._daily_state_path.is_file():
+                data = json.loads(self._daily_state_path.read_text(encoding="utf-8"))
+                self._last_daily_archive = {k: str(v) for k, v in data.items()}
+        except Exception as e:
+            _log.warning("加载归档状态失败 %s: %s", self._daily_state_path, e)
+
+    def _save_daily_state(self) -> None:
+        try:
+            self._daily_state_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._daily_state_lock:
+                self._daily_state_path.write_text(
+                    json.dumps(self._last_daily_archive, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+        except Exception as e:
+            _log.warning("保存归档状态失败 %s: %s", self._daily_state_path, e)
 
     # ── 公开方法 ──
 
@@ -122,14 +149,33 @@ class ArchiveManager:
                 return None
 
             now = time.time()
-            today_reset = _daily_reset_at(self._archive_hour, now)
+            today = _date_str(now)
 
-            if ctx.last_activity >= today_reset:
+            # 同一天内只归档一次（回放保留的旧消息会跨天存在，避免反复触发）
+            if self._last_daily_archive.get(chat_id) == today:
                 return None
 
-            return await self._do_archive(ctx, chat_id, is_group, "daily")
+            # 按消息时间戳判断跨天：消息流中存在"今天之前"的消息即触发归档。
+            # 不依赖 last_activity（context 被清理后重载会把 last_activity 刷成
+            # 加载时刻，掩盖跨天事实）。
+            if not self._crossed_day(ctx.get_history(), today):
+                return None
+
+            result = await self._do_archive(ctx, chat_id, is_group, "daily")
+            if result is not None:
+                self._last_daily_archive[chat_id] = today
+                self._save_daily_state()
+            return result
 
         return await self._cm._with_context_locked(chat_id, _do)
+
+    @staticmethod
+    def _crossed_day(messages: List[Any], today: str) -> bool:
+        """消息流中是否存在"今天之前"的消息（即跨天）。
+
+        用严格小于而非不等：未来时间戳（时钟偏移）不算跨天，避免误触发。
+        """
+        return any(_date_str(m.timestamp) < today for m in messages)
 
     def load_recent_summaries(self, chat_id: str) -> Optional[str]:
         mem_dir = _get_memory_dir(self._memory_dir, chat_id)
@@ -214,6 +260,16 @@ class ArchiveManager:
                         except Exception as e:
                             _log.warning("清理摘要文件失败 %s: %s", f.name, e)
 
+        # 清理过期的同日归档状态条目
+        cutoff_date = _date_str(time.time() - retention_seconds)
+        stale_chats = [
+            cid for cid, d in self._last_daily_archive.items() if d < cutoff_date
+        ]
+        if stale_chats:
+            for cid in stale_chats:
+                self._last_daily_archive.pop(cid, None)
+            self._save_daily_state()
+
         if removed:
             _log.info("归档清理完成: 移除了 %d 个文件", removed)
         return removed
@@ -253,12 +309,15 @@ class ArchiveManager:
         # 2. 收集消息
         all_msgs = ctx.get_history()
 
-        # 3. 提取回放消息
+        # 3. 提取回放消息（保留最近 N 条，不看时间，只看数量）
         replay_msgs = self._extract_replay_messages(all_msgs, self._replay_count)
 
-        # 4. 生成摘要文本
+        # 4. 生成摘要：只总结"被归档的部分"（今天之前的消息）。
+        #    按日期切分而非按回放数量切分：即使跨天后的第一条消息非 TEXT
+        #    （触发延迟到后面某条 TEXT），今天的消息也永远不会被卷进摘要。
+        archived_msgs = [m for m in all_msgs if _date_str(m.timestamp) < date]
         summary_text = self._format_summary_text(
-            all_msgs,
+            archived_msgs,
             self._summary_count,
             is_group,
             chat_id,
@@ -307,20 +366,34 @@ class ArchiveManager:
 
     # ── 消息提取 ──
 
+    def _is_replayable(self, msg: Any) -> bool:
+        """消息是否参与回放/摘要（过滤 tool、工具调用、表情、system、空内容）。
+
+        回放与摘要共用同一套谓词，避免过滤逻辑漂移。
+        """
+        if msg.role == "tool":
+            return False
+        if msg.role == "assistant" and msg.tool_calls:
+            return False
+        if (
+            msg.role == "assistant"
+            and msg.content
+            and "[助手发送了一个表情]" in msg.content
+        ):
+            return False
+        if msg.sender_id == "system":
+            return False
+        content = msg.content or ""
+        if msg.role == "user":
+            content = strip_content_prefix(content)
+        return bool(content.strip())
+
     def _extract_replay_messages(self, messages: List[Any], count: int) -> List[Any]:
+        if count <= 0:
+            return []
         result: List[ChatMessage] = []
         for msg in reversed(messages):
-            if msg.role == "tool":
-                continue
-            if msg.role == "assistant" and msg.tool_calls:
-                continue
-            if (
-                msg.role == "assistant"
-                and msg.content
-                and "[助手发送了一个表情]" in msg.content
-            ):
-                continue
-            if msg.sender_id == "system":
+            if not self._is_replayable(msg):
                 continue
 
             content = msg.content or ""
@@ -355,31 +428,11 @@ class ArchiveManager:
         chat_id: str,
         date: str,
     ) -> Optional[str]:
-        # 1. 正向收集有效消息
+        # 1. 正向收集有效消息（与回放共用同一套过滤谓词，避免漂移）
         selected: List[ChatMessage] = []
         for msg in messages:
-            if msg.role == "tool":
+            if not self._is_replayable(msg):
                 continue
-            if msg.role == "assistant" and msg.tool_calls:
-                continue
-            if (
-                msg.role == "assistant"
-                and msg.content
-                and "[助手发送了一个表情]" in msg.content
-            ):
-                continue
-            if msg.sender_id == "system":
-                continue
-
-            if msg.role == "user":
-                raw = strip_content_prefix(msg.content or "")
-                if not raw:
-                    continue
-            else:
-                raw = msg.content or ""
-                if not raw:
-                    continue
-
             selected.append(msg)
 
         # 取最后 count 条

@@ -265,8 +265,7 @@ class ServiceGraph:
                 merge_window_seconds=_merge_ws,
             )
             _log.info(
-                "归档系统已启用 (每日 %d:00 检查, 摘要 %d 条, 回放 %d 条)",
-                archive_config.get("archive_hour", 4),
+                "归档系统已启用 (跨天消息触发, 摘要 %d 条, 回放 %d 条)",
                 archive_config.get("summary_count", 15),
                 archive_config.get("replay_count", 6),
             )
