@@ -50,11 +50,25 @@ async def session_list(
 
     archived_counts = await context_manager.get_archived_sessions_summary_async()
 
+    # 并行获取所有会话的摘要信息，提升性能
+    summaries = await asyncio.gather(
+        *[context_manager.get_session_summary_async(cid) for cid in all_chat_ids],
+        return_exceptions=True
+    )
+
     sessions = []
-    for cid in all_chat_ids:
-        summary = await context_manager.get_session_summary_async(cid)
-        sessions.append(
-            {
+    for cid, summary in zip(all_chat_ids, summaries):
+        # 处理可能的异常
+        if isinstance(summary, Exception):
+            sessions.append({
+                "chat_id": cid,
+                "message_count": 0,
+                "last_activity": "-",
+                "estimated_tokens": 0,
+                "archived_count": archived_counts.get(cid, 0),
+            })
+        else:
+            sessions.append({
                 "chat_id": cid,
                 "message_count": summary["message_count"],
                 "last_activity": time.strftime(
@@ -63,8 +77,7 @@ async def session_list(
                 ),
                 "estimated_tokens": summary["estimated_tokens"],
                 "archived_count": archived_counts.get(cid, 0),
-            }
-        )
+            })
 
     sessions.sort(key=lambda s: s["last_activity"], reverse=True)
 
