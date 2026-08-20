@@ -18,6 +18,10 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
         else TtsService.default_tool_config()
     )
 
+    tag_examples = (
+        f"\n\n{backend_config.tag_examples}" if backend_config.tag_examples else ""
+    )
+
     tts_params = {
         "type": "object",
         "properties": {
@@ -175,6 +179,7 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
                 f"- {backend_config.text_rules}\n"
                 f"- {backend_config.instructions_rules}\n"
                 f"- {backend_config.voice_mode_rules}"
+                f"{tag_examples}"
             ),
             parameters=tts_params,
             handler=_synthesize_speech,

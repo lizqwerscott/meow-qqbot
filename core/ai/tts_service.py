@@ -32,6 +32,7 @@ class TtsBackendConfig:
     text_rules: str
     instructions_rules: str
     voice_mode_rules: str
+    tag_examples: str
     voice_modes: tuple[str, ...]
     default_base_url: str
 
@@ -53,6 +54,7 @@ class TtsService:
                 "VoxCPM：preset（默认）使用管理员预设的克隆音色；creative 不使用预设音色，"
                 "可自由设计新声音。"
             ),
+            tag_examples="",
             voice_modes=("preset", "creative"),
             default_base_url="http://localhost:8080",
         ),
@@ -60,7 +62,7 @@ class TtsService:
             text_rules=(
                 "S2-Pro：情绪、语气和效果标签必须使用 [bracket] 语法，并放在所修饰句子之前，"
                 "例如 [excited] 今天真不错。标签可用自然语言描述，但每句最多一个且不要滥用。"
-                "正文使用带句号的自然句；禁止分号和圆括号。"
+                "正文使用带句号的自然句；长文本使用干净标点也可正常生成；禁止分号和圆括号。"
             ),
             instructions_rules=(
                 "S2-Pro：只描述当前句子的情绪、语气或效果，例如「兴奋地说」「轻声耳语」。"
@@ -69,6 +71,17 @@ class TtsService:
             voice_mode_rules=(
                 "S2-Pro：仅支持 preset（默认）；管理员同时配置 ref_audio 和 ref_text 时使用克隆音色，"
                 "未配置参考音频时按服务默认音色生成。"
+            ),
+            tag_examples=(
+                "S2-Pro 标签示例（支持自由自然语言描述）：\n"
+                "- 情绪：[excited] [curious] [skeptical] [frustrated] [delighted] [grateful] "
+                "[confident] [sad] [angry] [surprised]\n"
+                "- 语气：[whispering] [shouting] [soft tone] [in a hurry tone]\n"
+                "- 效果：[laughing] [chuckling] [sighing] [sobbing] [panting]\n"
+                "- 自然描述：[speaking slowly and solemnly] [with deep sincerity] "
+                "[with quiet confidence]\n"
+                "标签放在所修饰句子前；每句最多一个标签；短文本不要堆叠标签；"
+                "相邻句子可使用对比情绪增加表现力。"
             ),
             voice_modes=("preset",),
             default_base_url="http://localhost:3030",

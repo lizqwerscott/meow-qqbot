@@ -254,6 +254,11 @@ async def test_tts_tool_prompt_uses_current_backend_rules(tmp_path):
     s2_text_rules = s2_entry.parameters["properties"]["text"]["description"]
     voxcpm_text_rules = voxcpm_entry.parameters["properties"]["text"]["description"]
     assert "S2-Pro" in s2_entry.description
+    assert "[excited] [curious] [skeptical]" in s2_entry.description
+    assert "[whispering] [shouting] [soft tone]" in s2_entry.description
+    assert "[laughing] [chuckling] [sighing]" in s2_entry.description
+    assert "每句最多一个标签" in s2_entry.description
+    assert "长文本使用干净标点也可正常生成" in s2_text_rules
     assert "禁止分号和圆括号" in s2_text_rules
     assert "VoxCPM" not in s2_entry.description
     assert s2_entry.parameters["properties"]["voice_mode"]["enum"] == ["preset"]
