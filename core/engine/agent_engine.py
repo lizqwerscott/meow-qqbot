@@ -415,10 +415,7 @@ class AgentEngine:
                 if outbox:
                     payload = self._build_side_effect_payload(pending)
                     prepared_new = await outbox.prepare(chat_id, message.id, payload)
-                if (
-                    getattr(self, "_archive_manager", None)
-                    and message.msg_type == MessageType.TEXT
-                ):
+                if getattr(self, "_archive_manager", None):
                     try:
                         await self._archive_manager.archive_if_stale(
                             chat_id, message.is_group
