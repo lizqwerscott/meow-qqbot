@@ -72,6 +72,14 @@ from core.webui import create_app, start_webui
 _log = logging.getLogger(__name__)
 
 
+def _resolve_tts_backend_and_base_url(tts_config: Mapping) -> tuple[str, str]:
+    """解析 TTS 后端及其显式或后端默认地址。"""
+    backend, backend_config = TtsService.resolve_backend(
+        tts_config.get("backend", "voxcpm")
+    )
+    return backend, tts_config.get("base_url", backend_config.default_base_url)
+
+
 class ServiceGraph:
     """服务依赖图 — 单次 build() 完成所有构造 + 连线。"""
 
@@ -413,8 +421,9 @@ class ServiceGraph:
         tts_config = self.cfg.tts
         self.tts_service = None
         if tts_config.get("enabled", False):
+            tts_backend, tts_base_url = _resolve_tts_backend_and_base_url(tts_config)
             self.tts_service = TtsService(
-                base_url=tts_config.get("base_url", "http://localhost:8080"),
+                base_url=tts_base_url,
                 http_client=self.http_client,
                 model=tts_config.get("model", "voxcpm"),
                 temp_dir=tts_config.get("temp_dir", "data/tts_temp/"),
@@ -425,10 +434,13 @@ class ServiceGraph:
                 temperature=tts_config.get("temperature"),
                 seed=tts_config.get("seed"),
                 max_steps=tts_config.get("max_steps"),
+                backend=tts_backend,
+                s2_params=tts_config.get("s2_params"),
             )
             _log.info(
-                "TTS 语音服务已初始化 (base_url=%s, model=%s)",
-                tts_config.get("base_url", "http://localhost:8080"),
+                "TTS 语音服务已初始化 (backend=%s, base_url=%s, model=%s)",
+                tts_backend,
+                tts_base_url,
                 tts_config.get("model", "voxcpm"),
             )
 

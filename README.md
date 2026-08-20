@@ -71,6 +71,33 @@ export OPENAI_BASE_URL="https://api.openai.com/v1"
 export OPENAI_MODEL="gpt-3.5-turbo"
 ```
 
+### S2-Pro 语音合成
+
+启动 S2-Pro 服务后，在实际使用的 TOML 配置中添加：
+
+```toml
+[tts]
+enabled = true
+backend = "s2-pro"
+base_url = "http://127.0.0.1:3030"
+ref_audio = "characters/voice-reference.wav" # 可选，5-30 秒 WAV/MP3
+ref_text = "参考音频对应的完整文本"           # 启用 ref_audio 克隆时必填；缺失则使用默认音色
+
+[tts.s2_params]
+max_new_tokens = 4096
+temperature = 0.58
+top_p = 0.88
+top_k = 40
+min_tokens_before_end = 0
+```
+
+`backend` 不配置时仍使用原有的 `voxcpm` 接口。S2-Pro 的 `instructions` 会转换为
+`[bracket]` 情绪标签；正文和 `instructions` 不应包含半角/全角分号或圆括号，服务会将
+分号替换为逗号并移除圆括号。服务返回的 32-bit float WAV 会自动归一化为 16-bit PCM WAV，
+以兼容 QQ 语音上传。`s2_params` 可选参数为 `max_new_tokens`、`temperature`、`top_p`、
+`top_k` 和 `min_tokens_before_end`。工具定义会根据当前 `backend` 注入对应模型的正文、
+情绪标签和 `voice_mode` 规则，避免将 VoxCPM 与 S2-Pro 的控制语法混用。
+
 ## 运行
 
 ```bash
