@@ -58,7 +58,7 @@ class ArchiveCommand:
             f"最后活跃: {last_act}\n"
             f"归档摘要: {status['archive_count']} 个\n"
             f"归档触发: 跨天首条消息（按消息时间戳）\n"
-            f"回放: {self.archive_manager.replay_count} 条\n"
+            f"回放: {self.archive_manager.replay_count} 条（昨天尾部）\n"
             f"摘要: {self.archive_manager.summary_count} 条",
         )
 
@@ -104,7 +104,7 @@ class ArchiveCommand:
             return make_reply(
                 input_message,
                 f"会话 {target[:24]}… 归档完成。\n"
-                f"回放: {result.replay_count} 条\n"
+                f"保留: {result.replay_count} 条（含今天全部）\n"
                 f"摘要: {'已生成' if result.summary_path else '无'}\n"
                 f"归档: {'已重命名' if result.archive_path else '无文件'}",
             )

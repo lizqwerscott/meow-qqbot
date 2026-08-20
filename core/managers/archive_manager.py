@@ -3,9 +3,9 @@
 消息驱动触发：每条 TEXT 消息前检查消息流中是否存在"今天之前"的消息
 （按消息时间戳判断跨天，不依赖 last_activity），跨天则归档一次（同一天
 内只归档一次，状态持久化跨重启）：
-1. 重命名 JSONL → .archived.<timestamp>（保留全部原始消息）
+1. 重命名 JSONL → .archived.<timestamp>（全量快照，保留全部原始消息）
 2. 今天之前（被归档）的消息中取最后 N 条 user/assistant 消息 → 写入 .md 摘要
-3. 最近 M 条消息回放到新 session（不看时间，只看消息数量）
+3. 保留：今天的消息全部保留 + 昨天尾部 M 条回放衔接上下文（不看时间，只看数量）
 4. 首次 build() 时注入归档摘要（仅一次，后续不再重复）
 """
 
@@ -309,22 +309,30 @@ class ArchiveManager:
         # 2. 收集消息
         all_msgs = ctx.get_history()
 
-        # 3. 提取回放消息（保留最近 N 条，不看时间，只看数量）
-        replay_msgs = self._extract_replay_messages(all_msgs, self._replay_count)
+        # 3. 按日期切分：今天及以后的消息全部保留（绝不归档，即使触发延迟
+        #    到跨天后的某条 TEXT——非 TEXT 消息已先进入 history）；
+        #    昨天及更早的消息归档。回放仅用于衔接上下文：今天消息已够多
+        #    （>= replay_count）时无需回放昨天的；不足时用昨天尾部补足。
+        today_msgs = [m for m in all_msgs if _date_str(m.timestamp) >= date]
+        old_msgs = [m for m in all_msgs if _date_str(m.timestamp) < date]
+        if len(today_msgs) >= self._replay_count:
+            replay_msgs = []
+        else:
+            need = self._replay_count - len(today_msgs)
+            replay_msgs = self._extract_replay_messages(old_msgs, need)
+        keep_msgs = replay_msgs + today_msgs  # 时间序：昨天尾部在前，今天在后
 
-        # 4. 生成摘要：只总结"被归档的部分"（今天之前的消息）。
-        #    按日期切分而非按回放数量切分：即使跨天后的第一条消息非 TEXT
-        #    （触发延迟到后面某条 TEXT），今天的消息也永远不会被卷进摘要。
-        archived_msgs = [m for m in all_msgs if _date_str(m.timestamp) < date]
+        # 4. 生成摘要：只总结被归档的部分（今天之前），
+        #    今天的消息永远不会被卷进摘要。
         summary_text = self._format_summary_text(
-            archived_msgs,
+            old_msgs,
             self._summary_count,
             is_group,
             chat_id,
             date,
         )
 
-        # 5. 归档（后台线程）
+        # 5. 归档（后台线程；rename 全量快照，含今天的消息作为历史保留）
         archive_path = await asyncio.to_thread(store.archive, chat_id, ts)
 
         # 6. 写入摘要 .md（后台线程）
@@ -332,22 +340,24 @@ class ArchiveManager:
         if summary_text:
             summary_path = await self._write_memory_file(chat_id, date, summary_text)
 
-        # 7. 清空 + 回放新历史
-        ctx.set_messages(replay_msgs)
+        # 7. 保留新历史（今天全部 + 昨天尾部回放）
+        ctx.set_messages(keep_msgs)
         ctx.last_activity = time.time()
 
         # 8. 写入新数据（后台线程）
         await asyncio.to_thread(
             store.flush,
             chat_id,
-            [m.to_dict() for m in replay_msgs],
+            [m.to_dict() for m in keep_msgs],
         )
 
         _log.info(
-            "归档完成 [%s..]: reason=%s replay=%d summary=%s",
+            "归档完成 [%s..]: reason=%s keep=%d (replay=%d+今天%d) summary=%s",
             chat_id[:12],
             reason,
+            len(keep_msgs),
             len(replay_msgs),
+            len(today_msgs),
             summary_path or "无",
         )
 
@@ -356,7 +366,7 @@ class ArchiveManager:
             reason=reason,
             archive_path=archive_path,
             summary_path=summary_path,
-            replay_count=len(replay_msgs),
+            replay_count=len(keep_msgs),
         )
 
         if summary_text and reason != "manual":

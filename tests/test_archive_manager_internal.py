@@ -173,6 +173,80 @@ async def test_archive_if_stale_today_only_no_trigger(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_archive_keeps_today_messages(tmp_path):
+    """延迟触发场景：跨天后第一条是非 TEXT（未触发归档），等到某条 TEXT
+    才归档时，今天早先的消息必须全部保留；且今天消息已 >= replay_count，
+    昨天的消息无需回放（摘要已注入，回放仅用于上下文衔接）。"""
+    now = time.time()
+    yesterday = now - 86400
+    msgs = [
+        ChatMessage(
+            role="user",
+            content=f"昨天{i}",
+            timestamp=yesterday - (4 - i) * 60,
+            message_id=f"y{i}",
+        )
+        for i in range(5)
+    ] + [
+        ChatMessage(
+            role="user",
+            content=f"今天{i}",
+            timestamp=now - (2 - i) * 60,
+            message_id=f"t{i}",
+        )
+        for i in range(3)
+    ]
+    ctx = _make_ctx(msgs)
+    cm = _FakeCM(ctx)
+    mgr = ArchiveManager(
+        context_manager=cm, memory_dir=str(tmp_path / "mem"), replay_count=2
+    )
+    result = await mgr.archive_if_stale("chat_001", is_group=False)
+    assert result is not None
+    assert result.replay_count == 3  # 今天 3 条已 >= 2，昨天不回放
+
+    kept = ctx.set_messages.call_args[0][0]
+    contents = [m.content for m in kept]
+    assert contents == ["今天0", "今天1", "今天2"]
+
+
+@pytest.mark.asyncio
+async def test_archive_replays_yesterday_tail_when_today_sparse(tmp_path):
+    """今天消息不足 replay_count 时，用昨天尾部补足上下文衔接
+    （此时摘要尚未注入，昨天回放是唯一上下文）。"""
+    now = time.time()
+    yesterday = now - 86400
+    msgs = [
+        ChatMessage(
+            role="user",
+            content=f"昨天{i}",
+            timestamp=yesterday - (3 - i) * 60,
+            message_id=f"y{i}",
+        )
+        for i in range(4)
+    ] + [
+        ChatMessage(
+            role="user",
+            content="今天0",
+            timestamp=now,
+            message_id="t0",
+        )
+    ]
+    ctx = _make_ctx(msgs)
+    cm = _FakeCM(ctx)
+    mgr = ArchiveManager(
+        context_manager=cm, memory_dir=str(tmp_path / "mem"), replay_count=2
+    )
+    result = await mgr.archive_if_stale("chat_001", is_group=False)
+    assert result is not None
+    assert result.replay_count == 2  # 昨天尾部 1 + 今天 1
+
+    kept = ctx.set_messages.call_args[0][0]
+    contents = [m.content for m in kept]
+    assert contents == ["昨天3", "今天0"]
+
+
+@pytest.mark.asyncio
 async def test_archive_manual_does_not_inject(tmp_path):
     now = time.time()
     msgs = [ChatMessage(role="user", content="随便", timestamp=now - 86400)]
