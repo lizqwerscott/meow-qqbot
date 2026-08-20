@@ -31,6 +31,7 @@ class TtsBackendConfig:
 
     text_rules: str
     instructions_rules: str
+    supports_instructions: bool
     voice_mode_rules: str
     tag_examples: str
     voice_modes: tuple[str, ...]
@@ -50,6 +51,7 @@ class TtsService:
                 "VoxCPM：描述语速、情绪和表达方式；服务会自动将其包进 (...) 后置于正文前。"
                 "preset 只描述情绪/语速/表达，不要改变音色身份；creative 可完整描述身份、音色和情绪。"
             ),
+            supports_instructions=True,
             voice_mode_rules=(
                 "VoxCPM：preset（默认）使用管理员预设的克隆音色；creative 不使用预设音色，"
                 "可自由设计新声音。"
@@ -64,10 +66,8 @@ class TtsService:
                 "例如 [excited] 今天真不错。标签可用自然语言描述，但每句最多一个且不要滥用。"
                 "正文使用带句号的自然句；长文本使用干净标点也可正常生成；禁止分号和圆括号。"
             ),
-            instructions_rules=(
-                "S2-Pro：只描述当前句子的情绪、语气或效果，例如「兴奋地说」「轻声耳语」。"
-                "服务会自动将其转换为正文前的 [bracket] 标签；不要自行写圆括号。"
-            ),
+            instructions_rules="",
+            supports_instructions=False,
             voice_mode_rules=(
                 "S2-Pro：仅支持 preset（默认）；管理员同时配置 ref_audio 和 ref_text 时使用克隆音色，"
                 "未配置参考音频时按服务默认音色生成。"
@@ -182,11 +182,15 @@ class TtsService:
             )
             return None
 
-        if self._backend == "s2-pro":
-            return await self._synthesize_s2_pro(
-                self._normalize_s2_text(text),
-                self._normalize_s2_text(instructions) if instructions else None,
+        if instructions and not self.tool_config.supports_instructions:
+            _log.warning(
+                "TTS backend=%s 不支持 instructions；请将方括号标签直接写入 text",
+                self._backend,
             )
+            return None
+
+        if self._backend == "s2-pro":
+            return await self._synthesize_s2_pro(self._normalize_s2_text(text))
         return await self._synthesize_voxcpm(text, instructions, voice_mode)
 
     async def _synthesize_voxcpm(
@@ -251,17 +255,8 @@ class TtsService:
             )
         ).strip()
 
-    async def _synthesize_s2_pro(
-        self,
-        text: str,
-        instructions: Optional[str],
-    ) -> Optional[bytes]:
-        input_text = text
-        if instructions:
-            tag = instructions.strip()
-            input_text = f"{tag if tag.startswith('[') and tag.endswith(']') else f'[{tag}]'} {text}"
-
-        files = {"text": (None, input_text)}
+    async def _synthesize_s2_pro(self, text: str) -> Optional[bytes]:
+        files = {"text": (None, text)}
         if self._ref_audio_data and self._ref_text:
             files["reference_text"] = (None, self._ref_text)
             files["reference"] = (

@@ -75,7 +75,7 @@ async def test_s2_pro_uses_multipart_clone_request_and_returns_pcm_wav(tmp_path)
             s2_params={"temperature": 0.58, "top_p": 0.88},
             temp_dir=str(tmp_path / "tts"),
         )
-        result = await service.synthesize("Hello", instructions="excited")
+        result = await service.synthesize("[excited] Hello")
 
     assert result is not None
     with wave.open(io.BytesIO(result), "rb") as output:
@@ -131,17 +131,39 @@ async def test_s2_pro_normalizes_restricted_text_and_blank_reference_transcript(
             ref_text=" \t ",
             temp_dir=str(tmp_path / "tts"),
         )
-        result = await service.synthesize(
-            "Hello; (quiet)；（calm）", instructions="（whispering；）"
-        )
+        result = await service.synthesize("[whispering；] Hello; (quiet)；（calm）")
 
     assert result is not None
 
 
 @pytest.mark.asyncio
-async def test_s2_pro_rejects_unsupported_voice_mode(tmp_path):
+async def test_s2_pro_rejects_instructions_without_request(tmp_path):
+    requests = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        pytest.fail(f"不应发送请求: {request.url}")
+        requests.append(request)
+        return httpx.Response(200, content=_float_wav([0.0]), request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        service = TtsService(
+            base_url="http://s2.test",
+            http_client=client,
+            backend="s2-pro",
+            temp_dir=str(tmp_path / "tts"),
+        )
+        result = await service.synthesize("Hello", instructions="excited")
+
+    assert result is None
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_s2_pro_rejects_unsupported_voice_mode_without_request(tmp_path):
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=_float_wav([0.0]), request=request)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         service = TtsService(
@@ -153,6 +175,7 @@ async def test_s2_pro_rejects_unsupported_voice_mode(tmp_path):
         result = await service.synthesize("Hello", voice_mode="creative")
 
     assert result is None
+    assert requests == []
 
 
 @pytest.mark.parametrize(
@@ -261,9 +284,11 @@ async def test_tts_tool_prompt_uses_current_backend_rules(tmp_path):
     assert "长文本使用干净标点也可正常生成" in s2_text_rules
     assert "禁止分号和圆括号" in s2_text_rules
     assert "VoxCPM" not in s2_entry.description
+    assert "instructions" not in s2_entry.parameters["properties"]
     assert s2_entry.parameters["properties"]["voice_mode"]["enum"] == ["preset"]
     assert "creative" not in s2_entry.description
     assert "VoxCPM" in voxcpm_entry.description
+    assert "instructions" in voxcpm_entry.parameters["properties"]
     assert "[laughing]、[sigh]" in voxcpm_text_rules
     assert voxcpm_entry.parameters["properties"]["voice_mode"]["enum"] == [
         "preset",

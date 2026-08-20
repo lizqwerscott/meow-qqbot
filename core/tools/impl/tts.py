@@ -18,37 +18,46 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
         else TtsService.default_tool_config()
     )
 
+    tool_rules = [backend_config.text_rules]
+    if backend_config.supports_instructions:
+        tool_rules.append(backend_config.instructions_rules)
+    tool_rules.append(backend_config.voice_mode_rules)
+    tool_rules_prompt = "\n".join(f"- {rule}" for rule in tool_rules)
+
     tag_examples = (
         f"\n\n{backend_config.tag_examples}" if backend_config.tag_examples else ""
     )
 
+    tts_properties = {
+        "text": {
+            "type": "string",
+            "description": (
+                "要转为语音的文字内容。限制不超过 500 字；至少 3-5 个字，"
+                "过短可能生成断裂音频。\n"
+                f"当前后端正文规则：{backend_config.text_rules}"
+            ),
+        },
+    }
+    if backend_config.supports_instructions:
+        tts_properties["instructions"] = {
+            "type": "string",
+            "description": (
+                "说话风格/语气描述（可选）。\n"
+                f"当前后端 instructions 规则：{backend_config.instructions_rules}"
+            ),
+        }
+    tts_properties["voice_mode"] = {
+        "type": "string",
+        "enum": list(backend_config.voice_modes),
+        "description": (
+            "语音生成模式。\n"
+            f"当前后端 voice_mode 规则：{backend_config.voice_mode_rules}"
+        ),
+    }
+
     tts_params = {
         "type": "object",
-        "properties": {
-            "text": {
-                "type": "string",
-                "description": (
-                    "要转为语音的文字内容。限制不超过 500 字；至少 3-5 个字，"
-                    "过短可能生成断裂音频。\n"
-                    f"当前后端正文规则：{backend_config.text_rules}"
-                ),
-            },
-            "instructions": {
-                "type": "string",
-                "description": (
-                    "说话风格/语气描述（可选）。\n"
-                    f"当前后端 instructions 规则：{backend_config.instructions_rules}"
-                ),
-            },
-            "voice_mode": {
-                "type": "string",
-                "enum": list(backend_config.voice_modes),
-                "description": (
-                    "语音生成模式。\n"
-                    f"当前后端 voice_mode 规则：{backend_config.voice_mode_rules}"
-                ),
-            },
-        },
+        "properties": tts_properties,
         "required": ["text"],
     }
 
@@ -176,9 +185,7 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
                 "3. 用户明确要求用某种语气说话（如'用热情的语气说'、'温柔地说'）\n"
                 "4. 回复内容较短且有感情色彩，适合语音表达\n\n"
                 "当前后端模型规则：\n"
-                f"- {backend_config.text_rules}\n"
-                f"- {backend_config.instructions_rules}\n"
-                f"- {backend_config.voice_mode_rules}"
+                f"{tool_rules_prompt}"
                 f"{tag_examples}"
             ),
             parameters=tts_params,

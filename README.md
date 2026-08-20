@@ -91,11 +91,11 @@ top_k = 40
 min_tokens_before_end = 0
 ```
 
-`backend` 不配置时仍使用原有的 `voxcpm` 接口。S2-Pro 的 `instructions` 会转换为
-`[bracket]` 情绪标签；正文和 `instructions` 不应包含半角/全角分号或圆括号，服务会将
-分号替换为逗号并移除圆括号。服务返回的 32-bit float WAV 会自动归一化为 16-bit PCM WAV，
-以兼容 QQ 语音上传。`s2_params` 可选参数为 `max_new_tokens`、`temperature`、`top_p`、
-`top_k` 和 `min_tokens_before_end`。工具定义会根据当前 `backend` 注入对应模型的正文、
+`backend` 不配置时仍使用原有的 `voxcpm` 接口。S2-Pro 的情绪和效果标签必须直接写入
+`text`，例如 `[excited] 今天真不错。`；它不支持 `instructions` 参数。正文不应包含半角/全角
+分号或圆括号，服务会将分号替换为逗号并移除圆括号。服务返回的 32-bit float WAV 会自动归一化为
+16-bit PCM WAV，以兼容 QQ 语音上传。`s2_params` 可选参数为 `max_new_tokens`、`temperature`、
+`top_p`、`top_k` 和 `min_tokens_before_end`。工具定义会根据当前 `backend` 注入对应模型的正文、
 情绪标签和 `voice_mode` 规则，避免将 VoxCPM 与 S2-Pro 的控制语法混用。
 
 ## 运行
