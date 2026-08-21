@@ -292,14 +292,14 @@ class ChatContext:
         except RuntimeError:
             self.store.flush(
                 self.chat_id,
-                [message.to_dict() for message in self.history],
+                [message.to_storage_dict() for message in self.history],
             )
             return
         if self._save_task and not self._save_task.done():
             self._save_pending = True
             return
         self._save_pending = False
-        messages = [m.to_dict() for m in self.history]
+        messages = [m.to_storage_dict() for m in self.history]
         self._save_task = asyncio.ensure_future(
             asyncio.to_thread(self.store.flush, self.chat_id, messages)
         )

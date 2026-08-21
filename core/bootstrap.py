@@ -266,16 +266,17 @@ class ServiceGraph:
                 context_manager=self.context_manager,
                 memory_dir=archive_config.get("memory_dir", "data/archives/memory/"),
                 archive_hour=archive_config.get("archive_hour", 4),
-                replay_count=archive_config.get("replay_count", 6),
+                replay_count=archive_config.get("replay_count"),
+                replay_gap_seconds=archive_config.get("replay_gap_seconds", 600),
                 summary_count=archive_config.get("summary_count", 15),
                 summary_days=archive_config.get("summary_days", 2),
                 retention_days=archive_config.get("retention_days", 30),
                 merge_window_seconds=_merge_ws,
             )
             _log.info(
-                "归档系统已启用 (跨天消息触发, 摘要 %d 条, 回放 %d 条)",
+                "归档系统已启用 (跨天消息触发, 摘要 %d 条, 回放连续段间隔 %d 秒)",
                 archive_config.get("summary_count", 15),
-                archive_config.get("replay_count", 6),
+                archive_config.get("replay_gap_seconds", 600),
             )
 
         # ── CostTracker ──

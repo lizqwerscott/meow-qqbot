@@ -80,6 +80,14 @@ class ChatMessage:
                 d["reasoning_content"] = self.reasoning_content
         return d
 
+    def to_storage_dict(self) -> Dict:
+        """生成 JSONL/archive 持久化记录，不改变发送给 LLM 的 wire 格式。"""
+        data = self.to_dict()
+        if self.role == "tool":
+            data["timestamp"] = self.timestamp
+            data["tool_name"] = self.tool_name
+        return data
+
     @staticmethod
     def from_dict(data) -> "ChatMessage":
         if isinstance(data, str):

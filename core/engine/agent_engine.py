@@ -415,13 +415,6 @@ class AgentEngine:
                 if outbox:
                     payload = self._build_side_effect_payload(pending)
                     prepared_new = await outbox.prepare(chat_id, message.id, payload)
-                if getattr(self, "_archive_manager", None):
-                    try:
-                        await self._archive_manager.archive_if_stale(
-                            chat_id, message.is_group
-                        )
-                    except Exception as exc:
-                        _log.warning("归档失败 [%s..]: %s", chat_id[:12], exc)
                 nickname = get_user_nickname(message.sender_id) or message.sender_id
                 await self.context_manager.record_chat_type(chat_id, message.is_group)
                 committed = (
@@ -447,6 +440,13 @@ class AgentEngine:
                         message.id,
                     )
                     return None
+                if getattr(self, "_archive_manager", None):
+                    try:
+                        await self._archive_manager.archive_if_stale(
+                            chat_id, message.is_group
+                        )
+                    except Exception as exc:
+                        _log.warning("归档失败 [%s..]: %s", chat_id[:12], exc)
                 admitted_ids[admission_key] = True
                 admitted_ids.move_to_end(admission_key)
                 while len(admitted_ids) > getattr(self, "_max_processed_ids", 1000):

@@ -58,7 +58,7 @@ class ArchiveCommand:
             f"最后活跃: {last_act}\n"
             f"归档摘要: {status['archive_count']} 个\n"
             f"归档触发: 跨天首条消息（按消息时间戳）\n"
-            f"回放: {self.archive_manager.replay_count} 条（昨天尾部）\n"
+            f"回放: 昨天最后一个连续片段（间隔 {self.archive_manager.replay_gap_seconds} 秒）\n"
             f"摘要: {self.archive_manager.summary_count} 条",
         )
 
@@ -98,15 +98,16 @@ class ArchiveCommand:
     ) -> List[Dict[str, Any]]:
         target = chat_id or input_message.chat_id
         try:
-            result = await self.archive_manager.archive_manual(
-                target, input_message.is_group
+            target_is_group = (
+                input_message.is_group if target == input_message.chat_id else None
             )
+            result = await self.archive_manager.archive_manual(target, target_is_group)
             return make_reply(
                 input_message,
                 f"会话 {target[:24]}… 归档完成。\n"
                 f"保留: {result.replay_count} 条（含今天全部）\n"
                 f"摘要: {'已生成' if result.summary_path else '无'}\n"
-                f"归档: {'已重命名' if result.archive_path else '无文件'}",
+                f"归档: {'已写入' if result.archive_path else '无文件'}",
             )
         except Exception as e:
             return make_reply(input_message, f"归档失败: {e}")

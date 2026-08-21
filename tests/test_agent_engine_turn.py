@@ -43,6 +43,54 @@ async def test_admission_duplicate_history_does_not_produce_prompt_fragment():
 
 
 @pytest.mark.asyncio
+async def test_admission_archives_after_message_is_persisted():
+    class ArchiveTracker:
+        def __init__(self, context_manager):
+            self.context_manager = context_manager
+            self.calls = []
+
+        async def archive_if_stale(self, chat_id, is_group):
+            self.calls.append(
+                (chat_id, is_group, list(self.context_manager.user_messages))
+            )
+
+    engine = make_engine(FakeToolLoop())
+    tracker = ArchiveTracker(engine.context_manager)
+    engine._archive_manager = tracker
+    pending = PendingInbound(
+        InputMessage("late", "user", "chat", "hello", False),
+        "hello",
+        "agent",
+    )
+
+    admitted = await engine._admit_pending_message(
+        pending,
+        source="initial",
+        get_user_nickname=lambda sender_id: sender_id,
+    )
+
+    assert admitted is not None
+    assert tracker.calls == [
+        (
+            "chat",
+            False,
+            [
+                (
+                    "chat",
+                    "hello",
+                    "late",
+                    {
+                        "sender_id": "user",
+                        "name": "user",
+                        "timestamp": pending.message.timestamp,
+                    },
+                )
+            ],
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_duplicate_admission_keeps_pending_outbox_effects():
     class DuplicateContextManager(FakeContextManager):
         async def add_user_message_async(self, *args, **kwargs):

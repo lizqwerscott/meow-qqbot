@@ -35,6 +35,12 @@ class ContextStore(ABC):
     def archive(self, chat_id: str, archive_ts: str) -> Optional[str]:
         """归档当前数据。返回归档标识符（如文件路径），无可归档数据则返回 None。"""
 
+    @abstractmethod
+    def archive_messages(
+        self, chat_id: str, archive_ts: str, messages: List[dict]
+    ) -> Optional[str]:
+        """仅归档指定消息，活跃数据由调用方另行刷新。"""
+
     # ── 聊天类型元数据 ──
 
     @abstractmethod
@@ -103,6 +109,17 @@ class JSONLContextStore(ContextStore):
     def release_file_lock(self, chat_id: str) -> None:
         with self._file_lock_guard:
             self._file_locks.pop(chat_id, None)
+
+    def _archive_path(self, chat_id: str, archive_ts: str) -> Path:
+        """在 chat 文件锁内为 archive 分配不覆盖既有文件的路径。"""
+        path = self._get_path(chat_id)
+        base = path.parent / f"{path.name}.archived.{archive_ts}"
+        archive_path = base
+        suffix = 1
+        while archive_path.exists():
+            archive_path = base.with_name(f"{base.name}.{suffix}")
+            suffix += 1
+        return archive_path
 
     # ── 消息持久化 ──
 
@@ -204,8 +221,8 @@ class JSONLContextStore(ContextStore):
     def archive(self, chat_id: str, archive_ts: str) -> Optional[str]:
         with self._acquire_file_lock(chat_id):
             path = self._get_path(chat_id)
-            archive_path = path.parent / f"{path.name}.archived.{archive_ts}"
             if path.exists():
+                archive_path = self._archive_path(chat_id, archive_ts)
                 path.rename(archive_path)
                 with self._lock:
                     self._flushed.pop(chat_id, None)
@@ -216,6 +233,23 @@ class JSONLContextStore(ContextStore):
                 )
                 return str(archive_path)
             return None
+
+    def archive_messages(
+        self, chat_id: str, archive_ts: str, messages: List[dict]
+    ) -> Optional[str]:
+        if not messages:
+            return None
+        with self._acquire_file_lock(chat_id):
+            archive_path = self._archive_path(chat_id, archive_ts)
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            self._write_full(archive_path, messages)
+            _log.info(
+                "已归档 %d 条消息 [%s..] → %s",
+                len(messages),
+                chat_id[:12],
+                archive_path.name,
+            )
+            return str(archive_path)
 
     # ── 聊天类型 ──
 
@@ -376,6 +410,11 @@ class MemoryContextStore(ContextStore):
 
     def archive(self, chat_id: str, archive_ts: str) -> Optional[str]:
         self._data.pop(chat_id, None)
+        return None
+
+    def archive_messages(
+        self, chat_id: str, archive_ts: str, messages: List[dict]
+    ) -> Optional[str]:
         return None
 
     def get_chat_type(self, chat_id: str) -> Optional[bool]:
