@@ -11,6 +11,7 @@ import pytest
 
 from core.ai.tts_service import TtsService
 from core.bootstrap import _resolve_tts_backend_and_base_url
+from core.tools._types import ToolContext
 from core.tools.deps import ToolDeps
 from core.tools.impl.tts import create_tts_entries
 from core.tools.ref import Ref
@@ -256,7 +257,72 @@ async def test_voxcpm_request_preserves_preset_and_creative_modes(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_tts_tool_prompt_uses_current_backend_rules(tmp_path):
+async def test_s2_pro_tool_preserves_text_tag_and_ignores_instructions(tmp_path):
+    generated = _float_wav([0.0])
+    requests = []
+
+    class MediaUploader:
+        async def upload(self, **kwargs):
+            return {"file": "uploaded"}
+
+    class BotEngine:
+        def __init__(self):
+            self.replies = []
+
+        async def send_reply(self, **kwargs):
+            self.replies.append(kwargs)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert (
+            _multipart_fields(request)["text"]
+            == "[soft tone] 主人主人，猫猫想要你摸摸头。好不好嘛？喵呜～".encode()
+        )
+        return httpx.Response(200, content=generated, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        service = TtsService(
+            base_url="http://s2.test",
+            http_client=client,
+            backend="s2-pro",
+            temp_dir=str(tmp_path / "tts"),
+        )
+        bot_engine = BotEngine()
+        entry = create_tts_entries(
+            ToolDeps(
+                tts_service=Ref(service),
+                media_uploader=Ref(MediaUploader()),
+                bot_engine=Ref(bot_engine),
+            )
+        )[0]
+        result = await entry.handler(
+            {
+                "instructions": "撒娇甜腻的语气，像小猫在主人怀里蹭蹭",
+                "text": "[soft tone] 主人主人，猫猫想要你摸摸头。好不好嘛？喵呜～",
+                "voice_mode": "preset",
+            },
+            ToolContext(
+                chat_id="chat-id",
+                is_group=False,
+                reply_to="message-id",
+                sender_id="user-id",
+                reply_callback=lambda _content: None,
+            ),
+        )
+
+    assert json.loads(result.content) == {
+        "success": True,
+        "message": "语音已发送到聊天中",
+    }
+    assert len(requests) == 1
+    assert bot_engine.replies == [
+        {
+            "chat_id": "chat-id",
+            "is_group": False,
+            "message_id": "message-id",
+            "media_file_info": {"file": "uploaded"},
+        }
+    ]
     async with httpx.AsyncClient() as client:
         s2_service = TtsService(
             base_url="http://s2.test",

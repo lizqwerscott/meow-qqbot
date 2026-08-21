@@ -86,6 +86,10 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
         instructions = (args.get("instructions") or "").strip()
         voice_mode = (args.get("voice_mode") or "preset").strip()
 
+        if instructions and not tts_service.tool_config.supports_instructions:
+            # Models can emit an obsolete field despite the current JSON schema.
+            instructions = ""
+
         MAX_TEXT_LENGTH = 500
         if len(text) > MAX_TEXT_LENGTH:
             return ToolResult(
