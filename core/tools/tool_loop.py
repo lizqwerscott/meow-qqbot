@@ -74,6 +74,7 @@ class ToolLoop:
         tool_reply_callback: Optional[Callable] = None,
         tool_reply_names: Optional[set[str] | frozenset[str]] = None,
         reply_state_callback: Optional[Callable[[bool], Awaitable[None]]] = None,
+        internal_control: bool = False,
         steering_enabled: bool = False,
         steering_admission_callback: Optional[
             Callable[[PendingInbound], Awaitable[Any]]
@@ -347,6 +348,7 @@ class ToolLoop:
                 reply_callback=reply_callback,
                 delivery_channel=delivery_channel,
                 reply_to_message_id=reply_to_message_id,
+                internal_control=internal_control,
             )
 
             for tc in tool_calls:
@@ -390,6 +392,7 @@ class ToolLoop:
                             reply_callback=tool_reply_callback,
                             delivery_channel=ctx.delivery_channel,
                             reply_to_message_id=ctx.reply_to_message_id,
+                            internal_control=ctx.internal_control,
                         )
                     else:
                         tool_ctx = ctx

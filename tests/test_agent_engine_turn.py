@@ -1,11 +1,16 @@
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
 
 from core.ai.protocol import AssistantMessage, AssistantToolCall
 from core.engine.agent_engine import AgentEngine, BackgroundTaskResult, _TurnRequest
-from core.managers.session_manager import PendingInbound, SessionTaskManager
+from core.managers.session_manager import (
+    AdmissionOrigin,
+    PendingInbound,
+    SessionTaskManager,
+)
 from core.message import InputMessage
 from core.tools._types import ToolResult
 from core.tools.tool_loop import ToolLoop
@@ -23,6 +28,7 @@ async def test_admission_duplicate_history_does_not_produce_prompt_fragment():
         InputMessage("duplicate", "user", "chat", "hello", False),
         "hello",
         "agent",
+        AdmissionOrigin.USER_MESSAGE,
     )
 
     admitted = await engine._admit_pending_message(
@@ -61,6 +67,7 @@ async def test_admission_archives_after_message_is_persisted():
         InputMessage("late", "user", "chat", "hello", False),
         "hello",
         "agent",
+        AdmissionOrigin.USER_MESSAGE,
     )
 
     admitted = await engine._admit_pending_message(
@@ -88,6 +95,38 @@ async def test_admission_archives_after_message_is_persisted():
             ],
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_internal_control_admission_skips_durable_side_effects(caplog):
+    engine = make_engine(FakeToolLoop())
+    calls = []
+
+    async def record(effect, payload):
+        calls.append((effect, payload))
+        return True
+
+    engine._run_hindsight_side_effect = lambda payload: record("hindsight", payload)
+    engine._run_learner_side_effect = lambda payload: record("learner", payload)
+    caplog.set_level(logging.INFO)
+    pending = PendingInbound(
+        InputMessage("task", "system", "task:1", "do work", False),
+        "do work",
+        "agent",
+        AdmissionOrigin.INTERNAL_CONTROL,
+    )
+
+    await engine._admit_pending_message(
+        pending,
+        source="initial",
+        get_user_nickname=lambda _: "system",
+    )
+
+    assert calls == []
+    assert [message[1] for message in engine.context_manager.user_messages] == [
+        "do work"
+    ]
+    assert any("跳过内部控制准入副作用" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -127,6 +166,7 @@ async def test_duplicate_admission_keeps_pending_outbox_effects():
         InputMessage("duplicate", "user", "chat", "hello", False),
         "hello",
         "agent",
+        AdmissionOrigin.USER_MESSAGE,
     )
 
     admitted = await engine._admit_pending_message(
@@ -634,7 +674,11 @@ async def test_process_message_preserves_prompt_stream_and_system_event_adapters
     from core.message import InputMessage
 
     message = InputMessage("id", "user", "chat", "hello", True)
-    await engine._process_message(message, reply_callback, lambda sender_id: "name")
+    await engine._process_message(
+        PendingInbound(message, "hello", "agent", AdmissionOrigin.USER_MESSAGE),
+        reply_callback,
+        lambda sender_id: "name",
+    )
 
     assert engine.context_manager.recorded_chat_types == [("chat", True)]
     assert prompt_calls[0]["user_nickname"] == "name"
@@ -642,6 +686,18 @@ async def test_process_message_preserves_prompt_stream_and_system_event_adapters
     assert tool_loop.calls[0]["get_user_nickname"]("user") == "name"
     assert tool_loop.calls[0]["stream_callback"] is not None
     assert system_events[0][0] == "chat"
+
+
+@pytest.mark.asyncio
+async def test_process_message_requires_explicit_admission_origin():
+    engine = make_engine(FakeToolLoop())
+
+    with pytest.raises(TypeError, match="requires PendingInbound"):
+        await engine._process_message(
+            InputMessage("id", "system", "task:1", "control", False),
+            lambda **kwargs: _none(),
+            lambda _: "system",
+        )
 
 
 @pytest.mark.asyncio
@@ -667,7 +723,12 @@ async def test_process_message_snapshots_events_after_admission():
     engine.prompt_builder = SimpleNamespace(build=build)
     task = asyncio.create_task(
         engine._process_message(
-            InputMessage("id", "user", "chat", "hello", False),
+            PendingInbound(
+                InputMessage("id", "user", "chat", "hello", False),
+                "hello",
+                "agent",
+                AdmissionOrigin.USER_MESSAGE,
+            ),
             lambda **kwargs: _none(),
             lambda _: "name",
         )
@@ -693,7 +754,11 @@ async def test_process_message_rolls_back_once_when_prompt_building_fails():
 
     message = InputMessage("id", "user", "chat", "hello", True)
     with pytest.raises(RuntimeError, match="prompt failed"):
-        await engine._process_message(message, lambda **kwargs: None, lambda _: "name")
+        await engine._process_message(
+            PendingInbound(message, "hello", "agent", AdmissionOrigin.USER_MESSAGE),
+            lambda **kwargs: None,
+            lambda _: "name",
+        )
 
     assert engine.context_manager.rollbacks == [("chat", "id")]
 
@@ -713,7 +778,12 @@ async def test_consumer_sends_friendly_error_and_requeues_message():
 
     engine._process_message = fail_process
     message = InputMessage("message", "user", "chat", "hello", True)
-    pending = PendingInbound(message, "hello", "agent")
+    pending = PendingInbound(
+        message,
+        "hello",
+        "agent",
+        AdmissionOrigin.USER_MESSAGE,
+    )
     enqueued = await engine.session_manager.enqueue_and_claim_consumer("chat", pending)
     consumer = asyncio.create_task(
         engine._consumer(
@@ -755,10 +825,12 @@ async def test_consumer_keeps_pending_message_for_tool_loop_steering():
     first = InputMessage("first", "user", "chat", "first", False)
     steering = InputMessage("steering", "user", "chat", "steering", False)
     first_enqueued = await engine.session_manager.enqueue_and_claim_consumer(
-        "chat", PendingInbound(first, "first", "agent")
+        "chat",
+        PendingInbound(first, "first", "agent", AdmissionOrigin.USER_MESSAGE),
     )
     await engine.session_manager.enqueue_and_claim_consumer(
-        "chat", PendingInbound(steering, "steering", "agent")
+        "chat",
+        PendingInbound(steering, "steering", "agent", AdmissionOrigin.USER_MESSAGE),
     )
 
     consumer = asyncio.create_task(
@@ -806,6 +878,20 @@ async def test_background_task_serializes_context_build_and_reply_result():
     assert events == ["context", "prompt"]
     assert tool_loop.calls[0]["delivery_channel"] == "delivery"
     assert tool_loop.calls[0]["reply_to_message_id"] == "original"
+    assert tool_loop.calls[0]["internal_control"] is True
+
+
+@pytest.mark.asyncio
+async def test_background_task_logs_metadata_without_prompt_content(caplog):
+    engine = make_engine(FakeToolLoop())
+    prompt = "do not write this control prompt to logs"
+    caplog.set_level(logging.INFO)
+
+    await engine.execute_background_task("task-chat", prompt, "system")
+
+    assert prompt not in caplog.text
+    assert "开始后台任务: chat_id=task-chat.." in caplog.text
+    assert f"prompt_chars={len(prompt)}" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1086,6 +1172,7 @@ async def test_tool_loop_steers_pending_messages_only_after_full_tool_batch(
         InputMessage("steer", "user", "chat", "follow up", False),
         "follow up",
         "agent",
+        AdmissionOrigin.USER_MESSAGE,
     )
 
     seen_tools = []
@@ -1160,6 +1247,7 @@ async def test_tool_loop_does_not_start_followup_for_passive_steering():
         InputMessage("passive", "user", "chat", "ambient", True),
         "ambient",
         "passive",
+        AdmissionOrigin.USER_MESSAGE,
     )
     await session_manager.enqueue_and_claim_consumer("chat", passive)
 
@@ -1196,6 +1284,7 @@ async def test_background_and_wake_turns_disable_steering():
     )
 
     assert [call["steering_enabled"] for call in tool_loop.calls] == [False, False]
+    assert [call["internal_control"] for call in tool_loop.calls] == [True, True]
 
 
 @pytest.mark.asyncio
@@ -1206,6 +1295,7 @@ async def test_consumer_cancellation_after_admission_commits_lease():
         InputMessage("cancelled", "user", "chat", "hello", False),
         "hello",
         "agent",
+        AdmissionOrigin.USER_MESSAGE,
     )
     enqueued = await engine.session_manager.enqueue_and_claim_consumer("chat", pending)
     replies = []

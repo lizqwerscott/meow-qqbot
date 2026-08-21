@@ -2,7 +2,11 @@ import asyncio
 
 import pytest
 
-from core.managers.session_manager import PendingInbound, SessionTaskManager
+from core.managers.session_manager import (
+    AdmissionOrigin,
+    PendingInbound,
+    SessionTaskManager,
+)
 from core.message import InputMessage
 
 
@@ -16,6 +20,7 @@ def pending(message_id: str) -> PendingInbound:
         InputMessage(message_id, "user", "chat_001", message_id, False),
         message_id,
         "agent",
+        AdmissionOrigin.USER_MESSAGE,
     )
 
 
@@ -41,6 +46,7 @@ async def test_steering_active_is_scoped_to_session(mgr):
         InputMessage("first", "user", "chat_001", "first", False),
         "first",
         "agent",
+        AdmissionOrigin.USER_MESSAGE,
     )
     enqueued = await mgr.enqueue_with_dispatch_mode("chat_001", agent, triggers_ai=True)
     lease = await mgr.claim_next_for_consumer("chat_001", enqueued.consumer_token)
@@ -58,11 +64,13 @@ async def test_agent_turn_activates_only_when_consumer_claims_it(mgr):
         InputMessage("first", "user", "chat_001", "first", False),
         "first",
         "agent",
+        AdmissionOrigin.USER_MESSAGE,
     )
     followup = PendingInbound(
         InputMessage("followup", "user", "chat_001", "followup", True),
         "followup",
         "passive",
+        AdmissionOrigin.USER_MESSAGE,
     )
     enqueued = await mgr.enqueue_with_dispatch_mode("chat_001", first, triggers_ai=True)
     assert await mgr.is_steering_active("chat_001") is False
@@ -70,6 +78,7 @@ async def test_agent_turn_activates_only_when_consumer_claims_it(mgr):
 
     first_lease = await mgr.claim_next_for_consumer("chat_001", enqueued.consumer_token)
     assert first_lease.items[0].dispatch_mode == "agent"
+    assert first_lease.items[0].origin is AdmissionOrigin.USER_MESSAGE
     assert await mgr.is_steering_active("chat_001") is True
     await mgr.commit(first_lease, first_lease.items[0])
 
@@ -85,6 +94,7 @@ async def test_idle_release_deactivates_steering_session(mgr):
         InputMessage("first", "user", "chat_001", "first", False),
         "first",
         "agent",
+        AdmissionOrigin.USER_MESSAGE,
     )
     enqueued = await mgr.enqueue_with_dispatch_mode("chat_001", agent, triggers_ai=True)
     lease = await mgr.claim_next_for_consumer("chat_001", enqueued.consumer_token)

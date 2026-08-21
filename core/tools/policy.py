@@ -114,7 +114,6 @@ def format_task_tool_descriptions(names: set[str]) -> str:
         "announce",
         "search_user",
         "memory",
-        "mark_important",
         "read_file",
         "write_file",
         "edit_file",

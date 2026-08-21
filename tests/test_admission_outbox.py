@@ -10,7 +10,12 @@ from core.engine.system_events import SystemEventBusy, SystemEventQueue
 async def test_outbox_retries_failed_effect_and_survives_reopen(tmp_path):
     path = tmp_path / "outbox.sqlite3"
     first = AdmissionOutbox(str(path))
-    await first.prepare("chat", "message", {"chat_id": "chat", "value": "x"})
+    await first.prepare(
+        "chat",
+        "message",
+        {"chat_id": "chat", "value": "x"},
+        effect_types=("hindsight",),
+    )
     await first.mark_ready("chat", "message")
     calls = []
 
@@ -32,7 +37,12 @@ async def test_outbox_retries_failed_effect_and_survives_reopen(tmp_path):
 @pytest.mark.asyncio
 async def test_outbox_recovers_prepared_after_local_admission(tmp_path):
     outbox = AdmissionOutbox(str(tmp_path / "outbox.sqlite3"))
-    await outbox.prepare("chat", "message", {"chat_id": "chat"})
+    await outbox.prepare(
+        "chat",
+        "message",
+        {"chat_id": "chat"},
+        effect_types=("hindsight", "learner"),
+    )
     recovered = await outbox.recover_prepared(
         lambda chat_id, message_id: asyncio.sleep(0, result=True)
     )
@@ -44,7 +54,12 @@ async def test_outbox_recovers_prepared_after_local_admission(tmp_path):
 @pytest.mark.asyncio
 async def test_outbox_leaves_prepared_rows_for_admission_in_progress(tmp_path):
     outbox = AdmissionOutbox(str(tmp_path / "outbox.sqlite3"))
-    await outbox.prepare("chat", "message", {"chat_id": "chat"})
+    await outbox.prepare(
+        "chat",
+        "message",
+        {"chat_id": "chat"},
+        effect_types=("hindsight", "learner"),
+    )
 
     recovered = await outbox.recover_prepared(
         lambda chat_id, message_id: asyncio.sleep(0, result=None)
@@ -58,7 +73,12 @@ async def test_outbox_leaves_prepared_rows_for_admission_in_progress(tmp_path):
 @pytest.mark.asyncio
 async def test_outbox_handlers_receive_stable_effect_keys(tmp_path):
     outbox = AdmissionOutbox(str(tmp_path / "outbox.sqlite3"))
-    await outbox.prepare("chat", "message", {"value": "x"})
+    await outbox.prepare(
+        "chat",
+        "message",
+        {"value": "x"},
+        effect_types=("hindsight", "learner"),
+    )
     await outbox.mark_ready("chat", "message")
     keys = []
 
@@ -76,9 +96,39 @@ async def test_outbox_handlers_receive_stable_effect_keys(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_outbox_skips_empty_effect_types_without_creating_rows(tmp_path):
+    outbox = AdmissionOutbox(str(tmp_path / "outbox.sqlite3"))
+
+    assert (
+        await outbox.prepare("chat", "message", {"value": "x"}, effect_types=())
+        is False
+    )
+    assert await outbox.pending_count() == 0
+    await outbox.close()
+
+
+@pytest.mark.asyncio
+async def test_outbox_requires_explicit_effect_types(tmp_path):
+    outbox = AdmissionOutbox(str(tmp_path / "outbox.sqlite3"))
+
+    with pytest.raises(TypeError, match="effect_types"):
+        await outbox.prepare("chat", "message", {"value": "x"})
+
+    await outbox.close()
+
+
+@pytest.mark.asyncio
 async def test_outbox_keeps_success_record_for_duplicate_prepare(tmp_path):
     outbox = AdmissionOutbox(str(tmp_path / "outbox.sqlite3"))
-    assert await outbox.prepare("chat", "message", {"value": "x"}) is True
+    assert (
+        await outbox.prepare(
+            "chat",
+            "message",
+            {"value": "x"},
+            effect_types=("hindsight", "learner"),
+        )
+        is True
+    )
     await outbox.mark_ready("chat", "message")
 
     async def handler(payload):
@@ -86,7 +136,15 @@ async def test_outbox_keeps_success_record_for_duplicate_prepare(tmp_path):
 
     await outbox.process({"hindsight": handler, "learner": handler})
 
-    assert await outbox.prepare("chat", "message", {"value": "x"}) is False
+    assert (
+        await outbox.prepare(
+            "chat",
+            "message",
+            {"value": "x"},
+            effect_types=("hindsight", "learner"),
+        )
+        is False
+    )
     assert await outbox.pending_count() == 0
     await outbox.close()
 
@@ -96,7 +154,15 @@ async def test_outbox_prunes_expired_success_records(tmp_path):
     outbox = AdmissionOutbox(
         str(tmp_path / "outbox.sqlite3"), succeeded_retention_seconds=0
     )
-    assert await outbox.prepare("chat", "message", {"value": "x"}) is True
+    assert (
+        await outbox.prepare(
+            "chat",
+            "message",
+            {"value": "x"},
+            effect_types=("hindsight", "learner"),
+        )
+        is True
+    )
     await outbox.mark_ready("chat", "message")
 
     async def handler(payload):
@@ -104,14 +170,27 @@ async def test_outbox_prunes_expired_success_records(tmp_path):
 
     await outbox.process({"hindsight": handler, "learner": handler})
 
-    assert await outbox.prepare("chat", "message", {"value": "x"}) is True
+    assert (
+        await outbox.prepare(
+            "chat",
+            "message",
+            {"value": "x"},
+            effect_types=("hindsight", "learner"),
+        )
+        is True
+    )
     await outbox.close()
 
 
 @pytest.mark.asyncio
 async def test_outbox_releases_all_claims_when_processing_is_cancelled(tmp_path):
     outbox = AdmissionOutbox(str(tmp_path / "outbox.sqlite3"))
-    await outbox.prepare("chat", "message", {"value": "x"})
+    await outbox.prepare(
+        "chat",
+        "message",
+        {"value": "x"},
+        effect_types=("hindsight", "learner"),
+    )
     await outbox.mark_ready("chat", "message")
     started = asyncio.Event()
 
@@ -179,7 +258,11 @@ def test_system_event_drain_keeps_events_added_after_user_turn_snapshot():
 
 @pytest.mark.asyncio
 async def test_session_manager_can_resume_preserved_inbox():
-    from core.managers.session_manager import PendingInbound, SessionTaskManager
+    from core.managers.session_manager import (
+        AdmissionOrigin,
+        PendingInbound,
+        SessionTaskManager,
+    )
     from core.message import InputMessage
 
     manager = SessionTaskManager()
@@ -187,6 +270,7 @@ async def test_session_manager_can_resume_preserved_inbox():
         InputMessage("message", "user", "chat", "hello", False),
         "hello",
         "agent",
+        AdmissionOrigin.USER_MESSAGE,
     )
     await manager.enqueue_and_claim_consumer("chat", pending)
     await manager.cleanup_all(preserve_inboxes=True)
@@ -201,9 +285,19 @@ async def test_session_manager_can_resume_preserved_inbox():
 @pytest.mark.asyncio
 async def test_outbox_serializes_concurrent_processing_in_admission_order(tmp_path):
     outbox = AdmissionOutbox(str(tmp_path / "outbox.sqlite3"))
-    await outbox.prepare("chat", "z-first", {"message": "z-first"})
+    await outbox.prepare(
+        "chat",
+        "z-first",
+        {"message": "z-first"},
+        effect_types=("hindsight", "learner"),
+    )
     await outbox.mark_ready("chat", "z-first")
-    await outbox.prepare("chat", "a-second", {"message": "a-second"})
+    await outbox.prepare(
+        "chat",
+        "a-second",
+        {"message": "a-second"},
+        effect_types=("hindsight", "learner"),
+    )
     await outbox.mark_ready("chat", "a-second")
     calls = []
 

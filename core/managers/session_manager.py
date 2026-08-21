@@ -5,6 +5,7 @@ import logging
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Deque, Dict, Generic, Literal, Optional, Set, TypeVar
 
 from core.message import InputMessage
@@ -15,6 +16,13 @@ T = TypeVar("T")
 MessageState = Literal["accepted", "admitted", "dropped", "failed"]
 
 
+class AdmissionOrigin(StrEnum):
+    """Trusted source classification for admission side effects."""
+
+    USER_MESSAGE = "user_message"
+    INTERNAL_CONTROL = "internal_control"
+
+
 @dataclass(frozen=True)
 class PendingInbound:
     """Immutable inbound envelope kept out of shared chat history until admission."""
@@ -22,6 +30,7 @@ class PendingInbound:
     message: InputMessage
     prepared_content: str
     dispatch_mode: Literal["agent", "passive"]
+    origin: AdmissionOrigin
     enqueued_at: float = field(default_factory=time.time)
 
 
@@ -119,6 +128,7 @@ class SessionTaskManager:
                     pending.message,
                     pending.prepared_content,
                     dispatch_mode,
+                    pending.origin,
                     pending.enqueued_at,
                 )
             return self._enqueue_locked(chat_id, pending)

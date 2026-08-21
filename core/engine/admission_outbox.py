@@ -14,7 +14,7 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Collection
 
 _log = logging.getLogger(__name__)
 
@@ -75,8 +75,20 @@ class AdmissionOutbox:
             return self._conn
 
     async def prepare(
-        self, chat_id: str, message_id: str, payload: dict[str, Any]
+        self,
+        chat_id: str,
+        message_id: str,
+        payload: dict[str, Any],
+        *,
+        effect_types: Collection[str],
     ) -> bool:
+        effect_types = tuple(dict.fromkeys(effect_types))
+        if not effect_types:
+            return False
+        unknown = set(effect_types) - {"hindsight", "learner"}
+        if unknown:
+            raise ValueError(f"unknown admission effect types: {sorted(unknown)}")
+
         conn = await self._ensure_open()
         encoded = json.dumps(payload, ensure_ascii=False)
         now = time.time()
@@ -88,7 +100,7 @@ class AdmissionOutbox:
                 (chat_id,),
             ).fetchone()
             admission_order = int(row["next_order"])
-            for effect_type in ("hindsight", "learner"):
+            for effect_type in effect_types:
                 cursor = conn.execute(
                     """
                     INSERT INTO admission_outbox

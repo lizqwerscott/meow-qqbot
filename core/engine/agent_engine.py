@@ -17,13 +17,18 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, List, Literal, Optional, Set
 from uuid import uuid4
 
+from core.engine.admission_effect_policy import effect_types_for
 from core.engine.admission_outbox import AdmissionOutbox
 from core.engine.context import EngineContext
 from core.engine.prompt_builder import PromptBuilder
 from core.learners.base import sanitize_for_learners
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager
-from core.managers.session_manager import PendingInbound, SessionTaskManager
+from core.managers.session_manager import (
+    AdmissionOrigin,
+    PendingInbound,
+    SessionTaskManager,
+)
 from core.message import InputMessage, MessageType, ResourceMeta
 from core.tasks.wake_coalescer import WakeTurnResult
 from core.tools.tool_loop import ToolLoop
@@ -68,6 +73,7 @@ class _TurnRequest:
     tool_reply_names: frozenset[str] = frozenset()
     reply_state_callback: Optional[Callable[[bool], Awaitable[None]]] = None
     rollback_after_prompt_failure_only: bool = False
+    internal_control: bool = False
     steering_enabled: bool = False
     steering_admission_callback: Optional[
         Callable[[PendingInbound], Awaitable[Optional[AdmittedMessage]]]
@@ -382,7 +388,12 @@ class AgentEngine:
                 else f"[正在回复: {input_message.replied_content}]"
             )
             content = f"{prefix}\n{content}" if content else prefix
-        return PendingInbound(input_message, content, dispatch_mode)
+        return PendingInbound(
+            input_message,
+            content,
+            dispatch_mode,
+            AdmissionOrigin.USER_MESSAGE,
+        )
 
     async def _admit_pending_message(
         self,
@@ -407,14 +418,29 @@ class AgentEngine:
                 )
                 return None
 
+            effect_types = effect_types_for(pending)
+            has_outbox_effects = bool(outbox and effect_types)
             prepared_new = False
             committed = False
-            if outbox:
+            if has_outbox_effects:
                 self._admission_in_progress.add(admission_key)
+            if pending.origin is AdmissionOrigin.INTERNAL_CONTROL:
+                _log.info(
+                    "跳过内部控制准入副作用: origin=%s chat=%s id=%s effects=%s",
+                    pending.origin,
+                    chat_id[:12],
+                    message.id,
+                    ("hindsight", "learner"),
+                )
             try:
-                if outbox:
+                if has_outbox_effects:
                     payload = self._build_side_effect_payload(pending)
-                    prepared_new = await outbox.prepare(chat_id, message.id, payload)
+                    prepared_new = await outbox.prepare(
+                        chat_id,
+                        message.id,
+                        payload,
+                        effect_types=effect_types,
+                    )
                 nickname = get_user_nickname(message.sender_id) or message.sender_id
                 await self.context_manager.record_chat_type(chat_id, message.is_group)
                 committed = (
@@ -429,7 +455,7 @@ class AgentEngine:
                     is not False
                 )
                 if not committed:
-                    if outbox:
+                    if has_outbox_effects:
                         if prepared_new:
                             await outbox.cancel(chat_id, message.id)
                         else:
@@ -452,10 +478,10 @@ class AgentEngine:
                 while len(admitted_ids) > getattr(self, "_max_processed_ids", 1000):
                     admitted_ids.popitem(last=False)
                 self._admitted_ids = admitted_ids
-                if outbox:
+                if has_outbox_effects:
                     await outbox.mark_ready(chat_id, message.id)
                     await self._process_admission_outbox()
-                else:
+                elif not outbox:
                     await self._run_admission_side_effects(pending, admission_key)
                 _log.debug(
                     "消息已准入 [%s..]: id=%s source=%s",
@@ -464,11 +490,11 @@ class AgentEngine:
                     source,
                 )
             except BaseException:
-                if outbox and not committed and prepared_new:
+                if has_outbox_effects and not committed and prepared_new:
                     await outbox.cancel(chat_id, message.id)
                 raise
             finally:
-                if outbox:
+                if has_outbox_effects:
                     self._admission_in_progress.discard(admission_key)
         nickname = get_user_nickname(message.sender_id) or message.sender_id
         timestamp = time.strftime(
@@ -586,6 +612,7 @@ class AgentEngine:
     async def _run_hindsight_side_effect(self, payload: dict) -> bool:
         if not getattr(self, "hindsight", None):
             return True
+        # Legacy outbox rows created before admission-effect filtering may contain cards.
         if payload["msg_type"] == str(MessageType.CARD):
             return True
         resources = [
@@ -611,6 +638,7 @@ class AgentEngine:
     async def _run_learner_side_effect(self, payload: dict) -> bool:
         if not getattr(self, "learners", None):
             return True
+        # Legacy outbox rows created before admission-effect filtering may contain cards.
         if payload["msg_type"] == str(MessageType.CARD):
             return True
         text = sanitize_for_learners(payload["content"])
@@ -642,8 +670,12 @@ class AgentEngine:
     ) -> None:
         payload = self._build_side_effect_payload(pending)
         handlers = {
-            "hindsight": self._run_hindsight_side_effect,
-            "learner": self._run_learner_side_effect,
+            effect_type: handler
+            for effect_type, handler in {
+                "hindsight": self._run_hindsight_side_effect,
+                "learner": self._run_learner_side_effect,
+            }.items()
+            if effect_type in effect_types_for(pending)
         }
         for effect_type, handler in handlers.items():
             try:
@@ -858,6 +890,7 @@ class AgentEngine:
                 binding_manager=self._session_binding,
                 tier=tier,
                 stream_callback=request.stream_callback,
+                internal_control=request.internal_control,
                 delivery_state_callback=(
                     _tool_delivery_callback if request.track_tool_delivery else None
                 ),
@@ -929,8 +962,10 @@ class AgentEngine:
         reply_callback: Callable,
         get_user_nickname: Callable[[str], str],
     ) -> None:
-        if isinstance(pending, InputMessage):
-            pending = PendingInbound(pending, pending.content, "agent")
+        if not isinstance(pending, PendingInbound):
+            raise TypeError(
+                "_process_message requires PendingInbound with explicit origin"
+            )
         input_message = pending.message
         chat_id = input_message.chat_id
         is_group = input_message.is_group
@@ -1062,7 +1097,9 @@ class AgentEngine:
         Returns:
             BackgroundTaskResult，支持旧式二元解包。
         """
-        _log.info(f"开始后台任务: chat_id={chat_id[:20]}.. prompt={prompt[:60]}")
+        _log.info(
+            "开始后台任务: chat_id=%s.. prompt_chars=%d", chat_id[:20], len(prompt)
+        )
 
         async def capturing_reply_callback(
             chat_id: str,
@@ -1101,7 +1138,12 @@ class AgentEngine:
 
             async def _build_prompt() -> tuple[list[dict], Optional[list[dict]]]:
                 await self._admit_pending_message(
-                    PendingInbound(msg, prompt, "agent"),
+                    PendingInbound(
+                        msg,
+                        prompt,
+                        "agent",
+                        AdmissionOrigin.INTERNAL_CONTROL,
+                    ),
                     source="initial",
                     get_user_nickname=lambda _: "system",
                 )
@@ -1123,6 +1165,7 @@ class AgentEngine:
                     delivery_channel=delivery_channel,
                     reply_to_message_id=reply_to_message_id,
                     timeout=300,
+                    internal_control=True,
                     tool_reply_callback=deliver_tool_reply_callback,
                     tool_reply_names=frozenset({"send_message"}),
                     steering_enabled=False,
@@ -1255,6 +1298,7 @@ class AgentEngine:
                     prompt_factory=_build_prompt,
                     reply_callback=_capture,
                     timeout=timeout,
+                    internal_control=True,
                     steering_enabled=False,
                 )
             )

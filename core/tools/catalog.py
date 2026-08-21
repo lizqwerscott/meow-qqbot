@@ -31,7 +31,6 @@ PROFILES: dict[str, set[str]] = {
     "heartbeat": {
         "heartbeat_respond",
         "memory",
-        "mark_important",
         "exec",
         "process",
         "search_content",
@@ -45,7 +44,6 @@ PROFILES: dict[str, set[str]] = {
     "cron": {
         "heartbeat_respond",
         "memory",
-        "mark_important",
         "exec",
         "process",
         "search_content",
@@ -60,7 +58,6 @@ PROFILES: dict[str, set[str]] = {
         "search_user",
         "send_message",
         "memory",
-        "mark_important",
         "write_file",
         "edit_file",
         "apply_patch",
@@ -92,7 +89,6 @@ CRON_ALLOWED: set[str] = {
     "announce",
     "search_user",
     "memory",
-    "mark_important",
     "read_file",
     "write_file",
     "edit_file",

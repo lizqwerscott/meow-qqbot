@@ -13,7 +13,6 @@ _CRON_ALLOWED: frozenset = frozenset(
         "announce",
         "search_user",
         "memory",
-        "mark_important",
         "read_file",
         "write_file",
         "edit_file",

@@ -13,6 +13,7 @@ class ToolContext:
     reply_callback: Callable
     delivery_channel: str = ""
     reply_to_message_id: str = ""
+    internal_control: bool = False
 
 
 @dataclass

@@ -49,6 +49,19 @@ class ToolRegistry:
             _log.warning(f"未知工具调用: {name}")
             return ToolResult(content=json.dumps({"error": f"未知工具: {name}"}))
 
+        if ctx.internal_control and name == "mark_important":
+            _log.warning(
+                "内部控制工具调用拒绝: %s sender=%s",
+                name,
+                ctx.sender_id[:16],
+            )
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "内部任务不允许写入长期记忆"},
+                    ensure_ascii=False,
+                )
+            )
+
         if permission_manager:
             role = permission_manager.get_user_role(ctx.sender_id)
             if not permission_manager.can_use_tool(name, role):

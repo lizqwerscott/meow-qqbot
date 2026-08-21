@@ -8,6 +8,7 @@ import logging
 
 import pytest
 
+from core.tools.catalog import CRON_ALLOWED, PROFILES
 from core.tools.policy import ChatContext, _filter_task_allow, build_tools
 
 
@@ -41,6 +42,12 @@ def test_filter_task_allow_empty_falls_back_to_announce():
 def test_filter_task_allow_wildcard_keeps_all():
     names = {"exec", "process", "announce"}
     assert _filter_task_allow(names, ["*"]) == names
+
+
+def test_internal_profiles_and_task_allowlist_exclude_mark_important():
+    for profile in ("heartbeat", "cron", "task"):
+        assert "mark_important" not in PROFILES[profile]
+    assert "mark_important" not in CRON_ALLOWED
 
 
 @pytest.mark.parametrize("profile", ["heartbeat", "cron", "task"])
