@@ -10,6 +10,8 @@ from core.tools.impl import registry
 
 _log = logging.getLogger(__name__)
 
+_INTERNAL_CONTROL_DISALLOWED_TOOLS = frozenset({"mark_important"})
+
 
 @dataclass
 class ChatContext:
@@ -86,6 +88,18 @@ def build_tools(
         names = _filter_task_allow(names, tools_allow)
 
     return registry.specs(names)
+
+
+def filter_internal_control_tools(tools: Optional[list[dict]]) -> Optional[list[dict]]:
+    """Remove tools internal-control turns must never offer to the model."""
+    if tools is None:
+        return None
+    return [
+        tool
+        for tool in tools
+        if not isinstance(tool.get("function"), dict)
+        or tool["function"].get("name") not in _INTERNAL_CONTROL_DISALLOWED_TOOLS
+    ]
 
 
 def _filter_task_allow(

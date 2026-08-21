@@ -9,7 +9,12 @@ import logging
 import pytest
 
 from core.tools.catalog import CRON_ALLOWED, PROFILES
-from core.tools.policy import ChatContext, _filter_task_allow, build_tools
+from core.tools.policy import (
+    ChatContext,
+    _filter_task_allow,
+    build_tools,
+    filter_internal_control_tools,
+)
 
 
 def _ctx(**kw) -> ChatContext:
@@ -48,6 +53,15 @@ def test_internal_profiles_and_task_allowlist_exclude_mark_important():
     for profile in ("heartbeat", "cron", "task"):
         assert "mark_important" not in PROFILES[profile]
     assert "mark_important" not in CRON_ALLOWED
+
+
+def test_internal_control_filter_removes_only_mark_important():
+    tools = [
+        {"type": "function", "function": {"name": "mark_important"}},
+        {"type": "function", "function": {"name": "memory"}},
+    ]
+
+    assert filter_internal_control_tools(tools) == [tools[1]]
 
 
 @pytest.mark.parametrize("profile", ["heartbeat", "cron", "task"])

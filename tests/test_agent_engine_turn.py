@@ -1279,12 +1279,73 @@ async def test_background_and_wake_turns_disable_steering():
         build_heartbeat_messages=lambda **kwargs: _empty_prompt(),
     )
     await engine.execute_background_task("background", "work", "system")
+    wake_tools = [
+        {"type": "function", "function": {"name": "mark_important"}},
+        {"type": "function", "function": {"name": "memory"}},
+    ]
     await engine.run_wake_turn(
-        source="system", session_key="wake", messages=[], tools=[]
+        source="system", session_key="wake", messages=[], tools=wake_tools
     )
 
     assert [call["steering_enabled"] for call in tool_loop.calls] == [False, False]
     assert [call["internal_control"] for call in tool_loop.calls] == [True, True]
+    assert [tool["function"]["name"] for tool in tool_loop.calls[1]["tools"]] == [
+        "memory"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_internal_control_turn_filters_mark_important_from_prebuilt_tools():
+    tool_loop = FakeToolLoop()
+    engine = make_engine(tool_loop)
+    internal_tools = [
+        {"type": "function", "function": {"name": "mark_important"}},
+        {"type": "function", "function": {"name": "memory"}},
+    ]
+
+    async def prompt_factory():
+        return [], internal_tools
+
+    await engine._run_turn(
+        _TurnRequest(
+            chat_id="wake",
+            sender_id="system",
+            is_group=False,
+            reply_to="wake-message",
+            route_text="system event",
+            prompt_factory=prompt_factory,
+            reply_callback=lambda **kwargs: _none(),
+            internal_control=True,
+        )
+    )
+
+    assert [tool["function"]["name"] for tool in tool_loop.calls[0]["tools"]] == [
+        "memory"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_user_turn_keeps_mark_important_in_prebuilt_tools():
+    tool_loop = FakeToolLoop()
+    engine = make_engine(tool_loop)
+    user_tools = [{"type": "function", "function": {"name": "mark_important"}}]
+
+    async def prompt_factory():
+        return [], user_tools
+
+    await engine._run_turn(
+        _TurnRequest(
+            chat_id="chat",
+            sender_id="user",
+            is_group=False,
+            reply_to="message",
+            route_text="remember this",
+            prompt_factory=prompt_factory,
+            reply_callback=lambda **kwargs: _none(),
+        )
+    )
+
+    assert tool_loop.calls[0]["tools"] == user_tools
 
 
 @pytest.mark.asyncio

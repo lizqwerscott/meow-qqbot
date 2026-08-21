@@ -31,6 +31,7 @@ from core.managers.session_manager import (
 )
 from core.message import InputMessage, MessageType, ResourceMeta
 from core.tasks.wake_coalescer import WakeTurnResult
+from core.tools.policy import filter_internal_control_tools
 from core.tools.tool_loop import ToolLoop
 
 _log = logging.getLogger(__name__)
@@ -857,6 +858,8 @@ class AgentEngine:
         async def _execute() -> _TurnResult:
             nonlocal prompt_built
             messages, tools = await request.prompt_factory()
+            if request.internal_control:
+                tools = filter_internal_control_tools(tools)
             prompt_built = True
             model_chain = request.model_chain
             tier = request.tier
