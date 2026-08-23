@@ -6,9 +6,11 @@
 - 动态 system 消息（记忆、时间、用户列表、技能条目）
 """
 
+import hashlib
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple
 
@@ -18,6 +20,10 @@ if TYPE_CHECKING:
 
 from core.engine.batch_media_context import BatchMediaContext
 from core.engine.delivery_prompt_contract import DeliveryPromptContract
+from core.engine.model_context_transcript import (
+    ModelContextScope,
+    ModelContextSnapshot,
+)
 from core.engine.turn_protocol_history import TurnProtocolHistory
 from core.message import InputMessage
 from core.tools.policy import ChatContext, build_tools, format_task_tool_descriptions
@@ -25,6 +31,19 @@ from core.tools.policy import ChatContext, build_tools, format_task_tool_descrip
 from .dynamic_context import DynamicContextBuilder
 
 _log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PromptBuildResult:
+    messages: List[dict]
+    tools: Optional[List[dict]]
+    model_context_scope: Optional[ModelContextScope] = None
+    model_context_fingerprint: Optional[str] = None
+
+    def __iter__(self):
+        yield self.messages
+        yield self.tools
+
 
 _MEMORY_SYSTEM_DESC = (
     "【记忆系统】\n"
@@ -112,6 +131,7 @@ class PromptBuilder:
         self._tts_service = None
         self._deps = deps
         self.timeline = None
+        self.model_context_transcript = None
         self.media_service = None
         self._dynamic_ctx_builder = DynamicContextBuilder(
             hindsight=self.hindsight,
@@ -138,9 +158,13 @@ class PromptBuilder:
         cost_tracker: Any = None,
         timeline_snapshot: Optional[Sequence["TimelineEvent"]] = None,
         protocol_snapshot: Optional[Sequence["ProtocolEvent"]] = None,
+        model_context_snapshot: Optional[ModelContextSnapshot] = None,
+        model_context_scope: Optional[ModelContextScope] = None,
+        model_context_identity: Optional[Sequence[str]] = None,
+        model_context_provider_identity: Optional[str] = None,
         delivery_contract: Optional[DeliveryPromptContract] = None,
         media_context: Optional[BatchMediaContext] = None,
-    ) -> Tuple[List[dict], Optional[List[dict]]]:
+    ) -> PromptBuildResult:
         """组装 AI 请求的 messages 列表。
 
         Returns:
@@ -154,7 +178,12 @@ class PromptBuilder:
                 chat_id
             )
             if compact_usage and cost_tracker:
-                cost_tracker.record_turn(chat_id, self.ai_service.model, compact_usage)
+                cost_tracker.record_turn(
+                    chat_id,
+                    self.ai_service.model,
+                    compact_usage,
+                    metadata={"usage_kind": "compaction"},
+                )
         except Exception as e:
             _log.warning("历史压缩失败 [%s..]: %s", chat_id[:12], e)
 
@@ -229,8 +258,51 @@ class PromptBuilder:
                 skill_system_intro=skill_intro,
             )
 
+        if (
+            model_context_scope is not None
+            and self.model_context_transcript is not None
+        ):
+            fingerprint = hashlib.sha256(
+                json.dumps(
+                    {
+                        "provider": type(self.ai_service).__name__,
+                        "model": getattr(self.ai_service, "model", ""),
+                        "model_identity": list(model_context_identity or ()),
+                        "system": static_prompt,
+                        "tools": tools_to_use or [],
+                        "delivery_contract": (
+                            delivery_contract.fingerprint(tools_to_use)
+                            if delivery_contract is not None
+                            else ""
+                        ),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+            try:
+                model_context_scope = (
+                    await self.model_context_transcript.ensure_generation(
+                        model_context_scope,
+                        fingerprint,
+                        provider_identity=model_context_provider_identity,
+                    )
+                )
+                model_context_snapshot = await self.model_context_transcript.snapshot(
+                    model_context_scope
+                )
+            except Exception as exc:
+                _log.warning("模型上下文 generation 检查失败: %s", exc)
+                model_context_scope = None
+                model_context_snapshot = None
+
         # ── 4. 完整历史 ──
-        if timeline_snapshot is None:
+        if model_context_snapshot is not None and timeline_snapshot is not None:
+            history = self._model_context_history(
+                model_context_snapshot, timeline_snapshot
+            )
+        elif timeline_snapshot is None:
             history = await self.context_manager.get_history_as_dicts_merged_async(
                 chat_id
             )
@@ -299,6 +371,14 @@ class PromptBuilder:
             if media_text:
                 messages.append({"role": "system", "content": media_text})
 
+        if delivery_contract is not None:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": delivery_contract.render_target(),
+                }
+            )
+
         # ── 6. 防御：清理孤立的 tool_calls（防止 compaction 拆散配对） ──
         from core.ai.protocol import ensure_messages_consistent
 
@@ -313,7 +393,35 @@ class PromptBuilder:
                 f"{[t['function']['name'] for t in tools_to_use]}"
             )
 
-        return messages, tools_to_use
+        return PromptBuildResult(
+            messages=messages,
+            tools=tools_to_use,
+            model_context_scope=model_context_scope,
+            model_context_fingerprint=(
+                fingerprint
+                if "fingerprint" in locals() and model_context_scope is not None
+                else None
+            ),
+        )
+
+    @classmethod
+    def _model_context_history(
+        cls,
+        model_context_snapshot: ModelContextSnapshot,
+        timeline_snapshot: Sequence["TimelineEvent"],
+    ) -> List[dict]:
+        history = model_context_snapshot.to_wire()
+        if model_context_snapshot.events:
+            inherited_event_ids = model_context_snapshot.source_event_ids
+            current_events = tuple(
+                event
+                for event in timeline_snapshot
+                if event.role == "user" and event.event_id not in inherited_event_ids
+            )
+        else:
+            current_events = tuple(timeline_snapshot)
+        history.extend(cls._timeline_history(current_events))
+        return history
 
     @staticmethod
     def _timeline_history(

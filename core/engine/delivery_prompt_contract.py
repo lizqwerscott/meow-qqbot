@@ -13,8 +13,9 @@ class DeliveryPromptContract:
     delivery_mode: str
     reply_target: str
 
-    def render(self, tools: list[dict] | None) -> str:
-        delivery_tools = sorted(
+    @staticmethod
+    def _delivery_tool_names(tools: list[dict] | None) -> list[str]:
+        return sorted(
             {
                 tool.get("function", {}).get("name", "")
                 for tool in tools or []
@@ -22,8 +23,17 @@ class DeliveryPromptContract:
                 in {"send_message", "send_emoji"}
             }
         )
+
+    def fingerprint(self, tools: list[dict] | None) -> dict[str, object]:
+        return {
+            "intent": str(self.intent),
+            "delivery_mode": self.delivery_mode,
+            "delivery_tools": self._delivery_tool_names(tools),
+        }
+
+    def render(self, tools: list[dict] | None) -> str:
+        delivery_tools = self._delivery_tool_names(tools)
         tool_names = "、".join(delivery_tools) if delivery_tools else "无"
-        target = self.reply_target or "当前会话"
         if self.delivery_mode == "message_tool_only":
             mode_rules = (
                 "本轮为 message_tool_only 交付。任何 assistant 文本，包括最终文本，"
@@ -46,9 +56,13 @@ class DeliveryPromptContract:
             (
                 "<delivery_contract>",
                 mode_rules,
-                f"固定投递目标：{target}。不得选择、推断或改写其他 chat 的投递目标。",
                 f"可见显式投递工具：{tool_names}。",
                 ambient_rule,
                 "</delivery_contract>",
             )
         )
+
+    def render_target(self) -> str:
+        """Render the per-turn target after the stable context prefix."""
+        target = self.reply_target or "当前会话"
+        return f"固定投递目标：{target}。不得选择、推断或改写其他 chat 的投递目标。"

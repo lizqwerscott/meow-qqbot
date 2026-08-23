@@ -20,6 +20,7 @@ from core.engine.delivery_ledger import (
 )
 from core.engine.engagement_config import EngagementConfig
 from core.engine.group_engagement import GroupEngagementManager
+from core.engine.prompt_builder import PromptBuildResult
 from core.engine.turn_capabilities import TurnCapabilities
 from core.engine.turn_state import TurnPhase
 from core.managers.session_manager import (
@@ -1256,6 +1257,224 @@ async def test_run_turn_uses_supplied_route_without_reclassifying():
 
     assert tool_loop.calls[0]["model_chain"] == ["chosen"]
     assert tool_loop.calls[0]["tier"] == "simple"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_returns_prompt_scope_without_shared_builder_state():
+    scope = SimpleNamespace(generation=7, kind="private_conversation")
+    tool_loop = FakeToolLoop()
+    engine = make_engine(tool_loop)
+
+    async def build_prompt():
+        return PromptBuildResult([], [], model_context_scope=scope)
+
+    async def reply_callback(**kwargs):
+        pass
+
+    result = await engine._run_turn(
+        _TurnRequest(
+            chat_id="chat",
+            sender_id="user",
+            is_group=False,
+            reply_to="message",
+            route_text="hello",
+            prompt_factory=build_prompt,
+            reply_callback=reply_callback,
+        )
+    )
+
+    assert result.model_context_scope is scope
+
+
+@pytest.mark.asyncio
+async def test_model_context_scope_fails_closed_for_direct_tasks_without_lifecycle_binding():
+    engine = make_engine(FakeToolLoop())
+    engine.model_context_enabled = True
+    pending = PendingInbound(
+        InputMessage(
+            "task-message",
+            "user",
+            "chat",
+            "do work",
+            True,
+            task_correlation_id="task-1",
+        ),
+        "do work",
+        InboundIntent.DIRECT_TASK,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+
+    assert await engine._model_context_scope(pending, pending.message) is None
+
+
+def _direct_task_pending(
+    *,
+    message_id="task-message",
+    sender_id="user",
+    chat_id="chat",
+    task_correlation_id="task-1",
+):
+    message = InputMessage(
+        message_id,
+        sender_id,
+        chat_id,
+        "do work",
+        True,
+        task_correlation_id=task_correlation_id,
+    )
+    return PendingInbound(
+        message,
+        message.content,
+        InboundIntent.DIRECT_TASK,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+
+
+async def _active_direct_task_engine(pending):
+    engine = make_engine(FakeToolLoop())
+    engine.model_context_enabled = True
+    roles = {pending.message.sender_id: "trusted"}
+    engine.scheduler = ConversationScheduler(
+        engine.session_manager,
+        user_role=roles.__getitem__,
+        role_at_least=lambda candidate, required: candidate == required,
+    )
+    result = await engine.scheduler.enqueue(pending.message.chat_id, pending)
+    work = await engine.scheduler.next_work(
+        pending.message.chat_id, owner_token=result.consumer_token
+    )
+    assert work is not None
+    await engine.scheduler.start_turn(
+        work, turn_id=pending.message.id, principal_id=pending.message.sender_id
+    )
+    return engine
+
+
+@pytest.mark.asyncio
+async def test_model_context_scope_allows_matching_active_direct_task():
+    pending = _direct_task_pending()
+    engine = await _active_direct_task_engine(pending)
+
+    scope = await engine._model_context_scope(
+        pending,
+        pending.message,
+        capabilities=engine._turn_capabilities(
+            pending.intent,
+            chat_id=pending.message.chat_id,
+            sender_id=pending.message.sender_id,
+            reply_to=pending.message.id,
+        ),
+    )
+
+    assert scope is not None
+    assert scope.task_correlation_id == "task-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"task_correlation_id": "task-2"},
+        {"chat_id": "other-chat"},
+        {"sender_id": "other-user"},
+    ],
+)
+async def test_model_context_scope_rejects_unrelated_direct_task_identity(overrides):
+    active = _direct_task_pending()
+    engine = await _active_direct_task_engine(active)
+    candidate = _direct_task_pending(message_id=active.message.id, **overrides)
+    capabilities = engine._turn_capabilities(
+        candidate.intent,
+        chat_id=candidate.message.chat_id,
+        sender_id=candidate.message.sender_id,
+        reply_to=candidate.message.id,
+    )
+
+    assert (
+        await engine._model_context_scope(
+            candidate, candidate.message, capabilities=capabilities
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_model_context_scope_rejects_completed_direct_task():
+    pending = _direct_task_pending()
+    engine = await _active_direct_task_engine(pending)
+    active = await engine.scheduler.get_turn(pending.message.id)
+    finalizing = await engine.scheduler.transition_turn(
+        pending.message.id,
+        expected_revision=active.revision,
+        phase=TurnPhase.FINALIZING,
+    )
+    completed = await engine.scheduler.transition_turn(
+        pending.message.id,
+        expected_revision=finalizing.revision,
+        phase=TurnPhase.COMPLETED,
+    )
+    await engine.scheduler.drop_turn(completed.turn_id)
+
+    capabilities = engine._turn_capabilities(
+        pending.intent,
+        chat_id=pending.message.chat_id,
+        sender_id=pending.message.sender_id,
+        reply_to=pending.message.id,
+    )
+    assert (
+        await engine._model_context_scope(
+            pending, pending.message, capabilities=capabilities
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_model_context_scope_rejects_mixed_task_correlation_batch():
+    pending = _direct_task_pending()
+    engine = await _active_direct_task_engine(pending)
+    other = _direct_task_pending(
+        message_id="other-task-message", task_correlation_id="task-2"
+    )
+    capabilities = engine._turn_capabilities(
+        pending.intent,
+        chat_id=pending.message.chat_id,
+        sender_id=pending.message.sender_id,
+        reply_to=other.message.id,
+    )
+
+    assert (
+        await engine._model_context_scope(
+            pending,
+            other.message,
+            capabilities=capabilities,
+            batch=(other,),
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_model_context_scope_rejects_mixed_private_principal_batch():
+    engine = make_engine(FakeToolLoop())
+    engine.model_context_enabled = True
+    pending = PendingInbound(
+        InputMessage("private-1", "user-1", "chat", "hello", False),
+        "hello",
+        InboundIntent.PRIVATE_CONVERSATION,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+    other = PendingInbound(
+        InputMessage("private-2", "user-2", "chat", "secret", False),
+        "secret",
+        InboundIntent.PRIVATE_CONVERSATION,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+
+    assert (
+        await engine._model_context_scope(pending, other.message, batch=(other,))
+        is None
+    )
 
 
 @pytest.mark.asyncio

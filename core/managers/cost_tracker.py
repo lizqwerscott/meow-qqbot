@@ -1,6 +1,7 @@
 """Real-time cost tracking — per-turn and session-level token usage & cost estimates."""
 
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
@@ -28,6 +29,8 @@ class SessionCostStats:
     cache_miss_tokens: int = 0
     cost: float = 0.0
     turn_count: int = 0
+    cache_observation_count: int = 0
+    cache_usage_missing_count: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -48,11 +51,23 @@ class CostTracker:
             self._pricing.update(pricing)
         self._session_stats: Dict[str, SessionCostStats] = {}
         self._global_stats = SessionCostStats()
+        self._cache_observations = deque(maxlen=1000)
 
-    def record_turn(self, chat_id: str, model: str, usage: Optional[Dict]) -> None:
-        if not usage:
-            return
+    def record_turn(
+        self,
+        chat_id: str,
+        model: str,
+        usage: Optional[Dict],
+        metadata: Optional[Dict] = None,
+    ) -> None:
+        usage = usage or {}
+        observation = dict(metadata or {})
+        usage_kind = observation.get("usage_kind", "completion")
+        is_cache_observation = usage_kind == "completion"
 
+        cache_keys_present = (
+            "prompt_cache_hit_tokens" in usage and "prompt_cache_miss_tokens" in usage
+        )
         hit = usage.get("prompt_cache_hit_tokens", 0) or 0
         miss = usage.get("prompt_cache_miss_tokens", 0) or 0
         prompt = usage.get("prompt_tokens", 0) or 0
@@ -74,6 +89,10 @@ class CostTracker:
         s.cache_miss_tokens += miss
         s.cost += cost
         s.turn_count += 1
+        s.cache_observation_count += int(is_cache_observation)
+        s.cache_usage_missing_count += int(
+            is_cache_observation and not cache_keys_present
+        )
 
         g = self._global_stats
         g.prompt_tokens += prompt
@@ -82,6 +101,26 @@ class CostTracker:
         g.cache_miss_tokens += miss
         g.cost += cost
         g.turn_count += 1
+        g.cache_observation_count += int(is_cache_observation)
+        g.cache_usage_missing_count += int(
+            is_cache_observation and not cache_keys_present
+        )
+
+        observation.update(
+            {
+                "model": model,
+                "usage_kind": usage_kind,
+                "prompt_tokens": prompt,
+                "prompt_cache_hit_tokens": hit,
+                "prompt_cache_miss_tokens": miss,
+                "cache_usage_present": cache_keys_present,
+            }
+        )
+        if is_cache_observation:
+            self._cache_observations.append(observation)
+
+    def cache_observations(self) -> list[dict]:
+        return list(self._cache_observations)
 
     def get_session_stats(self, chat_id: str) -> Optional[SessionCostStats]:
         return self._session_stats.get(chat_id)

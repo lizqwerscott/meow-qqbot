@@ -50,6 +50,7 @@ class MgmtContext:
     archive_manager: Any = None
     system_events: Any = None
     task_state_store: Any = None
+    model_context_config: dict = field(default_factory=dict)
 
 
 @dataclass

@@ -39,10 +39,29 @@
         <div class="stat-label">缓存命中率</div>
     </div>
     <div class="stat-card">
+        <div class="stat-value">{{ stats.cost.cache_hit_tokens }}</div>
+        <div class="stat-label">缓存命中 Tokens</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.cost.cache_miss_tokens }}</div>
+        <div class="stat-label">缓存未命中 Tokens</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.cost.cache_observation_count }}</div>
+        <div class="stat-label">缓存观测次数（缺失 {{ stats.cost.cache_usage_missing_count }}）</div>
+    </div>
+    <div class="stat-card">
         <div class="stat-value">${{ stats.cost.total_cost }}</div>
         <div class="stat-label">总消耗</div>
     </div>
 </div>
+
+{% if stats.model_context %}
+<div class="card" style="margin-top:20px">
+    <h2>🧠 模型上下文投影</h2>
+    <p>Schema: {{ stats.model_context.schema_version }} · Scope: {{ stats.model_context.scope_count }} · Events: {{ stats.model_context.event_count }}</p>
+</div>
+{% endif %}
 
 <div class="card" style="margin-top:20px">
     <h2>🤖 Hindsight 记忆系统</h2>

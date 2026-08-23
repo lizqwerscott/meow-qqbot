@@ -49,6 +49,7 @@ class AppConfig(BaseModel):
     web_fetch: dict = {}
     media: dict = {}
     approval: dict = {}  # [approval]：审批卡转发目标等
+    model_context_projection: dict = {}
 
 
 class ConfigLoader:
@@ -238,3 +239,7 @@ class ConfigLoader:
     def media(self) -> dict:
         """[media] 段：媒体存储、下载和图片理解配置。"""
         return self._cfg.media
+
+    @property
+    def model_context_projection(self) -> dict:
+        return self._cfg.model_context_projection

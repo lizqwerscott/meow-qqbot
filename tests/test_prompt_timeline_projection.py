@@ -1,4 +1,5 @@
 from core.engine.conversation_timeline import TimelineEvent
+from core.engine.model_context_transcript import ModelContextScope, ModelContextSnapshot
 from core.engine.prompt_builder import PromptBuilder
 
 
@@ -92,6 +93,39 @@ def test_timeline_history_is_authoritative_and_keeps_only_visible_events():
     assert projected[1]["content"] == "answer"
     assert all(set(message) == {"role", "content"} for message in projected)
     assert PromptBuilder._timeline_history(()) == []
+
+
+def test_empty_model_context_snapshot_preserves_existing_timeline_assistant_messages():
+    timeline = (
+        TimelineEvent(
+            chat_id="chat",
+            seq=1,
+            event_id="user:m1",
+            role="user",
+            content="question",
+            message_id="m1",
+            sender_id="alice",
+            timestamp=1_700_000_000,
+        ),
+        TimelineEvent(
+            chat_id="chat",
+            seq=2,
+            event_id="delivery:d1",
+            role="assistant",
+            content="answer",
+            event_kind="delivery",
+            delivery_kind="response",
+            timestamp=1_700_000_001,
+        ),
+    )
+    snapshot = ModelContextSnapshot(
+        scope=ModelContextScope(chat_id="chat", principal_id="alice"),
+        events=(),
+    )
+
+    history = PromptBuilder._model_context_history(snapshot, timeline)
+
+    assert [message["role"] for message in history] == ["user", "assistant"]
 
 
 def test_protocol_snapshot_is_limited_to_the_requested_turn():

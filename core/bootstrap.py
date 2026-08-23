@@ -500,6 +500,7 @@ class ServiceGraph:
                 archive_manager=self.archive_manager,
                 system_events=self.system_events,
                 task_state_store=self.task_state_store,
+                model_context_config=self.cfg.model_context_projection,
             ),
             bg=BgContext(
                 task_manager=self.task_manager,

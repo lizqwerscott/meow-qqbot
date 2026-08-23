@@ -36,7 +36,12 @@ from core.engine.delivery_ledger import (
 )
 from core.engine.delivery_prompt_contract import DeliveryPromptContract
 from core.engine.group_engagement import GroupEngagementManager
-from core.engine.prompt_builder import PromptBuilder
+from core.engine.model_context_transcript import (
+    ModelContextInvariantError,
+    ModelContextScope,
+    ModelContextTranscript,
+)
+from core.engine.prompt_builder import PromptBuilder, PromptBuildResult
 from core.engine.turn_capabilities import TurnCapabilities
 from core.engine.turn_protocol_history import TurnProtocolHistory
 from core.engine.turn_state import TurnPhase, TurnState, TurnStateError
@@ -58,7 +63,9 @@ from core.tools.tool_loop import ToolLoop
 _log = logging.getLogger(__name__)
 
 
-TurnPromptFactory = Callable[[], Awaitable[tuple[list[dict], Optional[list[dict]]]]]
+TurnPromptFactory = Callable[
+    [], Awaitable[PromptBuildResult | tuple[list[dict], Optional[list[dict]]]]
+]
 
 
 class _AdmissionAlreadyCommitted(Exception):
@@ -106,6 +113,11 @@ class _TurnRequest:
     ] = None
     capabilities: Optional[TurnCapabilities] = None
     turn_id: str = ""
+    intent: Optional[InboundIntent] = None
+    model_context_commit_callback: Optional[
+        Callable[[ModelContextScope], Awaitable[None]]
+    ] = None
+    model_context_provider_callback: Optional[Callable[..., Awaitable[Any]]] = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +127,7 @@ class _TurnResult:
     text_committed: bool = False
     tool_text_delivered: bool = False
     final_reply_silent: bool = False
+    model_context_scope: Optional[ModelContextScope] = None
 
 
 @dataclass(frozen=True)
@@ -213,8 +226,16 @@ class AgentEngine:
         self._delivery_recovery_task: Optional[asyncio.Task] = None
         self.timeline = ConversationTimeline()
         self.protocol_history = TurnProtocolHistory()
+        model_context_config = getattr(ctx.mgmt, "model_context_config", {}) or {}
+        self.model_context_enabled = bool(model_context_config.get("enabled", False))
+        self.model_context = ModelContextTranscript(
+            model_context_config.get("path", "data/model_context_transcript.sqlite3"),
+            max_events=int(model_context_config.get("max_events", 512)),
+            max_tokens=int(model_context_config.get("max_tokens", 24000)),
+        )
         self.prompt_builder = PromptBuilder(ctx)
         self.prompt_builder.timeline = self.timeline
+        self.prompt_builder.model_context_transcript = self.model_context
         self.tool_loop = ToolLoop(
             ctx,
             prompt_builder=self.prompt_builder,
@@ -474,6 +495,181 @@ class AgentEngine:
             history = TurnProtocolHistory()
             self.protocol_history = history
         return history
+
+    def _get_model_context(self) -> ModelContextTranscript:
+        transcript = getattr(self, "model_context", None)
+        if transcript is None:
+            transcript = ModelContextTranscript()
+            self.model_context = transcript
+        return transcript
+
+    async def _model_context_scope(
+        self,
+        pending: PendingInbound,
+        input_message: InputMessage,
+        *,
+        capabilities: Optional[TurnCapabilities] = None,
+        batch: tuple[PendingInbound, ...] = (),
+    ) -> Optional[ModelContextScope]:
+        if not getattr(self, "model_context_enabled", False):
+            return None
+        if pending.intent is InboundIntent.DIRECT_TASK:
+            correlation_id = pending.message.task_correlation_id
+            if not correlation_id or not getattr(self, "scheduler", None):
+                return None
+            if any(
+                item.intent is not InboundIntent.DIRECT_TASK
+                or item.message.task_correlation_id != correlation_id
+                or item.message.chat_id != input_message.chat_id
+                or item.message.sender_id != pending.message.sender_id
+                for item in (pending, *batch)
+            ):
+                return None
+            if not await self._get_scheduler().allows_model_context_inheritance(
+                pending.message.id,
+                chat_id=input_message.chat_id,
+                principal_id=pending.message.sender_id,
+                task_correlation_id=correlation_id,
+                reply_to=input_message.id,
+                capabilities=capabilities,
+            ):
+                return None
+            return ModelContextScope.for_intent(
+                chat_id=input_message.chat_id,
+                principal_id=pending.message.sender_id,
+                intent=pending.intent,
+                task_correlation_id=correlation_id,
+            )
+        if pending.intent is not InboundIntent.PRIVATE_CONVERSATION:
+            return None
+        if any(
+            item.intent is not InboundIntent.PRIVATE_CONVERSATION
+            or item.message.chat_id != input_message.chat_id
+            or item.message.sender_id != input_message.sender_id
+            for item in (pending, *batch)
+        ):
+            return None
+        return ModelContextScope.for_intent(
+            chat_id=input_message.chat_id,
+            principal_id=input_message.sender_id,
+            intent=pending.intent,
+        )
+
+    def _model_context_identity(self, input_message: InputMessage) -> tuple[str, ...]:
+        model_chain = input_message.model_chain
+        tier = input_message.tier
+        if (
+            model_chain is None
+            and tier is None
+            and self.rule_router
+            and self.model_registry
+        ):
+            tier = self.rule_router.classify(input_message.content)
+        if model_chain is None and tier is not None and self.model_registry:
+            model_chain = self.model_registry.get_chain(tier) or None
+        if model_chain:
+            identities = []
+            for name in model_chain:
+                service = self.model_registry.get(name) if self.model_registry else None
+                provider = getattr(service, "provider_type", "") if service else ""
+                identities.append(
+                    ":".join(
+                        (
+                            str(name),
+                            (
+                                provider or type(service).__name__
+                                if service
+                                else "missing"
+                            ),
+                            str(getattr(service, "model", "")) if service else "",
+                        )
+                    )
+                )
+            return tuple(identities)
+        service = self.ai_service
+        return (
+            f"{getattr(service, 'provider_type', '') or type(service).__name__}:"
+            f"{getattr(service, 'model', '')}",
+        )
+
+    @staticmethod
+    def _provider_identity(service: Any) -> str:
+        return (
+            f"{getattr(service, 'provider_type', '') or type(service).__name__}:"
+            f"{getattr(service, 'model', '')}"
+        )
+
+    async def _model_context_snapshot(self, scope: Optional[ModelContextScope]):
+        if scope is None:
+            return None
+        try:
+            return await self._get_model_context().snapshot(scope)
+        except Exception as exc:
+            _log.warning(
+                "模型上下文投影读取失败，回退 timeline [%s..]: %s",
+                scope.chat_id[:12],
+                exc,
+            )
+            return None
+
+    async def _materialize_model_context(
+        self,
+        scope: Optional[ModelContextScope],
+        *,
+        turn_id: str,
+        message_ids: set[str],
+    ) -> None:
+        if scope is None:
+            return
+        scope = await self._get_model_context().current_scope(scope)
+        timeline_events = await self._get_timeline().snapshot(scope.chat_id)
+        user_events = tuple(
+            event
+            for event in timeline_events
+            if event.role == "user" and event.message_id in message_ids
+        )
+        protocol_events = await self._get_protocol_history().snapshot(turn_id)
+        if not protocol_events:
+            raise ModelContextInvariantError(
+                f"turn has no protocol to materialize: {turn_id}"
+            )
+        await self._get_model_context().append_turn(
+            scope,
+            turn_id=turn_id,
+            user_events=user_events,
+            protocol_events=protocol_events,
+        )
+        _log.debug(
+            "模型上下文投影已提交 [%s..] generation=%d turn=%s events=%d",
+            scope.chat_id[:12],
+            scope.generation,
+            turn_id,
+            len(user_events) + len(protocol_events),
+        )
+
+    async def _close_model_context_scope(self, pending: PendingInbound) -> None:
+        if (
+            not getattr(self, "model_context_enabled", False)
+            or pending.intent is not InboundIntent.DIRECT_TASK
+            or not pending.message.task_correlation_id
+        ):
+            return
+        scope = ModelContextScope.for_intent(
+            chat_id=pending.message.chat_id,
+            principal_id=pending.message.sender_id,
+            intent=pending.intent,
+            task_correlation_id=pending.message.task_correlation_id,
+        )
+        if scope is None:
+            return
+        try:
+            await self._get_model_context().close_scope(scope)
+        except Exception as exc:
+            _log.warning(
+                "关闭 direct task 模型上下文失败 [%s..]: %s",
+                pending.message.chat_id[:12],
+                exc,
+            )
 
     def _get_delivery_controller(self) -> DeliveryController:
         controller = getattr(self, "delivery_controller", None)
@@ -1275,6 +1471,7 @@ class AgentEngine:
                             f"scheduler turn disappeared: {scheduler_turn_id}"
                         )
                     if current_turn.phase is TurnPhase.CANCELLED:
+                        await self._close_model_context_scope(pending)
                         await self._get_scheduler().drop_turn(current_turn.turn_id)
                     else:
                         finalizing = current_turn
@@ -1289,9 +1486,11 @@ class AgentEngine:
                             expected_revision=finalizing.revision,
                             phase=TurnPhase.COMPLETED,
                         )
+                        await self._close_model_context_scope(pending)
                         await self._get_scheduler().drop_turn(completed.turn_id)
                 except asyncio.CancelledError:
                     await self._cancel_scheduler_turn(scheduler_turn_id)
+                    await self._close_model_context_scope(pending)
                     for item in work.items:
                         state = self.session_manager.get_message_state(
                             chat_id, item.message.id
@@ -1307,6 +1506,7 @@ class AgentEngine:
                     raise
                 except Exception as exc:
                     await self._cancel_scheduler_turn(scheduler_turn_id)
+                    await self._close_model_context_scope(pending)
                     first_uncommitted = True
                     for item in work.items:
                         state = self.session_manager.get_message_state(
@@ -1404,7 +1604,9 @@ class AgentEngine:
 
         async def _execute() -> _TurnResult:
             nonlocal prompt_built
-            messages, tools = await request.prompt_factory()
+            prompt_result = await request.prompt_factory()
+            messages, tools = prompt_result
+            model_context_scope = getattr(prompt_result, "model_context_scope", None)
             if request.internal_control:
                 tools = filter_internal_control_tools(tools)
             if request.capabilities is not None:
@@ -1452,6 +1654,19 @@ class AgentEngine:
                 return await self._get_scheduler().is_turn_delivery_allowed(
                     request.turn_id, cancellation_generation
                 )
+
+            async def _model_context_provider(service, can_rebuild: bool):
+                nonlocal model_context_scope
+                if request.model_context_provider_callback is None:
+                    return None
+                result = await request.model_context_provider_callback(
+                    service, can_rebuild
+                )
+                if result is not None:
+                    model_context_scope = getattr(
+                        result, "model_context_scope", model_context_scope
+                    )
+                return result
 
             run = self.tool_loop.run(
                 messages=messages,
@@ -1515,6 +1730,37 @@ class AgentEngine:
                 delivery_state_callback=(
                     _tool_delivery_callback if request.track_tool_delivery else None
                 ),
+                cost_metadata=(
+                    {
+                        "scope_generation": model_context_scope.generation,
+                        "scope_kind": str(model_context_scope.kind),
+                        "tool_protocol": True,
+                        "turn_intent": str(
+                            request.intent
+                            or request.steering_intent
+                            or InboundIntent.DIRECT_TASK
+                        ),
+                    }
+                    if model_context_scope is not None
+                    else {
+                        "turn_intent": str(
+                            request.intent
+                            or request.steering_intent
+                            or InboundIntent.DIRECT_TASK
+                        )
+                    }
+                ),
+                protocol_settled_callback=(
+                    (lambda: request.model_context_commit_callback(model_context_scope))
+                    if request.model_context_commit_callback
+                    and model_context_scope is not None
+                    else None
+                ),
+                model_context_provider_callback=(
+                    _model_context_provider
+                    if request.model_context_provider_callback is not None
+                    else None
+                ),
             )
             if request.timeout is not None:
                 sent_emoji, text_committed = await asyncio.wait_for(
@@ -1528,6 +1774,7 @@ class AgentEngine:
                 text_committed=text_committed,
                 tool_text_delivered=tool_text_delivered,
                 final_reply_silent=final_reply_silent,
+                model_context_scope=model_context_scope,
             )
 
         async def _execute_with_rollback() -> _TurnResult:
@@ -1689,6 +1936,7 @@ class AgentEngine:
                         reply_to=decision.reply_anchor_id or input_message.id,
                         allowed_media_uris=allowed_media_uris,
                     ),
+                    intent=pending.intent,
                     turn_id=turn_id,
                     track_tool_delivery=True,
                 )
@@ -1724,19 +1972,43 @@ class AgentEngine:
         is_group = input_message.is_group
         user_nickname = get_user_nickname(input_message.sender_id)
         system_event_snapshot = []
+        capabilities = self._turn_capabilities(
+            pending.intent,
+            chat_id=chat_id,
+            sender_id=input_message.sender_id,
+            reply_to=input_message.id,
+        )
+        model_context_scope = await self._model_context_scope(
+            pending, input_message, capabilities=capabilities, batch=batch
+        )
+        message_ids = {item.message.id for item in (pending, *batch)}
+        model_context_identity = (
+            self._model_context_identity(input_message)
+            if model_context_scope is not None
+            else ()
+        )
+        prompt_state = {
+            "scope": model_context_scope,
+            "fingerprint": None,
+        }
 
-        async def _build_prompt() -> tuple[list[dict], Optional[list[dict]]]:
-            admitted_messages: list[AdmittedMessage] = []
-            for item in (pending, *batch):
-                admitted = await self._admit_pending_message(
-                    item,
-                    source="initial",
-                    get_user_nickname=get_user_nickname,
-                )
-                if admitted is not None:
-                    admitted_messages.append(admitted)
-            if not admitted_messages:
-                raise _AdmissionAlreadyCommitted
+        async def _build_prompt(
+            provider_identity: Optional[str] = None,
+            *,
+            admit: bool = True,
+        ) -> PromptBuildResult:
+            if admit:
+                admitted_messages: list[AdmittedMessage] = []
+                for item in (pending, *batch):
+                    admitted = await self._admit_pending_message(
+                        item,
+                        source="initial",
+                        get_user_nickname=get_user_nickname,
+                    )
+                    if admitted is not None:
+                        admitted_messages.append(admitted)
+                if not admitted_messages:
+                    raise _AdmissionAlreadyCommitted
             if self._system_events:
                 peek_events = getattr(self._system_events, "peek_non_heartbeat", None)
                 if peek_events:
@@ -1744,7 +2016,7 @@ class AgentEngine:
             media_context = await self._build_batch_media_context(
                 pending.message.id, (pending, *batch)
             )
-            return await self.prompt_builder.build(
+            built = await self.prompt_builder.build(
                 chat_id=chat_id,
                 is_group=is_group,
                 user_nickname=user_nickname,
@@ -1755,11 +2027,51 @@ class AgentEngine:
                 protocol_snapshot=await self._get_protocol_history().snapshot(
                     input_message.id
                 ),
+                model_context_snapshot=await self._model_context_snapshot(
+                    prompt_state["scope"]
+                ),
+                model_context_scope=prompt_state["scope"],
+                model_context_identity=model_context_identity,
+                model_context_provider_identity=provider_identity,
                 delivery_contract=self._delivery_contract(
                     pending.intent, input_message.id
                 ),
                 media_context=media_context,
             )
+            result = (
+                built
+                if isinstance(built, PromptBuildResult)
+                else PromptBuildResult(*built)
+            )
+            prompt_state["scope"] = result.model_context_scope
+            prompt_state["fingerprint"] = result.model_context_fingerprint
+            return result
+
+        async def _bind_model_context_provider(service, can_rebuild: bool):
+            scope = prompt_state["scope"]
+            fingerprint = prompt_state["fingerprint"]
+            if scope is None or not fingerprint:
+                return None
+            provider_identity = self._provider_identity(service)
+            if can_rebuild:
+                return await _build_prompt(provider_identity, admit=False)
+            try:
+                bound_scope = await self._get_model_context().ensure_generation(
+                    scope,
+                    fingerprint,
+                    provider_identity=provider_identity,
+                )
+            except Exception:
+                _log.warning(
+                    "provider 切换时模型上下文绑定失败 [%s..]，保留当前 turn prompt",
+                    chat_id[:12],
+                    exc_info=True,
+                )
+                prompt_state["scope"] = None
+                prompt_state["fingerprint"] = None
+                return None
+            prompt_state["scope"] = bound_scope
+            return PromptBuildResult([], [], model_context_scope=bound_scope)
 
         async def _admit_steering(
             steering: PendingInbound,
@@ -1769,6 +2081,7 @@ class AgentEngine:
                 source="steer",
                 get_user_nickname=get_user_nickname,
             )
+            message_ids.add(steering.message.id)
             if admitted is None:
                 return None
             additional_prompt_messages: tuple[dict, ...] = ()
@@ -1856,15 +2169,23 @@ class AgentEngine:
                     stream_callback=_stream_deliver,
                     steering_enabled=True,
                     steering_intent=pending.intent,
+                    intent=pending.intent,
                     steering_admission_callback=_admit_steering,
                     rollback_after_prompt_failure_only=True,
-                    capabilities=self._turn_capabilities(
-                        pending.intent,
-                        chat_id=chat_id,
-                        sender_id=input_message.sender_id,
-                        reply_to=input_message.id,
-                    ),
+                    capabilities=capabilities,
                     turn_id=input_message.id,
+                    model_context_commit_callback=(
+                        lambda scope: self._materialize_model_context(
+                            scope,
+                            turn_id=input_message.id,
+                            message_ids=message_ids,
+                        )
+                    ),
+                    model_context_provider_callback=(
+                        _bind_model_context_provider
+                        if model_context_scope is not None
+                        else None
+                    ),
                 )
             )
         except _AdmissionAlreadyCommitted:
@@ -2055,6 +2376,7 @@ class AgentEngine:
                         sender_id=sender_id,
                         reply_to=msg.id,
                     ),
+                    intent=InboundIntent.DIRECT_TASK,
                     turn_id=msg.id,
                 )
             )
@@ -2196,6 +2518,7 @@ class AgentEngine:
                         sender_id="system",
                         reply_to=msg.id,
                     ),
+                    intent=InboundIntent.DIRECT_TASK,
                     turn_id=msg.id,
                 )
             )
@@ -2290,7 +2613,12 @@ class AgentEngine:
             "cache_miss_tokens": g.cache_miss_tokens,
             "cache_hit_rate": round(g.cache_hit_rate * 100, 1),
             "total_cost": round(g.cost, 4),
+            "cache_observation_count": g.cache_observation_count,
+            "cache_usage_missing_count": g.cache_usage_missing_count,
         }
+
+        if getattr(self, "model_context_enabled", False):
+            stats["model_context"] = await self._get_model_context().status()
 
         if self.learners:
             stats["learners"] = self.learners.get_stats()
@@ -2331,6 +2659,10 @@ class AgentEngine:
             await asyncio.gather(recovery_task, return_exceptions=True)
         if self._admission_outbox:
             await self._admission_outbox.close()
+
+        model_context = getattr(self, "model_context", None)
+        if model_context is not None:
+            await model_context.close()
 
         if self.hindsight:
             await self.hindsight.close()

@@ -83,6 +83,14 @@ class StatusCommand:
             )
             if get_history_migration_summary is not None:
                 history_migration_summary = await get_history_migration_summary()
+            model_context = stats.get("model_context", {})
+            model_context_lines = []
+            if model_context:
+                model_context_lines = [
+                    "",
+                    "**模型上下文投影**",
+                    f"- schema: `{model_context.get('schema_version', 0)}`，scope: `{model_context.get('scope_count', 0)}`，events: `{model_context.get('event_count', 0)}`",
+                ]
             engagement_lines = [
                 "",
                 "**会话参与**",
@@ -108,7 +116,8 @@ class StatusCommand:
                     "",
                     "**AI 消耗**",
                     f"- API 调用: `{cost['turn_count']}` 次",
-                    f"- 输入 tokens: `{cost.get('prompt_tokens', 0):,}` (命中 `{cost.get('cache_hit_rate', 0)}%`)",
+                    f"- 输入 tokens: `{cost.get('prompt_tokens', 0):,}` (命中 `{cost.get('cache_hit_rate', 0)}%`，hit `{cost.get('cache_hit_tokens', 0):,}` / miss `{cost.get('cache_miss_tokens', 0):,}`)",
+                    f"- 缓存观测: `{cost.get('cache_observation_count', 0)}` 次（provider 未提供字段 `{cost.get('cache_usage_missing_count', 0)}` 次）",
                     f"- 输出 tokens: `{cost.get('completion_tokens', 0):,}`",
                     f"- 总费用: **¥{cost.get('total_cost', 0):.4f}**",
                 ]
@@ -137,6 +146,7 @@ class StatusCommand:
                 "",
                 "**记忆系统**",
                 f"- Hindsight: {_hindsight_status_line(hindsight_health)}",
+                *model_context_lines,
                 *cost_lines,
             ]
 

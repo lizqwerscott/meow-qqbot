@@ -273,7 +273,7 @@ class TestPendingStartsIncomplete:
 
 
 class _MockCost:
-    def record_turn(self, chat_id, model, usage):
+    def record_turn(self, chat_id, model, usage, metadata=None):
         pass
 
 

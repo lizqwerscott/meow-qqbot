@@ -117,6 +117,11 @@ class ToolLoop:
         turn_active_callback: Optional[Callable[[], Awaitable[bool]]] = None,
         turn_delivery_callback: Optional[Callable[[], Awaitable[bool]]] = None,
         turn_revision: int = 0,
+        cost_metadata: Optional[dict] = None,
+        protocol_settled_callback: Optional[Callable[[], Awaitable[None]]] = None,
+        model_context_provider_callback: Optional[
+            Callable[[Any, bool], Awaitable[Any]]
+        ] = None,
     ) -> tuple[bool, bool]:
         """执行工具调用循环。
 
@@ -203,6 +208,8 @@ class ToolLoop:
                     _log.warning("回复 callback 失败 [%s]: %s", chat_id[:12], cb_err)
                 return False, True
 
+        protocol_started = False
+        bound_provider_identity = None
         for round_idx in _rounds:
             if not await turn_is_active():
                 _log.info("turn 已终结，跳过后续模型请求: %s", protocol_turn_id)
@@ -215,13 +222,26 @@ class ToolLoop:
             usage = None
             if runner:
                 runner.reset_failures()
-
             while True:
                 svc = runner.service() if runner else self.ai_service
                 if svc is None:
                     _log.error("FallbackRunner: service() 返回 None，回退默认服务")
                     svc = self.ai_service
                 current_model_name = runner.current if runner else None
+                provider_identity = (
+                    f"{getattr(svc, 'provider_type', '') or type(svc).__name__}:"
+                    f"{getattr(svc, 'model', '')}"
+                )
+                if (
+                    model_context_provider_callback is not None
+                    and provider_identity != bound_provider_identity
+                ):
+                    rebound = await model_context_provider_callback(
+                        svc, not protocol_started
+                    )
+                    if not protocol_started and rebound is not None:
+                        messages, tools = rebound
+                    bound_provider_identity = provider_identity
 
                 _log.debug(
                     "provider payload [%s..] round=%d inbound_message_ids=%s",
@@ -335,9 +355,25 @@ class ToolLoop:
                     # 无模型链（使用默认 ai_service），尝试一次
                     break
 
+            provider_service = runner.service() if runner else svc
             model_for_cost = current_model_name or self.ai_service.model
-            if usage and self.cost_tracker:
-                self.cost_tracker.record_turn(chat_id, model_for_cost, usage)
+            if message is not None and self.cost_tracker:
+                metadata = dict(cost_metadata or {})
+                metadata["tool_protocol"] = any(
+                    message.get("role") == "tool" or bool(message.get("tool_calls"))
+                    for message in messages
+                )
+                metadata.setdefault(
+                    "provider",
+                    getattr(
+                        provider_service,
+                        "provider_type",
+                        provider_service.__class__.__name__,
+                    ),
+                )
+                self.cost_tracker.record_turn(
+                    chat_id, model_for_cost, usage, metadata=metadata
+                )
 
             # 流式已转发部分文本但调用异常：终止整个循环（部分文本已送达）
             if delivery.forwarded and message is None:
@@ -390,6 +426,28 @@ class ToolLoop:
             )
             if output_decision.should_deliver and not await turn_is_active():
                 output_decision = type(output_decision)(False, "turn_not_active")
+
+            if response_text or tool_calls:
+                if protocol_history is not None:
+                    await protocol_history.append_assistant(
+                        turn_id=protocol_turn_id,
+                        event_id=f"assistant:{round_idx}",
+                        content=response_text or "",
+                        tool_calls=tool_calls_data or (),
+                        reasoning_content=reasoning or "",
+                    )
+                protocol_started = True
+                await persist_legacy_assistant(
+                    chat_id,
+                    response_text or "",
+                    reply_to,
+                    tool_calls=tool_calls_data,
+                    reasoning_content=reasoning,
+                )
+
+            if not tool_calls and protocol_settled_callback is not None:
+                await protocol_settled_callback()
+
             if not tool_calls and transition_turn is not None:
                 try:
                     await transition_turn_and_track(
@@ -425,23 +483,6 @@ class ToolLoop:
 
             if reply_state_callback:
                 await reply_state_callback(not output_decision.should_deliver)
-
-            if response_text or tool_calls:
-                if protocol_history is not None:
-                    await protocol_history.append_assistant(
-                        turn_id=protocol_turn_id,
-                        event_id=f"assistant:{round_idx}",
-                        content=response_text or "",
-                        tool_calls=tool_calls_data or (),
-                        reasoning_content=reasoning or "",
-                    )
-                await persist_legacy_assistant(
-                    chat_id,
-                    response_text or "",
-                    reply_to,
-                    tool_calls=tool_calls_data,
-                    reasoning_content=reasoning,
-                )
 
             if not tool_calls:
                 break

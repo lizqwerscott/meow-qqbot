@@ -418,6 +418,42 @@ class ConversationScheduler:
                 state.chat_id, intent=state.intent, candidate_filter=allows
             )
 
+    async def allows_model_context_inheritance(
+        self,
+        turn_id: str,
+        *,
+        chat_id: str,
+        principal_id: str,
+        task_correlation_id: str,
+        reply_to: str,
+        capabilities,
+    ) -> bool:
+        """Authorize a direct-task model context while its turn is active."""
+        async with self._revision_condition:
+            state = self._turn_states.get(turn_id)
+            if (
+                state is None
+                or state.phase is not TurnPhase.ACTIVE
+                or state.intent is not InboundIntent.DIRECT_TASK
+                or state.chat_id != chat_id
+                or state.principal_id != principal_id
+                or state.task_correlation_id != task_correlation_id
+                or not task_correlation_id
+                or not state.principal_role
+                or self._user_role is None
+                or self._role_at_least is None
+                or not self._principal_role_is_current(state)
+            ):
+                return False
+            if capabilities is None:
+                return False
+            return (
+                capabilities.intent is InboundIntent.DIRECT_TASK
+                and capabilities.chat_id == chat_id
+                and capabilities.sender_id == principal_id
+                and capabilities.reply_to == reply_to
+            )
+
     async def commit_steer(
         self,
         turn_id: str,
