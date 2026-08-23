@@ -15,10 +15,12 @@ import json
 import logging
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from core.engine.history_projection import merge_timeline_visible_events
 from core.managers.chat_message import (
     ChatMessage,
     group_user_messages,
@@ -95,6 +97,7 @@ class ArchiveManager:
         merge_window_seconds: int = 15,
     ):
         self._cm = context_manager
+        self._timeline = None
         self._memory_dir = memory_dir
         self._archive_hour = archive_hour
         # replay_count 是旧配置的兼容参数；回放改为按完整时间段切分。
@@ -116,6 +119,9 @@ class ArchiveManager:
         self._daily_state_lock = threading.Lock()
         self._daily_state_path = Path(memory_dir).parent / "daily_archive_state.json"
         self._load_daily_state()
+
+    def set_timeline(self, timeline: Any) -> None:
+        self._timeline = timeline
 
     @property
     def _store(self):
@@ -249,13 +255,16 @@ class ArchiveManager:
         self, chat_id: str, is_group: bool
     ) -> Optional[ArchiveResult]:
         async def _do(ctx):
-            if ctx.is_empty():
-                return None
-
             now = time.time()
             today = _date_str(now)
 
             history = ctx.get_history()
+            merged_history = await self._merge_timeline_messages(chat_id, history)
+            if len(merged_history) != len(history):
+                ctx.set_messages(merged_history)
+                history = merged_history
+            if not history:
+                return None
             if not self._crossed_day(history, today):
                 return None
 
@@ -361,12 +370,40 @@ class ArchiveManager:
         return await self.load_recent_summaries_async(chat_id)
 
     async def get_session_status_async(self, chat_id: str) -> Dict[str, Any]:
-        history = await self._cm.get_chat_history_async(chat_id)
+        summary = None
+        if self._timeline is not None:
+            try:
+                candidate = await self._timeline.session_summary(chat_id)
+                if candidate.get("message_count", 0):
+                    summary = candidate
+            except Exception:
+                summary = None
+        if summary is not None:
+            message_count = summary["message_count"]
+            last_activity = summary["last_activity"]
+        else:
+            history = await self._cm.get_chat_history_async(chat_id)
+            if self._timeline is not None:
+                repair = getattr(self._timeline, "repair_from_legacy_history", None)
+                if repair is not None:
+                    await repair(chat_id, history)
+                repaired = await self._timeline.session_summary(chat_id)
+                if repaired.get("message_count", 0):
+                    message_count = repaired["message_count"]
+                    last_activity = repaired["last_activity"]
+                else:
+                    message_count = len(history)
+                    last_activity = (
+                        history[-1].get("timestamp", time.time()) if history else None
+                    )
+            else:
+                message_count = len(history)
+                last_activity = (
+                    history[-1].get("timestamp", time.time()) if history else None
+                )
         return {
-            "message_count": len(history),
-            "last_activity": (
-                history[-1].get("timestamp", time.time()) if history else None
-            ),
+            "message_count": message_count,
+            "last_activity": last_activity,
             "archive_count": len(
                 await asyncio.to_thread(
                     lambda: list(
@@ -473,10 +510,13 @@ class ArchiveManager:
 
         # 2. 收集消息。active history 的前缀可能是上一轮已进入 archive 的
         # 回放消息；它们仅用于上下文，不应再次写入新 archive。
-        all_msgs = ctx.get_history()
-        unit_start_times = self._unit_start_timestamps(all_msgs)
-        replayed_prefix_length = self._replayed_prefix_length(chat_id, all_msgs)
-        unarchived_indices = list(range(replayed_prefix_length, len(all_msgs)))
+        source_msgs = await self._merge_timeline_messages(chat_id, ctx.get_history())
+        if len(source_msgs) != len(ctx.get_history()):
+            ctx.set_messages(source_msgs)
+        all_msgs = await self._apply_timeline_projection(chat_id, source_msgs)
+        unit_start_times = self._unit_start_timestamps(source_msgs)
+        replayed_prefix_length = self._replayed_prefix_length(chat_id, source_msgs)
+        unarchived_indices = list(range(replayed_prefix_length, len(source_msgs)))
         old_indices = [
             index
             for index in unarchived_indices
@@ -500,7 +540,7 @@ class ArchiveManager:
             unit_start_times[today_indices[0]] if today_indices else None
         )
         replay_indices = self._select_replay_indices(
-            all_msgs,
+            source_msgs,
             old_history_indices,
             self._replay_gap_seconds,
             unit_start_times,
@@ -510,7 +550,9 @@ class ArchiveManager:
         base_keep_indices = set(today_indices) | set(replay_indices)
         # tool 调用与其全部结果是一个协议事务。跨日时，只要事务中任一消息
         # 必须保留，就将 assistant tool_calls 和每个对应 tool result 一起保留。
-        keep_indices = self._close_tool_transactions(all_msgs, set(base_keep_indices))
+        keep_indices = self._close_tool_transactions(
+            source_msgs, set(base_keep_indices)
+        )
         # 仅因工具事务闭包而保留的旧消息尚不完整归档，留到整个事务都属于
         # 旧历史时再写入 archive；普通回放消息仍会在本次 archive 中保留副本。
         transaction_carried_indices = keep_indices - base_keep_indices
@@ -559,7 +601,7 @@ class ArchiveManager:
                 or _date_str(unit_start_times[index]) >= date
             ):
                 break
-            replayed_prefix_keys.append(self._message_key(all_msgs[index]))
+            replayed_prefix_keys.append(self._message_key(source_msgs[index]))
         self._replayed_prefix_keys[chat_id] = replayed_prefix_keys
         self._replayed_prefix_known.add(chat_id)
         ctx.last_activity = time.time()
@@ -597,6 +639,91 @@ class ArchiveManager:
             self._pending_injection.add(chat_id)
 
         return result
+
+    async def _merge_timeline_messages(
+        self, chat_id: str, messages: List[Any]
+    ) -> List[Any]:
+        """Materialize timeline-only visible events into legacy history.
+
+        The legacy history remains the owner of assistant/tool protocol order,
+        but accepted visible deliveries and user admissions may already exist
+        only in the timeline during the migration. Materializing those events
+        before partitioning makes archive and replay operate on one ordered
+        visible projection without treating a tool-bearing assistant message as
+        the final visible response.
+        """
+        if self._timeline is None:
+            return messages
+        repair = getattr(self._timeline, "repair_from_legacy_history", None)
+        if callable(repair) and messages:
+            try:
+                legacy_history = [
+                    (
+                        message.to_storage_dict()
+                        if hasattr(message, "to_storage_dict")
+                        else (
+                            message.to_dict()
+                            if hasattr(message, "to_dict")
+                            else message
+                        )
+                    )
+                    for message in messages
+                ]
+                await repair(chat_id, legacy_history)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log.warning("归档回填 timeline 失败 [%s..]: %s", chat_id[:12], exc)
+        snapshot = getattr(self._timeline, "snapshot", None)
+        if not callable(snapshot):
+            return messages
+        try:
+            events = await snapshot(chat_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.warning("归档合并 timeline 失败 [%s..]: %s", chat_id[:12], exc)
+            return messages
+        if not events:
+            return messages
+
+        return merge_timeline_visible_events(messages, events)
+
+    async def _apply_timeline_projection(
+        self, chat_id: str, messages: List[Any]
+    ) -> List[Any]:
+        """Overlay accepted visible text without rewriting protocol messages."""
+        if self._timeline is None:
+            return messages
+        snapshot = getattr(self._timeline, "snapshot", None)
+        if not callable(snapshot):
+            return messages
+        try:
+            events = await snapshot(chat_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.warning("归档读取 timeline 投影失败 [%s..]: %s", chat_id[:12], exc)
+            return messages
+        visible = {
+            (event.role, event.message_id): event.content
+            for event in events
+            if event.role in {"user", "assistant"}
+            and event.message_id
+            and event.content
+        }
+        if not visible:
+            return messages
+        projected: List[Any] = []
+        for message in messages:
+            if message.role == "assistant" and message.tool_calls:
+                projected.append(message)
+                continue
+            content = visible.get((message.role, message.message_id))
+            projected.append(
+                replace(message, content=content) if content is not None else message
+            )
+        return projected
 
     # ── 消息提取 ──
 

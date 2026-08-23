@@ -326,8 +326,12 @@ async def test_request_approval_registers_pending_info(am):
 
         FakeSender.return_value.send = fake_send
         result = await am.request_approval(
-            "chat_001", "exec", "命令不在允许列表中", details="ls -la",
-            timeout=60, plan={"command": "ls -la", "cwd": "/"},
+            "chat_001",
+            "exec",
+            "命令不在允许列表中",
+            details="ls -la",
+            timeout=60,
+            plan={"command": "ls -la", "cwd": "/"},
             return_session_key=True,
         )
     decision, session_key = result
@@ -338,12 +342,51 @@ async def test_request_approval_registers_pending_info(am):
 
 
 @pytest.mark.asyncio
-async def test_resolve_prefix_match_short_id(am):
+async def test_request_approval_preserves_runtime_session_key(am):
+    session_key = "approval:turn-1:exec:stable-plan"
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            assert session_key in am._pending
+            am.resolve(session_key, "allow-once", "admin_001")
+            return True
+
+        FakeSender.return_value.send = fake_send
+        result = await am.request_approval(
+            "chat_001",
+            "exec",
+            "reason",
+            plan={"command": "ls"},
+            return_session_key=True,
+            session_key=session_key,
+        )
+
+    assert result == ("allow-once", session_key)
     future = asyncio.get_running_loop().create_future()
     am._pending["approval:chat:exec:abc12345"] = future
     # 短 id 前缀匹配
     assert am.resolve("approval:chat:exec:abc", "allow", "admin_001") is True
     assert future.result() == "allow"
+
+
+@pytest.mark.asyncio
+async def test_request_approval_does_not_replace_existing_session(am):
+    existing = asyncio.get_running_loop().create_future()
+    session_key = "approval:turn-1:exec:stable-plan"
+    am._pending[session_key] = existing
+
+    result = await am.request_approval(
+        "chat_001",
+        "exec",
+        "reason",
+        plan={"command": "ls"},
+        return_session_key=True,
+        session_key=session_key,
+    )
+
+    assert result == ("deny", "")
+    assert am._pending[session_key] is existing
+    assert not existing.done()
 
 
 @pytest.mark.asyncio
@@ -494,7 +537,11 @@ def test_record_use_flush_without_dirty_no_write(am, tmp_whitelist):
 
 def test_whitelist_stats(am):
     am._whitelist["allowlist"] = [
-        {"pattern": "git", "source": "allow-always", "approved_at": "2026-01-01T00:00:00"},
+        {
+            "pattern": "git",
+            "source": "allow-always",
+            "approved_at": "2026-01-01T00:00:00",
+        },
         {"pattern": "ls", "source": "legacy", "approved_at": "2026-02-01T00:00:00"},
         {"pattern": ""},
     ]
@@ -586,7 +633,11 @@ async def test_pending_plan_stored_deepcopy(am):
 
         FakeSender.return_value.send = fake_send
         result = await am.request_approval(
-            "chat_001", "exec", "原因", details="ls -la", plan=plan,
+            "chat_001",
+            "exec",
+            "原因",
+            details="ls -la",
+            plan=plan,
             return_session_key=True,
         )
     _, session_key = result

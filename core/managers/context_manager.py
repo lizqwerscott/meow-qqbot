@@ -4,6 +4,7 @@ import time
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
+from core.engine.history_projection import merge_timeline_visible_events
 from core.managers.chat_context import ChatContext
 from core.managers.context_compactor import ContextCompactor
 from core.managers.context_store import ContextStore
@@ -37,6 +38,10 @@ class ChatContextManager:
         self.contexts: Dict[str, ChatContext] = {}
         self._ctx_lock = asyncio.Lock()
         self._chat_locks: Dict[str, asyncio.Lock] = {}
+        self._timeline = None
+
+    def set_timeline(self, timeline: Any) -> None:
+        self._timeline = timeline
 
     @property
     def store(self) -> ContextStore:
@@ -153,7 +158,7 @@ class ChatContextManager:
     _token_cache_time: Dict[str, float] = {}  # 记录每个缓存条目的时间戳
     _token_cache_lock = asyncio.Lock()
     _token_cache_max_size: int = 1000  # 最大缓存会话数
-    
+
     # 会话 ID 缓存：避免重复扫描磁盘文件
     _chat_ids_cache: Optional[List[str]] = None
     _chat_ids_cache_time: float = 0
@@ -167,30 +172,30 @@ class ChatContextManager:
             history = context.get_history_as_dicts()
             message_count = len(history)
             last_activity = context.last_activity
-            
+
             # 使用缓存的 token 估算，避免每次重新计算
             estimated_tokens = await self._get_cached_tokens(chat_id)
-            
+
             return {
                 "message_count": message_count,
                 "last_activity": last_activity,
                 "estimated_tokens": estimated_tokens,
             }
-    
+
     async def get_session_summary_light(self, chat_id: str) -> Dict[str, Any]:
         """获取轻量级会话摘要（用于列表页面）。
-        
+
         只读取最后一条消息，避免加载完整历史，大幅提升列表页加载速度。
         """
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
-            
+
             # 只获取最后一条消息，不加载完整历史
             last_message = context.history[-1] if context.history else None
             message_count = len(context.history)
             last_activity = context.last_activity
-            
+
             # 只估算最后一条消息的 token（轻量级）
             estimated_tokens = 0
             if last_message:
@@ -199,7 +204,7 @@ class ChatContextManager:
                     estimated_tokens = len(last_message.content) // 4
                 except Exception:
                     estimated_tokens = 0
-            
+
             return {
                 "message_count": message_count,
                 "last_activity": last_activity,
@@ -208,13 +213,13 @@ class ChatContextManager:
 
     async def _get_cached_tokens(self, chat_id: str, context=None) -> int:
         """获取或计算 token 估算值，使用缓存避免重复计算。
-        
+
         使用基于时间戳的失效检查和 LRU 策略。
-        
+
         Args:
             chat_id: 会话 ID
             context: 可选的上下文对象（用于计算新值）
-            
+
         Returns:
             估算的 token 数
         """
@@ -223,23 +228,23 @@ class ChatContextManager:
             cached_tokens = self._token_cache.get(chat_id)
             cached_time = self._token_cache_time.get(chat_id, 0)
             now = time.time()
-            
+
             # 缓存存在且未过期（1 秒内），直接返回
             if cached_tokens is not None and (now - cached_time) < 1.0:
                 # 访问缓存，更新为最近使用
                 self._token_cache.move_to_end(chat_id)
                 return cached_tokens
-            
+
             # 缓存失效或首次访问，需要重新计算
             if context is None:
                 try:
                     context = await self._get_or_restore_context_locked(chat_id)
                 except Exception:
                     return 0
-            
+
             # 计算 token
             tokens = context.estimate_tokens_for_history()
-            
+
             # 写入缓存（移除旧条目，添加新条目）
             if chat_id in self._token_cache:
                 # 更新现有条目
@@ -250,20 +255,20 @@ class ChatContextManager:
                 # 添加新条目
                 self._token_cache[chat_id] = tokens
                 self._token_cache_time[chat_id] = now
-            
+
             # 如果超过最大缓存大小，清理最旧的条目
             if len(self._token_cache) > self._token_cache_max_size:
                 self._prune_token_cache()
-            
+
             return tokens
 
     async def _invalidate_token_cache(self, chat_id: str) -> None:
         """统一清理 token 缓存。
-        
+
         集中处理以下场景：
         - 会话移除：删除对应的缓存条目
         - 清空历史：将 token 重置为 0
-        
+
         Args:
             chat_id: 会话 ID
         """
@@ -271,18 +276,18 @@ class ChatContextManager:
             if chat_id in self._token_cache:
                 del self._token_cache[chat_id]
                 self._token_cache_time.pop(chat_id, None)
-    
+
     def _prune_token_cache(self):
         """清理最旧的缓存条目（保留最近访问的）。
-        
+
         使用 OrderedDict 的 popitem(last=False) 实现 O(1) LRU 清理。
         """
         if len(self._token_cache) <= self._token_cache_max_size:
             return
-        
+
         # 计算需要移除的条目数
         to_remove = len(self._token_cache) - self._token_cache_max_size
-        
+
         # 移除最旧的条目（O(1) 操作）
         for _ in range(to_remove):
             if self._token_cache:
@@ -329,6 +334,8 @@ class ChatContextManager:
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
             await context.clear_history_async()
+            if self._timeline is not None:
+                await self._timeline.clear_chat(chat_id)
             # 清空 token 缓存（历史已清空，token 应为 0）
             await self._invalidate_token_cache(chat_id)
 
@@ -366,7 +373,19 @@ class ChatContextManager:
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
-            result = await self._compactor.compact(context.get_history(), force=force)
+            history = context.get_history()
+            if self._timeline is not None:
+                try:
+                    events = await self._timeline.snapshot(chat_id)
+                    merged = merge_timeline_visible_events(history, events)
+                    if len(merged) != len(history):
+                        context.set_messages(merged)
+                        history = merged
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    _log.warning("压缩读取 timeline 失败 [%s..]: %s", chat_id[:12], exc)
+            result = await self._compactor.compact(history, force=force)
             if result.compacted:
                 context.set_messages(result.messages)
             return result.compacted, result.usage, len(result.messages)
@@ -383,7 +402,7 @@ class ChatContextManager:
                     await context.wait_for_save_async()
         finally:
             self._store.release_file_lock(chat_id)
-        
+
         # 清理 token 缓存
         await self._invalidate_token_cache(chat_id)
 
@@ -426,17 +445,20 @@ class ChatContextManager:
         # 使用缓存，减少磁盘 I/O
         async with self._ctx_lock:
             memory_ids = set(self.contexts)
-        
+
         # 检查缓存是否过期（在锁外检查，避免死锁）
         now = time.time()
-        if self._chat_ids_cache is not None and (now - self._chat_ids_cache_time) < self._chat_ids_cache_ttl:
+        if (
+            self._chat_ids_cache is not None
+            and (now - self._chat_ids_cache_time) < self._chat_ids_cache_ttl
+        ):
             disk_ids = set(self._chat_ids_cache)
         else:
             disk_ids = set(await asyncio.to_thread(self._store.get_all_disk_ids))
             # 更新缓存（在锁外操作）
             self._chat_ids_cache = sorted(disk_ids)
             self._chat_ids_cache_time = now
-        
+
         return sorted(set(disk_ids) | memory_ids)
 
     async def get_total_messages_count_async(self) -> int:

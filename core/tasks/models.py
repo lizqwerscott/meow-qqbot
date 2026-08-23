@@ -84,6 +84,9 @@ class TaskRecord:
     type: str = "manual"  # "cron" | "manual"
     status: TaskStatus = TaskStatus.PENDING
     prompt: str = ""  # AI 执行指令
+    auto_media_understanding: bool = False
+    media_refs: tuple[str, ...] = ()
+    media_source_chat_id: str = ""
     job_id: Optional[str] = None  # 关联的 CronJob ID
     session_id: str = ""  # 运行时填充：task:<id>
     created_at: float = field(default_factory=_now)
@@ -93,6 +96,8 @@ class TaskRecord:
     error: Optional[str] = None
     delivery_channel: Optional[str] = None  # 结果投递到的 chat_id
     delivery_status: DeliveryStatus = DeliveryStatus.UNKNOWN
+    delivery_id: str = ""  # DeliveryLedger logical delivery ID（用于恢复关联）
+    recovery_notification_pending: bool = False
     delivery_error: Optional[str] = None
     tool_delivered: bool = False
     silent: bool = False
@@ -106,6 +111,7 @@ class TaskRecord:
         d = asdict(self)
         d["status"] = self.status.value
         d["delivery_status"] = self.delivery_status.value
+        d["media_refs"] = list(self.media_refs)
         return d
 
     @classmethod
@@ -115,6 +121,7 @@ class TaskRecord:
         d["delivery_status"] = DeliveryStatus(
             d.get("delivery_status", DeliveryStatus.UNKNOWN.value)
         )
+        d["media_refs"] = tuple(d.get("media_refs") or ())
         return cls(**d)
 
 
@@ -134,6 +141,8 @@ class CronJob:
     cron_expression: str = ""  # 周期性 cron，如 "0 8 * * *"
     at: Optional[float] = None  # 一次性执行时间戳（UTC），有值则优先
     prompt: str = ""  # AI 执行指令
+    auto_media_understanding: bool = False
+    media_refs: tuple[str, ...] = ()
     enabled: bool = True
     catch_up: bool = True  # 重启时是否补跑错过的任务（仅 cron 有效）
     delete_after_run: bool = True  # 一次性任务执行后自动删除
@@ -178,6 +187,7 @@ class CronJob:
 
     def to_dict(self) -> dict:
         d = asdict(self)
+        d["media_refs"] = list(self.media_refs)
         return d
 
     def __post_init__(self):
@@ -193,10 +203,12 @@ class CronJob:
 
     @classmethod
     def from_dict(cls, d: dict) -> "CronJob":
+        d = dict(d)
         # 旧数据兼容：从 session_mode 推导 session_target
         if "session_target" not in d:
             session_mode = d.get("session_mode", "isolated")
             d["session_target"] = session_mode
+        d["media_refs"] = tuple(d.get("media_refs") or ())
         return cls(**d)
 
 

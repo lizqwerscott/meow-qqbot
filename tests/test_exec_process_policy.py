@@ -5,6 +5,7 @@ strictInlineEval 强制审批、security=deny 等核心行为。
 后台执行走 mock process_registry，不真跑命令。
 """
 
+import asyncio
 import json
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -82,7 +83,7 @@ def _build_deps():
     return deps
 
 
-def _ctx(sender, is_group=False):
+def _ctx(sender, is_group=False, transition=None):
     return ToolContext(
         chat_id="c1",
         is_group=is_group,
@@ -91,16 +92,28 @@ def _ctx(sender, is_group=False):
         reply_callback=lambda *a, **k: None,
         delivery_channel="",
         reply_to_message_id="",
+        turn_id="turn-1" if transition is not None else "",
+        turn_revision=4,
+        principal_id=sender,
+        transition_turn=transition,
     )
 
 
-async def _exec(deps, command, sender, is_group=False, background=True, workdir=None):
+async def _exec(
+    deps,
+    command,
+    sender,
+    is_group=False,
+    background=True,
+    workdir=None,
+    transition=None,
+):
     entries = create_exec_process_entries(deps)
     exec_entry = next(e for e in entries if e.name == "exec")
     args = {"command": command, "background": background}
     if workdir is not None:
         args["workdir"] = workdir
-    result = await exec_entry.handler(args, _ctx(sender, is_group))
+    result = await exec_entry.handler(args, _ctx(sender, is_group, transition))
     return json.loads(result.content)
 
 
@@ -161,6 +174,71 @@ async def test_admin_inline_eval_requires_approval_and_not_whitelisted(deps):
             e["pattern"] for e in deps.approval_manager.value._whitelist["allowlist"]
         ]
         assert "python3" not in patterns
+
+
+async def test_approved_exec_rechecks_role_before_execution(deps):
+    with patch("qqbot_agent_sdk.ApprovalSender") as FakeSender:
+
+        async def fake_send(**kw):
+            for key in list(deps.approval_manager.value._pending):
+                deps.approval_manager.value.resolve(key, "allow-once", ADMIN)
+            deps.permission_manager._data["roles"]["admin"] = []
+            return True
+
+        FakeSender.return_value.send = fake_send
+        result = await _exec(deps, "python3 -c 'print(1)'", ADMIN)
+
+    assert result["error"] == "APPROVAL_ROLE_CHANGED: 审批期间权限已降级"
+
+
+async def test_exec_approval_request_exception_restores_active_turn(deps):
+    transitions = []
+
+    async def transition(**kwargs):
+        transitions.append(kwargs)
+        return type("State", (), {"revision": kwargs["expected_revision"] + 1})()
+
+    deps.approval_manager.value.request_approval = AsyncMock(
+        side_effect=RuntimeError("approval transport failed")
+    )
+
+    with pytest.raises(RuntimeError, match="approval transport failed"):
+        await _exec(
+            deps,
+            "vim x.txt",
+            ADMIN,
+            transition=transition,
+        )
+
+    assert [item["phase"].value for item in transitions] == [
+        "awaiting_approval",
+        "active",
+    ]
+
+
+async def test_exec_approval_cancellation_cancels_turn(deps):
+    transitions = []
+
+    async def transition(**kwargs):
+        transitions.append(kwargs)
+        return type("State", (), {"revision": kwargs["expected_revision"] + 1})()
+
+    deps.approval_manager.value.request_approval = AsyncMock(
+        side_effect=asyncio.CancelledError()
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await _exec(
+            deps,
+            "vim x.txt",
+            ADMIN,
+            transition=transition,
+        )
+
+    assert [item["phase"].value for item in transitions] == [
+        "awaiting_approval",
+        "cancelled",
+    ]
 
 
 async def test_inline_eval_allow_always_downgraded(deps):

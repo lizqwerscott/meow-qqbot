@@ -9,6 +9,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.status import HTTP_303_SEE_OTHER, HTTP_400_BAD_REQUEST
 
+from core.engine.history_projection import visible_legacy_history
+
 _log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["sessions"])
@@ -35,6 +37,17 @@ def _make_flash_redirect(url: str, category: str, message: str):
     )
 
 
+async def _repair_timeline_from_legacy(context_manager, timeline, chat_id: str):
+    if timeline is None:
+        return
+    repair = getattr(timeline, "repair_from_legacy_history", None)
+    get_history = getattr(context_manager, "get_chat_history_async", None)
+    if not callable(repair) or not callable(get_history):
+        return
+    legacy_history = await get_history(chat_id)
+    await repair(chat_id, legacy_history)
+
+
 @router.get("/sessions", response_class=HTMLResponse)
 async def session_list(
     request: Request,
@@ -45,39 +58,65 @@ async def session_list(
     context_manager = managers.get("context_manager")
 
     all_chat_ids = await context_manager.get_all_disk_chat_ids_async()
+    if timeline := managers.get("conversation_timeline"):
+        try:
+            timeline_chat_ids = await timeline.chat_ids()
+            all_chat_ids = list(dict.fromkeys(all_chat_ids + timeline_chat_ids))
+        except Exception:
+            pass
     if q:
         all_chat_ids = [cid for cid in all_chat_ids if q.lower() in cid.lower()]
 
     archived_counts = await context_manager.get_archived_sessions_summary_async()
 
-    # 并行获取所有会话的摘要信息，提升性能
-    summaries = await asyncio.gather(
-        *[context_manager.get_session_summary_async(cid) for cid in all_chat_ids],
-        return_exceptions=True
-    )
+    timeline = managers.get("conversation_timeline")
+    if timeline is not None:
+        summaries = await asyncio.gather(
+            *[timeline.session_summary(cid) for cid in all_chat_ids],
+            return_exceptions=True,
+        )
+    else:
+        summaries = [None] * len(all_chat_ids)
 
     sessions = []
-    for cid, summary in zip(all_chat_ids, summaries):
-        # 处理可能的异常
-        if isinstance(summary, Exception):
-            sessions.append({
-                "chat_id": cid,
-                "message_count": 0,
-                "last_activity": "-",
-                "estimated_tokens": 0,
-                "archived_count": archived_counts.get(cid, 0),
-            })
+    for cid, timeline_summary in zip(all_chat_ids, summaries):
+        summary = timeline_summary
+        try:
+            if isinstance(summary, Exception):
+                summary = None
+            if timeline is not None:
+                await _repair_timeline_from_legacy(context_manager, timeline, cid)
+                repaired = await timeline.session_summary(cid)
+                if repaired.get("message_count", 0):
+                    summary = repaired
+            if not summary or not summary.get("message_count", 0):
+                summary = await context_manager.get_session_summary_async(cid)
+        except Exception:
+            summary = None
+
+        if summary is None:
+            sessions.append(
+                {
+                    "chat_id": cid,
+                    "message_count": 0,
+                    "last_activity": "-",
+                    "estimated_tokens": 0,
+                    "archived_count": archived_counts.get(cid, 0),
+                }
+            )
         else:
-            sessions.append({
-                "chat_id": cid,
-                "message_count": summary["message_count"],
-                "last_activity": time.strftime(
-                    "%Y-%m-%d %H:%M:%S",
-                    time.localtime(summary["last_activity"]),
-                ),
-                "estimated_tokens": summary["estimated_tokens"],
-                "archived_count": archived_counts.get(cid, 0),
-            })
+            sessions.append(
+                {
+                    "chat_id": cid,
+                    "message_count": summary["message_count"],
+                    "last_activity": time.strftime(
+                        "%Y-%m-%d %H:%M:%S",
+                        time.localtime(summary["last_activity"]),
+                    ),
+                    "estimated_tokens": summary["estimated_tokens"],
+                    "archived_count": archived_counts.get(cid, 0),
+                }
+            )
 
     sessions.sort(key=lambda s: s["last_activity"], reverse=True)
 
@@ -288,8 +327,19 @@ async def session_detail(request: Request, chat_id: str):
     managers = request.app.state.managers
     templates = request.app.state.templates
     context_manager = managers.get("context_manager")
+    timeline = managers.get("conversation_timeline")
 
-    history = await context_manager.get_chat_history_async(chat_id, max_messages=200)
+    history = await timeline.history(chat_id, max_events=200) if timeline else []
+    if timeline is not None:
+        try:
+            await _repair_timeline_from_legacy(context_manager, timeline, chat_id)
+            history = await timeline.history(chat_id, max_events=200)
+        except Exception:
+            pass
+    elif not history:
+        history = visible_legacy_history(
+            await context_manager.get_chat_history_async(chat_id, max_messages=200)
+        )
     history.reverse()
 
     archived_files = await context_manager.get_archived_files_async(chat_id)
@@ -311,8 +361,11 @@ async def session_clear(request: Request, chat_id: str):
     _validate_chat_id(chat_id)
     managers = request.app.state.managers
     context_manager = managers.get("context_manager")
+    timeline = managers.get("conversation_timeline")
 
     await context_manager.clear_chat_history_async(chat_id)
+    if timeline is not None:
+        await timeline.clear_chat(chat_id)
     return _make_flash_redirect("/sessions", "success", "会话已清空")
 
 

@@ -84,6 +84,7 @@ class WakeTurnResult:
     deliver_to_user: str = ""  # 非空时投递到该 chat_id，否则 DM 管理员
     captured_replies: list = field(default_factory=list)
     error: str = ""
+    turn_id: str = ""
 
 
 WakeHandler = Callable[[PendingWake], "Awaitable[WakeRunResult]"]

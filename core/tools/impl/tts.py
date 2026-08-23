@@ -4,6 +4,7 @@ import logging
 from qqbot_agent_sdk.constants import MEDIA_TYPE_VOICE
 
 from core.ai.tts_service import TtsService
+from core.engine.delivery_ledger import DeliveryReceipt
 from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
 
@@ -101,6 +102,19 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
                 )
             )
 
+        if (
+            ctx.turn_active_callback is not None
+            and not await ctx.turn_active_callback()
+        ):
+            return ToolResult(
+                content=json.dumps({"error": "当前 turn 已终结"}, ensure_ascii=False),
+                delivery_receipt=DeliveryReceipt(
+                    status="failed",
+                    error_code="turn_not_active",
+                    retryable=False,
+                ),
+            )
+
         try:
             audio_bytes = await tts_service.synthesize(
                 text=text,
@@ -147,14 +161,14 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
 
         try:
             if effective_reply_to:
-                await bot_engine.send_reply(
+                transport_result = await bot_engine.send_reply(
                     chat_id=effective_chat_id,
                     is_group=ctx.is_group,
                     message_id=effective_reply_to,
                     media_file_info=file_info,
                 )
             else:
-                await bot_engine.send_proactive(
+                transport_result = await bot_engine.send_proactive(
                     chat_id=effective_chat_id,
                     is_group=ctx.is_group,
                     media_file_info=file_info,
@@ -167,6 +181,22 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
                 )
             )
 
+        receipt = (
+            transport_result
+            if isinstance(transport_result, DeliveryReceipt)
+            else DeliveryReceipt(
+                status="accepted",
+                logical_delivery_id=(
+                    f"voice:{effective_chat_id}:{ctx.turn_id or ctx.reply_to or 'proactive'}"
+                ),
+            )
+        )
+        if receipt.status not in {"accepted", "partial"}:
+            return ToolResult(
+                content=json.dumps({"error": "发送语音未确认"}, ensure_ascii=False),
+                delivery_receipt=receipt,
+            )
+
         return ToolResult(
             content=json.dumps(
                 {
@@ -174,7 +204,8 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
                     "message": "语音已发送到聊天中",
                 },
                 ensure_ascii=False,
-            )
+            ),
+            delivery_receipt=receipt,
         )
 
     return [
@@ -194,5 +225,6 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
             ),
             parameters=tts_params,
             handler=_synthesize_speech,
+            delivery_kind="voice",
         ),
     ]

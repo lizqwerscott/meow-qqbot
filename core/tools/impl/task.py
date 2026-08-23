@@ -68,6 +68,20 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
         payload_model = (args.get("model") or "").strip() or None
         payload_thinking = (args.get("thinking") or "").strip() or None
         enable_notify = bool(args.get("enable_notify", True))
+        auto_media_understanding = bool(args.get("auto_media_understanding", False))
+        media_refs = args.get("media_refs") or []
+        if not isinstance(media_refs, list) or any(
+            not isinstance(ref, str)
+            or not ref.startswith("media://inbound/")
+            or "/" in ref.removeprefix("media://inbound/")
+            for ref in media_refs
+        ):
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "media_refs 必须是受控 media://inbound/<id> 引用数组"},
+                    ensure_ascii=False,
+                )
+            )
 
         tools_allow = args.get("tools_allow")
         if tools_allow is not None:
@@ -147,6 +161,9 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
             prompt = ""
         elif payload_type == "system_event":
             payload_command = ""
+        if payload_type != "message":
+            auto_media_understanding = False
+            media_refs = []
 
         job = await cron_job_manager.create_job(
             name=name,
@@ -163,6 +180,8 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
             thinking=payload_thinking,
             enable_notify=enable_notify,
             tools_allow=tools_allow,
+            auto_media_understanding=auto_media_understanding,
+            media_refs=tuple(dict.fromkeys(media_refs)),
         )
 
         payload_labels = {
@@ -204,6 +223,8 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
                     "model": payload_model or "",
                     "thinking": payload_thinking or "",
                     "tools_allow": tools_allow,
+                    "auto_media_understanding": job.auto_media_understanding,
+                    "media_refs": list(job.media_refs),
                     "message": desc,
                 },
                 ensure_ascii=False,
@@ -661,6 +682,23 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
             job.tools_allow = ["*"] if "*" in val else [n for n in val if n != "*"]
             changed.append("tools_allow")
 
+    def _updater_auto_media_understanding(job, val, changed):
+        job.auto_media_understanding = bool(val)
+        changed.append("auto_media_understanding")
+
+    def _updater_media_refs(job, val, changed):
+        if not isinstance(val, list):
+            return
+        if any(
+            not isinstance(ref, str)
+            or not ref.startswith("media://inbound/")
+            or "/" in ref.removeprefix("media://inbound/")
+            for ref in val
+        ):
+            return
+        job.media_refs = tuple(dict.fromkeys(val))
+        changed.append("media_refs")
+
     _UPDATERS = {
         "name": _updater_name,
         "cron_expression": _updater_cron,
@@ -675,6 +713,8 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
         "thinking": _updater_thinking,
         "enable_notify": _updater_enable_notify,
         "tools_allow": _updater_tools_allow,
+        "auto_media_understanding": _updater_auto_media_understanding,
+        "media_refs": _updater_media_refs,
     }
 
     _CRON_JOB_FIELDS = {
@@ -729,6 +769,15 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
             "type": ["array", "null"],
             "items": {"type": "string"},
             "description": "指定该定时任务可用的工具列表。设置为 ['*'] 可使用全部 cron 允许的工具。",
+        },
+        "auto_media_understanding": {
+            "type": "boolean",
+            "description": "是否在任务执行前理解显式提供的媒体引用。默认关闭；不会从 prompt 猜测媒体。",
+        },
+        "media_refs": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "显式授权的 media://inbound/<id> 引用数组，仅在 auto_media_understanding=true 时生效。",
         },
     }
 

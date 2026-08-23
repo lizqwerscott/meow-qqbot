@@ -1,5 +1,7 @@
 import asyncio
 import threading
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -281,6 +283,45 @@ async def test_compact_history_if_needed_forwards_force_and_applies_result(
     assert (await mgr.get_chat_history_async("chat_001"))[0]["content"] == "summary"
     assert compactor.calls[0][1] is True
     assert compactor.calls[0][0][0].content == original.content
+
+
+@pytest.mark.asyncio
+async def test_compaction_materializes_timeline_only_visible_events(mgr, compactor):
+    mgr.set_timeline(
+        SimpleNamespace(
+            snapshot=AsyncMock(
+                return_value=(
+                    SimpleNamespace(
+                        event_id="delivery:d1",
+                        role="assistant",
+                        message_id="",
+                        content="accepted answer",
+                        timestamp=1,
+                    ),
+                )
+            )
+        )
+    )
+
+    await mgr.compact_history_if_needed("chat_001", force=True)
+
+    assert [message.content for message in compactor.calls[0][0]] == ["accepted answer"]
+
+
+@pytest.mark.asyncio
+async def test_clear_history_also_clears_timeline(mgr):
+    class Timeline:
+        def __init__(self):
+            self.cleared = []
+
+        async def clear_chat(self, chat_id):
+            self.cleared.append(chat_id)
+
+    timeline = Timeline()
+    mgr.set_timeline(timeline)
+    await mgr.clear_chat_history_async("chat_001")
+
+    assert timeline.cleared == ["chat_001"]
 
 
 @pytest.mark.asyncio

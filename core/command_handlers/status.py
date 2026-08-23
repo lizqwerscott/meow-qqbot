@@ -60,8 +60,45 @@ class StatusCommand:
             active_chats = stats.get("active_chats", 0)
             hindsight_health = stats.get("hindsight_health", {})
             learner_stats = stats.get("learners", {})
-
             sm = self.agent_engine._skill_managers
+            engagement_status = {}
+            get_engagement_status = getattr(
+                self.agent_engine, "get_engagement_status", None
+            )
+            if get_engagement_status is not None:
+                engagement_status = await get_engagement_status()
+            engagement_metrics = engagement_status.get("engagement", {})
+            delivery_counts = engagement_status.get("delivery", {})
+            history_migration = {}
+            get_history_migration_status = getattr(
+                self.agent_engine, "get_history_migration_status", None
+            )
+            if get_history_migration_status is not None:
+                history_migration = await get_history_migration_status(
+                    input_message.chat_id
+                )
+            history_migration_summary = {}
+            get_history_migration_summary = getattr(
+                self.agent_engine, "get_history_migration_summary", None
+            )
+            if get_history_migration_summary is not None:
+                history_migration_summary = await get_history_migration_summary()
+            engagement_lines = [
+                "",
+                "**会话参与**",
+                f"- Shadow 候选: `{engagement_metrics.get('shadow_candidates', 0)}`",
+                f"- Active 预留: `{engagement_metrics.get('active_reserved', 0)}`",
+                f"- Delivery: `prepared={delivery_counts.get('prepared', 0)}` `sent={delivery_counts.get('sent', 0)}` `failed={delivery_counts.get('failed', 0)}`",
+            ]
+            history_lines = [
+                "",
+                "**历史迁移**",
+                f"- 可见消息: `legacy={history_migration.get('legacy_visible_count', 0)}` `timeline={history_migration.get('timeline_visible_count', 0)}`",
+                f"- 缺口: `{history_migration.get('missing_legacy_visible_count', 0)}`，legacy protocol: `{history_migration.get('legacy_protocol_count', 0)}`",
+                f"- 可移除 legacy read: `{'yes' if history_migration.get('ready_for_legacy_read_removal') else 'no'}`",
+                f"- 全局会话: `{history_migration_summary.get('session_count', 0)}`，可退出 fallback: `{history_migration_summary.get('sessions_ready_for_legacy_read_removal', 0)}`",
+                f"- 全局缺口会话: `{history_migration_summary.get('sessions_with_missing_legacy_visible', 0)}`，协议残留会话: `{history_migration_summary.get('sessions_with_legacy_protocol', 0)}`",
+            ]
             skill_count = len(sm.list_skill_names()) if sm and sm.has_skills else 0
 
             cost = stats.get("cost", {})
@@ -95,6 +132,8 @@ class StatusCommand:
                 f"- 技能: `{skill_count}` 个",
                 f"- 插件: `{self._plugin_count()}` 个",
                 *self._approval_line(),
+                *engagement_lines,
+                *history_lines,
                 "",
                 "**记忆系统**",
                 f"- Hindsight: {_hindsight_status_line(hindsight_health)}",

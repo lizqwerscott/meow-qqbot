@@ -63,7 +63,9 @@ async def test_finish_already_cancelled_task(mgr, mock_store):
     task = await mgr.create_task(prompt="测试任务")
     await mgr.start_task(task.id)
     await mgr.cancel_task(task.id)
-    result = await mgr.finish_task(task.id, TaskStatus.SUCCESS, result="should_not_override")
+    result = await mgr.finish_task(
+        task.id, TaskStatus.SUCCESS, result="should_not_override"
+    )
     assert result is not None
     assert result.status == TaskStatus.CANCELLED
     assert result.result is None or result.result != "should_not_override"
@@ -87,10 +89,32 @@ async def test_cancel_already_finished_task(mgr, mock_store):
 
 
 @pytest.mark.asyncio
-async def test_detect_lost_tasks(mgr, mock_store):
+async def test_interrupt_active_tasks_on_restart_marks_pending_and_running(
+    mgr, mock_store
+):
+    pending = await mgr.create_task(prompt="pending")
+    running = await mgr.create_task(prompt="running")
+    await mgr.start_task(running.id)
+
+    interrupted = await mgr.interrupt_active_tasks_on_restart()
+
+    assert {task.id for task in interrupted} == {pending.id, running.id}
+    for task in (pending, running):
+        assert mock_store._tasks[task.id].status == TaskStatus.LOST
+        assert mock_store._tasks[task.id].error == "任务因进程重启中断，未自动重放"
+        assert mock_store._tasks[task.id].finished_at is not None
+        assert mock_store._tasks[task.id].recovery_notification_pending
+
+    assert {task.id for task in mgr.list_restart_recovery_tasks()} == {
+        pending.id,
+        running.id,
+    }
+    assert await mgr.interrupt_active_tasks_on_restart() == []
+
     # pending 任务，很久以前创建
     old_task = TaskRecord(
-        prompt="old", type="manual",
+        prompt="old",
+        type="manual",
         created_at=time.time() - 7200,
     )
     old_task.status = TaskStatus.PENDING

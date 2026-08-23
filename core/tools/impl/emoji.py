@@ -3,6 +3,7 @@ import logging
 
 from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
 
+from core.engine.delivery_ledger import DeliveryReceipt
 from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
 
@@ -77,7 +78,23 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
         is_background = bool(ctx.delivery_channel)
         effective_reply_to = None if is_background else ctx.reply_to
 
-        success, description, file_name, error = await _send_emoji_by_hash(
+        if (
+            ctx.turn_active_callback is not None
+            and not await ctx.turn_active_callback()
+        ):
+            return ToolResult(
+                content=json.dumps(
+                    {"success": False, "reason": "当前 turn 已终结"},
+                    ensure_ascii=False,
+                ),
+                delivery_receipt=DeliveryReceipt(
+                    status="failed",
+                    error_code="turn_not_active",
+                    retryable=False,
+                ),
+            )
+
+        success, description, file_name, error, receipt = await _send_emoji_by_hash(
             emoji_manager=emoji_manager,
             media_uploader=media_uploader,
             bot_engine=bot_engine,
@@ -99,6 +116,7 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
                     ensure_ascii=False,
                 ),
                 sent_emoji=True,
+                delivery_receipt=receipt,
             )
         else:
             _log.warning(f"表情发送失败 [{emoji_hash[:12]}..]: {error}")
@@ -110,7 +128,8 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
                         "suggestion": "可以搜索其他表情试试，或直接用文字表达",
                     },
                     ensure_ascii=False,
-                )
+                ),
+                delivery_receipt=receipt,
             )
 
     async def _send_emoji_by_hash(
@@ -121,17 +140,17 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
         emoji_hash: str,
         is_group: bool,
         reply_to: str | None = None,
-    ) -> tuple[bool, str, str, str]:
+    ) -> tuple[bool, str, str, str, DeliveryReceipt | None]:
         record = emoji_manager.find_by_hash(emoji_hash)
         if not record:
-            return False, "", "", f"未找到表情: {emoji_hash[:12]}"
+            return False, "", "", f"未找到表情: {emoji_hash[:12]}", None
 
         full_hash = record["hash"]
         file_name = record.get("file_name", "")
         local_path = emoji_manager._emoji_dir / file_name
 
         if not local_path.exists():
-            return False, "", file_name, f"本地文件缺失: {local_path}"
+            return False, "", file_name, f"本地文件缺失: {local_path}", None
 
         desc = (
             record.get("user_description")
@@ -150,18 +169,29 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
             )
 
             if reply_to:
-                await bot_engine.send_reply(
+                transport_result = await bot_engine.send_reply(
                     chat_id=chat_id,
                     is_group=is_group,
                     message_id=reply_to,
                     media_file_info=file_info,
                 )
             else:
-                await bot_engine.send_proactive(
+                transport_result = await bot_engine.send_proactive(
                     chat_id=chat_id,
                     is_group=is_group,
                     media_file_info=file_info,
                 )
+            receipt = (
+                transport_result
+                if isinstance(transport_result, DeliveryReceipt)
+                else DeliveryReceipt(
+                    status="accepted",
+                    logical_delivery_id=f"emoji:{chat_id}:{full_hash}",
+                )
+            )
+
+            if receipt.status not in {"accepted", "partial"}:
+                return False, desc, file_name, "表情发送未确认", receipt
 
             record = emoji_manager.get_info(full_hash)
             if record:
@@ -169,11 +199,22 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
                 await emoji_manager.update_emoji(full_hash, used_count=count)
 
             _log.info(f"表情图片已发送 [{full_hash[:12]}..]: {desc}")
-            return True, desc, file_name, ""
+            return True, desc, file_name, "", receipt
 
         except Exception as e:
             _log.error(f"发送表情图片失败 [{full_hash[:12]}..]: {e}")
-            return False, desc, file_name, str(e)
+            return (
+                False,
+                desc,
+                file_name,
+                str(e),
+                DeliveryReceipt(
+                    status="failed",
+                    logical_delivery_id=f"emoji:{chat_id}:{full_hash}",
+                    error_code="transport_exception",
+                    retryable=True,
+                ),
+            )
 
     EMOJI_SEARCH_PARAMS = {
         "type": "object",
@@ -215,5 +256,6 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
             description="发送一个指定的表情图片到聊天中。需要提供通过 search_emoji 获取到的表情 hash。一条回复最多发送 1 个表情。",
             parameters=EMOJI_SEND_PARAMS,
             handler=_send_emoji,
+            delivery_kind="emoji",
         ),
     ]

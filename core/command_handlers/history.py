@@ -3,6 +3,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from core.command_handlers.base import command, make_reply
+from core.engine.history_projection import visible_legacy_history
 from core.managers.context_manager import ChatContextManager
 from core.message import InputMessage
 
@@ -16,8 +17,21 @@ _log = logging.getLogger(__name__)
     description="上下文管理",
 )
 class HistoryCommand:
-    def __init__(self, context_manager: ChatContextManager):
+    def __init__(self, context_manager: ChatContextManager, timeline=None):
         self.context_manager = context_manager
+        self.timeline = timeline
+
+    async def _get_visible_history(self, chat_id: str) -> List[Dict[str, Any]]:
+        if self.timeline is not None:
+            projected = await self.timeline.history(chat_id)
+            legacy = await self.context_manager.get_chat_history_async(chat_id)
+            await self.timeline.repair_from_legacy_history(chat_id, legacy)
+            if projected or legacy:
+                return await self.timeline.history(chat_id)
+            return projected
+        return visible_legacy_history(
+            await self.context_manager.get_chat_history_async(chat_id)
+        )
 
     async def execute(
         self, input_message: InputMessage, args: str
@@ -47,7 +61,7 @@ class HistoryCommand:
 
     async def _show_status(self, input_message: InputMessage) -> List[Dict[str, Any]]:
         chat_id = input_message.chat_id
-        history = await self.context_manager.get_chat_history_async(chat_id)
+        history = await self._get_visible_history(chat_id)
         count = len(history)
         last = history[-1] if history else None
         last_time = (
@@ -80,7 +94,7 @@ class HistoryCommand:
     ) -> List[Dict[str, Any]]:
         target = chat_id or input_message.chat_id
         try:
-            history = await self.context_manager.get_chat_history_async(target)
+            history = await self._get_visible_history(target)
             lines = []
             for i, msg in enumerate(history, 1):
                 role = (
@@ -131,25 +145,53 @@ class HistoryCommand:
         target = chat_id or input_message.chat_id
         try:
             await self.context_manager.clear_chat_history_async(target)
+            if self.timeline is not None:
+                await self.timeline.clear_chat(target)
             return make_reply(input_message, f"会话 {target[:24]}… 历史已清空。")
         except Exception as e:
             return make_reply(input_message, f"清空失败: {e}")
 
     async def _list_sessions(self, input_message: InputMessage) -> List[Dict[str, Any]]:
         all_ids = await self.context_manager.get_all_chat_ids_async()
+        if self.timeline is not None:
+            try:
+                all_ids = list(dict.fromkeys(all_ids + await self.timeline.chat_ids()))
+            except Exception:
+                pass
         if not all_ids:
             return make_reply(input_message, "没有活跃的会话。")
         lines = []
         for cid in all_ids:
-            history = await self.context_manager.get_chat_history_async(cid)
-            count = len(history)
-            last_act = (
-                time.strftime(
-                    "%H:%M", time.localtime(history[-1].get("timestamp", time.time()))
+            summary = None
+            if self.timeline is not None:
+                try:
+                    candidate = await self.timeline.session_summary(cid)
+                    if not candidate.get("message_count", 0):
+                        legacy = await self.context_manager.get_chat_history_async(cid)
+                        await self.timeline.repair_from_legacy_history(cid, legacy)
+                        candidate = await self.timeline.session_summary(cid)
+                    summary = candidate
+                except Exception:
+                    summary = None
+            if summary is not None:
+                count = summary["message_count"]
+                last_act = time.strftime(
+                    "%H:%M", time.localtime(summary["last_activity"])
                 )
-                if history
-                else "无"
-            )
+            else:
+                history = await self.context_manager.get_chat_history_async(cid)
+                visible_history = visible_legacy_history(history)
+                count = len(visible_history)
+                last_act = (
+                    time.strftime(
+                        "%H:%M",
+                        time.localtime(
+                            visible_history[-1].get("timestamp", time.time())
+                        ),
+                    )
+                    if visible_history
+                    else "无"
+                )
             short = cid[:16] + "…" if len(cid) > 16 else cid
             lines.append(f"{short} ({count} 条, {last_act})")
         reply = f"活跃会话 ({len(all_ids)}):\n" + "\n".join(lines)

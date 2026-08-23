@@ -14,12 +14,34 @@ from typing import Any, Awaitable, Callable, List, Optional
 
 from core.ai.fallback_runner import FallbackRunner
 from core.ai.protocol import ensure_messages_consistent
-from core.managers.session_manager import PendingInbound
+from core.engine.assistant_output import decide_assistant_output
+from core.engine.delivery_ledger import DeliveryController, DeliveryReceipt
+from core.engine.turn_capabilities import TurnCapabilities
+from core.engine.turn_protocol_history import TurnProtocolHistory
+from core.engine.turn_state import TurnPhase, TurnStateError
+from core.managers.session_manager import InboundIntent, InboxLease, PendingInbound
 from core.tools._types import ToolContext
 from core.tools.impl import execute as execute_tool
 from core.tools.stream_delivery import StreamDelivery, is_silent_reply_text
 
 _log = logging.getLogger(__name__)
+
+
+def _delivery_intent_content(tool_name: str, args: dict) -> str:
+    """Return a stable, non-plaintext fingerprint for media delivery intent."""
+    if tool_name == "send_emoji":
+        return f"emoji:{str(args.get('emoji_hash') or '').strip()}"
+    if tool_name == "synthesize_speech":
+        return json.dumps(
+            {
+                "text": str(args.get("text") or "").strip(),
+                "instructions": str(args.get("instructions") or "").strip(),
+                "voice_mode": str(args.get("voice_mode") or "preset").strip(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    return ""
 
 
 class ToolLoop:
@@ -76,10 +98,25 @@ class ToolLoop:
         reply_state_callback: Optional[Callable[[bool], Awaitable[None]]] = None,
         internal_control: bool = False,
         steering_enabled: bool = False,
+        steering_intent: Optional[InboundIntent] = None,
         steering_admission_callback: Optional[
             Callable[[PendingInbound], Awaitable[Any]]
         ] = None,
+        steering_claim_callback: Optional[
+            Callable[[], Awaitable[Optional[InboxLease[PendingInbound]]]]
+        ] = None,
+        steering_commit_callback: Optional[
+            Callable[[InboxLease[PendingInbound], PendingInbound], Awaitable[None]]
+        ] = None,
         inbound_message_ids: Optional[List[str]] = None,
+        capabilities: Optional[TurnCapabilities] = None,
+        delivery_controller: Optional[DeliveryController] = None,
+        turn_id: str = "",
+        protocol_history: Optional[TurnProtocolHistory] = None,
+        transition_turn: Optional[Callable[..., Awaitable[Any]]] = None,
+        turn_active_callback: Optional[Callable[[], Awaitable[bool]]] = None,
+        turn_delivery_callback: Optional[Callable[[], Awaitable[bool]]] = None,
+        turn_revision: int = 0,
     ) -> tuple[bool, bool]:
         """执行工具调用循环。
 
@@ -103,6 +140,48 @@ class ToolLoop:
         current_model_name: Optional[str] = None
         suppress_reply = False
         inbound_message_ids = list(inbound_message_ids or [])
+        protocol_turn_id = turn_id or reply_to
+
+        async def record_protocol_tool(
+            tool_name: str, tool_call_id: str, content: str
+        ) -> None:
+            if protocol_history is None:
+                return
+            await protocol_history.append_tool_result(
+                turn_id=protocol_turn_id,
+                event_id=f"tool:{tool_call_id}",
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                content=content,
+            )
+
+        async def turn_is_active() -> bool:
+            return turn_active_callback is None or await turn_active_callback()
+
+        current_turn_revision = turn_revision
+        final_delivery_started = False
+
+        async def transition_turn_and_track(**kwargs):
+            nonlocal current_turn_revision
+            if transition_turn is None:
+                return None
+            updated = await transition_turn(**kwargs)
+            if updated is not None and hasattr(updated, "revision"):
+                current_turn_revision = updated.revision
+            return updated
+
+        async def turn_can_deliver() -> bool:
+            if final_delivery_started and turn_delivery_callback is not None:
+                return await turn_delivery_callback()
+            return await turn_is_active()
+
+        async def persist_legacy_assistant(*args, **kwargs) -> None:
+            if capabilities is None:
+                await self.context_manager.add_assistant_message_async(*args, **kwargs)
+
+        async def persist_legacy_tool(*args, **kwargs) -> None:
+            if capabilities is None:
+                await self.context_manager.add_tool_result_async(*args, **kwargs)
 
         if self._max_tool_rounds == -1:
             _rounds: Any = itertools.count()
@@ -125,6 +204,9 @@ class ToolLoop:
                 return False, True
 
         for round_idx in _rounds:
+            if not await turn_is_active():
+                _log.info("turn 已终结，跳过后续模型请求: %s", protocol_turn_id)
+                break
             # ── 防御：清理 messages 中孤立的 tool_calls ──
             ensure_messages_consistent(messages)
 
@@ -148,9 +230,12 @@ class ToolLoop:
                     inbound_message_ids,
                 )
 
+                defer_stream_delivery = capabilities is not None
                 delivery = StreamDelivery(
                     chat_id=chat_id,
-                    stream_callback=stream_callback,
+                    stream_callback=(
+                        None if defer_stream_delivery else stream_callback
+                    ),
                     message_delivered=lambda: message_delivered,
                     block_chars=self._stream_block_chars,
                     idle_seconds=self._stream_block_idle,
@@ -160,10 +245,11 @@ class ToolLoop:
                 try:
                     # 协议已声明 chat_completion_stream，直接调用（不防御式探测）
                     if self._stream_reply:
-                        cb = None
+                        # Capability-governed turns buffer provider output until the
+                        # completed response is classified. Legacy callers retain
+                        # their existing immediate stream behavior during migration.
+                        cb = delivery.callbacks if stream_callback is not None else None
                         request_messages = list(messages)
-                        if stream_callback is not None:
-                            cb = delivery.callbacks
                         message, usage = await svc.chat_completion_stream(
                             messages=request_messages,
                             tools=tools,
@@ -266,6 +352,10 @@ class ToolLoop:
                 text_committed = True
                 break
 
+            if not await turn_is_active():
+                _log.info("turn 已终结，抑制 provider 返回内容: %s", protocol_turn_id)
+                break
+
             response_text = message.content or ""
             tool_calls = message.tool_calls or []
 
@@ -291,43 +381,61 @@ class ToolLoop:
                     except json.JSONDecodeError:
                         pass
 
-            if response_text:
-                if message_delivered:
-                    _log.info(
-                        f"[工具循环 第{round_idx + 1}轮] send_message 已投递，跳过后续文本发送"
+            output_decision = decide_assistant_output(
+                response_text,
+                tool_calls,
+                capabilities=capabilities,
+                explicit_delivery_already_sent=message_delivered,
+                suppress_reply=suppress_reply,
+            )
+            if output_decision.should_deliver and not await turn_is_active():
+                output_decision = type(output_decision)(False, "turn_not_active")
+            if not tool_calls and transition_turn is not None:
+                try:
+                    await transition_turn_and_track(
+                        expected_revision=current_turn_revision,
+                        phase=TurnPhase.FINALIZING,
                     )
-                elif is_silent_reply_text(response_text) or suppress_reply:
-                    if delivery.forwarded:
-                        # 探测期内不应发生；若发生（超长静默追加），已转发部分无法撤回
-                        _log.warning(
-                            f"[工具循环 第{round_idx + 1}轮] 静默回复但流式已转发部分文本，"
-                            "无法撤回"
-                        )
-                    else:
-                        _log.info(f"[工具循环 第{round_idx + 1}轮] 静默回复，跳过发送")
-                else:
+                    final_delivery_started = True
+                except TurnStateError:
+                    if await turn_is_active():
+                        raise
+                    output_decision = type(output_decision)(False, "turn_not_active")
+            if output_decision.should_deliver:
 
-                    async def _reply_remaining(content: str) -> None:
-                        await reply_callback(
-                            chat_id=chat_id,
-                            content=content,
-                            message_id=reply_to,
-                            is_group=is_group,
-                        )
+                async def _reply_remaining(content: str) -> None:
+                    if not await turn_can_deliver():
+                        _log.info("turn 已终结，跳过自动投递: %s", protocol_turn_id)
+                        return
+                    await reply_callback(
+                        chat_id=chat_id,
+                        content=content,
+                        message_id=reply_to,
+                        is_group=is_group,
+                    )
 
-                    await delivery.finish(response_text, _reply_remaining)
-                    text_committed = text_committed or delivery.text_committed
-
-            if reply_state_callback:
-                await reply_state_callback(
-                    not response_text
-                    or is_silent_reply_text(response_text)
-                    or suppress_reply
-                    or message_delivered
+                await delivery.finish(response_text, _reply_remaining)
+                text_committed = text_committed or delivery.text_committed
+            elif response_text:
+                _log.info(
+                    "[工具循环 第%d轮] 抑制 assistant 文本投递: %s",
+                    round_idx + 1,
+                    output_decision.reason,
                 )
 
+            if reply_state_callback:
+                await reply_state_callback(not output_decision.should_deliver)
+
             if response_text or tool_calls:
-                await self.context_manager.add_assistant_message_async(
+                if protocol_history is not None:
+                    await protocol_history.append_assistant(
+                        turn_id=protocol_turn_id,
+                        event_id=f"assistant:{round_idx}",
+                        content=response_text or "",
+                        tool_calls=tool_calls_data or (),
+                        reasoning_content=reasoning or "",
+                    )
+                await persist_legacy_assistant(
                     chat_id,
                     response_text or "",
                     reply_to,
@@ -349,9 +457,19 @@ class ToolLoop:
                 delivery_channel=delivery_channel,
                 reply_to_message_id=reply_to_message_id,
                 internal_control=internal_control,
+                turn_id=turn_id or reply_to,
+                turn_revision=current_turn_revision,
+                principal_id=sender_id,
+                transition_turn=(
+                    transition_turn_and_track if transition_turn is not None else None
+                ),
+                capabilities=capabilities,
+                turn_active_callback=turn_is_active,
             )
 
             for tc in tool_calls:
+                preprepared_record = None
+                preprepared_content = ""
                 try:
                     args = json.loads(tc.arguments)
                 except json.JSONDecodeError:
@@ -368,7 +486,7 @@ class ToolLoop:
                         }
                     )
                     try:
-                        await self.context_manager.add_tool_result_async(
+                        await persist_legacy_tool(
                             chat_id,
                             tc.name,
                             content,
@@ -380,10 +498,23 @@ class ToolLoop:
                             tc.name,
                             persist_err,
                         )
+                    await record_protocol_tool(tc.name, tc.id, content)
                     continue
 
                 try:
+                    if not await turn_is_active():
+                        content = json.dumps(
+                            {"error": "TURN_NOT_ACTIVE: 当前 turn 已终结"},
+                            ensure_ascii=False,
+                        )
+                        messages.append(
+                            {"role": "tool", "tool_call_id": tc.id, "content": content}
+                        )
+                        await persist_legacy_tool(chat_id, tc.name, content, tc.id)
+                        await record_protocol_tool(tc.name, tc.id, content)
+                        continue
                     if tool_reply_callback and tc.name in (tool_reply_names or ()):
+
                         tool_ctx = ToolContext(
                             chat_id=ctx.chat_id,
                             is_group=ctx.is_group,
@@ -393,16 +524,175 @@ class ToolLoop:
                             delivery_channel=ctx.delivery_channel,
                             reply_to_message_id=ctx.reply_to_message_id,
                             internal_control=ctx.internal_control,
+                            turn_id=ctx.turn_id,
+                            turn_revision=current_turn_revision,
+                            principal_id=ctx.principal_id,
+                            transition_turn=ctx.transition_turn,
+                            capabilities=ctx.capabilities,
+                            turn_active_callback=ctx.turn_active_callback,
                         )
                     else:
                         tool_ctx = ctx
+                    if delivery_controller is not None and tc.name in (
+                        tool_reply_names or ()
+                    ):
+                        base_callback = tool_ctx.reply_callback
+
+                        async def deliver_tool_message(**kwargs):
+                            if not await turn_is_active():
+                                return DeliveryReceipt(
+                                    status="failed",
+                                    error_code="turn_not_active",
+                                    retryable=False,
+                                )
+                            record = await delivery_controller.prepare_tool_delivery(
+                                chat_id=chat_id,
+                                turn_id=turn_id or reply_to,
+                                tool_name=tc.name,
+                                tool_call_id=tc.id,
+                                content=str(kwargs.get("content", "")),
+                                reply_anchor_id=reply_to,
+                            )
+                            if not await turn_is_active():
+                                receipt = DeliveryReceipt(
+                                    status="failed",
+                                    logical_delivery_id=record.logical_delivery_id,
+                                    error_code="turn_not_active",
+                                    retryable=False,
+                                )
+                            else:
+                                try:
+                                    receipt = await base_callback(**kwargs)
+                                except Exception:
+                                    receipt = DeliveryReceipt(
+                                        status="failed",
+                                        logical_delivery_id=record.logical_delivery_id,
+                                        error_code="transport_exception",
+                                        retryable=True,
+                                    )
+                            await delivery_controller.settle_tool_delivery(
+                                record,
+                                (
+                                    receipt
+                                    if isinstance(receipt, DeliveryReceipt)
+                                    else None
+                                ),
+                                content=str(kwargs.get("content", "")),
+                            )
+                            return receipt
+
+                        tool_ctx = ToolContext(
+                            chat_id=tool_ctx.chat_id,
+                            is_group=tool_ctx.is_group,
+                            reply_to=tool_ctx.reply_to,
+                            sender_id=tool_ctx.sender_id,
+                            reply_callback=deliver_tool_message,
+                            delivery_channel=tool_ctx.delivery_channel,
+                            reply_to_message_id=tool_ctx.reply_to_message_id,
+                            internal_control=tool_ctx.internal_control,
+                            turn_id=tool_ctx.turn_id,
+                            turn_revision=current_turn_revision,
+                            principal_id=tool_ctx.principal_id,
+                            transition_turn=tool_ctx.transition_turn,
+                            capabilities=tool_ctx.capabilities,
+                            turn_active_callback=tool_ctx.turn_active_callback,
+                        )
+                    if capabilities is not None and not capabilities.allows_context(
+                        chat_id=tool_ctx.chat_id,
+                        sender_id=tool_ctx.sender_id,
+                        reply_to=tool_ctx.reply_to,
+                    ):
+                        content = json.dumps(
+                            {"error": "工具上下文不匹配当前 turn capability"},
+                            ensure_ascii=False,
+                        )
+                        messages.append(
+                            {"role": "tool", "tool_call_id": tc.id, "content": content}
+                        )
+                        await persist_legacy_tool(chat_id, tc.name, content, tc.id)
+                        await record_protocol_tool(tc.name, tc.id, content)
+                        continue
+                    if capabilities is not None and not capabilities.allows_tool(
+                        tc.name
+                    ):
+                        content = json.dumps(
+                            {"error": f"工具不在当前 turn capability 内: {tc.name}"},
+                            ensure_ascii=False,
+                        )
+                        messages.append(
+                            {"role": "tool", "tool_call_id": tc.id, "content": content}
+                        )
+                        await persist_legacy_tool(chat_id, tc.name, content, tc.id)
+                        await record_protocol_tool(tc.name, tc.id, content)
+                        continue
+                    if capabilities is not None and not capabilities.allows_tool_args(
+                        tc.name, args
+                    ):
+                        content = json.dumps(
+                            {"error": "工具参数不在当前 turn capability 内"},
+                            ensure_ascii=False,
+                        )
+                        messages.append(
+                            {"role": "tool", "tool_call_id": tc.id, "content": content}
+                        )
+                        await persist_legacy_tool(chat_id, tc.name, content, tc.id)
+                        await record_protocol_tool(tc.name, tc.id, content)
+                        continue
+                    if delivery_controller is not None and tc.name not in (
+                        tool_reply_names or ()
+                    ):
+                        preprepared_content = _delivery_intent_content(tc.name, args)
+                        if preprepared_content:
+                            preprepared_record = (
+                                await delivery_controller.prepare_tool_delivery(
+                                    chat_id=delivery_channel or chat_id,
+                                    turn_id=turn_id or reply_to,
+                                    tool_name=tc.name,
+                                    tool_call_id=tc.id,
+                                    content=preprepared_content,
+                                    reply_anchor_id=reply_to,
+                                )
+                            )
                     result = await execute_tool(tc.name, args, tool_ctx, self._perm)
+                    if preprepared_record is not None:
+                        receipt = result.delivery_receipt or DeliveryReceipt(
+                            status="failed",
+                            logical_delivery_id=preprepared_record.logical_delivery_id,
+                            error_code="tool_delivery_not_confirmed",
+                            retryable=False,
+                        )
+                        await delivery_controller.settle_tool_delivery(
+                            preprepared_record,
+                            receipt,
+                            content=result.content,
+                        )
+                    elif (
+                        delivery_controller is not None
+                        and result.delivery_receipt is not None
+                        and tc.name not in (tool_reply_names or ())
+                    ):
+                        record = await delivery_controller.prepare_tool_delivery(
+                            chat_id=chat_id,
+                            turn_id=turn_id or reply_to,
+                            tool_name=tc.name,
+                            tool_call_id=tc.id,
+                            content=result.content,
+                            reply_anchor_id=reply_to,
+                        )
+                        await delivery_controller.settle_tool_delivery(
+                            record, result.delivery_receipt, content=result.content
+                        )
+                    if not await turn_is_active():
+                        _log.info("turn 已终结，抑制工具结果提交: %s", protocol_turn_id)
+                        continue
                     content = result.content
                     if result.sent_emoji:
                         sent_emoji = True
-                    if result.sent_text:
-                        text_committed = True
+                    receipt_status = getattr(result.delivery_receipt, "status", "")
+                    if receipt_status in {"accepted", "partial"}:
                         message_delivered = True
+                        if tc.name == "send_message":
+                            text_committed = True
                         if delivery_state_callback:
                             await delivery_state_callback()
                     if result.no_reply:
@@ -410,6 +700,20 @@ class ToolLoop:
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
+                    if (
+                        preprepared_record is not None
+                        and delivery_controller is not None
+                    ):
+                        await delivery_controller.settle_tool_delivery(
+                            preprepared_record,
+                            DeliveryReceipt(
+                                status="unknown",
+                                logical_delivery_id=preprepared_record.logical_delivery_id,
+                                error_code="tool_execution_exception",
+                                retryable=False,
+                            ),
+                            content=preprepared_content,
+                        )
                     _log.error(
                         "工具 [%s] 执行异常: %s",
                         tc.name,
@@ -427,7 +731,7 @@ class ToolLoop:
                         }
                     )
                     try:
-                        await self.context_manager.add_tool_result_async(
+                        await persist_legacy_tool(
                             chat_id,
                             tc.name,
                             content,
@@ -439,6 +743,7 @@ class ToolLoop:
                             tc.name,
                             persist_err,
                         )
+                    await record_protocol_tool(tc.name, tc.id, content)
                     continue
 
                 messages.append(
@@ -448,25 +753,34 @@ class ToolLoop:
                         "content": content,
                     }
                 )
-                await self.context_manager.add_tool_result_async(
+                await persist_legacy_tool(
                     chat_id,
                     tc.name,
                     content,
                     tc.id,
                 )
+                await record_protocol_tool(tc.name, tc.id, content)
 
                 # 在 tool 响应之后写入表情标记，避免插在 assistant(tc) 和 tool 之间
                 if result.sent_emoji:
-                    await self.context_manager.add_assistant_message_async(
+                    await persist_legacy_assistant(
                         chat_id,
                         "[助手发送了一个表情]",
                         reply_to,
                     )
 
-            if steering_enabled and steering_admission_callback:
+            if (
+                steering_enabled
+                and steering_admission_callback
+                and await turn_is_active()
+            ):
                 steer_msgs = await self._drain_steering_messages(
                     chat_id=chat_id,
+                    intent=steering_intent,
+                    principal_id=sender_id,
+                    claim_callback=steering_claim_callback,
                     admission_callback=steering_admission_callback,
+                    steering_commit_callback=steering_commit_callback,
                     inbound_message_ids=inbound_message_ids,
                 )
                 if steer_msgs:
@@ -480,14 +794,28 @@ class ToolLoop:
         self,
         *,
         chat_id: str,
+        intent: Optional[InboundIntent] = None,
+        principal_id: str = "",
+        claim_callback: Optional[
+            Callable[[], Awaitable[Optional[InboxLease[PendingInbound]]]]
+        ] = None,
         admission_callback: Callable[[PendingInbound], Awaitable[Any]],
+        steering_commit_callback: Optional[
+            Callable[[InboxLease[PendingInbound], PendingInbound], Awaitable[None]]
+        ] = None,
         inbound_message_ids: Optional[List[str]] = None,
     ) -> List[dict]:
         """Admit the leased pending batch after a complete tool batch only."""
         if not self.session_manager:
             return []
 
-        lease = await self.session_manager.claim_pending_for_steer(chat_id)
+        lease = (
+            await claim_callback()
+            if claim_callback is not None
+            else await self.session_manager.claim_pending_for_steer(
+                chat_id, intent=intent, principal_id=principal_id or None
+            )
+        )
         if lease is None:
             return []
 
@@ -497,7 +825,10 @@ class ToolLoop:
 
                 async def _admit_and_commit(item: PendingInbound) -> Any:
                     admitted = await admission_callback(item)
-                    await self.session_manager.commit(lease, item)
+                    if steering_commit_callback is not None:
+                        await steering_commit_callback(lease, item)
+                    else:
+                        await self.session_manager.commit(lease, item)
                     return admitted
 
                 admission_task = asyncio.create_task(_admit_and_commit(pending))

@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 from core.ai.tts_service import TtsService
 from core.command_handlers.base import command, make_reply
 from core.engine.client import BotEngine
+from core.engine.delivery_ledger import DeliveryController, DeliveryReceipt
 from core.message import InputMessage
 
 _log = logging.getLogger(__name__)
@@ -11,9 +12,15 @@ _log = logging.getLogger(__name__)
 
 @command(name="tts", aliases=["语音", "朗读"], description="将文字转为语音")
 class TtsCommand:
-    def __init__(self, bot_engine: BotEngine, tts_service: TtsService):
+    def __init__(
+        self,
+        bot_engine: BotEngine,
+        tts_service: TtsService,
+        delivery_controller: DeliveryController | None = None,
+    ):
         self.bot_engine = bot_engine
         self.tts_service = tts_service
+        self.delivery_controller = delivery_controller
 
     async def execute(
         self, input_message: InputMessage, args: str
@@ -49,13 +56,39 @@ class TtsCommand:
                 file_name="tts.wav",
             )
 
-            await self.bot_engine.send_reply(
-                chat_id=input_message.chat_id,
-                content="",
-                message_id=input_message.id,
-                is_group=input_message.is_group,
-                media_file_info=file_info,
-            )
+            async def _send_media(**kwargs):
+                return await self.bot_engine.send_reply(
+                    chat_id=kwargs["chat_id"],
+                    content="",
+                    message_id=kwargs["message_id"],
+                    is_group=kwargs["is_group"],
+                    media_file_info=file_info,
+                )
+
+            if self.delivery_controller is not None:
+                receipt = await self.delivery_controller.deliver_text(
+                    delivery_id=(
+                        f"command:{input_message.chat_id}:{input_message.id}:tts"
+                    ),
+                    chat_id=input_message.chat_id,
+                    content="",
+                    callback=_send_media,
+                    message_id=input_message.id,
+                    is_group=input_message.is_group,
+                    reason="command_media",
+                    timeline_delivery_kind=None,
+                )
+            else:
+                receipt = await _send_media(
+                    chat_id=input_message.chat_id,
+                    message_id=input_message.id,
+                    is_group=input_message.is_group,
+                )
+            if isinstance(receipt, DeliveryReceipt) and receipt.status not in {
+                "accepted",
+                "partial",
+            }:
+                return make_reply(input_message, "语音发送未确认，请稍后重试")
             return []
 
         except Exception as e:

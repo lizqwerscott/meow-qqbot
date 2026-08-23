@@ -24,6 +24,7 @@ from qqbot_agent_sdk.media_loader import MediaUploader
 
 from core.ai.multimodal import MultimodalService
 from core.engine.agent_engine import AgentEngine
+from core.engine.delivery_ledger import DeliveryReceipt
 from core.engine.message_parser import MessageParser, MessageParserDeps
 from core.engine.router import Router
 from core.managers.command_manager import CommandManager
@@ -41,6 +42,9 @@ class _ReplyDeliveryState:
     mode: Literal["passive", "proactive"] = "passive"
     next_chunk_index: int = 1
     last_used: float = 0.0
+    last_send_success_count: int = 0
+    last_send_chunk_count: int = 1
+    last_send_platform_ids: List[str] | None = None
 
 
 def _is_passive_reply_limit_error(exc: BaseException) -> bool:
@@ -64,6 +68,21 @@ def _is_passive_reply_limit_error(exc: BaseException) -> bool:
         # 需降级为主动发送（不带 reply_to）才能送达。
         or ("msg_id" in text or "msgid" in text)
         and any(k in text for k in ("过期", "失效", "无效", "不存在"))
+    )
+
+
+def _is_uncertain_transport_error(exc: BaseException) -> bool:
+    """Return whether a failed request may have reached the remote channel."""
+    return isinstance(
+        exc,
+        (
+            asyncio.TimeoutError,
+            TimeoutError,
+            ConnectionError,
+            OSError,
+            httpx.TimeoutException,
+            httpx.NetworkError,
+        ),
     )
 
 
@@ -282,6 +301,7 @@ class BotEngine:
             replied_author=parsed.replied_author,
             replied_author_id=parsed.replied_author_id,
             replied_message_id=parsed.replied_message_id,
+            task_correlation_id=parsed.task_correlation_id,
             msg_type=parsed.msg_type,
             resources=parsed.resources,
             replied_resources=parsed.replied_resources,
@@ -365,6 +385,9 @@ class BotEngine:
             mode="passive" if reply_to is not None else "proactive"
         )
         state.last_used = time.monotonic()
+        state.last_send_success_count = 0
+        state.last_send_chunk_count = 1
+        state.last_send_platform_ids = []
         current_chunk_index = chunk_index or state.next_chunk_index
         state.next_chunk_index = max(state.next_chunk_index, current_chunk_index + 1)
 
@@ -426,6 +449,16 @@ class BotEngine:
                         markdown=current_markdown,
                         retries=1,
                     )
+                state.last_send_success_count += 1
+                if isinstance(result, dict):
+                    platform_message_id = str(
+                        result.get("id")
+                        or result.get("message_id")
+                        or result.get("msg_id")
+                        or ""
+                    )
+                    if platform_message_id:
+                        state.last_send_platform_ids.append(platform_message_id)
                 state.mode = "proactive"
                 return result
             except Exception as exc:
@@ -465,6 +498,7 @@ class BotEngine:
             return await send_chunk(content)
 
         chunks = split_markdown(content)
+        state.last_send_chunk_count = max(1, len(chunks))
         last_result: Dict[str, Any] = {}
         for i, chunk in enumerate(chunks):
             if len(chunks) > 1:
@@ -519,18 +553,23 @@ class BotEngine:
         media_file_info: Optional[str] = None,
         markdown: bool = True,
         keyboard: Optional[InlineKeyboard] = None,
-    ) -> Dict[str, Any]:
+    ) -> DeliveryReceipt:
+        logical_delivery_id = f"reply:{chat_id}:{message_id or 'proactive'}"
         state = self._get_reply_delivery_state(chat_id, message_id, is_group)
-        return await self._send(
-            chat_id,
-            content,
-            reply_to=message_id,
-            is_group=is_group,
-            media_file_info=media_file_info,
-            markdown=markdown,
-            keyboard=keyboard,
-            delivery_state=state,
-        )
+        try:
+            await self._send(
+                chat_id,
+                content,
+                reply_to=message_id,
+                is_group=is_group,
+                media_file_info=media_file_info,
+                markdown=markdown,
+                keyboard=keyboard,
+                delivery_state=state,
+            )
+        except Exception as exc:
+            return self._delivery_failure_receipt(logical_delivery_id, state, exc)
+        return self._delivery_success_receipt(logical_delivery_id, state)
 
     async def send_proactive(
         self,
@@ -541,29 +580,91 @@ class BotEngine:
         media_file_info: Optional[str] = None,
         markdown: bool = True,
         keyboard: Optional[InlineKeyboard] = None,
-    ) -> Dict[str, Any]:
-        return await self._send(
-            chat_id,
-            content,
-            reply_to=None,
-            is_group=is_group,
-            media_file_info=media_file_info,
-            markdown=markdown,
-            keyboard=keyboard,
-        )
+    ) -> DeliveryReceipt:
+        logical_delivery_id = f"proactive:{chat_id}:{time.time_ns()}"
+        state = _ReplyDeliveryState(mode="proactive", last_used=time.monotonic())
+        try:
+            await self._send(
+                chat_id,
+                content,
+                reply_to=None,
+                is_group=is_group,
+                media_file_info=media_file_info,
+                markdown=markdown,
+                keyboard=keyboard,
+                delivery_state=state,
+            )
+        except Exception as exc:
+            return self._delivery_failure_receipt(logical_delivery_id, state, exc)
+        return self._delivery_success_receipt(logical_delivery_id, state)
 
     async def _send_reply(
         self, chat_id: str, content: str, message_id: str, is_group: bool = False
-    ) -> None:
+    ) -> DeliveryReceipt:
+        logical_delivery_id = f"reply:{chat_id}:{message_id or 'proactive'}"
         try:
             reply_to = message_id if message_id else None
             state = self._get_reply_delivery_state(chat_id, message_id, is_group)
-            await self._send(
+            result = await self._send(
                 chat_id,
                 content,
                 reply_to=reply_to,
                 is_group=is_group,
                 delivery_state=state,
             )
+            return self._delivery_success_receipt(logical_delivery_id, state)
         except Exception as e:
             _log.error("发送回复失败 [%s]: %s", chat_id, e)
+            return self._delivery_failure_receipt(logical_delivery_id, state, e)
+
+    @staticmethod
+    def _delivery_success_receipt(
+        logical_delivery_id: str, state: _ReplyDeliveryState
+    ) -> DeliveryReceipt:
+        platform_message_id = (
+            (state.last_send_platform_ids or [])[-1]
+            if state.last_send_platform_ids
+            else ""
+        )
+        chunk_count = max(1, state.last_send_chunk_count)
+        return DeliveryReceipt(
+            status="accepted",
+            logical_delivery_id=logical_delivery_id,
+            transport_id=platform_message_id,
+            platform_message_id=platform_message_id,
+            chunk_index=chunk_count - 1,
+            chunk_count=chunk_count,
+        )
+
+    @staticmethod
+    def _delivery_failure_receipt(
+        logical_delivery_id: str,
+        state: _ReplyDeliveryState,
+        exc: BaseException,
+    ) -> DeliveryReceipt:
+        success_count = state.last_send_success_count
+        chunk_count = max(1, state.last_send_chunk_count)
+        platform_message_id = (
+            (state.last_send_platform_ids or [])[-1]
+            if state.last_send_platform_ids
+            else ""
+        )
+        if success_count:
+            status = "partial"
+            retryable = False
+        elif _is_uncertain_transport_error(exc):
+            status = "unknown"
+            retryable = False
+        else:
+            status = "failed"
+            retryable = True
+        return DeliveryReceipt(
+            status=status,
+            logical_delivery_id=logical_delivery_id,
+            transport_id=platform_message_id,
+            platform_message_id=platform_message_id,
+            error_code=type(exc).__name__,
+            retryable=retryable,
+            chunk_index=min(max(success_count - 1, 0), chunk_count - 1),
+            chunk_count=chunk_count,
+        )

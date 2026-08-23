@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core.engine.agent_engine import BackgroundTaskResult
+from core.engine.delivery_ledger import DeliveryReceipt
 from core.tasks.models import CronJob, TaskRecord, TaskStatus
 from core.tasks.runner import BackgroundTaskRunner
 
@@ -649,6 +650,101 @@ async def test_background_task_intent_immediate(runner):
     call_kwargs = runner._wake_dispatcher.request.call_args.kwargs
     assert call_kwargs["source"] == "background-task"
     assert call_kwargs["intent"] == "immediate"
+
+
+@pytest.mark.asyncio
+async def test_manual_task_final_result_uses_direct_ledger_delivery(runner):
+    runner._wake_dispatcher = AsyncMock()
+    runner._execute_prompt_cb = AsyncMock(
+        return_value=BackgroundTaskResult(result="最终报告")
+    )
+    runner._delivery_cb = AsyncMock(
+        return_value=DeliveryReceipt(status="accepted", platform_message_id="m1")
+    )
+    runner._task_manager.start_task = AsyncMock(
+        return_value=TaskRecord(
+            id="manual", status=TaskStatus.RUNNING, delivery_channel="user_001"
+        )
+    )
+    runner._task_manager.finish_task = AsyncMock(
+        return_value=TaskRecord(
+            id="manual",
+            status=TaskStatus.SUCCESS,
+            result="最终报告",
+            delivery_channel="user_001",
+        )
+    )
+    runner._task_manager.update_task_record = AsyncMock()
+
+    task = await runner.run_task(
+        TaskRecord(id="manual", type="manual", delivery_channel="user_001")
+    )
+
+    assert task.delivery_status.value == "delivered"
+    assert task.delivery_id == "task:manual:final"
+    assert runner._delivery_cb.await_args.kwargs["delivery_id"] == "task:manual:final"
+    assert runner._delivery_cb.await_args.kwargs["content"].endswith("最终报告")
+    runner._wake_dispatcher.request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("execution", "expected_status"),
+    [
+        (BackgroundTaskResult(result="already sent", tool_delivered=True), "delivered"),
+        (BackgroundTaskResult(result="NO_REPLY", silent=True), "not-requested"),
+    ],
+)
+async def test_manual_task_deduplicates_tool_and_silent_results(
+    runner, execution, expected_status
+):
+    runner._wake_dispatcher = AsyncMock()
+    runner._execute_prompt_cb = AsyncMock(return_value=execution)
+    runner._delivery_cb = AsyncMock()
+    runner._task_manager.start_task = AsyncMock(
+        return_value=TaskRecord(
+            id="manual", status=TaskStatus.RUNNING, delivery_channel="user_001"
+        )
+    )
+    runner._task_manager.finish_task = AsyncMock(
+        return_value=TaskRecord(
+            id="manual",
+            status=TaskStatus.SUCCESS,
+            result=execution.result,
+            delivery_channel="user_001",
+        )
+    )
+    runner._task_manager.update_task_record = AsyncMock()
+
+    task = await runner.run_task(
+        TaskRecord(id="manual", type="manual", delivery_channel="user_001")
+    )
+
+    assert task.delivery_status.value == expected_status
+    runner._delivery_cb.assert_not_awaited()
+    runner._wake_dispatcher.request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_delivery_is_attempted_once(runner):
+    runner._delivery_cb = AsyncMock(return_value=DeliveryReceipt(status="unknown"))
+    runner._task_manager.update_task_record = AsyncMock()
+    task = TaskRecord(
+        id="restart",
+        status=TaskStatus.LOST,
+        delivery_channel="user_001",
+        recovery_notification_pending=True,
+    )
+
+    handled = await runner.deliver_restart_recovery(task, is_group=False)
+
+    assert handled is True
+    assert task.delivery_id == "task:restart:restart"
+    assert task.delivery_status.value == "unknown"
+    assert task.recovery_notification_pending is False
+    runner._delivery_cb.assert_awaited_once()
+    assert await runner.deliver_restart_recovery(task, is_group=False) is False
+    runner._delivery_cb.assert_awaited_once()
 
 
 @pytest.mark.asyncio

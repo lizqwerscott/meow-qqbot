@@ -7,6 +7,8 @@
 from dataclasses import dataclass, field
 from typing import Any, Tuple
 
+from core.engine.engagement_config import EngagementConfig
+
 
 @dataclass
 class AIContext:
@@ -21,6 +23,7 @@ class AIContext:
     stream_reply: bool = False
     stream_block_chars: int = 800
     stream_block_idle_ms: int = 1000
+    engagement_config: EngagementConfig = field(default_factory=EngagementConfig)
 
 
 @dataclass
@@ -46,6 +49,7 @@ class MgmtContext:
     workspace_manager: Any = None
     archive_manager: Any = None
     system_events: Any = None
+    task_state_store: Any = None
 
 
 @dataclass

@@ -15,6 +15,7 @@ from core.approval.exec_policy import (
     DECISION_DENY,
     ExecPolicy,
 )
+from core.engine.delivery_ledger import DeliveryController, DeliveryReceipt
 
 _log = logging.getLogger(__name__)
 
@@ -46,10 +47,12 @@ class ApprovalManager:
         api_client,
         admin_ids: list[str],
         forward_to: list[str] = (),  # 2.3：审批卡转发目标（'c2c:<id>'/'group:<id>'）
+        delivery_controller: DeliveryController | None = None,
     ):
         self._api = api_client
         self._admin_ids = set(admin_ids)
         self._forward_to = list(forward_to or ())
+        self._delivery_controller = delivery_controller
         self._pending: dict[str, asyncio.Future] = {}
         # 审批对应的 canonical plan（openclaw 风格：批准后须比对，防执行内容漂移）
         self._pending_plans: dict[str, dict] = {}
@@ -344,6 +347,7 @@ class ApprovalManager:
         ask_fallback: str | None = None,
         persist: bool = True,
         return_session_key: bool = False,
+        session_key: str | None = None,
     ) -> str | tuple[str, str]:
         """发起审批。
 
@@ -363,7 +367,12 @@ class ApprovalManager:
         fallback = ask_fallback or self.get_host_policy().ask_fallback
 
         admin_id = next(iter(self._admin_ids))
-        session_key = f"approval:{chat_id}:{tool_name}:{uuid.uuid4().hex[:8]}"
+        session_key = session_key or (
+            f"approval:{chat_id}:{tool_name}:{uuid.uuid4().hex[:8]}"
+        )
+        if session_key in self._pending:
+            _log.warning("审批 session key 已存在，拒绝覆盖: %s..", session_key[:20])
+            return (DECISION_DENY, "") if return_session_key else DECISION_DENY
         future = asyncio.get_running_loop().create_future()
         self._pending[session_key] = future
         if plan:
@@ -403,9 +412,58 @@ class ApprovalManager:
             targets.append(parsed)
         sent = False
         for chat_type, target_id in targets:
+
+            async def _send_card(**_kwargs):
+                try:
+                    accepted = await sender.send(
+                        chat_type=chat_type, chat_id=target_id, req=req
+                    )
+                except (
+                    asyncio.TimeoutError,
+                    TimeoutError,
+                    ConnectionError,
+                    OSError,
+                ) as exc:
+                    return DeliveryReceipt(
+                        status="unknown",
+                        error_code=type(exc).__name__,
+                        retryable=False,
+                    )
+                except Exception as exc:
+                    return DeliveryReceipt(
+                        status="failed",
+                        error_code=type(exc).__name__,
+                        retryable=True,
+                    )
+                return DeliveryReceipt(
+                    status="accepted" if accepted else "failed",
+                    error_code="approval_card_rejected" if not accepted else "",
+                    retryable=not accepted,
+                )
+
             try:
-                if await sender.send(chat_type=chat_type, chat_id=target_id, req=req):
-                    sent = True
+                if self._delivery_controller is not None:
+                    receipt = await self._delivery_controller.deliver_text(
+                        delivery_id=(
+                            f"approval-card:{session_key}:{chat_type}:{target_id}"
+                        ),
+                        chat_id=target_id,
+                        content=f"{reason}\n{details}".strip(),
+                        callback=_send_card,
+                        is_group=chat_type == "group",
+                        reason="approval_card",
+                        timeline_delivery_kind=None,
+                    )
+                    accepted = receipt.status == "accepted"
+                else:
+                    accepted = bool(
+                        await sender.send(
+                            chat_type=chat_type, chat_id=target_id, req=req
+                        )
+                    )
+                sent = sent or accepted
+                if not accepted:
+                    _log.warning("审批消息未确认 %s:%s..", chat_type, target_id[:12])
             except Exception as e:
                 _log.warning(
                     "审批消息发送异常 %s:%s..: %s", chat_type, target_id[:12], e
@@ -419,7 +477,8 @@ class ApprovalManager:
             self._spawn_admin_notice(
                 f"⚠️ 审批请求未能送达（{session_key}）。\n"
                 f"命令: {details[:120]}\n"
-                f"已按策略自动处理；如需重新审批请重新发起该命令。"
+                f"已按策略自动处理；如需重新审批请重新发起该命令。",
+                delivery_id=f"approval-fallback:{session_key}:unreachable",
             )
             return (
                 (self._apply_fallback(fallback, details), session_key)
@@ -486,7 +545,7 @@ class ApprovalManager:
         out.sort(key=lambda p: p["created_at"], reverse=True)
         return out
 
-    def _spawn_admin_notice(self, text: str):
+    def _spawn_admin_notice(self, text: str, *, delivery_id: str = ""):
         """向 admin c2c 异步补发一条文本通知（审批卡失败/超时兜底，2.3）。"""
         if not self._admin_ids:
             return
@@ -498,7 +557,48 @@ class ApprovalManager:
 
         async def _notify():
             try:
-                await self._api.send_text("c2c", admin_id, text)
+
+                async def _transport(**_kwargs):
+                    try:
+                        response = await self._api.send_text("c2c", admin_id, text)
+                    except (
+                        asyncio.TimeoutError,
+                        TimeoutError,
+                        ConnectionError,
+                        OSError,
+                    ) as exc:
+                        return DeliveryReceipt(
+                            status="unknown",
+                            error_code=type(exc).__name__,
+                            retryable=False,
+                        )
+                    platform_message_id = ""
+                    if isinstance(response, dict):
+                        platform_message_id = str(
+                            response.get("id")
+                            or response.get("message_id")
+                            or response.get("msg_id")
+                            or ""
+                        )
+                    elif response:
+                        platform_message_id = str(response)
+                    return DeliveryReceipt(
+                        status="accepted",
+                        transport_id=platform_message_id,
+                        platform_message_id=platform_message_id,
+                    )
+
+                if self._delivery_controller is not None:
+                    await self._delivery_controller.deliver_text(
+                        delivery_id=delivery_id or f"approval-fallback:{admin_id}",
+                        chat_id=admin_id,
+                        content=text,
+                        callback=_transport,
+                        reason="approval_fallback",
+                        timeline_delivery_kind=None,
+                    )
+                else:
+                    await self._api.send_text("c2c", admin_id, text)
             except Exception as e:
                 _log.warning("审批通知文本发送失败: %s", e)
 
@@ -566,5 +666,6 @@ class ApprovalManager:
             self._spawn_admin_notice(
                 f"⏰ 审批请求已超时（{session_key}），已按策略自动处理。\n"
                 f"命令: {details[:120]}\n"
-                f"如需重新审批，请重新发起该命令。"
+                f"如需重新审批，请重新发起该命令。",
+                delivery_id=f"approval-fallback:{session_key}:timeout",
             )

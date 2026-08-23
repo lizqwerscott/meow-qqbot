@@ -27,6 +27,7 @@ from core.engine.context import (
     SubContext,
     SysContext,
 )
+from core.engine.engagement_config import normalize_engagement_config
 from core.engine.hindsight_memory import HindsightMemory
 from core.engine.router import Router
 from core.engine.system_events import SystemEventQueue
@@ -54,6 +55,7 @@ from core.tasks import (
     CronJobManager,
     CronJobScheduler,
     TaskManager,
+    TaskStateStore,
     TaskStore,
 )
 from core.tasks.heartbeat import HeartbeatManager
@@ -94,16 +96,18 @@ class ServiceGraph:
     # ── build: 三阶段构造 ──────────────────────────────────────────
 
     async def build(self):
-        self._build_services()
+        await self._build_services()
         self._build_bot_engine()
         self._wire_callbacks()
+        await self._deliver_pending_task_recovery()
         self._setup_extras()
         await self.agent_engine.start()
         return self
 
     # ── 阶段 1: 构造所有服务 ───────────────────────────────────────
 
-    def _build_services(self):
+    async def _build_services(self):
+
         self.http_client = httpx.AsyncClient(timeout=60.0)
         self.heartbeat_manager = None
         self._wake_runner = None
@@ -303,6 +307,7 @@ class ServiceGraph:
         self.context_cleanup_task = None
         tasks_config = self.cfg.tasks
         self.task_manager = None
+        self.task_state_store = None
         self.cron_job_manager = None
         self.background_task_runner = None
         self.cron_scheduler = None
@@ -317,6 +322,22 @@ class ServiceGraph:
                 lost_ttl_hours=tasks_config.get("lost_ttl_hours", 24),
             )
             self.task_manager = TaskManager(store=task_store)
+            self.task_state_store = TaskStateStore(
+                tasks_config.get("data_dir", "data/tasks/")
+            )
+            interrupted_turns = (
+                await self.task_state_store.mark_interrupted_on_restart()
+            )
+            if interrupted_turns:
+                _log.warning("已封存 %d 个上次进程遗留 turn", len(interrupted_turns))
+            interrupted_tasks = (
+                await self.task_manager.interrupt_active_tasks_on_restart()
+            )
+            if interrupted_tasks:
+                _log.warning(
+                    "已将 %d 个上次进程遗留任务标记为 LOST，不会自动重放",
+                    len(interrupted_tasks),
+                )
             self.cron_job_manager = CronJobManager(store=task_store)
             self.background_task_runner = BackgroundTaskRunner(
                 task_manager=self.task_manager
@@ -447,6 +468,7 @@ class ServiceGraph:
 
         # ── EngineContext ──
         ai_config = self.cfg.ai or {}
+        engagement_config = normalize_engagement_config(ai_config)
         ctx = EngineContext(
             ai=AIContext(
                 ai_service=self.ai_service,
@@ -457,6 +479,7 @@ class ServiceGraph:
                 stream_reply=ai_config.get("stream_reply", False),
                 stream_block_chars=ai_config.get("stream_block_chars", 800),
                 stream_block_idle_ms=ai_config.get("stream_block_idle_ms", 1000),
+                engagement_config=engagement_config,
             ),
             prompt=PromptContext(
                 template_manager=self.template_manager,
@@ -476,6 +499,7 @@ class ServiceGraph:
                 workspace_manager=self.workspace_manager,
                 archive_manager=self.archive_manager,
                 system_events=self.system_events,
+                task_state_store=self.task_state_store,
             ),
             bg=BgContext(
                 task_manager=self.task_manager,
@@ -488,6 +512,9 @@ class ServiceGraph:
         # ── AgentEngine ──
         self.agent_engine = AgentEngine(ctx)
         self.agent_engine.set_media_service(self.media_service)
+        self.context_manager.set_timeline(self.agent_engine.timeline)
+        if self.archive_manager is not None:
+            self.archive_manager.set_timeline(self.agent_engine.timeline)
 
         # ── 注入 TTS ──
         if self.tts_service:
@@ -545,6 +572,17 @@ class ServiceGraph:
             media_service=self.media_service,
         )
 
+    async def _deliver_pending_task_recovery(self) -> None:
+        if not self.task_manager or not self.background_task_runner:
+            return
+        for task in self.task_manager.list_restart_recovery_tasks():
+            is_group = bool(
+                self.context_manager.get_chat_type(task.delivery_channel or "")
+            )
+            await self.background_task_runner.deliver_restart_recovery(
+                task, is_group=is_group
+            )
+
     # ── 阶段 3: 交叉连线 ────────────────────────────────────────────
 
     def _wire_callbacks(self):
@@ -569,16 +607,26 @@ class ServiceGraph:
                 self.agent_engine.execute_background_task
             )
 
-            async def _deliver(chat_id, content, message_id, is_group):
-                try:
-                    actual = self.context_manager.get_chat_type(chat_id)
-                    if actual is not None:
-                        is_group = actual
-                    await self.bot_engine.send_proactive(
-                        chat_id, content, is_group=is_group
+            async def _deliver(chat_id, content, message_id, is_group, delivery_id=""):
+                actual = self.context_manager.get_chat_type(chat_id)
+                if actual is not None:
+                    is_group = actual
+
+                async def transport(**kwargs):
+                    return await self.bot_engine.send_proactive(
+                        kwargs["chat_id"],
+                        kwargs["content"],
+                        is_group=kwargs["is_group"],
                     )
-                except Exception as e:
-                    _log.error("投递任务结果失败: %s", e)
+
+                return await self.agent_engine._get_delivery_controller().deliver_text(
+                    delivery_id=delivery_id or f"background:{chat_id}",
+                    chat_id=chat_id,
+                    content=content,
+                    callback=transport,
+                    message_id=message_id,
+                    is_group=is_group,
+                )
 
             self.background_task_runner.set_delivery_callback(_deliver)
 
@@ -608,6 +656,7 @@ class ServiceGraph:
             api_client=self.bot_engine.api,
             admin_ids=self.admin_ids,
             forward_to=list(approval_cfg.get("forward_to") or ()),
+            delivery_controller=self.agent_engine._get_delivery_controller(),
         )
         self.tool_deps.approval_manager.value = self.approval_manager
         self.bot_engine.approval_manager = self.approval_manager
@@ -703,6 +752,7 @@ class ServiceGraph:
         chat_delivery = ChatReplyDeliveryStrategy(
             reply_callback=self.bot_engine._send_reply,
             context_manager=self.context_manager,
+            delivery_controller=self.agent_engine._get_delivery_controller(),
         )
 
         hb_delivery = None
@@ -715,6 +765,7 @@ class ServiceGraph:
                 context_manager=self.context_manager,
                 show_ok=show_ok,
                 show_alerts=show_alerts,
+                delivery_controller=self.agent_engine._get_delivery_controller(),
             )
 
         active_hours_cfg = self.cfg.heartbeat.get("active_hours", {})
@@ -790,6 +841,7 @@ class ServiceGraph:
         register_all_commands(
             self.bot_engine.command_manager,
             context_manager=self.context_manager,
+            timeline=self.agent_engine.timeline,
             emoji_manager=self.emoji_manager,
             agent_engine=self.agent_engine,
             skill_managers=self.skill_managers,
@@ -803,6 +855,7 @@ class ServiceGraph:
             heartbeat_manager=self.heartbeat_manager,
             archive_manager=self.archive_manager,
             tts_service=self.tts_service,
+            delivery_controller=self.agent_engine._get_delivery_controller(),
             approval_manager=self.approval_manager,
             media_service=self.media_service,
         )
@@ -827,6 +880,7 @@ class ServiceGraph:
                     "emoji_manager": self.emoji_manager,
                     "nickname_manager": self.nickname_manager,
                     "context_manager": self.context_manager,
+                    "conversation_timeline": self.agent_engine.timeline,
                     "cost_tracker": self.cost_tracker,
                     "agent_engine": self.agent_engine,
                     "learning_orchestrator": self.learning_orchestrator,

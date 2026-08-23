@@ -196,6 +196,10 @@ class WakeRunner:
                     sender_id="system",
                     input_message=msg,
                     cost_tracker=self._agent.cost_tracker,
+                    timeline_snapshot=await self._agent._get_timeline().snapshot(
+                        pw.session_key
+                    ),
+                    protocol_snapshot=(),
                 )
         except SystemEventBusy:
             return WakeRunResult(

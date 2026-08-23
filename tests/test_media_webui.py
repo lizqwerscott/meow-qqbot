@@ -203,3 +203,55 @@ async def test_text_preview_uses_configured_limit(tmp_path):
         data=b"abcdef",
     )
     assert await service.get_text_preview(record.media_id) == "abcd"
+
+
+@pytest.mark.asyncio
+async def test_sessions_webui_repairs_legacy_gap_when_timeline_is_nonempty(tmp_path):
+    from core.engine.conversation_timeline import ConversationTimeline
+
+    class ContextManager:
+        async def get_all_disk_chat_ids_async(self):
+            return ["chat-1"]
+
+        async def get_archived_sessions_summary_async(self):
+            return {}
+
+        async def get_chat_history_async(self, chat_id, max_messages=None):
+            return [
+                {
+                    "role": "user",
+                    "content": "hello",
+                    "message_id": "u1",
+                    "timestamp": 1,
+                },
+                {"role": "assistant", "content": "legacy answer", "timestamp": 2},
+            ]
+
+        async def get_session_summary_async(self, chat_id):
+            raise AssertionError("timeline summary should be used")
+
+        async def get_archived_files_async(self, chat_id):
+            return []
+
+    timeline = ConversationTimeline(str(tmp_path / "timeline.sqlite3"))
+    await timeline.append_user_message(
+        chat_id="chat-1",
+        message_id="u1",
+        content="hello",
+        sender_id="u1",
+        timestamp=1,
+    )
+    app = create_app(
+        {"context_manager": ContextManager(), "conversation_timeline": timeline}, {}
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/sessions")
+        detail = await client.get("/sessions/chat-1")
+
+    assert response.status_code == 200
+    assert ">2</td>" in response.text
+    assert detail.status_code == 200
+    assert "legacy answer" in detail.text
+    assert (await timeline.history("chat-1"))[-1]["content"] == "legacy answer"
+    await timeline.close()

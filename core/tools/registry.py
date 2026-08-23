@@ -49,6 +49,51 @@ class ToolRegistry:
             _log.warning(f"未知工具调用: {name}")
             return ToolResult(content=json.dumps({"error": f"未知工具: {name}"}))
 
+        if (
+            ctx.turn_active_callback is not None
+            and not await ctx.turn_active_callback()
+        ):
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "TURN_NOT_ACTIVE: 当前 turn 已终结"},
+                    ensure_ascii=False,
+                )
+            )
+
+        if ctx.capabilities is not None:
+            if not ctx.capabilities.allows_context(
+                chat_id=ctx.chat_id,
+                sender_id=ctx.sender_id,
+                reply_to=ctx.reply_to,
+            ):
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": "工具上下文不匹配当前 turn capability"},
+                        ensure_ascii=False,
+                    )
+                )
+            if not ctx.capabilities.allows_tool(name):
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": f"工具不在当前 turn capability 内: {name}"},
+                        ensure_ascii=False,
+                    )
+                )
+            if not ctx.capabilities.allows_tool_args(name, args):
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": "工具参数不在当前 turn capability 内"},
+                        ensure_ascii=False,
+                    )
+                )
+            if not ctx.capabilities.allows_delivery_kind(entry.delivery_kind):
+                return ToolResult(
+                    content=json.dumps(
+                        {"error": "投递类型不在当前 turn capability 内"},
+                        ensure_ascii=False,
+                    )
+                )
+
         if ctx.internal_control and name == "mark_important":
             _log.warning(
                 "内部控制工具调用拒绝: %s sender=%s",

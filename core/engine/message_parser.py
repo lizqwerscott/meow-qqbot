@@ -35,6 +35,7 @@ class ParsedMessage:
     author_id: str
     author_username: str
     replied_message_id: str = ""
+    task_correlation_id: str = ""
     mention_entries: List[Tuple[str, str]] = field(default_factory=list)
     reply_author_entries: List[Tuple[str, str]] = field(default_factory=list)
     replied_resources: List[ResourceMeta] = field(default_factory=list)
@@ -238,6 +239,9 @@ class MessageParser:
 
         author_id = raw.get("author", {}).get("id", "")
         author_username = raw.get("author", {}).get("username", "")
+        task_metadata = raw.get("task")
+        if not isinstance(task_metadata, dict):
+            task_metadata = {}
 
         return ParsedMessage(
             id=event.message_id,
@@ -253,6 +257,11 @@ class MessageParser:
             replied_author=replied_author,
             replied_author_id=replied_author_id,
             replied_message_id=replied_message_id,
+            task_correlation_id=str(
+                raw.get("task_correlation_id")
+                or task_metadata.get("correlation_id", "")
+                or ""
+            ),
             author_id=author_id,
             author_username=author_username,
             mention_entries=mention_entries,

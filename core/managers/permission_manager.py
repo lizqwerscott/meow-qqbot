@@ -58,6 +58,10 @@ class PermissionManager:
     def _role_level(self, role: str) -> int:
         return ROLE_LEVEL.get(role, 1)
 
+    def role_at_least(self, candidate_role: str, required_role: str) -> bool:
+        """Compare roles without exposing the internal numeric ordering."""
+        return self._role_level(candidate_role) >= self._role_level(required_role)
+
     def is_admin_role(self, role: str) -> bool:
         return self._role_level(role) >= 3
 

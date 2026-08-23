@@ -6,7 +6,8 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -112,6 +113,101 @@ def test_tool_message_serialization_preserves_archive_metadata():
     assert stored["tool_name"] == "read_file"
     assert restored.timestamp == 123.0
     assert restored.tool_name == "read_file"
+
+
+@pytest.mark.asyncio
+async def test_archive_projection_prefers_timeline_visible_text_but_keeps_protocol():
+    manager = ArchiveManager(context_manager=MagicMock())
+    manager.set_timeline(
+        SimpleNamespace(
+            snapshot=AsyncMock(
+                return_value=(
+                    SimpleNamespace(
+                        role="user", message_id="user-1", content="canonical user"
+                    ),
+                    SimpleNamespace(
+                        role="assistant", message_id="user-1", content="canonical reply"
+                    ),
+                )
+            )
+        )
+    )
+    tool_calls = [{"id": "call-1", "function": {"name": "read_file"}}]
+    messages = [
+        ChatMessage("user", "stale user", 1, message_id="user-1"),
+        ChatMessage(
+            "assistant", "internal", 2, message_id="user-1", tool_calls=tool_calls
+        ),
+    ]
+
+    projected = await manager._apply_timeline_projection("chat", messages)
+
+    assert projected[0].content == "canonical user"
+    assert projected[1] is messages[1]
+    assert projected[1].tool_calls == tool_calls
+
+
+@pytest.mark.asyncio
+async def test_archive_materializes_timeline_only_visible_events():
+    manager = ArchiveManager(context_manager=MagicMock())
+    manager.set_timeline(
+        SimpleNamespace(
+            snapshot=AsyncMock(
+                return_value=(
+                    SimpleNamespace(
+                        event_id="user:u1",
+                        role="user",
+                        message_id="u1",
+                        content="canonical user",
+                        sender_id="u",
+                        timestamp=1,
+                    ),
+                    SimpleNamespace(
+                        event_id="delivery:d1",
+                        role="assistant",
+                        message_id="",
+                        content="accepted answer",
+                        sender_id="",
+                        timestamp=2,
+                    ),
+                )
+            )
+        )
+    )
+    protocol = ChatMessage(
+        "assistant",
+        "internal",
+        1.5,
+        message_id="u1",
+        tool_calls=[{"id": "call-1"}],
+    )
+
+    merged = await manager._merge_timeline_messages("chat", [protocol])
+
+    assert [message.content for message in merged] == [
+        "canonical user",
+        "internal",
+        "accepted answer",
+    ]
+    assert merged[1].tool_calls == [{"id": "call-1"}]
+
+
+@pytest.mark.asyncio
+async def test_archive_repairs_legacy_visible_gap_before_materializing_timeline():
+    manager = ArchiveManager(context_manager=MagicMock())
+    timeline = SimpleNamespace(
+        repair_from_legacy_history=AsyncMock(),
+        snapshot=AsyncMock(return_value=()),
+    )
+    manager.set_timeline(timeline)
+    message = make_msg("user", "legacy", "u1", timestamp=1.0)
+
+    merged = await manager._merge_timeline_messages("chat", [message])
+
+    assert merged == [message]
+    timeline.repair_from_legacy_history.assert_awaited_once_with(
+        "chat", [message.to_storage_dict()]
+    )
 
 
 # ── _extract_replay_messages ──
@@ -834,6 +930,32 @@ async def test_manual_archive_uses_target_chat_type_for_summary(tmp_path, monkey
 
     assert result.summary_path is not None
     assert "- **Type**: 群聊" in Path(result.summary_path).read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_session_status_prefers_timeline_summary(tmp_path):
+    context_manager = MagicMock()
+    context_manager.get_chat_history_async = MagicMock(
+        side_effect=AssertionError("legacy history should not be read")
+    )
+    timeline = MagicMock()
+    timeline.session_summary = AsyncMock(
+        return_value={
+            "message_count": 2,
+            "last_activity": 120.0,
+            "estimated_tokens": 5,
+        }
+    )
+    manager = ArchiveManager(
+        context_manager=context_manager,
+        memory_dir=str(tmp_path / "mem"),
+    )
+    manager.set_timeline(timeline)
+
+    status = await manager.get_session_status_async("chat_001")
+
+    assert status["message_count"] == 2
+    assert status["last_activity"] == 120.0
 
 
 @pytest.mark.asyncio

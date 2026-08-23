@@ -1,5 +1,10 @@
 """测试 BackgroundTaskRunner 的静态辅助函数。"""
 
+from unittest.mock import AsyncMock
+
+import pytest
+
+from core.engine.agent_engine import BackgroundTaskResult
 from core.tasks.delivery_policy import decide_cron_delivery
 from core.tasks.models import (
     CronJob,
@@ -133,6 +138,32 @@ def test_session_target_from_dict_isolated_default():
     assert job.session_target == "isolated"
 
 
+def test_media_strategy_defaults_off_and_round_trips():
+    from core.tasks.models import CronJob, TaskRecord
+
+    task = TaskRecord.from_dict(
+        {
+            "id": "task",
+            "prompt": "inspect",
+            "media_refs": ["media://inbound/a"],
+        }
+    )
+    assert task.auto_media_understanding is False
+    assert task.media_refs == ("media://inbound/a",)
+
+    job = CronJob.from_dict(
+        {
+            "id": "job",
+            "name": "inspect",
+            "at": 1,
+            "media_refs": ["media://inbound/a"],
+        }
+    )
+    assert job.auto_media_understanding is False
+    assert job.media_refs == ("media://inbound/a",)
+    assert job.to_dict()["media_refs"] == ["media://inbound/a"]
+
+
 def test_session_target_in_to_dict():
     """to_dict 包含 session_target。"""
     job = CronJob(name="test", session_target="main")
@@ -215,4 +246,47 @@ def test_cron_delivery_skips_after_tool_delivery():
 def test_task_record_delivery_status_is_backward_compatible():
     task = TaskRecord.from_dict({"id": "t", "status": "success"})
     assert task.delivery_status == DeliveryStatus.UNKNOWN
+    assert task.delivery_id == ""
     assert task.to_dict()["delivery_status"] == "unknown"
+    assert task.to_dict()["delivery_id"] == ""
+
+
+@pytest.mark.asyncio
+async def test_runner_passes_explicit_media_strategy_only_when_enabled():
+    class Manager:
+        async def start_task(self, task_id):
+            task.status = TaskStatus.RUNNING
+            return task
+
+        async def finish_task(self, task_id, status, result=None, error=None):
+            task.status = status
+            task.result = result
+            task.error = error
+            return task
+
+        async def update_task_record(self, value):
+            return None
+
+    task = TaskRecord(
+        id="task",
+        prompt="inspect",
+        auto_media_understanding=True,
+        media_refs=("media://inbound/a",),
+        media_source_chat_id="source",
+    )
+    runner = BackgroundTaskRunner(Manager())
+    callback = AsyncMock(return_value=BackgroundTaskResult(result="ok"))
+    runner.set_execute_callback(callback)
+
+    await runner.run_task(task)
+
+    kwargs = callback.await_args.kwargs
+    assert kwargs["auto_media_understanding"] is True
+    assert kwargs["media_refs"] == ("media://inbound/a",)
+    assert kwargs["media_source_chat_id"] == "source"
+
+    callback.reset_mock()
+    task.auto_media_understanding = False
+    await runner.run_task(task)
+    assert "auto_media_understanding" not in callback.await_args.kwargs
+    assert "media_refs" not in callback.await_args.kwargs

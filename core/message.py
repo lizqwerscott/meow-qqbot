@@ -50,6 +50,7 @@ class InputMessage:
     replied_author: str = ""
     replied_author_id: str = ""
     replied_message_id: str = ""
+    task_correlation_id: str = ""
     msg_type: MessageType = MessageType.TEXT
     timestamp: Optional[float] = None
     model_chain: Optional[List[str]] = None

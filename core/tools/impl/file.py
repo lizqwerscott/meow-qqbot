@@ -1,8 +1,10 @@
 import asyncio
 import json
 import logging
+import uuid
 from pathlib import Path
 
+from core.engine.turn_state import TurnPhase, TurnStateError
 from core.text_paging import (
     BinaryFileError,
     OffsetOutOfRangeError,
@@ -36,6 +38,7 @@ def is_admin_private(ctx: ToolContext, deps: ToolDeps) -> bool:
 async def _approve_path_access(
     ctx: ToolContext, file_path: str, tool_name: str, reason: str, deps: ToolDeps
 ):
+    """Approve one out-of-sandbox path with turn-bound plan verification."""
     if not is_admin_private(ctx, deps):
         return None
     mgr = deps.approval_manager.value
@@ -47,12 +50,100 @@ async def _approve_path_access(
         )
     except ValueError:
         resolved = Path(file_path).resolve()
-    if mgr.check_whitelist(tool_name, str(resolved)):
+    resolved_path = str(resolved)
+    if mgr.check_whitelist(tool_name, resolved_path):
         return resolved
-    result = await mgr.request_approval(ctx.chat_id, tool_name, reason, str(resolved))
-    if result in ("allow-once", "allow-always"):
-        return resolved
-    return None
+
+    plan = {
+        "tool_name": tool_name,
+        "resolved_path": resolved_path,
+        "chat_id": ctx.chat_id,
+    }
+    approval_revision = ctx.turn_revision
+    approval_session_key = ""
+    if ctx.turn_id:
+        plan.update(
+            turn_id=ctx.turn_id,
+            principal_id=ctx.principal_id,
+            turn_revision=approval_revision,
+        )
+    if ctx.transition_turn is not None:
+        approval_session_key = (
+            f"approval:{ctx.turn_id}:{tool_name}:{uuid.uuid4().hex[:12]}"
+        )
+        try:
+            awaiting = await ctx.transition_turn(
+                expected_revision=approval_revision,
+                phase=TurnPhase.AWAITING_APPROVAL,
+                approval_plan_id=approval_session_key,
+            )
+        except TurnStateError:
+            return None
+        approval_revision = awaiting.revision
+        ctx.turn_revision = approval_revision
+        plan["turn_revision"] = approval_revision
+        plan["approval_plan_id"] = approval_session_key
+        if ctx.capabilities is not None:
+            plan["capability_generation"] = ctx.capabilities.cancellation_generation
+
+    try:
+        result, session_key = await mgr.request_approval(
+            ctx.chat_id,
+            tool_name,
+            reason,
+            resolved_path,
+            plan=plan,
+            return_session_key=True,
+            session_key=approval_session_key or None,
+        )
+    except asyncio.CancelledError:
+        if approval_session_key:
+            mgr.take_pending_plan(approval_session_key)
+        if ctx.transition_turn is not None:
+            try:
+                await ctx.transition_turn(
+                    expected_revision=approval_revision,
+                    phase=TurnPhase.CANCELLED,
+                )
+            except TurnStateError:
+                pass
+        raise
+    except Exception:
+        if approval_session_key:
+            mgr.take_pending_plan(approval_session_key)
+        if ctx.transition_turn is not None:
+            try:
+                resumed = await ctx.transition_turn(
+                    expected_revision=approval_revision,
+                    phase=TurnPhase.ACTIVE,
+                )
+                ctx.turn_revision = resumed.revision
+            except TurnStateError:
+                pass
+        raise
+    if ctx.transition_turn is not None:
+        try:
+            resumed = await ctx.transition_turn(
+                expected_revision=approval_revision,
+                phase=TurnPhase.ACTIVE,
+            )
+            ctx.turn_revision = resumed.revision
+        except TurnStateError:
+            if session_key:
+                mgr.take_pending_plan(session_key)
+            return None
+    if not is_admin_private(ctx, deps):
+        if session_key:
+            mgr.take_pending_plan(session_key)
+        return None
+    if result not in ("allow-once", "allow-always", "allow"):
+        return None
+    if session_key and mgr.take_pending_plan(session_key) != plan:
+        _log.warning(
+            "file approval plan mismatch: tool=%s path=%s", tool_name, resolved
+        )
+        return None
+    return resolved
 
 
 def sandbox_target(

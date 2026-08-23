@@ -13,22 +13,43 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable, List, Literal, Optional, Set
 from uuid import uuid4
 
 from core.engine.admission_effect_policy import effect_types_for
 from core.engine.admission_outbox import AdmissionOutbox
+from core.engine.batch_media_context import (
+    BatchMediaContext,
+    BatchMediaContextBuilder,
+    BatchMediaLimits,
+)
 from core.engine.context import EngineContext
+from core.engine.conversation_scheduler import ConversationScheduler
+from core.engine.conversation_timeline import ConversationTimeline
+from core.engine.delivery_ledger import (
+    DeliveryController,
+    DeliveryLedger,
+    DeliveryReceipt,
+    DeliveryRecord,
+    DeliveryRecoveryResult,
+)
+from core.engine.delivery_prompt_contract import DeliveryPromptContract
+from core.engine.group_engagement import GroupEngagementManager
 from core.engine.prompt_builder import PromptBuilder
+from core.engine.turn_capabilities import TurnCapabilities
+from core.engine.turn_protocol_history import TurnProtocolHistory
+from core.engine.turn_state import TurnPhase, TurnState, TurnStateError
 from core.learners.base import sanitize_for_learners
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager
 from core.managers.session_manager import (
     AdmissionOrigin,
+    InboundIntent,
     PendingInbound,
     SessionTaskManager,
 )
+from core.media.models import MediaTurnContext
 from core.message import InputMessage, MessageType, ResourceMeta
 from core.tasks.wake_coalescer import WakeTurnResult
 from core.tools.policy import filter_internal_control_tools
@@ -76,9 +97,15 @@ class _TurnRequest:
     rollback_after_prompt_failure_only: bool = False
     internal_control: bool = False
     steering_enabled: bool = False
+    steering_intent: Optional[InboundIntent] = None
     steering_admission_callback: Optional[
         Callable[[PendingInbound], Awaitable[Optional[AdmittedMessage]]]
     ] = None
+    steering_commit_callback: Optional[
+        Callable[[Any, PendingInbound], Awaitable[None]]
+    ] = None
+    capabilities: Optional[TurnCapabilities] = None
+    turn_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -134,6 +161,7 @@ class AgentEngine:
         self.media_uploader = None
         self.multimodal_service = ctx.ai.multimodal_service
         self.media_service = None
+        self.media_context_builder: Optional[BatchMediaContextBuilder] = None
         self._tts_service = None
         self._api_client = None
 
@@ -146,10 +174,47 @@ class AgentEngine:
         self._archive_manager = ctx.mgmt.archive_manager
         self._system_events = ctx.mgmt.system_events
         self._workspace_manager = ctx.mgmt.workspace_manager
+        self._task_state_store = ctx.mgmt.task_state_store
+        self._permission_manager = ctx.mgmt.permission_manager
 
         # ── 子模块 ──
         self.session_manager = SessionTaskManager()
+        engagement_config = getattr(ctx.ai, "engagement_config", None)
+        if engagement_config is None:
+            from core.engine.engagement_config import normalize_engagement_config
+
+            engagement_config = normalize_engagement_config({})
+        self.scheduler = ConversationScheduler(
+            self.session_manager,
+            collect_idle_ms=engagement_config.conversation_collect_idle_ms,
+            collect_max_wait_ms=engagement_config.conversation_collect_max_wait_ms,
+            collect_max_messages=engagement_config.conversation_collect_max_messages,
+            collect_max_chars=engagement_config.conversation_collect_max_chars,
+            ambient_collect_idle_ms=engagement_config.group_ambient_idle_ms,
+            direct_task_collaboration_enabled=(
+                engagement_config.direct_task_collaboration_enabled
+            ),
+            user_role=(
+                self._permission_manager.get_user_role
+                if self._permission_manager is not None
+                else None
+            ),
+            role_at_least=(
+                self._permission_manager.role_at_least
+                if self._permission_manager is not None
+                else None
+            ),
+            task_state_store=ctx.mgmt.task_state_store,
+        )
+        self.group_engagement = GroupEngagementManager(engagement_config)
+        self.engagement_config = engagement_config
+        self.delivery_controller: Optional[DeliveryController] = None
+        self._delivery_recovery_locks: dict[str, asyncio.Lock] = {}
+        self._delivery_recovery_task: Optional[asyncio.Task] = None
+        self.timeline = ConversationTimeline()
+        self.protocol_history = TurnProtocolHistory()
         self.prompt_builder = PromptBuilder(ctx)
+        self.prompt_builder.timeline = self.timeline
         self.tool_loop = ToolLoop(
             ctx,
             prompt_builder=self.prompt_builder,
@@ -200,6 +265,345 @@ class AgentEngine:
 
         _log.info("AgentEngine 已初始化")
 
+    def _get_scheduler(self) -> ConversationScheduler:
+        """Create the scheduler lazily for lightweight test/fallback engine fixtures."""
+        scheduler = getattr(self, "scheduler", None)
+        if scheduler is None:
+            scheduler = ConversationScheduler(self.session_manager)
+            self.scheduler = scheduler
+        return scheduler
+
+    async def _cancel_scheduler_turn(self, turn_id: str) -> None:
+        """Best-effort terminal cleanup for a consumer work item that did not finish."""
+        scheduler = self._get_scheduler()
+        state = await scheduler.get_turn(turn_id)
+        if state is None:
+            return
+        try:
+            if state.phase in {TurnPhase.CANCELLED, TurnPhase.COMPLETED}:
+                await scheduler.drop_turn(turn_id)
+                return
+            cancelled = await scheduler.transition_turn(
+                turn_id,
+                expected_revision=state.revision,
+                phase=TurnPhase.CANCELLED,
+            )
+            await scheduler.drop_turn(cancelled.turn_id)
+        except TurnStateError as exc:
+            _log.warning("scheduler turn cancellation failed [%s]: %s", turn_id, exc)
+
+    def _get_group_engagement(self) -> GroupEngagementManager:
+        """Lazily create the gate for lightweight test/fallback engine fixtures."""
+        manager = getattr(self, "group_engagement", None)
+        if manager is None:
+            from core.engine.engagement_config import EngagementConfig
+
+            manager = GroupEngagementManager(EngagementConfig())
+            self.group_engagement = manager
+        return manager
+
+    def _get_batch_media_context_builder(self) -> BatchMediaContextBuilder:
+        builder = getattr(self, "media_context_builder", None)
+        if builder is None or builder.media_service is not self.media_service:
+            config = getattr(self, "engagement_config", None)
+            limits = BatchMediaLimits(
+                max_resources=getattr(config, "media_batch_max_resources", 8),
+                max_chars=getattr(config, "media_batch_max_chars", 12000),
+                max_download_bytes=getattr(
+                    config, "media_batch_max_download_bytes", 100 * 1024 * 1024
+                ),
+                capability_timeout_seconds=getattr(
+                    config, "media_batch_capability_timeout_seconds", 120.0
+                ),
+            )
+            builder = BatchMediaContextBuilder(self.media_service, limits=limits)
+            self.media_context_builder = builder
+        return builder
+
+    async def _build_batch_media_context(
+        self, turn_id: str, items: tuple[PendingInbound, ...]
+    ) -> BatchMediaContext:
+        """Prepare media only for a batch that is about to call a provider."""
+        try:
+            return await self._get_batch_media_context_builder().build(
+                turn_id=turn_id, items=items
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.warning("媒体批次上下文构建失败 [%s]: %s", turn_id, exc)
+            return BatchMediaContext(turn_id, (), MediaTurnContext())
+
+    def _turn_capabilities(
+        self,
+        intent: InboundIntent,
+        *,
+        chat_id: str,
+        sender_id: str,
+        reply_to: str,
+        allowed_media_uris: frozenset[str] | None = None,
+    ) -> TurnCapabilities:
+        return TurnCapabilities.for_intent(
+            intent,
+            chat_id=chat_id,
+            sender_id=sender_id,
+            reply_to=reply_to,
+            allowed_media_uris=allowed_media_uris,
+        )
+
+    def _delivery_contract(
+        self, intent: InboundIntent, reply_target: str
+    ) -> DeliveryPromptContract:
+        config = getattr(self, "engagement_config", None)
+        if config is None:
+            from core.engine.engagement_config import EngagementConfig
+
+            config = EngagementConfig()
+        delivery_modes = {
+            InboundIntent.PRIVATE_CONVERSATION: config.private_conversation_delivery_mode,
+            InboundIntent.DIRECT_TASK: config.direct_task_delivery_mode,
+            InboundIntent.GROUP_AMBIENT: config.group_ambient_delivery_mode,
+        }
+        return DeliveryPromptContract(
+            intent=intent,
+            delivery_mode=delivery_modes[intent],
+            reply_target=reply_target,
+        )
+
+    def _get_timeline(self) -> ConversationTimeline:
+        timeline = getattr(self, "timeline", None)
+        if timeline is None:
+            timeline = ConversationTimeline()
+            self.timeline = timeline
+        return timeline
+
+    async def _record_timeline_user_message(self, pending: PendingInbound) -> None:
+        """Write the admission projection without making it a protocol message."""
+        if pending.origin is not AdmissionOrigin.USER_MESSAGE:
+            return
+        message = pending.message
+        try:
+            await self._get_timeline().append_user_message(
+                chat_id=message.chat_id,
+                message_id=message.id,
+                content=pending.prepared_content,
+                sender_id=message.sender_id,
+                timestamp=message.timestamp,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # ChatContext remains the compatibility source until projection
+            # migration is complete; a projection failure must be observable.
+            _log.warning(
+                "会话 timeline 写入失败 [%s..] message=%s: %s",
+                message.chat_id[:12],
+                message.id,
+                exc,
+            )
+
+    async def _repair_timeline_from_legacy_history(self, chat_id: str) -> None:
+        get_history = getattr(self.context_manager, "get_chat_history_async", None)
+        if get_history is None:
+            return
+        timeline = self._get_timeline()
+        repair = getattr(timeline, "repair_from_legacy_history", None)
+        if repair is None:
+            return
+        try:
+            history = await get_history(chat_id)
+            migrated = await repair(chat_id, history)
+            if migrated:
+                _log.info(
+                    "已从旧 ChatContext 回填 timeline [%s..]: %d 条",
+                    chat_id[:12],
+                    migrated,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.warning("旧历史回填 timeline 失败 [%s..]: %s", chat_id[:12], exc)
+
+    async def get_history_migration_status(self, chat_id: str) -> dict:
+        """Return non-content readiness for retiring legacy prompt history."""
+        legacy = await self.context_manager.get_chat_history_async(chat_id)
+        return (await self._get_timeline().migration_report(chat_id, legacy)).to_dict()
+
+    async def get_history_migration_summary(self) -> dict:
+        """Scan all known sessions and return content-free migration readiness."""
+        chat_ids: set[str] = set()
+        for method_name in (
+            "get_all_chat_ids_async",
+            "get_all_disk_chat_ids_async",
+        ):
+            method = getattr(self.context_manager, method_name, None)
+            if method is None:
+                continue
+            try:
+                chat_ids.update(str(chat_id) for chat_id in await method())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log.warning("枚举历史迁移会话失败 [%s]: %s", method_name, exc)
+
+        timeline = self._get_timeline()
+        try:
+            chat_ids.update(str(chat_id) for chat_id in await timeline.chat_ids())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.warning("枚举 timeline 会话失败: %s", exc)
+
+        reports = []
+        scan_errors = 0
+        for chat_id in sorted(chat_ids):
+            try:
+                legacy = await self.context_manager.get_chat_history_async(chat_id)
+                reports.append(await timeline.migration_report(chat_id, legacy))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                scan_errors += 1
+                _log.warning("扫描历史迁移状态失败 [%s..]: %s", chat_id[:12], exc)
+
+        return timeline.migration_summary(reports, scan_errors=scan_errors).to_dict()
+
+    def _get_protocol_history(self) -> TurnProtocolHistory:
+        history = getattr(self, "protocol_history", None)
+        if history is None:
+            history = TurnProtocolHistory()
+            self.protocol_history = history
+        return history
+
+    def _get_delivery_controller(self) -> DeliveryController:
+        controller = getattr(self, "delivery_controller", None)
+        if controller is None:
+            config = getattr(self, "engagement_config", None)
+            if config is None:
+                from core.engine.engagement_config import EngagementConfig
+
+                config = EngagementConfig()
+            controller = DeliveryController(
+                DeliveryLedger(),
+                retry_base_seconds=config.delivery_retry_base_seconds,
+                max_attempts=config.delivery_retry_max_attempts,
+                timeline=self._get_timeline(),
+                audit_delivery=(
+                    task_state_store.record_delivery
+                    if (task_state_store := getattr(self, "_task_state_store", None))
+                    is not None
+                    else None
+                ),
+            )
+            self.delivery_controller = controller
+        return controller
+
+    async def _recover_ambient_deliveries(
+        self,
+        chat_id: str,
+        reply_callback: Callable,
+        *,
+        allow_transport_retry: bool = False,
+    ) -> DeliveryRecoveryResult:
+        """Recover stale ambient text with explicit transport idempotency opt-in."""
+        locks = getattr(self, "_delivery_recovery_locks", None)
+        if locks is None:
+            locks = {}
+            self._delivery_recovery_locks = locks
+        lock = locks.setdefault(chat_id, asyncio.Lock())
+        async with lock:
+
+            async def _resolve_content(record: DeliveryRecord) -> Optional[str]:
+                timeline = getattr(self, "timeline", None)
+                history_reader = getattr(timeline, "history", None)
+                history = await history_reader(chat_id) if history_reader else []
+                if not history:
+                    history = await self.context_manager.get_chat_history_async(chat_id)
+                for item in reversed(history):
+                    if (
+                        item.get("role") == "assistant"
+                        and item.get("message_id") == record.reply_anchor_id
+                    ):
+                        content = item.get("content")
+                        if isinstance(content, str) and content:
+                            return content
+                return None
+
+            async def _transport(record: DeliveryRecord, content: str) -> object:
+                kwargs = {
+                    "chat_id": record.chat_id,
+                    "content": content,
+                    "message_id": record.reply_anchor_id,
+                    "is_group": True,
+                }
+                if allow_transport_retry:
+                    kwargs["delivery_id"] = record.logical_delivery_id or record.key
+                return await reply_callback(
+                    **kwargs,
+                )
+
+            config = getattr(self, "engagement_config", None)
+            if config is None:
+                from core.engine.engagement_config import EngagementConfig
+
+                config = EngagementConfig()
+            result = await self._get_delivery_controller().recover_prepared(
+                chat_id=chat_id,
+                key_prefix="ambient:",
+                older_than=time.time() - config.delivery_recovery_after_seconds,
+                content_resolver=_resolve_content,
+                transport=_transport,
+                allow_transport_retry=allow_transport_retry,
+            )
+            if result.scanned:
+                _log.info(
+                    "ambient delivery recovery [%s..]: sent=%d retryable=%d failed=%d",
+                    chat_id[:12],
+                    result.sent,
+                    result.retryable,
+                    result.failed,
+                )
+            return result
+
+    async def _delivery_recovery_worker(self) -> None:
+        config = getattr(self, "engagement_config", None)
+        interval = max(
+            1.0,
+            getattr(config, "delivery_recovery_after_seconds", 60.0),
+        )
+        while True:
+            try:
+                for chat_id, callbacks in tuple(
+                    getattr(self, "_consumer_callbacks", {}).items()
+                ):
+                    if not self._get_group_engagement().is_active_chat(chat_id):
+                        continue
+                    await self._recover_ambient_deliveries(chat_id, callbacks[0])
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log.warning("投递恢复 worker 失败: %s", exc)
+                await asyncio.sleep(interval)
+
+    async def _ensure_delivery_recovery_worker(self) -> None:
+        if self._get_group_engagement().config.group_ambient_mode != "active":
+            return
+        task = getattr(self, "_delivery_recovery_task", None)
+        if task is None or task.done():
+            self._delivery_recovery_task = asyncio.create_task(
+                self._delivery_recovery_worker()
+            )
+
+    async def get_engagement_status(self) -> dict:
+        """Return aggregate engagement and delivery state for health surfaces."""
+        metrics = self._get_group_engagement().snapshot_metrics()
+        delivery = {}
+        controller = getattr(self, "delivery_controller", None)
+        if controller is not None:
+            delivery = await controller.ledger.status_counts()
+        return {"engagement": metrics, "delivery": delivery}
+
     # ── 懒注入 ──
 
     def set_media_uploader(self, media_uploader: Any):
@@ -224,6 +628,7 @@ class AgentEngine:
 
     def set_media_service(self, media_service: Any):
         self.media_service = media_service
+        self.media_context_builder = None
         self.prompt_builder.media_service = media_service
         if self._deps:
             self._deps.media_service = media_service
@@ -260,7 +665,10 @@ class AgentEngine:
     def _register_builtin_hooks(self) -> None:
         from core.engine.duplicate_reply import DuplicateReplyDetector
 
-        self._duplicate_reply = DuplicateReplyDetector(self.context_manager)
+        self._duplicate_reply = DuplicateReplyDetector(
+            self.context_manager,
+            delivery_controller_getter=lambda: self.delivery_controller,
+        )
         self.add_message_hook(self._duplicate_reply.handle_message, priority=100)
 
     async def _run_hooks(
@@ -298,11 +706,8 @@ class AgentEngine:
         self.last_active_chat = chat_id
         self.last_active_time = time.time()
 
-        triggers_ai = (
-            input_message.msg_type != MessageType.EMOJI
-            and self._should_dispatch_to_ai(input_message)
-        )
-        needs_ai = triggers_ai
+        intent = self._classify_inbound_intent(input_message)
+        needs_ai = intent is not InboundIntent.GROUP_AMBIENT
         if needs_ai and self.rule_router and self.model_registry:
             tier = self.rule_router.classify(input_message.content)
             input_message.tier = tier
@@ -311,11 +716,9 @@ class AgentEngine:
         try:
             pending = await self._prepare_pending_inbound(
                 input_message,
-                dispatch_mode="agent" if triggers_ai else "passive",
+                intent=intent,
             )
-            enqueued = await self.session_manager.enqueue_with_dispatch_mode(
-                chat_id, pending, triggers_ai=triggers_ai
-            )
+            enqueued = await self._get_scheduler().enqueue(chat_id, pending)
         except BaseException:
             async with self._dedup_lock:
                 self._pending_ids.discard(input_message.id)
@@ -334,11 +737,36 @@ class AgentEngine:
             )
             async with self._dedup_lock:
                 self._processed_ids.pop(enqueued.dropped.message.id, None)
+        if not enqueued.accepted:
+            if intent is not InboundIntent.GROUP_AMBIENT:
+                try:
+                    receipt = await self._get_delivery_controller().deliver_text(
+                        delivery_id=f"backpressure:{chat_id}:{input_message.id}",
+                        chat_id=chat_id,
+                        content="当前会话任务较多，请稍后重试。",
+                        callback=reply_callback,
+                        message_id=input_message.id,
+                        is_group=input_message.is_group,
+                        reason="inbox_backpressure",
+                        timeline_delivery_kind="system_fallback",
+                    )
+                    if receipt.status != "accepted":
+                        _log.warning(
+                            "会话背压提示未确认 [%s..]: %s",
+                            chat_id[:12],
+                            receipt.status,
+                        )
+                except Exception as exc:
+                    _log.warning("发送会话背压提示失败 [%s..]: %s", chat_id[:12], exc)
+            return
         if enqueued.accepted:
             self._consumer_callbacks[chat_id] = (
                 reply_callback,
                 get_user_nickname,
             )
+            if self._get_group_engagement().config.group_ambient_mode == "active":
+                await self._recover_ambient_deliveries(chat_id, reply_callback)
+                await self._ensure_delivery_recovery_worker()
         _log.debug("消息已入 inbox [%s..]: %s", chat_id[:12], input_message.id)
         if enqueued.should_start_consumer:
             task = asyncio.create_task(
@@ -357,31 +785,17 @@ class AgentEngine:
         self,
         input_message: InputMessage,
         *,
-        dispatch_mode: Literal["agent", "passive"],
+        intent: InboundIntent,
     ) -> PendingInbound:
-        """Build immutable media/reply context without mutating shared chat history."""
-        media_history_text = ""
-        if self.media_service:
-            try:
-                media_context = await self.media_service.prepare_for_ai(input_message)
-                media_history_text = "\n\n".join(
-                    [*media_context.current_blocks, *media_context.replied_blocks]
-                )
-            except Exception as exc:
-                _log.warning(
-                    "媒体历史上下文构建失败 [%s..]: %s", input_message.chat_id[:12], exc
-                )
-
+        """Build lightweight immutable ingress context without media analysis."""
         content = input_message.content
-        media_refs = [
+        media_refs = tuple(
             resource.media_uri
             for resource in (*input_message.resources, *input_message.replied_resources)
             if resource.media_uri
-        ]
+        )
         if media_refs:
             content += "\n[媒体引用: " + ", ".join(media_refs) + "]"
-        if media_history_text:
-            content += "\n" + media_history_text
         if input_message.replied_content:
             prefix = (
                 f"[正在回复 {input_message.replied_author}: {input_message.replied_content}]"
@@ -392,8 +806,9 @@ class AgentEngine:
         return PendingInbound(
             input_message,
             content,
-            dispatch_mode,
+            intent,
             AdmissionOrigin.USER_MESSAGE,
+            resource_refs=media_refs,
         )
 
     async def _admit_pending_message(
@@ -444,6 +859,8 @@ class AgentEngine:
                     )
                 nickname = get_user_nickname(message.sender_id) or message.sender_id
                 await self.context_manager.record_chat_type(chat_id, message.is_group)
+                if pending.origin is AdmissionOrigin.USER_MESSAGE:
+                    await self._repair_timeline_from_legacy_history(chat_id)
                 committed = (
                     await self.context_manager.add_user_message_async(
                         chat_id,
@@ -467,6 +884,8 @@ class AgentEngine:
                         message.id,
                     )
                     return None
+                if pending.origin is AdmissionOrigin.USER_MESSAGE:
+                    await self._record_timeline_user_message(pending)
                 if getattr(self, "_archive_manager", None):
                     try:
                         await self._archive_manager.archive_if_stale(
@@ -552,6 +971,20 @@ class AgentEngine:
     ) -> Optional[bool]:
         if (chat_id, message_id) in self._admission_in_progress:
             return None
+        timeline = getattr(self, "timeline", None)
+        history_reader = getattr(timeline, "history", None)
+        if callable(history_reader):
+            try:
+                timeline_history = await history_reader(chat_id)
+                if any(
+                    item.get("role") == "user" and item.get("message_id") == message_id
+                    for item in timeline_history
+                ):
+                    return True
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log.debug("timeline 准入检查失败 [%s..]: %s", chat_id[:12], exc)
         get_history = getattr(self.context_manager, "get_chat_history_async", None)
         if get_history is None:
             return False
@@ -567,6 +1000,7 @@ class AgentEngine:
 
     async def start(self) -> None:
         await self._process_admission_outbox()
+        await self._ensure_delivery_recovery_worker()
         await self._resume_preserved_consumers()
 
     async def _resume_preserved_consumers(self) -> None:
@@ -708,6 +1142,14 @@ class AgentEngine:
             return True
         return input_message.replied_author_id == self._bot_id
 
+    def _classify_inbound_intent(self, input_message: InputMessage) -> InboundIntent:
+        """Classify once at ingress; queue and tool-loop state cannot rewrite it."""
+        if not input_message.is_group:
+            return InboundIntent.PRIVATE_CONVERSATION
+        if self._should_dispatch_to_ai(input_message):
+            return InboundIntent.DIRECT_TASK
+        return InboundIntent.GROUP_AMBIENT
+
     # ── 辅助方法 ──
 
     @staticmethod
@@ -737,57 +1179,154 @@ class AgentEngine:
     ) -> None:
         try:
             while True:
-                lease = await self.session_manager.claim_next_for_consumer(
-                    chat_id, consumer_token
+                work = await self._get_scheduler().next_work(
+                    chat_id, owner_token=consumer_token
                 )
-                if lease is None:
-                    if await self.session_manager.release_consumer_if_idle(
+                if work is None:
+                    if await self._get_scheduler().release_consumer_if_idle(
                         chat_id, consumer_token
                     ):
                         return
                     continue
 
-                pending = lease.items[0]
+                pending = work.pending
+                batch = work.items[1:]
                 message = pending.message
+                scheduler_turn_id = message.id
+                turn_state: TurnState | None = None
                 try:
-                    if pending.dispatch_mode == "agent":
-                        await self._process_message(
-                            pending, reply_callback, get_user_nickname
-                        )
-                    else:
-                        session_lock = await self.session_manager.get_lock(chat_id)
-                        async with session_lock:
-                            await self._admit_pending_message(
+                    turn_state = await self._get_scheduler().start_turn(
+                        work,
+                        turn_id=scheduler_turn_id,
+                        principal_id=message.sender_id,
+                    )
+                    if pending.intent is not InboundIntent.GROUP_AMBIENT:
+                        if batch:
+                            await self._process_message(
                                 pending,
-                                source="passive",
-                                get_user_nickname=get_user_nickname,
+                                reply_callback,
+                                get_user_nickname,
+                                batch=batch,
                             )
-                            if message.msg_type != MessageType.EMOJI:
-                                await self._run_hooks(
-                                    message, reply_callback, get_user_nickname
-                                )
-                    await self.session_manager.commit(lease, pending)
-                except asyncio.CancelledError:
-                    state = self.session_manager.get_message_state(chat_id, message.id)
-                    admission_key = (chat_id, message.id)
-                    if state == "admitted" or admission_key in getattr(
-                        self, "_admitted_ids", {}
-                    ):
-                        await self.session_manager.commit(lease, pending)
+                        else:
+                            await self._process_message(
+                                pending,
+                                reply_callback,
+                                get_user_nickname,
+                            )
                     else:
-                        await self.session_manager.requeue_front(lease)
+                        if (
+                            turn_state.phase is not TurnPhase.ACTIVE
+                            or work.passive_admission_only
+                        ):
+                            decision = None
+                        else:
+                            decision = await self._get_group_engagement().evaluate(
+                                chat_id, batch=work.items
+                            )
+                            self._get_group_engagement().observe(decision)
+                        if decision is not None and decision.shadow:
+                            _log.info(
+                                "ambient shadow candidate [%s..] reason=%s batch=%d",
+                                chat_id[:12],
+                                decision.reason,
+                                len(work.items),
+                            )
+                        if (
+                            decision is not None
+                            and decision.allowed
+                            and self.group_engagement.config.group_ambient_mode
+                            == "active"
+                        ):
+                            await self._process_ambient_active(
+                                pending,
+                                batch,
+                                decision,
+                                reply_callback,
+                                get_user_nickname,
+                            )
+                        else:
+                            if decision is not None and decision.allowed:
+                                _log.warning(
+                                    "ambient active decision held passive until delivery integration [%s..]",
+                                    chat_id[:12],
+                                )
+                            session_lock = await self.session_manager.get_lock(chat_id)
+                            async with session_lock:
+                                for item in work.items:
+                                    await self._admit_pending_message(
+                                        item,
+                                        source="passive",
+                                        get_user_nickname=get_user_nickname,
+                                    )
+                                    if item.message.msg_type != MessageType.EMOJI:
+                                        await self._run_hooks(
+                                            item.message,
+                                            reply_callback,
+                                            get_user_nickname,
+                                        )
+                    for item in work.items:
+                        await self._get_scheduler().commit(work, item)
+                    current_turn = await self._get_scheduler().get_turn(
+                        scheduler_turn_id
+                    )
+                    if current_turn is None:
+                        raise TurnStateError(
+                            f"scheduler turn disappeared: {scheduler_turn_id}"
+                        )
+                    if current_turn.phase is TurnPhase.CANCELLED:
+                        await self._get_scheduler().drop_turn(current_turn.turn_id)
+                    else:
+                        finalizing = current_turn
+                        if current_turn.phase is TurnPhase.ACTIVE:
+                            finalizing = await self._get_scheduler().transition_turn(
+                                scheduler_turn_id,
+                                expected_revision=current_turn.revision,
+                                phase=TurnPhase.FINALIZING,
+                            )
+                        completed = await self._get_scheduler().transition_turn(
+                            scheduler_turn_id,
+                            expected_revision=finalizing.revision,
+                            phase=TurnPhase.COMPLETED,
+                        )
+                        await self._get_scheduler().drop_turn(completed.turn_id)
+                except asyncio.CancelledError:
+                    await self._cancel_scheduler_turn(scheduler_turn_id)
+                    for item in work.items:
+                        state = self.session_manager.get_message_state(
+                            chat_id, item.message.id
+                        )
+                        admission_key = (chat_id, item.message.id)
+                        if state == "admitted" or admission_key in getattr(
+                            self, "_admitted_ids", {}
+                        ):
+                            await self._get_scheduler().commit(work, item)
+                        else:
+                            await self._get_scheduler().requeue_front(work)
+                            break
                     raise
                 except Exception as exc:
-                    admission_key = (chat_id, message.id)
-                    state = self.session_manager.get_message_state(chat_id, message.id)
-                    if state == "admitted" or admission_key in getattr(
-                        self, "_admitted_ids", {}
-                    ):
-                        await self.session_manager.commit(lease, pending)
-                    else:
-                        await self.session_manager.fail(lease, pending)
-                        async with self._dedup_lock:
-                            self._processed_ids.pop(message.id, None)
+                    await self._cancel_scheduler_turn(scheduler_turn_id)
+                    first_uncommitted = True
+                    for item in work.items:
+                        state = self.session_manager.get_message_state(
+                            chat_id, item.message.id
+                        )
+                        admission_key = (chat_id, item.message.id)
+                        if state == "admitted" or admission_key in getattr(
+                            self, "_admitted_ids", {}
+                        ):
+                            await self._get_scheduler().commit(work, item)
+                        elif first_uncommitted:
+                            await self._get_scheduler().fail(work, item)
+                            first_uncommitted = False
+                            async with self._dedup_lock:
+                                self._processed_ids.pop(item.message.id, None)
+                            await self._get_scheduler().requeue_front(work)
+                            break
+                        else:
+                            await self._get_scheduler().requeue_front(work)
+                            break
                     _log.error(
                         "消费者处理消息 %s 时出错: %s",
                         message.id,
@@ -795,19 +1334,27 @@ class AgentEngine:
                         exc_info=True,
                     )
                     try:
-                        await reply_callback(
+                        receipt = await self._get_delivery_controller().deliver_text(
+                            delivery_id=f"consumer-error:{chat_id}:{message.id}",
                             chat_id=chat_id,
                             content="抱歉，处理您的消息时出现了问题，请稍后再试。",
+                            callback=reply_callback,
                             message_id=message.id,
                             is_group=message.is_group,
                         )
+                        if receipt.status != "accepted":
+                            _log.warning(
+                                "错误回复未确认 [%s..]: %s",
+                                chat_id[:12],
+                                receipt.status,
+                            )
                     except Exception as reply_err:
                         _log.warning(
                             "向用户发送错误回复失败 [%s..]: %s", chat_id[:12], reply_err
                         )
                     continue
         finally:
-            replacement_token = await self.session_manager.handoff_consumer(
+            replacement_token = await self._get_scheduler().handoff_consumer(
                 chat_id, consumer_token
             )
             if replacement_token is not None:
@@ -860,6 +1407,8 @@ class AgentEngine:
             messages, tools = await request.prompt_factory()
             if request.internal_control:
                 tools = filter_internal_control_tools(tools)
+            if request.capabilities is not None:
+                tools = request.capabilities.filter_tools(tools)
             prompt_built = True
             model_chain = request.model_chain
             tier = request.tier
@@ -867,6 +1416,42 @@ class AgentEngine:
                 if self.rule_router and self.model_registry:
                     tier = self.rule_router.classify(request.route_text)
                     model_chain = self.model_registry.get_chain(tier) or None
+
+            turn_state = (
+                await self._get_scheduler().get_turn(request.turn_id)
+                if request.turn_id
+                else None
+            )
+            capabilities = request.capabilities
+            cancellation_generation = (
+                turn_state.cancellation_generation if turn_state is not None else 0
+            )
+            if capabilities is not None:
+                capabilities = replace(
+                    capabilities,
+                    cancellation_generation=cancellation_generation,
+                )
+
+            async def _transition_turn(**kwargs):
+                if turn_state is None:
+                    return None
+                return await self._get_scheduler().transition_turn(
+                    request.turn_id, **kwargs
+                )
+
+            async def _turn_is_active() -> bool:
+                if turn_state is None:
+                    return True
+                return await self._get_scheduler().is_turn_execution_allowed(
+                    request.turn_id, cancellation_generation
+                )
+
+            async def _turn_can_deliver() -> bool:
+                if turn_state is None:
+                    return True
+                return await self._get_scheduler().is_turn_delivery_allowed(
+                    request.turn_id, cancellation_generation
+                )
 
             run = self.tool_loop.run(
                 messages=messages,
@@ -879,9 +1464,26 @@ class AgentEngine:
                 tool_reply_names=request.tool_reply_names,
                 reply_state_callback=_reply_state_callback,
                 steering_enabled=request.steering_enabled,
+                steering_intent=request.steering_intent,
                 steering_admission_callback=(
                     _steering_admission_callback
                     if request.steering_admission_callback
+                    else None
+                ),
+                steering_claim_callback=(
+                    lambda: (
+                        self._get_scheduler().claim_steer(request.turn_id)
+                        if request.turn_id
+                        else None
+                    )
+                ),
+                steering_commit_callback=(
+                    (
+                        lambda lease, item: self._get_scheduler().commit_steer(
+                            request.turn_id, lease, item
+                        )
+                    )
+                    if request.turn_id and request.steering_admission_callback
                     else None
                 ),
                 inbound_message_ids=[request.reply_to] if request.reply_to else [],
@@ -894,6 +1496,22 @@ class AgentEngine:
                 tier=tier,
                 stream_callback=request.stream_callback,
                 internal_control=request.internal_control,
+                capabilities=capabilities,
+                delivery_controller=(
+                    self._get_delivery_controller()
+                    if (
+                        request.tool_reply_callback
+                        or request.capabilities is not None
+                        or request.turn_id
+                    )
+                    else None
+                ),
+                turn_id=request.turn_id or request.reply_to,
+                protocol_history=self._get_protocol_history(),
+                transition_turn=_transition_turn if turn_state is not None else None,
+                turn_active_callback=_turn_is_active,
+                turn_delivery_callback=_turn_can_deliver,
+                turn_revision=turn_state.revision if turn_state is not None else 0,
                 delivery_state_callback=(
                     _tool_delivery_callback if request.track_tool_delivery else None
                 ),
@@ -959,34 +1577,173 @@ class AgentEngine:
         async with session_lock:
             return await _execute_with_rollback()
 
+    async def _process_ambient_active(
+        self,
+        pending: PendingInbound,
+        batch: tuple[PendingInbound, ...],
+        decision,
+        reply_callback: Callable,
+        get_user_nickname: Callable[[str], str],
+    ) -> None:
+        """Run an opted-in ambient turn behind the durable delivery gate."""
+        input_message = (batch[-1] if batch else pending).message
+        chat_id = input_message.chat_id
+        admitted_any = False
+        final_delivered = False
+        controller = self._get_delivery_controller()
+        turn_id = pending.message.id
+        allowed_media_uris = frozenset(
+            resource.media_uri
+            for item in (pending, *batch)
+            for resource in (*item.message.resources, *item.message.replied_resources)
+            if resource.media_uri
+        )
+
+        async def _build_prompt() -> tuple[list[dict], Optional[list[dict]]]:
+            nonlocal admitted_any
+            admitted_messages: list[AdmittedMessage] = []
+            for item in (pending, *batch):
+                admitted = await self._admit_pending_message(
+                    item,
+                    source="ambient",
+                    get_user_nickname=get_user_nickname,
+                )
+                if admitted is not None:
+                    admitted_any = True
+                    admitted_messages.append(admitted)
+            if not admitted_messages:
+                raise _AdmissionAlreadyCommitted
+            media_context = await self._build_batch_media_context(
+                turn_id, (pending, *batch)
+            )
+            return await self.prompt_builder.build(
+                chat_id=chat_id,
+                is_group=True,
+                user_nickname=get_user_nickname(input_message.sender_id),
+                sender_id=input_message.sender_id,
+                input_message=input_message,
+                cost_tracker=self.cost_tracker,
+                timeline_snapshot=await self._get_timeline().snapshot(chat_id),
+                protocol_snapshot=await self._get_protocol_history().snapshot(turn_id),
+                delivery_contract=self._delivery_contract(
+                    pending.intent, decision.reply_anchor_id or input_message.id
+                ),
+                media_context=media_context,
+            )
+
+        async def _tool_reply_callback(**kwargs):
+            return await reply_callback(**kwargs)
+
+        async def _final_reply_callback(**kwargs) -> None:
+            nonlocal final_delivered
+            content = kwargs.get("content", "")
+            delivery, record = await controller.prepare_ambient(
+                chat_id=chat_id,
+                turn_id=turn_id,
+                content=content,
+                delivery_mode=self.group_engagement.config.group_ambient_delivery_mode,
+                tool_delivered=False,
+                reply_anchor_id=decision.reply_anchor_id,
+            )
+            if not delivery.should_deliver or record is None:
+                return
+            receipt = await reply_callback(**kwargs)
+            if isinstance(receipt, DeliveryReceipt):
+                settled = await controller.settle_receipt(
+                    record, receipt, content=content
+                )
+                final_delivered = bool(
+                    settled is not None and receipt.status == "accepted"
+                )
+            else:
+                # Keep test/dry-run callbacks compatible until all transports return receipts.
+                settled = await controller.mark_sent(record)
+                final_delivered = settled is not None
+
+        if not await self.group_engagement.start(decision):
+            _log.warning(
+                "ambient decision expired before provider start [%s..]", chat_id[:12]
+            )
+            return
+        try:
+            turn = await self._run_turn(
+                _TurnRequest(
+                    chat_id=chat_id,
+                    sender_id=input_message.sender_id,
+                    is_group=True,
+                    reply_to=decision.reply_anchor_id or input_message.id,
+                    route_text=input_message.content,
+                    prompt_factory=_build_prompt,
+                    reply_callback=_final_reply_callback,
+                    tool_reply_callback=_tool_reply_callback,
+                    tool_reply_names=frozenset({"send_message"}),
+                    get_user_nickname=get_user_nickname,
+                    model_chain=input_message.model_chain,
+                    tier=input_message.tier,
+                    rollback_message_id=pending.message.id,
+                    steering_enabled=False,
+                    capabilities=self._turn_capabilities(
+                        pending.intent,
+                        chat_id=chat_id,
+                        sender_id=input_message.sender_id,
+                        reply_to=decision.reply_anchor_id or input_message.id,
+                        allowed_media_uris=allowed_media_uris,
+                    ),
+                    turn_id=turn_id,
+                    track_tool_delivery=True,
+                )
+            )
+            await self.group_engagement.complete(
+                decision,
+                delivered=turn.sent_emoji
+                or turn.tool_text_delivered
+                or final_delivered,
+                silent=turn.final_reply_silent
+                or not (turn.sent_emoji or turn.tool_text_delivered or final_delivered),
+            )
+        except _AdmissionAlreadyCommitted:
+            await self.group_engagement.complete(decision, delivered=False, silent=True)
+        except Exception:
+            await self.group_engagement.complete(decision, delivered=False, silent=True)
+            raise
+
     async def _process_message(
         self,
         pending: PendingInbound,
         reply_callback: Callable,
         get_user_nickname: Callable[[str], str],
+        *,
+        batch: tuple[PendingInbound, ...] = (),
     ) -> None:
         if not isinstance(pending, PendingInbound):
             raise TypeError(
                 "_process_message requires PendingInbound with explicit origin"
             )
-        input_message = pending.message
+        input_message = (batch[-1] if batch else pending).message
         chat_id = input_message.chat_id
         is_group = input_message.is_group
         user_nickname = get_user_nickname(input_message.sender_id)
         system_event_snapshot = []
 
         async def _build_prompt() -> tuple[list[dict], Optional[list[dict]]]:
-            admitted = await self._admit_pending_message(
-                pending,
-                source="initial",
-                get_user_nickname=get_user_nickname,
-            )
-            if admitted is None:
+            admitted_messages: list[AdmittedMessage] = []
+            for item in (pending, *batch):
+                admitted = await self._admit_pending_message(
+                    item,
+                    source="initial",
+                    get_user_nickname=get_user_nickname,
+                )
+                if admitted is not None:
+                    admitted_messages.append(admitted)
+            if not admitted_messages:
                 raise _AdmissionAlreadyCommitted
             if self._system_events:
                 peek_events = getattr(self._system_events, "peek_non_heartbeat", None)
                 if peek_events:
                     system_event_snapshot.extend(peek_events(chat_id))
+            media_context = await self._build_batch_media_context(
+                pending.message.id, (pending, *batch)
+            )
             return await self.prompt_builder.build(
                 chat_id=chat_id,
                 is_group=is_group,
@@ -994,6 +1751,14 @@ class AgentEngine:
                 sender_id=input_message.sender_id,
                 input_message=input_message,
                 cost_tracker=self.cost_tracker,
+                timeline_snapshot=await self._get_timeline().snapshot(chat_id),
+                protocol_snapshot=await self._get_protocol_history().snapshot(
+                    input_message.id
+                ),
+                delivery_contract=self._delivery_contract(
+                    pending.intent, input_message.id
+                ),
+                media_context=media_context,
             )
 
         async def _admit_steering(
@@ -1031,14 +1796,46 @@ class AgentEngine:
                 additional_prompt_messages=additional_prompt_messages,
             )
 
-        async def _stream_deliver(chunk: str) -> None:
+        delivery_sequence = 0
+
+        async def _deliver_reply(*args, **kwargs):
+            nonlocal delivery_sequence
+            content = kwargs.get("content")
+            if content is None:
+                content = args[1] if len(args) > 1 else (args[0] if args else "")
+            delivery_sequence += 1
+            controller = self._get_delivery_controller()
+            record = await controller.prepare_reply_delivery(
+                chat_id=chat_id,
+                turn_id=input_message.id,
+                sequence=delivery_sequence,
+                content=content,
+                reply_anchor_id=input_message.id,
+            )
             try:
-                await reply_callback(
+                receipt = await reply_callback(
                     chat_id=chat_id,
-                    content=chunk,
+                    content=content,
                     message_id=input_message.id,
                     is_group=is_group,
                 )
+            except Exception:
+                receipt = DeliveryReceipt(
+                    status="failed",
+                    logical_delivery_id=record.logical_delivery_id,
+                    error_code="transport_exception",
+                    retryable=True,
+                )
+            await controller.settle_tool_delivery(
+                record,
+                receipt if isinstance(receipt, DeliveryReceipt) else None,
+                content=content,
+            )
+            return receipt
+
+        async def _stream_deliver(chunk: str) -> None:
+            try:
+                await _deliver_reply(chunk)
             except Exception as cb_err:
                 _log.warning("流式转发失败 [%s..]: %s", chat_id[:12], cb_err)
 
@@ -1051,15 +1848,23 @@ class AgentEngine:
                     reply_to=input_message.id,
                     route_text=input_message.content,
                     prompt_factory=_build_prompt,
-                    reply_callback=reply_callback,
+                    reply_callback=_deliver_reply,
                     get_user_nickname=get_user_nickname,
                     model_chain=input_message.model_chain,
                     tier=input_message.tier,
                     rollback_message_id=input_message.id,
                     stream_callback=_stream_deliver,
                     steering_enabled=True,
+                    steering_intent=pending.intent,
                     steering_admission_callback=_admit_steering,
                     rollback_after_prompt_failure_only=True,
+                    capabilities=self._turn_capabilities(
+                        pending.intent,
+                        chat_id=chat_id,
+                        sender_id=input_message.sender_id,
+                        reply_to=input_message.id,
+                    ),
+                    turn_id=input_message.id,
                 )
             )
         except _AdmissionAlreadyCommitted:
@@ -1082,6 +1887,9 @@ class AgentEngine:
         delivery_channel: str = "",
         reply_to_message_id: str = "",
         tools_allow: Optional[List[str]] = None,
+        auto_media_understanding: bool = False,
+        media_refs: tuple[str, ...] = (),
+        media_source_chat_id: str = "",
     ) -> BackgroundTaskResult:
         """在独立会话中执行后台任务。
 
@@ -1096,6 +1904,9 @@ class AgentEngine:
             delivery_channel: 真实聊天 ID，用于 send_emoji 等需要真实 chat_id 的工具
             reply_to_message_id: 创建任务时的原始消息 ID，用于构造 msg_id
             tools_allow: 后台任务可用工具列表（None=默认，["*"]=全部，[]=仅announce）
+            auto_media_understanding: 是否请求显式授权媒体的自动理解（默认关闭）
+            media_refs: 调用方显式提供的受控媒体引用，不从 prompt 推断
+            media_source_chat_id: 校验媒体授权的来源聊天 ID
 
         Returns:
             BackgroundTaskResult，支持旧式二元解包。
@@ -1137,6 +1948,47 @@ class AgentEngine:
             is_at_mention=False,
         )
 
+        async def _resolve_media_resources() -> list[ResourceMeta]:
+            if not auto_media_understanding or not media_refs:
+                return []
+            source_chat_id = media_source_chat_id or delivery_channel
+            if not source_chat_id or self.media_service is None:
+                return []
+            store = getattr(self.media_service, "store", None)
+            authorize = getattr(store, "authorize", None)
+            if authorize is None:
+                return []
+            resources: list[ResourceMeta] = []
+            seen: set[str] = set()
+            for media_uri in media_refs:
+                if (
+                    not isinstance(media_uri, str)
+                    or not media_uri.startswith("media://inbound/")
+                    or "/" in media_uri.removeprefix("media://inbound/")
+                    or media_uri in seen
+                ):
+                    continue
+                seen.add(media_uri)
+                try:
+                    record = await authorize(source_chat_id, media_uri)
+                except Exception as exc:
+                    _log.warning("后台任务媒体授权失败 [%s]: %s", media_uri, exc)
+                    continue
+                if record is None:
+                    continue
+                resources.append(
+                    ResourceMeta(
+                        resource_type=record.resource_type,
+                        media_uri=record.media_uri,
+                        media_id=record.media_id,
+                        hash=record.sha256,
+                        mime_type=record.mime_type,
+                        size=record.size,
+                        filename=record.filename,
+                    )
+                )
+            return resources
+
         try:
 
             async def _build_prompt() -> tuple[list[dict], Optional[list[dict]]]:
@@ -1144,16 +1996,41 @@ class AgentEngine:
                     PendingInbound(
                         msg,
                         prompt,
-                        "agent",
+                        InboundIntent.PRIVATE_CONVERSATION,
                         AdmissionOrigin.INTERNAL_CONTROL,
                     ),
                     source="initial",
                     get_user_nickname=lambda _: "system",
                 )
+                media_context = None
+                resources = await _resolve_media_resources()
+                if resources:
+                    source_chat_id = media_source_chat_id or delivery_channel
+                    media_message = InputMessage(
+                        id=msg.id,
+                        sender_id=sender_id,
+                        chat_id=source_chat_id,
+                        content=prompt,
+                        is_group=is_group,
+                        resources=resources,
+                    )
+                    media_pending = PendingInbound(
+                        media_message,
+                        prompt,
+                        InboundIntent.PRIVATE_CONVERSATION,
+                        AdmissionOrigin.INTERNAL_CONTROL,
+                        resource_refs=tuple(
+                            resource.media_uri for resource in resources
+                        ),
+                    )
+                    media_context = await self._build_batch_media_context(
+                        msg.id, (media_pending,)
+                    )
                 return await self.prompt_builder.build_task_messages(
                     chat_id=chat_id,
                     prompt=prompt,
                     tools_allow=tools_allow,
+                    media_context=media_context,
                 )
 
             turn = await self._run_turn(
@@ -1172,6 +2049,13 @@ class AgentEngine:
                     tool_reply_callback=deliver_tool_reply_callback,
                     tool_reply_names=frozenset({"send_message"}),
                     steering_enabled=False,
+                    capabilities=self._turn_capabilities(
+                        InboundIntent.PRIVATE_CONVERSATION,
+                        chat_id=chat_id,
+                        sender_id=sender_id,
+                        reply_to=msg.id,
+                    ),
+                    turn_id=msg.id,
                 )
             )
 
@@ -1251,13 +2135,14 @@ class AgentEngine:
             chat_id = f"heartbeat:{int(_time.time())}"
 
         msg = InputMessage(
-            id=f"wake_{chat_id}_{int(_time.time())}",
+            id=f"wake_{chat_id}_{_time.time_ns()}",
             sender_id="system",
             chat_id=chat_id,
             content=extra_prompt or "[系统事件]",
             is_group=is_group,
             is_at_mention=False,
         )
+        result.turn_id = msg.id
 
         wake_resp: dict = {}
 
@@ -1286,6 +2171,8 @@ class AgentEngine:
                     sender_id="system",
                     input_message=msg,
                     cost_tracker=self.cost_tracker,
+                    timeline_snapshot=await self._get_timeline().snapshot(session_key),
+                    protocol_snapshot=(),
                 )
 
             async def _capture(chat_id, content, message_id, is_group):
@@ -1303,6 +2190,13 @@ class AgentEngine:
                     timeout=timeout,
                     internal_control=True,
                     steering_enabled=False,
+                    capabilities=self._turn_capabilities(
+                        InboundIntent.PRIVATE_CONVERSATION,
+                        chat_id=chat_id,
+                        sender_id="system",
+                        reply_to=msg.id,
+                    ),
+                    turn_id=msg.id,
                 )
             )
 
@@ -1431,6 +2325,10 @@ class AgentEngine:
         if self._outbox_task and not self._outbox_task.done():
             self._outbox_task.cancel()
             await asyncio.gather(self._outbox_task, return_exceptions=True)
+        recovery_task = getattr(self, "_delivery_recovery_task", None)
+        if recovery_task and not recovery_task.done():
+            recovery_task.cancel()
+            await asyncio.gather(recovery_task, return_exceptions=True)
         if self._admission_outbox:
             await self._admission_outbox.close()
 

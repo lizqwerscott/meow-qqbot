@@ -4,9 +4,12 @@
 通过 deliver() 的 delivery_target 参数获取投递目标。
 """
 
+import hashlib
 import logging
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Optional
+
+from core.engine.delivery_ledger import DeliveryController
 
 _log = logging.getLogger(__name__)
 
@@ -29,12 +32,45 @@ class HeartbeatDeliveryStrategy(DeliveryStrategy):
         context_manager: Any = None,
         show_ok: bool = False,
         show_alerts: bool = True,
+        delivery_controller: Optional[DeliveryController] = None,
     ):
         self._hb = heartbeat_manager
         self._send = reply_callback
         self._ctx = context_manager
         self._show_ok = show_ok
         self._show_alerts = show_alerts
+        self._delivery_controller = delivery_controller
+
+    def _admin_delivery_id(self, result: Any, text: str, kind: str) -> str:
+        turn_id = str(getattr(result, "turn_id", "") or "")
+        if not turn_id:
+            turn_id = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        return f"heartbeat:{turn_id}:{kind}:admin"
+
+    async def _deliver_to_admin(self, result: Any, text: str, *, kind: str) -> bool:
+        """Deliver an administrator heartbeat through the receipt ledger."""
+        if not self._delivery_controller:
+            return await self._hb.deliver_to_admin(text)
+        admin_id = getattr(self._hb, "admin_delivery_target", "")
+        if not admin_id:
+            admin_ids = getattr(self._hb, "_admin_ids", ())
+            admin_id = admin_ids[0] if admin_ids else ""
+        receipt_sender = getattr(self._hb, "deliver_to_admin_receipt", None)
+        if not admin_id or receipt_sender is None:
+            return await self._hb.deliver_to_admin(text)
+
+        async def _transport(**_kwargs):
+            return await receipt_sender(text)
+
+        receipt = await self._delivery_controller.deliver_text(
+            delivery_id=self._admin_delivery_id(result, text, kind),
+            chat_id=admin_id,
+            content=text,
+            callback=_transport,
+            message_id="",
+            is_group=False,
+        )
+        return receipt.status == "accepted"
 
     async def deliver(self, result: Any, *, delivery_target: str = "") -> None:
         if result.should_notify and result.notification_text:
@@ -55,12 +91,22 @@ class HeartbeatDeliveryStrategy(DeliveryStrategy):
                     deliver_to_user[:16],
                     len(text),
                 )
-                await self._send(
-                    chat_id=deliver_to_user,
-                    content=text,
-                    message_id="",
-                    is_group=is_group,
-                )
+                if self._delivery_controller:
+                    await self._delivery_controller.deliver_text(
+                        delivery_id=f"heartbeat:{getattr(result, 'turn_id', '')}:user",
+                        chat_id=deliver_to_user,
+                        content=text,
+                        callback=self._send,
+                        message_id="",
+                        is_group=is_group,
+                    )
+                else:
+                    await self._send(
+                        chat_id=deliver_to_user,
+                        content=text,
+                        message_id="",
+                        is_group=is_group,
+                    )
             else:
                 # 投递给管理员 DM（心跳通知）
                 if self._hb.should_suppress(text):
@@ -73,14 +119,17 @@ class HeartbeatDeliveryStrategy(DeliveryStrategy):
                 _log.info(
                     "[Delivery] Heartbeat 发送DM: len=%d text=%.60s", len(text), text
                 )
-                delivered = await self._hb.deliver_to_admin(text)
+                delivered = await self._deliver_to_admin(
+                    result, text, kind="notification"
+                )
                 if not delivered:
                     raise RuntimeError("heartbeat admin delivery was not confirmed")
                 self._hb.record_notification(text)
         elif self._show_ok:
             self._hb.record_delivery_start()
             _log.debug("[Delivery] Heartbeat 发送静默确认: ok")
-            delivered = await self._hb.deliver_to_admin("一切正常，无需关注。")
+            text = "一切正常，无需关注。"
+            delivered = await self._deliver_to_admin(result, text, kind="ok")
             if not delivered:
                 raise RuntimeError("heartbeat admin delivery was not confirmed")
 
@@ -92,16 +141,34 @@ class ChatReplyDeliveryStrategy(DeliveryStrategy):
     同时支持 normal chat 的 captured_replies 和 system event 的 notification_text。
     """
 
-    def __init__(self, reply_callback: Callable, context_manager: Any = None):
+    def __init__(
+        self,
+        reply_callback: Callable,
+        context_manager: Any = None,
+        delivery_controller: Optional[DeliveryController] = None,
+    ):
         self._send = reply_callback
         self._ctx = context_manager
+        self._delivery_controller = delivery_controller
 
-    async def _send_text(self, text: str, target: str) -> None:
+    async def _send_text(
+        self, text: str, target: str, *, delivery_id: str = ""
+    ) -> None:
         is_group = False
         if self._ctx:
             chat_type = self._ctx.get_chat_type(target)
             if chat_type is not None:
                 is_group = chat_type
+        if self._delivery_controller:
+            await self._delivery_controller.deliver_text(
+                delivery_id=delivery_id or f"chat-reply:{target}",
+                chat_id=target,
+                content=text,
+                callback=self._send,
+                message_id="",
+                is_group=is_group,
+            )
+            return
         await self._send(
             chat_id=target,
             content=text,
@@ -125,7 +192,11 @@ class ChatReplyDeliveryStrategy(DeliveryStrategy):
                     target[:16],
                     len(text),
                 )
-                await self._send_text(text, target)
+                await self._send_text(
+                    text,
+                    target,
+                    delivery_id=f"wake:{getattr(result, 'turn_id', '')}:notification",
+                )
                 return
 
         # Normal chat path: AI 直接输出文本
@@ -153,7 +224,11 @@ class ChatReplyDeliveryStrategy(DeliveryStrategy):
             delivery_target[:16],
             len(combined),
         )
-        await self._send_text(combined, delivery_target)
+        await self._send_text(
+            combined,
+            delivery_target,
+            delivery_id=f"wake:{getattr(result, 'turn_id', '')}:captured",
+        )
 
 
 class SilentDeliveryStrategy(DeliveryStrategy):

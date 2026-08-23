@@ -35,11 +35,17 @@ class TaskManager:
         job_id: Optional[str] = None,
         delivery_channel: Optional[str] = None,
         reply_to_message_id: str = "",
+        auto_media_understanding: bool = False,
+        media_refs: tuple[str, ...] = (),
+        media_source_chat_id: str = "",
     ) -> TaskRecord:
         """创建一个新的后台任务（状态 = pending）。"""
         task = TaskRecord(
             type=task_type,
             prompt=prompt,
+            auto_media_understanding=auto_media_understanding,
+            media_refs=tuple(media_refs),
+            media_source_chat_id=media_source_chat_id,
             job_id=job_id,
             delivery_channel=delivery_channel,
             reply_to_message_id=reply_to_message_id,
@@ -64,6 +70,14 @@ class TaskManager:
         if current is not None:
             self._running_tasks[task_id] = current
         return task
+
+    def list_restart_recovery_tasks(self) -> List[TaskRecord]:
+        """Return interrupted tasks that still need their single recovery notice."""
+        return [
+            task
+            for task in self._store.all_tasks().values()
+            if task.recovery_notification_pending
+        ]
 
     async def update_task_record(self, task: TaskRecord) -> None:
         """更新任务记录到持久化存储（不改变状态）。"""
@@ -145,6 +159,35 @@ class TaskManager:
 
         _log.info(f"任务已取消: id={task_id[:12]}..")
         return True
+
+    async def interrupt_active_tasks_on_restart(self) -> List[TaskRecord]:
+        """Atomically mark persisted active tasks as interrupted after restart.
+
+        The runner must never resume a persisted model/tool loop. Keep the
+        historical ``LOST`` status for compatibility, but make the cause
+        explicit so recovery and operators can distinguish restart interruption
+        from a later stale-task scan.
+        """
+        interrupted: list[TaskRecord] = []
+        now = time.time()
+        async with self._status_lock:
+            for task in self._store.all_tasks().values():
+                if task.status not in TaskStatus.active():
+                    continue
+                task.status = TaskStatus.LOST
+                task.finished_at = now
+                task.error = "任务因进程重启中断，未自动重放"
+                task.recovery_notification_pending = True
+                await self._store.update_task(task)
+                interrupted.append(task)
+            self._running_tasks.clear()
+        if interrupted:
+            _log.warning(
+                "进程重启中断 %d 个后台任务: %s",
+                len(interrupted),
+                ", ".join(task.id[:12] for task in interrupted),
+            )
+        return interrupted
 
     # ── LOST 检测 ──
 
@@ -228,6 +271,8 @@ class CronJobManager:
         model: Optional[str] = None,
         thinking: Optional[str] = None,
         tools_allow: Optional[List[str]] = None,
+        auto_media_understanding: bool = False,
+        media_refs: tuple[str, ...] = (),
     ) -> CronJob:
         if not cron_expression and at is None:
             raise ValueError("cron_expression 和 at 必须至少提供一个")
@@ -246,6 +291,8 @@ class CronJobManager:
             cron_expression=cron_expression,
             at=at,
             prompt=prompt,
+            auto_media_understanding=auto_media_understanding,
+            media_refs=tuple(media_refs),
             enabled=enabled,
             catch_up=catch_up,
             delete_after_run=delete_after_run,

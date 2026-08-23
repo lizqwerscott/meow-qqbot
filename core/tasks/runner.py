@@ -21,6 +21,7 @@ import time
 from typing import Any, Callable, List, Optional
 
 import core.tasks.wake_coalescer as _wake_coalescer
+from core.engine.delivery_ledger import DeliveryReceipt
 from core.tools.shell_env import build_exec_env_for
 
 from .delivery_policy import decide_cron_delivery
@@ -133,16 +134,27 @@ class BackgroundTaskRunner:
 
         try:
             # 在独立 session 中执行 prompt
+            execute_kwargs = {
+                "chat_id": chat_id,
+                "prompt": task.prompt,
+                "sender_id": "system",
+                "is_group": is_group,
+                "delivery_channel": task.delivery_channel or "",
+                "reply_to_message_id": task.reply_to_message_id,
+                "tools_allow": tools_allow,
+            }
+            if task.auto_media_understanding:
+                execute_kwargs.update(
+                    {
+                        "auto_media_understanding": True,
+                        "media_refs": task.media_refs,
+                        "media_source_chat_id": task.media_source_chat_id
+                        or task.delivery_channel
+                        or "",
+                    }
+                )
             execution = await asyncio.wait_for(
-                self._execute_prompt_cb(
-                    chat_id=chat_id,
-                    prompt=task.prompt,
-                    sender_id="system",
-                    is_group=is_group,
-                    delivery_channel=task.delivery_channel or "",
-                    reply_to_message_id=task.reply_to_message_id,
-                    tools_allow=tools_allow,
-                ),
+                self._execute_prompt_cb(**execute_kwargs),
                 timeout=timeout,
             )
             result = getattr(execution, "result", None)
@@ -197,9 +209,22 @@ class BackgroundTaskRunner:
                 error=str(e),
             )
 
-        # ── 手动后台任务完成后：唤醒目标会话 ──
+        # ── 手动后台任务完成后：优先直接投递最终结果 ──
+        manual_delivery_handled = False
         if (
             task
+            and task.type == "manual"
+            and task.status
+            in (TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.TIMEOUT)
+        ):
+            manual_delivery_handled = await self._deliver_manual_task_result(
+                task, is_group=is_group
+            )
+
+        # ── 手动后台任务完成后：无 direct delivery 时保持 wake 兼容路径 ──
+        if (
+            task
+            and not manual_delivery_handled
             and task.status
             in (TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.TIMEOUT)
             and task.type == "manual"
@@ -227,6 +252,111 @@ class BackgroundTaskRunner:
                 )
 
         return task
+
+    async def _deliver_manual_task_result(
+        self, task: TaskRecord, *, is_group: bool
+    ) -> bool:
+        """Settle a manual task's final delivery through the injected ledger adapter.
+
+        Returns whether this task had a direct-delivery route. A failed or unknown
+        receipt still counts as handled: falling back to a wake turn could resend
+        content after an uncertain transport call.
+        """
+        if not task.delivery_channel or self._delivery_cb is None:
+            return False
+
+        if task.tool_delivered:
+            task.delivery_status = DeliveryStatus.DELIVERED
+        elif task.silent:
+            task.delivery_status = DeliveryStatus.NOT_REQUESTED
+        else:
+            status_text = {
+                TaskStatus.SUCCESS: "已完成",
+                TaskStatus.FAILED: "执行失败",
+                TaskStatus.TIMEOUT: "执行超时",
+            }.get(task.status, "已结束")
+            task.delivery_id = f"task:{task.id}:final"
+            try:
+                try:
+                    receipt = await self._delivery_cb(
+                        chat_id=task.delivery_channel,
+                        content=self._format_result_event_text(
+                            f"后台任务{status_text}", task
+                        ),
+                        message_id="",
+                        is_group=is_group,
+                        delivery_id=task.delivery_id,
+                    )
+                except TypeError as callback_error:
+                    if "delivery_id" not in str(callback_error):
+                        raise
+                    receipt = await self._delivery_cb(
+                        chat_id=task.delivery_channel,
+                        content=self._format_result_event_text(
+                            f"后台任务{status_text}", task
+                        ),
+                        message_id="",
+                        is_group=is_group,
+                    )
+                if isinstance(receipt, DeliveryReceipt):
+                    if receipt.status in {"accepted", "partial"}:
+                        task.delivery_status = DeliveryStatus.DELIVERED
+                    elif receipt.status == "unknown":
+                        task.delivery_status = DeliveryStatus.UNKNOWN
+                        task.delivery_error = receipt.error_code or "unknown receipt"
+                    else:
+                        task.delivery_status = DeliveryStatus.NOT_DELIVERED
+                        task.delivery_error = receipt.error_code or "delivery failed"
+                else:
+                    task.delivery_status = DeliveryStatus.DELIVERED
+            except Exception as exc:
+                task.delivery_status = DeliveryStatus.NOT_DELIVERED
+                task.delivery_error = str(exc)
+                _log.error("投递手动后台任务结果失败: %s", exc)
+
+        await self._task_manager.update_task_record(task)
+        return True
+
+    async def deliver_restart_recovery(
+        self, task: TaskRecord, *, is_group: bool
+    ) -> bool:
+        """Send one non-replay notice for a task interrupted by process restart."""
+        if not task.recovery_notification_pending:
+            return False
+        try:
+            if not task.delivery_channel or self._delivery_cb is None:
+                task.recovery_notification_pending = False
+                await self._task_manager.update_task_record(task)
+                return True
+            task.delivery_id = f"task:{task.id}:restart"
+            receipt = await self._delivery_cb(
+                chat_id=task.delivery_channel,
+                content="后台任务因机器人重启而中断，未自动重试。",
+                message_id="",
+                is_group=is_group,
+                delivery_id=task.delivery_id,
+            )
+            if isinstance(receipt, DeliveryReceipt):
+                if receipt.status in {"accepted", "partial"}:
+                    task.delivery_status = DeliveryStatus.DELIVERED
+                elif receipt.status == "unknown":
+                    task.delivery_status = DeliveryStatus.UNKNOWN
+                    task.delivery_error = receipt.error_code or "unknown receipt"
+                else:
+                    task.delivery_status = DeliveryStatus.NOT_DELIVERED
+                    task.delivery_error = receipt.error_code or "delivery failed"
+            else:
+                task.delivery_status = DeliveryStatus.DELIVERED
+        except Exception as exc:
+            task.delivery_status = DeliveryStatus.NOT_DELIVERED
+            task.delivery_error = str(exc)
+            _log.error("投递任务重启中断通知失败: %s", exc)
+        finally:
+            # Do not retry after an uncertain transport attempt. The ledger's
+            # deterministic key is the remaining idempotency boundary.
+            task.recovery_notification_pending = False
+            await self._task_manager.update_task_record(task)
+        return True
 
     @staticmethod
     def _resolve_session_id(job: CronJob, task_id: str) -> str:
@@ -471,6 +601,9 @@ class BackgroundTaskRunner:
             task_type="cron",
             job_id=job.id,
             delivery_channel=job.delivery_channel,
+            auto_media_understanding=job.auto_media_understanding,
+            media_refs=job.media_refs,
+            media_source_chat_id=job.delivery_channel or "",
         )
 
         # 根据 session_mode 覆盖 session_id
@@ -507,14 +640,40 @@ class BackgroundTaskRunner:
                 decision.should_deliver,
             )
             if decision.should_deliver and self._delivery_cb:
+                task.delivery_id = f"cron:{job.id}:{task.id}"
                 try:
-                    await self._delivery_cb(
-                        chat_id=job.delivery_channel,
-                        content=decision.content,
-                        message_id="",
-                        is_group=job.is_group,
-                    )
-                    task.delivery_status = DeliveryStatus.DELIVERED
+                    try:
+                        receipt = await self._delivery_cb(
+                            chat_id=job.delivery_channel,
+                            content=decision.content,
+                            message_id="",
+                            is_group=job.is_group,
+                            delivery_id=task.delivery_id,
+                        )
+                    except TypeError as callback_error:
+                        if "delivery_id" not in str(callback_error):
+                            raise
+                        receipt = await self._delivery_cb(
+                            chat_id=job.delivery_channel,
+                            content=decision.content,
+                            message_id="",
+                            is_group=job.is_group,
+                        )
+                    if isinstance(receipt, DeliveryReceipt):
+                        if receipt.status in {"accepted", "partial"}:
+                            task.delivery_status = DeliveryStatus.DELIVERED
+                        elif receipt.status == "unknown":
+                            task.delivery_status = DeliveryStatus.UNKNOWN
+                            task.delivery_error = (
+                                receipt.error_code or "unknown receipt"
+                            )
+                        else:
+                            task.delivery_status = DeliveryStatus.NOT_DELIVERED
+                            task.delivery_error = (
+                                receipt.error_code or "delivery failed"
+                            )
+                    else:
+                        task.delivery_status = DeliveryStatus.DELIVERED
                 except Exception as e:
                     task.delivery_status = DeliveryStatus.NOT_DELIVERED
                     task.delivery_error = str(e)

@@ -53,14 +53,44 @@ class Router:
         # ── 1. 命令检测 ──
         command_messages = await self.command_manager.process_message(input_message)
         if command_messages:
-            for msg in command_messages:
+            delivery_controller = None
+            get_delivery_controller = getattr(
+                self.agent_engine, "_get_delivery_controller", None
+            )
+            if callable(get_delivery_controller):
                 try:
-                    await reply_callback(
-                        chat_id=msg["chat_id"],
-                        content=msg["content"],
-                        message_id=msg["message_id"],
-                        is_group=msg["is_group"],
-                    )
+                    delivery_controller = get_delivery_controller()
+                except Exception as exc:
+                    _log.warning("命令回复 ledger 初始化失败: %s", exc)
+            for index, msg in enumerate(command_messages):
+                try:
+                    if delivery_controller is None:
+                        await reply_callback(
+                            chat_id=msg["chat_id"],
+                            content=msg["content"],
+                            message_id=msg["message_id"],
+                            is_group=msg["is_group"],
+                        )
+                    else:
+                        receipt = await delivery_controller.deliver_text(
+                            delivery_id=(
+                                f"command:{input_message.chat_id}:"
+                                f"{input_message.id}:{index}"
+                            ),
+                            chat_id=msg["chat_id"],
+                            content=msg["content"],
+                            callback=reply_callback,
+                            message_id=msg["message_id"],
+                            is_group=msg["is_group"],
+                            reason="command_reply",
+                            timeline_delivery_kind=None,
+                        )
+                        if receipt.status not in {"accepted", "partial"}:
+                            _log.warning(
+                                "命令回复未确认 [%s..]: %s",
+                                msg["chat_id"][:12],
+                                receipt.status,
+                            )
                 except Exception as cb_err:
                     _log.warning(
                         "命令回复发送失败 [%s..]: %s", msg["chat_id"][:12], cb_err

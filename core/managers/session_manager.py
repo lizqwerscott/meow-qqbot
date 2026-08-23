@@ -6,7 +6,7 @@ import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Deque, Dict, Generic, Literal, Optional, Set, TypeVar
+from typing import Callable, Deque, Dict, Generic, Literal, Optional, Set, TypeVar
 
 from core.message import InputMessage
 
@@ -23,15 +23,41 @@ class AdmissionOrigin(StrEnum):
     INTERNAL_CONTROL = "internal_control"
 
 
+class InboundIntent(StrEnum):
+    """Immutable routing intent assigned before an item enters a session inbox."""
+
+    DIRECT_TASK = "direct_task"
+    PRIVATE_CONVERSATION = "private_conversation"
+    GROUP_AMBIENT = "group_ambient"
+
+
 @dataclass(frozen=True)
 class PendingInbound:
     """Immutable inbound envelope kept out of shared chat history until admission."""
 
     message: InputMessage
     prepared_content: str
-    dispatch_mode: Literal["agent", "passive"]
+    intent: InboundIntent
     origin: AdmissionOrigin
     enqueued_at: float = field(default_factory=time.time)
+    resource_refs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Read compatibility for pre-intent inbox rows and old test fixtures.
+        if isinstance(self.intent, str):
+            legacy = {
+                "agent": InboundIntent.PRIVATE_CONVERSATION,
+                "passive": InboundIntent.GROUP_AMBIENT,
+            }
+            normalized = legacy.get(self.intent)
+            if normalized is None:
+                normalized = InboundIntent(self.intent)
+            object.__setattr__(self, "intent", normalized)
+
+    @property
+    def dispatch_mode(self) -> Literal["agent", "passive"]:
+        """Deprecated compatibility view; scheduling uses ``intent``."""
+        return "passive" if self.intent is InboundIntent.GROUP_AMBIENT else "agent"
 
 
 @dataclass(frozen=True)
@@ -64,7 +90,6 @@ class SessionTaskManager:
         self._locks: Dict[str, asyncio.Lock] = {}
         self._running: Dict[str, int] = {}
         self._next_consumer_token = 0
-        self._steering_active: Set[str] = set()
         self._leased_counts: Dict[str, int] = {}
         self._states: OrderedDict[tuple[str, str], MessageState] = OrderedDict()
         self._max_inbox_size = max_inbox_size
@@ -87,9 +112,18 @@ class SessionTaskManager:
         inbox = self._inboxes.setdefault(chat_id, deque())
         leased_count = self._leased_counts.get(chat_id, 0)
         if len(inbox) + leased_count >= self._max_inbox_size:
-            if inbox:
-                dropped = inbox.popleft()
+            dropped = next(
+                (item for item in inbox if item.intent is InboundIntent.GROUP_AMBIENT),
+                None,
+            )
+            if dropped is not None:
+                inbox.remove(dropped)
+            elif pending.intent is InboundIntent.GROUP_AMBIENT:
+                self._set_state(chat_id, pending.message.id, "dropped")
+                return InboxEnqueueResult(False, False, dropped=pending)
             else:
+                # Do not silently discard explicit or private user work. A future
+                # durable inbox may turn this into backpressure/retry handling.
                 self._set_state(chat_id, pending.message.id, "dropped")
                 return InboxEnqueueResult(False, False, dropped=pending)
         else:
@@ -116,26 +150,13 @@ class SessionTaskManager:
     async def enqueue_with_dispatch_mode(
         self, chat_id: str, pending: PendingInbound, *, triggers_ai: bool
     ) -> InboxEnqueueResult[PendingInbound]:
-        """Classify and enqueue inbound work atomically without pre-activating turns."""
-        async with self._lock:
-            dispatch_mode: Literal["agent", "passive"] = (
-                "agent"
-                if triggers_ai or chat_id in self._steering_active
-                else "passive"
-            )
-            if pending.dispatch_mode != dispatch_mode:
-                pending = PendingInbound(
-                    pending.message,
-                    pending.prepared_content,
-                    dispatch_mode,
-                    pending.origin,
-                    pending.enqueued_at,
-                )
-            return self._enqueue_locked(chat_id, pending)
+        """Deprecated wrapper; it never rewrites the immutable inbound intent."""
+        return await self.enqueue_and_claim_consumer(chat_id, pending)
 
     async def is_steering_active(self, chat_id: str) -> bool:
+        """Deprecated compatibility query for callers migrating to turn state."""
         async with self._lock:
-            return chat_id in self._steering_active
+            return bool(self._leased_counts.get(chat_id))
 
     def _reserve_lease_items(self, chat_id: str, count: int) -> None:
         self._leased_counts[chat_id] = self._leased_counts.get(chat_id, 0) + count
@@ -157,23 +178,85 @@ class SessionTaskManager:
             if not inbox:
                 return None
             pending = inbox.popleft()
-            if pending.dispatch_mode == "agent":
-                self._steering_active.add(chat_id)
             self._reserve_lease_items(chat_id, 1)
             return InboxLease(chat_id=chat_id, items=(pending,))
 
+    async def peek_next_for_consumer(
+        self, chat_id: str, consumer_token: int
+    ) -> Optional[PendingInbound]:
+        """Read the FIFO head without reserving it for a consumer."""
+        return await self.peek_pending_for_consumer(chat_id, consumer_token, offset=0)
+
+    async def peek_pending_for_consumer(
+        self, chat_id: str, consumer_token: int, *, offset: int = 0
+    ) -> Optional[PendingInbound]:
+        """Read an unleased FIFO item without changing its reservation state."""
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
+        async with self._lock:
+            if self._running.get(chat_id) != consumer_token:
+                return None
+            inbox = self._inboxes.get(chat_id)
+            if not inbox or offset >= len(inbox):
+                return None
+            return inbox[offset]
+
     async def claim_pending_for_steer(
-        self, chat_id: str
+        self,
+        chat_id: str,
+        *,
+        intent: Optional[InboundIntent] = None,
+        principal_id: Optional[str] = None,
+        candidate_filter: Optional[Callable[[PendingInbound], bool]] = None,
+        max_items: Optional[int] = None,
+        max_chars: Optional[int] = None,
+        skip_head: bool = False,
     ) -> Optional[InboxLease[PendingInbound]]:
-        """Claim pending messages only while this session has an active consumer."""
+        """Claim a contiguous same-intent prefix, optionally after the FIFO head."""
         async with self._lock:
             inbox = self._inboxes.get(chat_id)
             if not inbox or chat_id not in self._running:
                 return None
-            items = tuple(inbox)
-            inbox.clear()
+            start_index = 1 if skip_head else 0
+            if len(inbox) <= start_index:
+                return None
+            candidate = inbox[start_index]
+            if intent is None:
+                intent = candidate.intent
+            if candidate.intent is not intent:
+                return None
+            if principal_id and candidate.message.sender_id != principal_id:
+                return None
+            if candidate_filter is not None and not candidate_filter(candidate):
+                return None
+            items: list[PendingInbound] = []
+            total_chars = 0
+            while len(inbox) > start_index and inbox[start_index].intent is intent:
+                candidate = inbox[start_index]
+                if principal_id and candidate.message.sender_id != principal_id:
+                    break
+                if candidate_filter is not None and not candidate_filter(candidate):
+                    break
+                if max_items is not None and len(items) >= max_items:
+                    break
+                candidate_chars = len(candidate.prepared_content)
+                if (
+                    max_chars is not None
+                    and items
+                    and total_chars + candidate_chars > max_chars
+                ):
+                    break
+                if skip_head:
+                    inbox.rotate(-1)
+                    items.append(inbox.popleft())
+                    inbox.rotate(1)
+                else:
+                    items.append(inbox.popleft())
+                total_chars += candidate_chars
+            if not items:
+                return None
             self._reserve_lease_items(chat_id, len(items))
-            return InboxLease(chat_id=chat_id, items=items)
+            return InboxLease(chat_id=chat_id, items=tuple(items))
 
     async def commit(self, lease: InboxLease[T], item: T) -> None:
         """Commit the next leased item after its local history admission succeeds."""
@@ -237,7 +320,6 @@ class SessionTaskManager:
             inbox = self._inboxes.get(chat_id)
             self._running.pop(chat_id, None)
             if not inbox:
-                self._steering_active.discard(chat_id)
                 return None
             self._next_consumer_token += 1
             replacement_token = self._next_consumer_token
@@ -253,8 +335,14 @@ class SessionTaskManager:
             if inbox:
                 return False
             self._running.pop(chat_id, None)
-            self._steering_active.discard(chat_id)
             return True
+
+    async def has_pending_intent(self, chat_id: str, intent: InboundIntent) -> bool:
+        """Return whether an unleased inbox item has the requested intent."""
+        async with self._lock:
+            return any(
+                pending.intent is intent for pending in self._inboxes.get(chat_id, ())
+            )
 
     async def claim_existing_consumers(
         self, chat_ids: Set[str]
@@ -279,9 +367,12 @@ class SessionTaskManager:
     def has_active_consumer(self, chat_id: str) -> bool:
         return chat_id in self._running
 
+    def is_consumer_owner(self, chat_id: str, consumer_token: int) -> bool:
+        """Return whether a token still owns the session consumer slot."""
+        return self._running.get(chat_id) == consumer_token
+
     async def cleanup_session(self, chat_id: str) -> None:
         async with self._lock:
-            self._steering_active.discard(chat_id)
             self._inboxes.pop(chat_id, None)
             self._leased_counts.pop(chat_id, None)
             self._locks.pop(chat_id, None)
@@ -289,7 +380,6 @@ class SessionTaskManager:
 
     async def cleanup_all(self, *, preserve_inboxes: bool = False) -> None:
         async with self._lock:
-            self._steering_active.clear()
             if not preserve_inboxes:
                 self._inboxes.clear()
             self._leased_counts.clear()

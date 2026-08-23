@@ -314,6 +314,8 @@ async def test_s2_pro_tool_preserves_text_tag_and_ignores_instructions(tmp_path)
         "success": True,
         "message": "语音已发送到聊天中",
     }
+    assert result.delivery_receipt is not None
+    assert result.delivery_receipt.status == "accepted"
     assert len(requests) == 1
     assert bot_engine.replies == [
         {

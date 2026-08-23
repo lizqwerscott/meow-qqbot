@@ -10,8 +10,15 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple
 
+if TYPE_CHECKING:
+    from core.engine.conversation_timeline import TimelineEvent
+    from core.engine.turn_protocol_history import ProtocolEvent
+
+from core.engine.batch_media_context import BatchMediaContext
+from core.engine.delivery_prompt_contract import DeliveryPromptContract
+from core.engine.turn_protocol_history import TurnProtocolHistory
 from core.message import InputMessage
 from core.tools.policy import ChatContext, build_tools, format_task_tool_descriptions
 
@@ -104,6 +111,7 @@ class PromptBuilder:
         self._system_events = ctx.mgmt.system_events
         self._tts_service = None
         self._deps = deps
+        self.timeline = None
         self.media_service = None
         self._dynamic_ctx_builder = DynamicContextBuilder(
             hindsight=self.hindsight,
@@ -128,6 +136,10 @@ class PromptBuilder:
         sender_id: str,
         input_message: InputMessage,
         cost_tracker: Any = None,
+        timeline_snapshot: Optional[Sequence["TimelineEvent"]] = None,
+        protocol_snapshot: Optional[Sequence["ProtocolEvent"]] = None,
+        delivery_contract: Optional[DeliveryPromptContract] = None,
+        media_context: Optional[BatchMediaContext] = None,
     ) -> Tuple[List[dict], Optional[List[dict]]]:
         """组装 AI 请求的 messages 列表。
 
@@ -218,9 +230,24 @@ class PromptBuilder:
             )
 
         # ── 4. 完整历史 ──
-        history = await self.context_manager.get_history_as_dicts_merged_async(chat_id)
+        if timeline_snapshot is None:
+            history = await self.context_manager.get_history_as_dicts_merged_async(
+                chat_id
+            )
+            history = self._apply_timeline_snapshot(history, timeline_snapshot)
+        else:
+            history = self._timeline_history(timeline_snapshot)
+        if protocol_snapshot:
+            history.extend(TurnProtocolHistory.to_wire_messages(protocol_snapshot))
 
         messages: List[dict] = [{"role": "system", "content": static_prompt}]
+        if delivery_contract is not None:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": delivery_contract.render(tools_to_use),
+                }
+            )
         messages.extend(history)
 
         # ── 5. 动态上下文（委托给 DynamicContextBuilder） ──
@@ -267,14 +294,10 @@ class PromptBuilder:
                 }
             )
 
-        if self.media_service:
-            try:
-                media_context = await self.media_service.prepare_for_ai(input_message)
-                media_text = media_context.as_text()
-                if media_text:
-                    messages.append({"role": "system", "content": media_text})
-            except Exception as exc:
-                _log.warning("媒体上下文构建失败 [%s..]: %s", chat_id[:12], exc)
+        if media_context is not None:
+            media_text = media_context.as_text()
+            if media_text:
+                messages.append({"role": "system", "content": media_text})
 
         # ── 6. 防御：清理孤立的 tool_calls（防止 compaction 拆散配对） ──
         from core.ai.protocol import ensure_messages_consistent
@@ -291,6 +314,68 @@ class PromptBuilder:
             )
 
         return messages, tools_to_use
+
+    @staticmethod
+    def _timeline_history(
+        timeline_snapshot: Sequence["TimelineEvent"],
+    ) -> List[dict]:
+        """Build visible prompt history from a frozen timeline snapshot.
+
+        A provided empty snapshot is authoritative: it must not fall back to
+        the shared legacy context, which may contain another turn's protocol.
+        Protocol events are appended separately by the caller for the active
+        turn only.
+        """
+        history: List[dict] = []
+        for event in timeline_snapshot:
+            if event.role not in {"user", "assistant"} or not event.content:
+                continue
+            if event.role == "user":
+                name = event.sender_id or "未知"
+                timestamp = time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(event.timestamp)
+                )
+                content = f"[{name} 在 {timestamp}]: {event.content}"
+            else:
+                content = event.content
+            history.append({"role": event.role, "content": content})
+        return history
+
+    @staticmethod
+    def _apply_timeline_snapshot(
+        history: List[dict], timeline_snapshot: Optional[Sequence["TimelineEvent"]]
+    ) -> List[dict]:
+        """Use the frozen timeline as authority for matching user message text.
+
+        The legacy context still defines protocol ordering and display metadata.
+        Replacing only message-id matches avoids duplicating user content or
+        separating assistant tool calls from their result messages during the
+        dual-write migration.
+        """
+        if not timeline_snapshot:
+            return history
+        user_events = {
+            event.message_id: event
+            for event in timeline_snapshot
+            if event.role == "user" and event.message_id
+        }
+        if not user_events:
+            return history
+        projected: List[dict] = []
+        for message in history:
+            event = user_events.get(message.get("message_id"))
+            if message.get("role") != "user" or event is None:
+                projected.append(message)
+                continue
+            copied = dict(message)
+            name = copied.get("name") or copied.get("sender_id") or event.sender_id
+            timestamp = time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(event.timestamp)
+            )
+            copied["raw_content"] = event.content
+            copied["content"] = f"[{name} 在 {timestamp}]: {event.content}"
+            projected.append(copied)
+        return projected
 
     def _resolve_task_tools(
         self,
@@ -314,6 +399,7 @@ class PromptBuilder:
         chat_id: str,
         prompt: str,
         tools_allow: Optional[List[str]] = None,
+        media_context: Optional[BatchMediaContext] = None,
     ) -> Tuple[List[dict], Optional[List[dict]]]:
         """组装后台任务的 messages 列表（使用 task_chat.j2 模板）。
 
@@ -337,6 +423,14 @@ class PromptBuilder:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ]
+        if media_context is not None and media_context.as_text():
+            messages.insert(
+                1,
+                {
+                    "role": "system",
+                    "content": "【已授权的媒体上下文】\n" + media_context.as_text(),
+                },
+            )
         return messages, tools_to_use
 
     async def build_heartbeat_messages(
@@ -408,10 +502,22 @@ class PromptBuilder:
         # ── 聊天历史（作为独立消息对，仅 session=main） ──
         if session_mode == "main" and admin_chat_id:
             try:
-                recent = await self.context_manager.get_chat_history_async(
+                recent = (
+                    await self.timeline.history(admin_chat_id, max_events=20)
+                    if self.timeline is not None
+                    else []
+                )
+                legacy_recent = await self.context_manager.get_chat_history_async(
                     admin_chat_id,
                     max_messages=20,
                 )
+                if self.timeline is not None:
+                    await self.timeline.repair_from_legacy_history(
+                        admin_chat_id, legacy_recent
+                    )
+                    recent = await self.timeline.history(admin_chat_id, max_events=20)
+                if not recent:
+                    recent = legacy_recent
                 inserted = 0
                 for msg in recent[-15:]:
                     role = msg.get("role")

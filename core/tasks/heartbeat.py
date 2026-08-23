@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import core.tasks.wake_coalescer as _coalescer
+from core.engine.delivery_ledger import DeliveryReceipt
 
 _log = logging.getLogger(__name__)
 
@@ -349,26 +350,59 @@ class HeartbeatManager:
         self._last_text = text
         self._last_sent = time.time()
 
-    async def deliver_to_admin(self, text: str) -> bool:
+    @property
+    def admin_delivery_target(self) -> str:
+        """Return the sole configured administrator target for ledgered delivery."""
+        return self._admin_ids[0] if self._admin_ids else ""
+
+    async def deliver_to_admin_receipt(self, text: str) -> DeliveryReceipt:
+        """Send an admin heartbeat and expose the transport acceptance receipt."""
         if not self._running or not self._admin_ids or not self._api:
-            return False
+            return DeliveryReceipt(
+                status="failed", error_code="admin_transport_unavailable"
+            )
         admin_id = self._admin_ids[0]
         content = f"[❤️ 心跳提醒]\n{text}"
         try:
-            await self._api.send_text("c2c", admin_id, content, reply_to=None)
-        except Exception as e:
-            _log.error(f"心跳投递失败: {e}")
-            return False
+            response = await self._api.send_text(
+                "c2c", admin_id, content, reply_to=None
+            )
+        except Exception as exc:
+            _log.error(f"心跳投递失败: {exc}")
+            if isinstance(
+                exc, (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError)
+            ):
+                return DeliveryReceipt(
+                    status="unknown",
+                    error_code=type(exc).__name__,
+                    retryable=False,
+                )
+            return DeliveryReceipt(
+                status="failed",
+                error_code=type(exc).__name__,
+                retryable=True,
+            )
 
         _log.info(f"心跳提醒已投递到管理员 {admin_id[:12]}..")
-        if self._context_manager:
-            try:
-                await self._context_manager.add_assistant_message_async(
-                    admin_id, content, f"hb_{int(time.time())}"
-                )
-            except Exception as e:
-                _log.warning(f"心跳投递后的上下文记录失败: {e}")
-        return True
+        platform_message_id = ""
+        if isinstance(response, dict):
+            platform_message_id = str(
+                response.get("id")
+                or response.get("message_id")
+                or response.get("msg_id")
+                or ""
+            )
+        elif response:
+            platform_message_id = str(response)
+        return DeliveryReceipt(
+            status="accepted",
+            transport_id=platform_message_id,
+            platform_message_id=platform_message_id,
+        )
+
+    async def deliver_to_admin(self, text: str) -> bool:
+        """Compatibility bool view for callers that have not adopted receipts."""
+        return (await self.deliver_to_admin_receipt(text)).status == "accepted"
 
     # ── 上下文清理 ──
 

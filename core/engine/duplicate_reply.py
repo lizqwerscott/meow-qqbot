@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from collections import OrderedDict
+from typing import Callable, Optional
 
 from core.message import MessageType
 
@@ -14,8 +15,13 @@ _MAX_CACHED_CHATS = 500
 class DuplicateReplyDetector:
     """检测群聊中连续相同内容并自动复读"""
 
-    def __init__(self, context_manager):
+    def __init__(
+        self,
+        context_manager,
+        delivery_controller_getter: Optional[Callable[[], object]] = None,
+    ):
         self._cm = context_manager
+        self._delivery_controller_getter = delivery_controller_getter
         self._replied: "OrderedDict[str, str]" = OrderedDict()
         self._lock = asyncio.Lock()
 
@@ -51,13 +57,33 @@ class DuplicateReplyDetector:
             last_content[:30],
         )
         reply_id = f"dupe_{input_message.id}"
+        project_to_history = True
         try:
-            await reply_callback(
-                chat_id=input_message.chat_id,
-                content=last_content,
-                message_id=input_message.id,
-                is_group=True,
+            controller = (
+                self._delivery_controller_getter()
+                if self._delivery_controller_getter is not None
+                else None
             )
+            if controller is None:
+                await reply_callback(
+                    chat_id=input_message.chat_id,
+                    content=last_content,
+                    message_id=input_message.id,
+                    is_group=True,
+                )
+            else:
+                receipt = await controller.deliver_text(
+                    delivery_id=reply_id,
+                    chat_id=input_message.chat_id,
+                    content=last_content,
+                    callback=reply_callback,
+                    message_id=input_message.id,
+                    is_group=True,
+                    reason="duplicate_reply",
+                )
+                if receipt.status not in {"accepted", "partial"}:
+                    return False
+                project_to_history = receipt.status == "accepted"
         except Exception as cb_err:
             _log.warning("复读发送失败 [%s..]: %s", input_message.chat_id[:12], cb_err)
             return False
@@ -68,9 +94,10 @@ class DuplicateReplyDetector:
             if len(self._replied) > _MAX_CACHED_CHATS:
                 self._replied.popitem(last=False)
 
-        await self._cm.add_assistant_message_async(
-            input_message.chat_id,
-            last_content,
-            reply_id,
-        )
+        if project_to_history:
+            await self._cm.add_assistant_message_async(
+                input_message.chat_id,
+                last_content,
+                reply_id,
+            )
         return True

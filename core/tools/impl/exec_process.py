@@ -1,8 +1,10 @@
 """exec + process 工具"""
 
+import asyncio
 import json
 import logging
 import os
+import uuid
 from typing import Optional
 
 from core.approval.allowlist import (
@@ -23,6 +25,8 @@ from core.approval.exec_policy import (
     requires_approval,
     resolve_mode_from_policy,
 )
+from core.engine.turn_state import TurnPhase, TurnStateError
+from core.managers.permission_manager import ROLE_LEVEL
 from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
 from core.tools.env_override_policy import validate_env_override
@@ -67,7 +71,15 @@ def _build_exec_policy(perm, approval_mgr):
 
 def _plan_mismatch(stored: dict, current: dict) -> bool:
     """比对审批时绑定的 plan 与当前执行计划（对齐 openclaw approval mismatch）。"""
-    for key in ("command", "cwd"):
+    for key in (
+        "command",
+        "cwd",
+        "turn_id",
+        "principal_id",
+        "turn_revision",
+        "approval_plan_id",
+        "capability_generation",
+    ):
         if stored.get(key) != current.get(key):
             return True
     if stored.get("resolved_path") != current.get("resolved_path"):
@@ -334,6 +346,13 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
             "multi_interp_target": multi_interp_target,
         }
 
+        if ctx.turn_id:
+            plan["turn_id"] = ctx.turn_id
+            plan["principal_id"] = ctx.principal_id
+            plan["turn_revision"] = ctx.turn_revision
+            if ctx.capabilities is not None:
+                plan["capability_generation"] = ctx.capabilities.cancellation_generation
+
         if needs_ask:
             decision: str | None = None
             session_key: str | None = None
@@ -355,26 +374,105 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                     decision = DECISION_ALLOW_ONCE
             if decision is None:
                 if approval_mgr and role == "admin" and can_approve_in_ctx:
-                    result = await approval_mgr.request_approval(
-                        chat_id=ctx.chat_id,
-                        tool_name="exec",
-                        reason="命令不在允许列表中",
-                        details=command,
-                        plan=plan,
-                        ask_fallback=policy.ask_fallback,
-                        # strictInlineEval：inline 命令的 allow-always 不落白名单；
-                        # 2.2：interp_unbound（无法绑定唯一文件）同样不落白名单
-                        persist=(
-                            not inline_hit
-                            and not interp_unbound
-                            and not multi_interp_target
-                            and not wrapper_invalid
-                            and not payload_wrapper_hit
-                        ),
-                        timeout=policy.approval_timeout or 300,
-                        return_session_key=True,
-                    )
+                    approval_revision = ctx.turn_revision
+                    approval_session_key = ""
+                    if ctx.transition_turn is not None:
+                        approval_session_key = (
+                            f"approval:{ctx.turn_id}:exec:{uuid.uuid4().hex[:12]}"
+                        )
+                        try:
+                            awaiting = await ctx.transition_turn(
+                                expected_revision=approval_revision,
+                                phase=TurnPhase.AWAITING_APPROVAL,
+                                approval_plan_id=approval_session_key,
+                            )
+                        except TurnStateError:
+                            return ToolResult(
+                                content=json.dumps(
+                                    {
+                                        "error": "APPROVAL_STATE_MISMATCH: turn 不可进入审批"
+                                    },
+                                    ensure_ascii=False,
+                                )
+                            )
+                        approval_revision = awaiting.revision
+                        plan["turn_revision"] = approval_revision
+                        plan["approval_plan_id"] = approval_session_key
+                    try:
+                        result = await approval_mgr.request_approval(
+                            chat_id=ctx.chat_id,
+                            tool_name="exec",
+                            reason="命令不在允许列表中",
+                            details=command,
+                            plan=plan,
+                            ask_fallback=policy.ask_fallback,
+                            # strictInlineEval：inline 命令的 allow-always 不落白名单；
+                            # 2.2：interp_unbound（无法绑定唯一文件）同样不落白名单
+                            persist=(
+                                not inline_hit
+                                and not interp_unbound
+                                and not multi_interp_target
+                                and not wrapper_invalid
+                                and not payload_wrapper_hit
+                            ),
+                            timeout=policy.approval_timeout or 300,
+                            return_session_key=True,
+                            session_key=approval_session_key or None,
+                        )
+                    except asyncio.CancelledError:
+                        if approval_mgr and approval_session_key:
+                            approval_mgr.take_pending_plan(approval_session_key)
+                        if ctx.transition_turn is not None:
+                            try:
+                                await ctx.transition_turn(
+                                    expected_revision=approval_revision,
+                                    phase=TurnPhase.CANCELLED,
+                                )
+                            except TurnStateError:
+                                pass
+                        raise
+                    except Exception:
+                        if approval_mgr and approval_session_key:
+                            approval_mgr.take_pending_plan(approval_session_key)
+                        if ctx.transition_turn is not None:
+                            try:
+                                resumed = await ctx.transition_turn(
+                                    expected_revision=approval_revision,
+                                    phase=TurnPhase.ACTIVE,
+                                )
+                                ctx.turn_revision = resumed.revision
+                            except TurnStateError:
+                                pass
+                        raise
                     decision, session_key = result
+                    if ctx.transition_turn is not None:
+                        try:
+                            resumed = await ctx.transition_turn(
+                                expected_revision=approval_revision,
+                                phase=TurnPhase.ACTIVE,
+                            )
+                            ctx.turn_revision = resumed.revision
+                        except TurnStateError:
+                            if approval_mgr and session_key:
+                                approval_mgr.take_pending_plan(session_key)
+                            return ToolResult(
+                                content=json.dumps(
+                                    {
+                                        "error": "APPROVAL_STATE_MISMATCH: 审批后 turn 已变更"
+                                    },
+                                    ensure_ascii=False,
+                                )
+                            )
+                    current_role = perm.get_user_role(ctx.sender_id) if perm else role
+                    if ROLE_LEVEL.get(current_role, 1) < ROLE_LEVEL.get(role, 1):
+                        if approval_mgr and session_key:
+                            approval_mgr.take_pending_plan(session_key)
+                        return ToolResult(
+                            content=json.dumps(
+                                {"error": "APPROVAL_ROLE_CHANGED: 审批期间权限已降级"},
+                                ensure_ascii=False,
+                            )
+                        )
                     if decision == DECISION_ALLOW:
                         decision = DECISION_ALLOW_ONCE
                 else:
@@ -481,8 +579,6 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                         ensure_ascii=False,
                     )
                 )
-
-        import asyncio
 
         # 前台：段级执行（分析-执行绑定，支持 && || ; | 语义）
         effective_timeout = min(timeout or 60, 120)

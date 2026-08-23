@@ -44,6 +44,7 @@ from .preflight import PreflightContext, PreflightResult, run_preflight
 from .runner import BackgroundTaskRunner
 from .scheduler import CronJobScheduler
 from .store import TaskStore
+from .task_state_store import TaskStateStore
 from .wake_coalescer import (
     INTENT_EVENT,
     INTENT_IMMEDIATE,
@@ -72,6 +73,7 @@ __all__ = [
     "TaskStatus",
     "CronJob",
     "TaskStore",
+    "TaskStateStore",
     "TaskManager",
     "CronJobManager",
     "CronJobScheduler",

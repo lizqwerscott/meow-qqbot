@@ -8,6 +8,7 @@ from core.engine.client import (
     _is_passive_reply_limit_error,
     _ReplyDeliveryState,
 )
+from core.engine.delivery_ledger import DeliveryReceipt
 
 
 def make_engine(api):
@@ -245,6 +246,91 @@ async def test_delivery_state_is_shared_by_send_reply_and_stream_callback():
 
     assert api.send_text.await_count == 1
     assert api.post_group_message.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_reply_callback_returns_accepted_receipt():
+    api = make_api()
+    api.send_text.return_value = {"id": "sent"}
+    engine = make_engine(api)
+
+    receipt = await engine._send_reply("group-1", "hello", "message-1", True)
+
+    assert isinstance(receipt, DeliveryReceipt)
+    assert receipt.status == "accepted"
+    assert receipt.logical_delivery_id == "reply:group-1:message-1"
+    assert receipt.platform_message_id == "sent"
+
+
+@pytest.mark.asyncio
+async def test_reply_callback_returns_retryable_failed_receipt_without_raising():
+    api = make_api()
+    api.send_text.side_effect = RuntimeError("QQ Bot API timeout")
+    engine = make_engine(api)
+
+    receipt = await engine._send_reply("group-1", "hello", "message-1", True)
+
+    assert receipt.status == "failed"
+    assert receipt.retryable is True
+    assert receipt.error_code == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_send_reply_returns_transport_receipt():
+    api = make_api()
+    api.send_text.return_value = {"message_id": "reply-1"}
+    engine = make_engine(api)
+
+    receipt = await engine.send_reply(
+        "group-1", "hello", message_id="message-1", is_group=True
+    )
+
+    assert receipt.status == "accepted"
+    assert receipt.logical_delivery_id == "reply:group-1:message-1"
+    assert receipt.platform_message_id == "reply-1"
+    assert receipt.chunk_index == 0
+    assert receipt.chunk_count == 1
+
+
+@pytest.mark.asyncio
+async def test_send_proactive_timeout_returns_unknown_receipt():
+    api = make_api()
+    api.post_group_message.side_effect = TimeoutError("channel timeout")
+    engine = make_engine(api)
+
+    receipt = await engine.send_proactive("group-1", "hello", is_group=True)
+
+    assert receipt.status == "unknown"
+    assert receipt.retryable is False
+    assert receipt.error_code == "TimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_send_reply_returns_partial_receipt_after_chunk_failure():
+    api = make_api()
+    api.send_text.return_value = {"id": "chunk-1"}
+    api.post_group_message.side_effect = RuntimeError("second chunk failed")
+    engine = make_engine(api)
+
+    import core.engine.client as client_module
+
+    original_split = client_module.split_markdown
+    client_module.split_markdown = lambda content: ["one", "two"]
+    try:
+        receipt = await engine.send_reply(
+            "group-1",
+            "ignored",
+            message_id="message-1",
+            is_group=True,
+            markdown=False,
+        )
+    finally:
+        client_module.split_markdown = original_split
+
+    assert receipt.status == "partial"
+    assert receipt.platform_message_id == "chunk-1"
+    assert receipt.chunk_index == 0
+    assert receipt.chunk_count == 2
 
 
 def test_delivery_state_isolated_by_chat_context():

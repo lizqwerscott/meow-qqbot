@@ -1,13 +1,30 @@
 import asyncio
 import logging
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from core.ai.protocol import AssistantMessage, AssistantToolCall
-from core.engine.agent_engine import AgentEngine, BackgroundTaskResult, _TurnRequest
+from core.engine.agent_engine import (
+    AgentEngine,
+    BackgroundTaskResult,
+    _TurnRequest,
+    _TurnResult,
+)
+from core.engine.conversation_scheduler import ConversationScheduler
+from core.engine.delivery_ledger import (
+    DeliveryController,
+    DeliveryLedger,
+    DeliveryReceipt,
+)
+from core.engine.engagement_config import EngagementConfig
+from core.engine.group_engagement import GroupEngagementManager
+from core.engine.turn_capabilities import TurnCapabilities
+from core.engine.turn_state import TurnPhase
 from core.managers.session_manager import (
     AdmissionOrigin,
+    InboundIntent,
     PendingInbound,
     SessionTaskManager,
 )
@@ -49,7 +66,42 @@ async def test_admission_duplicate_history_does_not_produce_prompt_fragment():
 
 
 @pytest.mark.asyncio
-async def test_admission_archives_after_message_is_persisted():
+async def test_user_admission_writes_conversation_timeline_projection():
+    engine = make_engine(FakeToolLoop())
+
+    class Timeline:
+        def __init__(self):
+            self.calls = []
+
+        async def append_user_message(self, **kwargs):
+            self.calls.append(kwargs)
+
+    timeline = Timeline()
+    engine.timeline = timeline
+    pending = PendingInbound(
+        InputMessage("timeline-message", "user", "chat", "hello", False),
+        "hello",
+        InboundIntent.PRIVATE_CONVERSATION,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+
+    admitted = await engine._admit_pending_message(
+        pending,
+        source="initial",
+        get_user_nickname=lambda sender_id: sender_id,
+    )
+
+    assert admitted is not None
+    assert timeline.calls == [
+        {
+            "chat_id": "chat",
+            "message_id": "timeline-message",
+            "content": "hello",
+            "sender_id": "user",
+            "timestamp": pending.message.timestamp,
+        }
+    ]
+
     class ArchiveTracker:
         def __init__(self, context_manager):
             self.context_manager = context_manager
@@ -95,6 +147,79 @@ async def test_admission_archives_after_message_is_persisted():
             ],
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_admission_duplicate_check_prefers_timeline_projection():
+    engine = make_engine(FakeToolLoop())
+    engine.timeline = SimpleNamespace(
+        history=AsyncMock(return_value=[{"role": "user", "message_id": "message-1"}])
+    )
+
+    class LegacyContextManager:
+        async def get_chat_history_async(self, chat_id):
+            raise AssertionError("legacy history should not be read")
+
+    engine.context_manager = LegacyContextManager()
+
+    assert await engine._is_message_admitted("chat", "message-1") is True
+
+
+@pytest.mark.asyncio
+async def test_history_migration_summary_scans_legacy_and_timeline_session_union(
+    tmp_path,
+):
+    from core.engine.conversation_timeline import ConversationTimeline
+
+    timeline = ConversationTimeline(str(tmp_path / "timeline.sqlite3"))
+    await timeline.append_user_message(
+        chat_id="shared",
+        message_id="m1",
+        content="hello",
+        sender_id="user",
+        timestamp=1,
+    )
+    await timeline.append_user_message(
+        chat_id="timeline-only",
+        message_id="m2",
+        content="new",
+        sender_id="user",
+        timestamp=2,
+    )
+
+    class ContextManager:
+        async def get_all_chat_ids_async(self):
+            return ["shared", "legacy-only"]
+
+        async def get_all_disk_chat_ids_async(self):
+            return ["disk-only"]
+
+        async def get_chat_history_async(self, chat_id):
+            if chat_id == "shared":
+                return [{"role": "user", "raw_content": "hello"}]
+            if chat_id == "legacy-only":
+                return [
+                    {"role": "user", "raw_content": "old"},
+                    {"role": "tool", "content": "result", "tool_call_id": "call"},
+                ]
+            return []
+
+    engine = make_engine(FakeToolLoop())
+    engine.context_manager = ContextManager()
+    engine.timeline = timeline
+
+    summary = await engine.get_history_migration_summary()
+
+    assert summary == {
+        "session_count": 4,
+        "sessions_with_missing_legacy_visible": 1,
+        "sessions_with_legacy_protocol": 1,
+        "sessions_ready_for_legacy_read_removal": 3,
+        "sessions_with_scan_errors": 0,
+        "ready_for_legacy_read_removal": False,
+    }
+    assert "hello" not in str(summary)
+    await timeline.close()
 
 
 @pytest.mark.asyncio
@@ -335,6 +460,7 @@ async def test_tool_loop_isolates_send_message_callback_from_other_tools(monkeyp
 
     async def tool_callback(**kwargs):
         callback_calls.append(("special", kwargs["content"]))
+        return DeliveryReceipt(status="accepted", logical_delivery_id="tool:task:1")
 
     async def fake_execute(name, args, tool_ctx, permission_manager):
         if name == "send_message":
@@ -345,7 +471,12 @@ async def test_tool_loop_isolates_send_message_callback_from_other_tools(monkeyp
                 message_id="",
                 is_group=tool_ctx.is_group,
             )
-            return ToolResult(content="ok", sent_text=True)
+            return ToolResult(
+                content="ok",
+                delivery_receipt=DeliveryReceipt(
+                    status="accepted", logical_delivery_id="tool:task:1"
+                ),
+            )
         assert tool_ctx.reply_callback is capture_callback
         await tool_ctx.reply_callback(
             chat_id=tool_ctx.chat_id,
@@ -370,7 +501,477 @@ async def test_tool_loop_isolates_send_message_callback_from_other_tools(monkeyp
     assert callback_calls == [("special", "sent"), ("normal", "other output")]
 
 
-def test_should_dispatch_to_ai_for_reply_to_bot():
+@pytest.mark.asyncio
+async def test_tool_loop_prepares_media_delivery_before_execution(monkeypatch):
+    class FakeAI:
+        model = "test"
+
+        def __init__(self):
+            self.responses = iter(
+                [
+                    AssistantMessage(
+                        content=None,
+                        tool_calls=[
+                            AssistantToolCall(
+                                "emoji-call",
+                                "send_emoji",
+                                '{"emoji_hash":"abc123"}',
+                            )
+                        ],
+                    ),
+                    AssistantMessage(content="done"),
+                ]
+            )
+
+        async def chat_completion_with_tools(self, **kwargs):
+            return next(self.responses), None
+
+    class FakeContext:
+        async def add_assistant_message_async(self, *args, **kwargs):
+            return None
+
+        async def add_tool_result_async(self, *args, **kwargs):
+            return None
+
+    ai = FakeAI()
+    ctx = SimpleNamespace(
+        ai=SimpleNamespace(
+            ai_service=ai,
+            max_tool_rounds=3,
+            model_registry=None,
+            stream_reply=False,
+        ),
+        mgmt=SimpleNamespace(
+            permission_manager=None,
+            cost_tracker=None,
+            context_manager=FakeContext(),
+        ),
+        memory=SimpleNamespace(hindsight_memory=None),
+    )
+    loop = ToolLoop(ctx)
+    controller = DeliveryController(DeliveryLedger(":memory:"))
+    observed = []
+
+    async def fake_execute(name, args, tool_ctx, permission_manager):
+        record = await controller.ledger.get("tool:chat:turn-1:send_emoji:emoji-call")
+        observed.append(record.status if record else None)
+        return ToolResult(
+            content="emoji sent",
+            sent_emoji=True,
+            delivery_receipt=DeliveryReceipt(
+                status="accepted", logical_delivery_id="emoji:abc123"
+            ),
+        )
+
+    monkeypatch.setattr("core.tools.tool_loop.execute_tool", fake_execute)
+    await loop.run(
+        messages=[],
+        tools=[],
+        chat_id="chat",
+        is_group=True,
+        reply_to="reply",
+        reply_callback=AsyncMock(),
+        delivery_controller=controller,
+        turn_id="turn-1",
+    )
+
+    assert observed == ["prepared"]
+    record = await controller.ledger.get("tool:chat:turn-1:send_emoji:emoji-call")
+    assert record is not None
+    assert record.status == "sent"
+    await controller.ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_suppresses_assistant_text_when_response_has_tool_calls(
+    monkeypatch,
+):
+    class FakeAI:
+        model = "test"
+
+        def __init__(self):
+            self.responses = iter(
+                [
+                    AssistantMessage(
+                        content="I will inspect it.",
+                        tool_calls=[AssistantToolCall("call-1", "read_file", "{}")],
+                    ),
+                    AssistantMessage(content="The inspection is complete."),
+                ]
+            )
+
+        async def chat_completion_with_tools(self, **kwargs):
+            return next(self.responses), None
+
+    class FakeContext:
+        def __init__(self):
+            self.legacy_assistant = []
+            self.legacy_tools = []
+
+        async def add_assistant_message_async(self, *args, **kwargs):
+            self.legacy_assistant.append((args, kwargs))
+
+        async def add_tool_result_async(self, *args, **kwargs):
+            self.legacy_tools.append((args, kwargs))
+
+    context = FakeContext()
+    ctx = SimpleNamespace(
+        ai=SimpleNamespace(
+            ai_service=FakeAI(),
+            max_tool_rounds=3,
+            model_registry=None,
+            stream_reply=False,
+        ),
+        mgmt=SimpleNamespace(
+            permission_manager=None,
+            cost_tracker=None,
+            context_manager=context,
+        ),
+        memory=SimpleNamespace(hindsight_memory=None),
+    )
+    delivered = []
+
+    async def reply_callback(**kwargs):
+        delivered.append(kwargs["content"])
+
+    async def fake_execute(*args, **kwargs):
+        return ToolResult(content="inspection data")
+
+    monkeypatch.setattr("core.tools.tool_loop.execute_tool", fake_execute)
+    await ToolLoop(ctx).run(
+        messages=[],
+        tools=[],
+        chat_id="chat",
+        is_group=False,
+        reply_to="message",
+        reply_callback=reply_callback,
+        capabilities=TurnCapabilities.for_intent(InboundIntent.PRIVATE_CONVERSATION),
+    )
+
+    assert context.legacy_assistant == []
+    assert context.legacy_tools == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_call", "capabilities"),
+    [
+        (
+            AssistantToolCall("malformed", "read_file", "not-json"),
+            TurnCapabilities.for_intent(InboundIntent.PRIVATE_CONVERSATION),
+        ),
+        (
+            AssistantToolCall(
+                "unauthorized-media",
+                "image",
+                '{"media_uri":"media://inbound/other"}',
+            ),
+            TurnCapabilities.for_intent(
+                InboundIntent.GROUP_AMBIENT,
+                allowed_media_uris=frozenset({"media://inbound/allowed"}),
+            ),
+        ),
+    ],
+)
+async def test_capability_tool_rejection_does_not_write_legacy_protocol(
+    monkeypatch, tool_call, capabilities
+):
+    class FakeAI:
+        model = "test"
+
+        def __init__(self):
+            self.responses = iter(
+                [
+                    AssistantMessage(content=None, tool_calls=[tool_call]),
+                    AssistantMessage(content="done"),
+                ]
+            )
+
+        async def chat_completion_with_tools(self, **kwargs):
+            return next(self.responses), None
+
+    class FakeContext:
+        def __init__(self):
+            self.legacy_assistant = []
+            self.legacy_tools = []
+
+        async def add_assistant_message_async(self, *args, **kwargs):
+            self.legacy_assistant.append((args, kwargs))
+
+        async def add_tool_result_async(self, *args, **kwargs):
+            self.legacy_tools.append((args, kwargs))
+
+    context = FakeContext()
+    ctx = SimpleNamespace(
+        ai=SimpleNamespace(
+            ai_service=FakeAI(),
+            max_tool_rounds=3,
+            model_registry=None,
+            stream_reply=False,
+        ),
+        mgmt=SimpleNamespace(
+            permission_manager=None,
+            cost_tracker=None,
+            context_manager=context,
+        ),
+        memory=SimpleNamespace(hindsight_memory=None),
+    )
+
+    async def reply_callback(**kwargs):
+        return None
+
+    await ToolLoop(ctx).run(
+        messages=[],
+        tools=[],
+        chat_id="chat",
+        is_group=capabilities.intent is InboundIntent.GROUP_AMBIENT,
+        reply_to="message",
+        reply_callback=reply_callback,
+        capabilities=capabilities,
+    )
+
+    assert context.legacy_assistant == []
+    assert context.legacy_tools == []
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_stops_at_turn_gate_after_completed_tool(monkeypatch):
+    class FakeAI:
+        model = "test"
+
+        def __init__(self):
+            self.calls = 0
+
+        async def chat_completion_with_tools(self, **kwargs):
+            self.calls += 1
+            if self.calls > 1:
+                pytest.fail("terminated turn must not start another provider request")
+            return (
+                AssistantMessage(
+                    content="working",
+                    tool_calls=[AssistantToolCall("call-1", "read_file", "{}")],
+                ),
+                None,
+            )
+
+    class FakeContext:
+        async def add_assistant_message_async(self, *args, **kwargs):
+            return None
+
+        async def add_tool_result_async(self, *args, **kwargs):
+            raise AssertionError("terminated turn must not commit a tool result")
+
+    ai = FakeAI()
+    ctx = SimpleNamespace(
+        ai=SimpleNamespace(
+            ai_service=ai,
+            max_tool_rounds=3,
+            model_registry=None,
+            stream_reply=False,
+        ),
+        mgmt=SimpleNamespace(
+            permission_manager=None,
+            cost_tracker=None,
+            context_manager=FakeContext(),
+        ),
+        memory=SimpleNamespace(hindsight_memory=None),
+    )
+    active = True
+    executions = []
+    delivered = []
+
+    async def turn_is_active():
+        return active
+
+    async def reply_callback(**kwargs):
+        delivered.append(kwargs["content"])
+
+    async def fake_execute(name, args, tool_ctx, permission_manager):
+        nonlocal active
+        executions.append(name)
+        active = False
+        return ToolResult(content="done")
+
+    monkeypatch.setattr("core.tools.tool_loop.execute_tool", fake_execute)
+    result = await ToolLoop(ctx).run(
+        messages=[],
+        tools=[],
+        chat_id="chat",
+        is_group=False,
+        reply_to="message",
+        reply_callback=reply_callback,
+        turn_active_callback=turn_is_active,
+    )
+
+    assert result == (False, False)
+    assert ai.calls == 1
+    assert executions == ["read_file"]
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_tracks_revision_after_approval_transition(monkeypatch):
+    class FakeAI:
+        model = "test"
+
+        def __init__(self):
+            self.calls = 0
+
+        async def chat_completion_with_tools(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return (
+                    AssistantMessage(
+                        tool_calls=[AssistantToolCall("call-1", "first_tool", "{}")]
+                    ),
+                    None,
+                )
+            if self.calls == 2:
+                return (
+                    AssistantMessage(
+                        tool_calls=[AssistantToolCall("call-2", "second_tool", "{}")]
+                    ),
+                    None,
+                )
+            return AssistantMessage(content="done"), None
+
+    class FakeContext:
+        async def add_assistant_message_async(self, *args, **kwargs):
+            return None
+
+        async def add_tool_result_async(self, *args, **kwargs):
+            return None
+
+    ctx = SimpleNamespace(
+        ai=SimpleNamespace(
+            ai_service=FakeAI(),
+            max_tool_rounds=3,
+            model_registry=None,
+            stream_reply=False,
+        ),
+        mgmt=SimpleNamespace(
+            permission_manager=None,
+            cost_tracker=None,
+            context_manager=FakeContext(),
+        ),
+        memory=SimpleNamespace(hindsight_memory=None),
+    )
+    seen_revisions = []
+
+    async def transition(**kwargs):
+        seen_revisions.append(kwargs["expected_revision"])
+        return SimpleNamespace(revision=kwargs["expected_revision"] + 1)
+
+    async def fake_execute(name, args, tool_ctx, permission_manager):
+        seen_revisions.append((name, tool_ctx.turn_revision))
+        if name == "first_tool":
+            awaiting = await tool_ctx.transition_turn(
+                expected_revision=tool_ctx.turn_revision,
+                phase=TurnPhase.AWAITING_APPROVAL,
+                approval_plan_id="approval-1",
+            )
+            await tool_ctx.transition_turn(
+                expected_revision=awaiting.revision,
+                phase=TurnPhase.ACTIVE,
+            )
+        return ToolResult(content="ok")
+
+    monkeypatch.setattr("core.tools.tool_loop.execute_tool", fake_execute)
+    await ToolLoop(ctx).run(
+        messages=[],
+        tools=[],
+        chat_id="chat",
+        is_group=False,
+        reply_to="message",
+        reply_callback=AsyncMock(),
+        turn_id="turn",
+        transition_turn=transition,
+        turn_revision=7,
+    )
+
+    assert seen_revisions == [
+        ("first_tool", 7),
+        7,
+        8,
+        ("second_tool", 9),
+        9,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_explicit_delivery_transport_is_blocked_after_turn_terminates(
+    monkeypatch,
+):
+    class FakeAI:
+        model = "test"
+
+        async def chat_completion_with_tools(self, **kwargs):
+            return (
+                AssistantMessage(
+                    tool_calls=[AssistantToolCall("send-1", "send_message", "{}")]
+                ),
+                None,
+            )
+
+    class FakeContext:
+        async def add_assistant_message_async(self, *args, **kwargs):
+            return None
+
+        async def add_tool_result_async(self, *args, **kwargs):
+            return None
+
+    ctx = SimpleNamespace(
+        ai=SimpleNamespace(
+            ai_service=FakeAI(),
+            max_tool_rounds=1,
+            model_registry=None,
+            stream_reply=False,
+        ),
+        mgmt=SimpleNamespace(
+            permission_manager=None,
+            cost_tracker=None,
+            context_manager=FakeContext(),
+        ),
+        memory=SimpleNamespace(hindsight_memory=None),
+    )
+    active = True
+    transport_calls = []
+    controller = DeliveryController(DeliveryLedger(":memory:"))
+
+    async def turn_is_active():
+        return active
+
+    async def raw_transport(**kwargs):
+        transport_calls.append(kwargs)
+
+    async def fake_execute(name, args, tool_ctx, permission_manager):
+        nonlocal active
+        active = False
+        receipt = await tool_ctx.reply_callback(
+            chat_id=tool_ctx.chat_id,
+            content="must not send",
+            message_id=tool_ctx.reply_to,
+            is_group=tool_ctx.is_group,
+        )
+        return ToolResult(content="delivery attempted", delivery_receipt=receipt)
+
+    monkeypatch.setattr("core.tools.tool_loop.execute_tool", fake_execute)
+    await ToolLoop(ctx).run(
+        messages=[],
+        tools=[],
+        chat_id="chat",
+        is_group=True,
+        reply_to="message",
+        reply_callback=AsyncMock(),
+        tool_reply_callback=raw_transport,
+        tool_reply_names={"send_message"},
+        delivery_controller=controller,
+        turn_id="turn",
+        turn_active_callback=turn_is_active,
+    )
+
+    assert transport_calls == []
+    assert await controller.ledger.status_counts() == {}
+    await controller.ledger.close()
     engine = make_engine(FakeToolLoop())
 
     from core.message import InputMessage
@@ -385,6 +986,18 @@ def test_should_dispatch_to_ai_for_reply_to_bot():
     )
 
     assert engine._should_dispatch_to_ai(message) is True
+
+
+def test_classifies_inbound_intent_once_at_ingress():
+    engine = make_engine(FakeToolLoop())
+
+    private = InputMessage("private", "user", "chat", "🙂", False)
+    direct = InputMessage("direct", "user", "chat", "猫猫执行", True)
+    ambient = InputMessage("ambient", "user", "chat", "闲聊", True)
+
+    assert engine._classify_inbound_intent(private).value == "private_conversation"
+    assert engine._classify_inbound_intent(direct).value == "direct_task"
+    assert engine._classify_inbound_intent(ambient).value == "group_ambient"
 
 
 def test_should_not_dispatch_to_ai_for_reply_to_other_user():
@@ -448,6 +1061,127 @@ def test_should_not_dispatch_to_ai_for_unwoken_group_image_message():
     )
 
     assert engine._should_dispatch_to_ai(message) is False
+
+
+@pytest.mark.asyncio
+async def test_ingress_keeps_media_references_without_preparing_them():
+    engine = make_engine(FakeToolLoop())
+
+    class MediaService:
+        def __init__(self):
+            self.calls = 0
+
+        async def prepare_for_ai(self, message):
+            self.calls += 1
+            raise AssertionError("ingress must not prepare media")
+
+    from core.message import ResourceMeta
+
+    engine.media_service = MediaService()
+    message = InputMessage(
+        "media",
+        "user",
+        "chat",
+        "请看附件",
+        True,
+        resources=[ResourceMeta(resource_type="image", media_uri="media://inbound/a")],
+    )
+
+    pending = await engine._prepare_pending_inbound(
+        message, intent=InboundIntent.GROUP_AMBIENT
+    )
+
+    assert pending.resource_refs == ("media://inbound/a",)
+    assert "[媒体引用: media://inbound/a]" in pending.prepared_content
+    assert engine.media_service.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_background_task_media_is_explicitly_authorized_and_lazy():
+    engine = make_engine(FakeToolLoop())
+    prompt_contexts = []
+
+    class Store:
+        async def authorize(self, chat_id, media_uri):
+            assert chat_id == "source-chat"
+            assert media_uri == "media://inbound/a"
+            return SimpleNamespace(
+                resource_type="image",
+                media_uri=media_uri,
+                media_id="a",
+                sha256="digest",
+                mime_type="image/png",
+                size=12,
+                filename="a.png",
+            )
+
+    class MediaService:
+        def __init__(self):
+            self.store = Store()
+            self.prepare_calls = 0
+
+        async def prepare_for_ai(self, message):
+            self.prepare_calls += 1
+            assert message.chat_id == "source-chat"
+            assert [resource.media_uri for resource in message.resources] == [
+                "media://inbound/a"
+            ]
+            from core.media.models import MediaTurnContext
+
+            return MediaTurnContext(current_blocks=("understood",))
+
+    engine.media_service = MediaService()
+
+    async def build_task_messages(**kwargs):
+        prompt_contexts.append(kwargs["media_context"])
+        return [], []
+
+    engine.prompt_builder = SimpleNamespace(build_task_messages=build_task_messages)
+    await engine.execute_background_task(
+        "task-chat",
+        "inspect the attachment",
+        "system",
+        delivery_channel="source-chat",
+        auto_media_understanding=True,
+        media_refs=("media://inbound/a",),
+        media_source_chat_id="source-chat",
+    )
+
+    assert engine.media_service.prepare_calls == 1
+    assert prompt_contexts[0].as_text() == "understood"
+
+
+@pytest.mark.asyncio
+async def test_background_task_media_understanding_is_off_by_default():
+    engine = make_engine(FakeToolLoop())
+
+    class MediaService:
+        def __init__(self):
+            self.prepare_calls = 0
+
+        async def prepare_for_ai(self, message):
+            self.prepare_calls += 1
+            raise AssertionError("disabled task must not prepare media")
+
+    engine.media_service = MediaService()
+    engine.prompt_builder = SimpleNamespace(
+        build_task_messages=lambda **kwargs: pytest.fail("sync callback")
+    )
+
+    async def build_task_messages(**kwargs):
+        assert kwargs["media_context"] is None
+        return [], []
+
+    engine.prompt_builder.build_task_messages = build_task_messages
+    await engine.execute_background_task(
+        "task-chat",
+        "do work",
+        "system",
+        delivery_channel="source-chat",
+        media_refs=("media://inbound/a",),
+    )
+
+    assert engine.media_service.prepare_calls == 0
 
 
 @pytest.mark.asyncio
@@ -684,6 +1418,9 @@ async def test_process_message_preserves_prompt_stream_and_system_event_adapters
     assert prompt_calls[0]["user_nickname"] == "name"
     assert delivered[0]["message_id"] == "id"
     assert tool_loop.calls[0]["get_user_nickname"]("user") == "name"
+    assert tool_loop.calls[0]["capabilities"].allows_context(
+        chat_id="chat", sender_id="user", reply_to="id"
+    )
     assert tool_loop.calls[0]["stream_callback"] is not None
     assert system_events[0][0] == "chat"
 
@@ -764,8 +1501,11 @@ async def test_process_message_rolls_back_once_when_prompt_building_fails():
 
 
 @pytest.mark.asyncio
-async def test_consumer_sends_friendly_error_and_requeues_message():
+async def test_consumer_sends_friendly_error_and_requeues_message(tmp_path):
     engine = make_engine(FakeToolLoop())
+    engine.delivery_controller = DeliveryController(
+        DeliveryLedger(str(tmp_path / "delivery.sqlite3"))
+    )
     delivered = []
     delivered_event = asyncio.Event()
 
@@ -879,6 +1619,11 @@ async def test_background_task_serializes_context_build_and_reply_result():
     assert tool_loop.calls[0]["delivery_channel"] == "delivery"
     assert tool_loop.calls[0]["reply_to_message_id"] == "original"
     assert tool_loop.calls[0]["internal_control"] is True
+    assert (
+        tool_loop.calls[0]["capabilities"].intent is InboundIntent.PRIVATE_CONVERSATION
+    )
+    assert tool_loop.calls[0]["capabilities"].chat_id == "task-chat"
+    assert tool_loop.calls[0]["turn_id"].startswith("bg_task-chat_")
 
 
 @pytest.mark.asyncio
@@ -1376,6 +2121,46 @@ async def test_consumer_cancellation_after_admission_commits_lease():
     assert engine.session_manager.get_message_state("chat", "cancelled") == "admitted"
 
 
+@pytest.mark.asyncio
+async def test_consumer_collects_private_same_intent_messages_into_one_turn():
+    engine = make_engine(FakeToolLoop())
+    engine.scheduler = ConversationScheduler(
+        engine.session_manager,
+        collect_idle_ms=10,
+        collect_max_wait_ms=20,
+        collect_max_messages=8,
+        collect_max_chars=6000,
+    )
+    engine.prompt_builder = SimpleNamespace(build=lambda **kwargs: _empty_prompt())
+    first = PendingInbound(
+        InputMessage("first", "user", "chat", "first", False),
+        "first",
+        "private_conversation",
+        AdmissionOrigin.USER_MESSAGE,
+    )
+    second = PendingInbound(
+        InputMessage("second", "user", "chat", "second", False),
+        "second",
+        "private_conversation",
+        AdmissionOrigin.USER_MESSAGE,
+    )
+    enqueued = await engine.scheduler.enqueue("chat", first)
+    await engine.scheduler.enqueue("chat", second)
+
+    consumer = asyncio.create_task(
+        engine._consumer(
+            "chat", lambda **kwargs: _none(), lambda _: "user", enqueued.consumer_token
+        )
+    )
+    await consumer
+
+    assert len(engine.tool_loop.calls) == 1
+    assert [message[2] for message in engine.context_manager.user_messages] == [
+        "first",
+        "second",
+    ]
+
+
 async def _empty_prompt():
     return [], []
 
@@ -1424,6 +2209,8 @@ async def test_wake_turn_uses_normal_builder_for_system_source():
 
     assert calls[0]["chat_id"] == "chat"
     assert calls[0]["sender_id"] == "system"
+    assert isinstance(calls[0]["timeline_snapshot"], tuple)
+    assert calls[0]["protocol_snapshot"] == ()
 
 
 @pytest.mark.asyncio
@@ -1516,3 +2303,157 @@ async def test_wake_turn_uses_default_and_explicit_timeouts(monkeypatch):
     )
 
     assert timeouts == [120, 7]
+
+
+@pytest.mark.asyncio
+async def test_wake_turn_ids_do_not_collide_within_one_second():
+    engine = make_engine(FakeToolLoop())
+    engine._reply_callback = object()
+
+    first = await engine.run_wake_turn(
+        source="system", session_key="same-chat", messages=[], tools=[]
+    )
+    second = await engine.run_wake_turn(
+        source="system", session_key="same-chat", messages=[], tools=[]
+    )
+
+    assert first.turn_id != second.turn_id
+
+
+@pytest.mark.asyncio
+async def test_active_ambient_turn_uses_delivery_ledger(tmp_path):
+    engine = make_engine(FakeToolLoop())
+    engine.group_engagement = GroupEngagementManager(
+        EngagementConfig(
+            group_ambient_mode="active",
+            group_ambient_active_chats=("chat",),
+            group_ambient_delivery_mode="automatic",
+            group_ambient_cooldown_seconds=0,
+            group_ambient_quiet_cooldown_seconds=0,
+        )
+    )
+    engine.delivery_controller = DeliveryController(
+        DeliveryLedger(str(tmp_path / "delivery.sqlite3"))
+    )
+    pending = PendingInbound(
+        InputMessage("ambient-1", "user", "chat", "hello?", True),
+        "hello?",
+        InboundIntent.GROUP_AMBIENT,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+    decision = await engine.group_engagement.evaluate("chat", batch=[pending])
+    delivered = []
+
+    async def raw_reply(**kwargs):
+        delivered.append(kwargs["content"])
+
+    async def fake_run(request):
+        await request.reply_callback(
+            chat_id="chat",
+            content="answer",
+            message_id="ambient-1",
+            is_group=True,
+        )
+        return _TurnResult(
+            replies=("answer",),
+            sent_emoji=False,
+            text_committed=True,
+            tool_text_delivered=False,
+            final_reply_silent=False,
+        )
+
+    engine._run_turn = fake_run
+    await engine._process_ambient_active(
+        pending, (), decision, raw_reply, lambda sender_id: sender_id
+    )
+
+    assert delivered == ["answer"]
+    record = await engine.delivery_controller.ledger.get("ambient:chat:ambient-1")
+    assert record is not None
+    assert record.status == "sent"
+
+
+@pytest.mark.asyncio
+async def test_engine_recovers_stale_ambient_delivery_with_idempotency_opt_in(
+    tmp_path,
+):
+    engine = make_engine(FakeToolLoop())
+    ledger = DeliveryLedger(str(tmp_path / "delivery.sqlite3"))
+    engine.delivery_controller = DeliveryController(ledger)
+    engine.engagement_config = EngagementConfig(delivery_recovery_after_seconds=1)
+    engine.context_manager = SimpleNamespace(
+        get_chat_history_async=lambda chat_id: _history_with_ambient_answer()
+    )
+    prepared = await ledger.prepare(
+        key="ambient:chat:turn",
+        chat_id="chat",
+        turn_id="turn",
+        reason="final_reply",
+        reply_anchor_id="anchor",
+        content_hash=ledger.content_hash("answer"),
+    )
+    conn = await ledger._ensure_open()
+    conn.execute(
+        "UPDATE delivery_ledger SET updated_at = 0 WHERE delivery_key = ?",
+        (prepared.key,),
+    )
+    conn.commit()
+    delivered = []
+
+    async def reply_callback(**kwargs):
+        delivered.append(kwargs)
+
+    await engine._recover_ambient_deliveries(
+        "chat", reply_callback, allow_transport_retry=True
+    )
+
+    assert delivered[0]["content"] == "answer"
+    assert delivered[0]["delivery_id"] == prepared.logical_delivery_id
+    recovered = await ledger.get(prepared.key)
+    assert recovered is not None
+    assert recovered.status == "sent"
+    await ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_engine_recovery_preserves_failed_transport_receipt(tmp_path):
+    engine = make_engine(FakeToolLoop())
+    ledger = DeliveryLedger(str(tmp_path / "delivery.sqlite3"))
+    engine.delivery_controller = DeliveryController(ledger)
+    engine.engagement_config = EngagementConfig(delivery_recovery_after_seconds=1)
+    engine.context_manager = SimpleNamespace(
+        get_chat_history_async=lambda chat_id: _history_with_ambient_answer()
+    )
+    prepared = await ledger.prepare(
+        key="ambient:chat:turn",
+        chat_id="chat",
+        turn_id="turn",
+        reason="final_reply",
+        reply_anchor_id="anchor",
+        content_hash=ledger.content_hash("answer"),
+    )
+    conn = await ledger._ensure_open()
+    conn.execute(
+        "UPDATE delivery_ledger SET updated_at = 0 WHERE delivery_key = ?",
+        (prepared.key,),
+    )
+    conn.commit()
+
+    async def reply_callback(**kwargs):
+        return DeliveryReceipt(status="failed", logical_delivery_id="ambient:chat:turn")
+
+    result = await engine._recover_ambient_deliveries("chat", reply_callback)
+
+    assert result.scanned == 1
+    recovered = await ledger.get(prepared.key)
+    assert recovered is not None
+    assert recovered.status == "unknown"
+    assert recovered.reason == "recovery_requires_idempotency"
+    await ledger.close()
+
+
+async def _history_with_ambient_answer():
+    return [
+        {"role": "user", "content": "question", "message_id": "anchor"},
+        {"role": "assistant", "content": "answer", "message_id": "anchor"},
+    ]
