@@ -1774,7 +1774,7 @@ class AgentEngine:
                     )
                 return result
 
-            async def _model_context_usage(usage, service, model_name):
+            async def _model_context_usage(usage, service, model_name, _elapsed_ms):
                 if request.model_context_usage_callback is None:
                     return
                 await request.model_context_usage_callback(

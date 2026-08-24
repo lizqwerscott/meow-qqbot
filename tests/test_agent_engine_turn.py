@@ -1346,6 +1346,44 @@ async def test_run_turn_returns_prompt_scope_without_shared_builder_state():
 
 
 @pytest.mark.asyncio
+async def test_run_turn_accepts_tool_loop_usage_elapsed_ms():
+    scope = SimpleNamespace(generation=7, kind="private_conversation")
+    received = []
+    service = object()
+
+    async def report_usage(recorded_scope, usage, recorded_service, model_name):
+        received.append((recorded_scope, usage, recorded_service, model_name))
+
+    async def emit_usage(kwargs):
+        await kwargs["model_context_usage_callback"](
+            {"prompt_tokens": 1}, service, "test", 12.5
+        )
+
+    engine = make_engine(FakeToolLoop(on_run=emit_usage))
+
+    async def build_prompt():
+        return PromptBuildResult([], [], model_context_scope=scope)
+
+    async def reply_callback(**kwargs):
+        pass
+
+    await engine._run_turn(
+        _TurnRequest(
+            chat_id="chat",
+            sender_id="user",
+            is_group=False,
+            reply_to="message",
+            route_text="hello",
+            prompt_factory=build_prompt,
+            reply_callback=reply_callback,
+            model_context_usage_callback=report_usage,
+        )
+    )
+
+    assert received == [(scope, {"prompt_tokens": 1}, service, "test")]
+
+
+@pytest.mark.asyncio
 async def test_model_context_scope_fails_closed_for_direct_tasks_without_lifecycle_binding():
     engine = make_engine(FakeToolLoop())
     engine.model_context_enabled = True
