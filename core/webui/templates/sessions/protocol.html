@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}协议历史 - 猫猫管理{% endblock %}
+{% set nav_active = "sessions" %}
+
+{% block content %}
+<h2 style="margin-bottom:20px">🧪 协议历史 <code>{{ chat_id[:16] }}..</code></h2>
+
+<div style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
+    <a href="/sessions/{{ chat_id }}" class="btn">← 可见聊天</a>
+    <a href="/sessions" class="btn">会话列表</a>
+</div>
+
+{% if not messages %}
+<p style="color:var(--text-secondary)">此会话暂无模型协议消息</p>
+{% endif %}
+
+{% for msg in messages %}
+{% set role = msg.role %}
+<div class="chat-message {{ role }}">
+    <div class="msg-meta">
+        {% if role == "assistant" %}🤖 Assistant
+        {% elif role == "tool" %}🔧 工具: {{ msg.tool_name or '未知' }}
+        {% endif %}
+        {% if msg.timestamp %} · {{ msg.timestamp | format_timestamp }}{% endif %}
+        {% if msg.turn_id %} · turn <code>{{ msg.turn_id[:16] }}..</code>{% endif %}
+    </div>
+    <div class="msg-content">{{ msg.content or '(空)' }}</div>
+    {% if msg.tool_calls %}
+    <div class="tool-details">
+        <strong>工具调用:</strong>
+        {% for tc in msg.tool_calls %}
+        <div style="margin-top:4px">
+            <strong>{{ tc.function.name }}</strong>({{ tc.function.arguments[:300] }}{% if tc.function.arguments|length > 300 %}…{% endif %})
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+    {% if msg.tool_call_id %}
+    <div class="tool-details"><strong>Call ID:</strong> {{ msg.tool_call_id }}</div>
+    {% endif %}
+    {% if msg.reasoning_content %}
+    <div class="tool-details">
+        <strong>推理过程:</strong>
+        <pre style="white-space:pre-wrap;font-size:12px;margin-top:4px">{{ msg.reasoning_content[:500] }}{% if msg.reasoning_content|length > 500 %}…{% endif %}</pre>
+    </div>
+    {% endif %}
+</div>
+{% endfor %}
+{% endblock %}

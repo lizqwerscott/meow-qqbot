@@ -28,6 +28,8 @@ class TimelineEvent:
     event_kind: str = "user_message"
     delivery_kind: str = ""
     timestamp: float = 0.0
+    session_kind: str = "chat"
+    token_count: int = 0
 
     def to_history_dict(self) -> dict:
         return {
@@ -39,6 +41,8 @@ class TimelineEvent:
             "event_id": self.event_id,
             "event_kind": self.event_kind,
             "delivery_kind": self.delivery_kind,
+            "session_kind": self.session_kind,
+            "token_count": self.token_count,
         }
 
 
@@ -129,10 +133,29 @@ class ConversationTimeline:
                     event_kind TEXT NOT NULL,
                     delivery_kind TEXT NOT NULL DEFAULT '',
                     timestamp REAL NOT NULL,
+                    session_kind TEXT NOT NULL DEFAULT 'chat',
+                    token_count INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (chat_id, seq),
                     UNIQUE (chat_id, event_id)
                 )
                 """)
+            columns = {
+                row["name"]
+                for row in self._conn.execute(
+                    "PRAGMA table_info(conversation_timeline)"
+                ).fetchall()
+            }
+            if "session_kind" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE conversation_timeline ADD COLUMN session_kind TEXT NOT NULL DEFAULT 'chat'"
+                )
+            if "token_count" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE conversation_timeline ADD COLUMN token_count INTEGER NOT NULL DEFAULT 0"
+                )
+                self._conn.execute(
+                    "UPDATE conversation_timeline SET token_count = LENGTH(content) / 4"
+                )
             self._conn.commit()
         return self._conn
 
@@ -149,6 +172,14 @@ class ConversationTimeline:
             event_kind=row["event_kind"],
             delivery_kind=row["delivery_kind"],
             timestamp=float(row["timestamp"]),
+            session_kind=(
+                row["session_kind"] if "session_kind" in row.keys() else "chat"
+            ),
+            token_count=(
+                int(row["token_count"])
+                if "token_count" in row.keys()
+                else max(0, len(row["content"]) // 4)
+            ),
         )
 
     async def append(
@@ -163,6 +194,8 @@ class ConversationTimeline:
         sender_id: str = "",
         delivery_kind: str = "",
         timestamp: float | None = None,
+        session_kind: str = "chat",
+        token_count: int | None = None,
     ) -> TimelineEvent:
         """Append one event or return the existing event for the same event key."""
         if not chat_id or not event_id:
@@ -171,8 +204,13 @@ class ConversationTimeline:
             raise ValueError(f"invalid timeline role: {role}")
         if event_kind not in {"user_message", "delivery"}:
             raise ValueError(f"invalid timeline event kind: {event_kind}")
+        if not session_kind:
+            session_kind = "chat"
         conn = await self._ensure_open()
         now = time.time() if timestamp is None else timestamp
+        tokens = (
+            max(0, len(content) // 4) if token_count is None else max(0, token_count)
+        )
         async with self._lock:
             existing = conn.execute(
                 "SELECT * FROM conversation_timeline WHERE chat_id = ? AND event_id = ?",
@@ -180,6 +218,17 @@ class ConversationTimeline:
             ).fetchone()
             if existing is not None:
                 return self._event(existing)
+            if session_kind == "chat":
+                previous_kind = conn.execute(
+                    """
+                    SELECT session_kind FROM conversation_timeline
+                     WHERE chat_id = ? AND role = 'user'
+                     ORDER BY seq DESC LIMIT 1
+                    """,
+                    (chat_id,),
+                ).fetchone()
+                if previous_kind is not None:
+                    session_kind = previous_kind["session_kind"]
             next_seq = conn.execute(
                 "SELECT COALESCE(MAX(seq), 0) + 1 FROM conversation_timeline WHERE chat_id = ?",
                 (chat_id,),
@@ -188,8 +237,9 @@ class ConversationTimeline:
                 """
                 INSERT INTO conversation_timeline
                     (chat_id, seq, event_id, role, content, message_id,
-                     sender_id, event_kind, delivery_kind, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     sender_id, event_kind, delivery_kind, timestamp,
+                     session_kind, token_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chat_id,
@@ -202,6 +252,8 @@ class ConversationTimeline:
                     event_kind,
                     delivery_kind,
                     now,
+                    session_kind,
+                    tokens,
                 ),
             )
             conn.commit()
@@ -219,6 +271,7 @@ class ConversationTimeline:
         content: str,
         sender_id: str,
         timestamp: float,
+        session_kind: str = "chat",
     ) -> TimelineEvent:
         return await self.append(
             chat_id=chat_id,
@@ -229,6 +282,7 @@ class ConversationTimeline:
             message_id=message_id,
             sender_id=sender_id,
             timestamp=timestamp,
+            session_kind=session_kind,
         )
 
     async def append_accepted_delivery(
@@ -240,6 +294,7 @@ class ConversationTimeline:
         delivery_kind: str,
         message_id: str = "",
         timestamp: float | None = None,
+        session_kind: str = "chat",
     ) -> TimelineEvent:
         return await self.append(
             chat_id=chat_id,
@@ -250,6 +305,7 @@ class ConversationTimeline:
             delivery_kind=delivery_kind,
             message_id=message_id,
             timestamp=timestamp,
+            session_kind=session_kind,
         )
 
     async def repair_from_legacy_history(
@@ -446,7 +502,8 @@ class ConversationTimeline:
                 """
                 SELECT COUNT(*) AS message_count,
                        COALESCE(MAX(timestamp), 0) AS last_activity,
-                       COALESCE(SUM(LENGTH(content)), 0) AS content_chars
+                       COALESCE(SUM(LENGTH(content)), 0) AS content_chars,
+                       COALESCE(SUM(token_count), 0) AS estimated_tokens
                   FROM conversation_timeline
                  WHERE chat_id = ?
                 """,
@@ -455,7 +512,7 @@ class ConversationTimeline:
         return {
             "message_count": int(row["message_count"]),
             "last_activity": float(row["last_activity"]),
-            "estimated_tokens": int(row["content_chars"]) // 4,
+            "estimated_tokens": int(row["estimated_tokens"]),
         }
 
     async def clear_chat(self, chat_id: str) -> None:

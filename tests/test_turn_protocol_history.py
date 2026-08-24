@@ -99,6 +99,50 @@ async def test_protocol_history_isolated_by_turn_id(tmp_path):
     await history.close()
 
 
+@pytest.mark.asyncio
+async def test_protocol_history_deletes_one_chat_and_caches_full_event_tokens(tmp_path):
+    history = TurnProtocolHistory(str(tmp_path / "protocol.sqlite3"))
+    await history.append_assistant(
+        chat_id="chat-a",
+        turn_id="turn-a",
+        event_id="assistant:0",
+        content="answer",
+        tool_calls=[
+            {"id": "call-a", "function": {"name": "read_file", "arguments": "{}"}}
+        ],
+        reasoning_content="reasoning",
+    )
+    await history.append_assistant(
+        chat_id="chat-b",
+        turn_id="turn-b",
+        event_id="assistant:0",
+        content="keep",
+    )
+
+    summary = await history.session_summary("chat-a")
+    assert summary["estimated_tokens"] > len("answer") // 4
+
+    await history.delete_chat("chat-a")
+
+    assert await history.history("chat-a") == []
+    assert len(await history.history("chat-b")) == 1
+    await history.close()
+
+
+@pytest.mark.asyncio
+async def test_protocol_history_claims_legacy_turn_by_message_id(tmp_path):
+    history = TurnProtocolHistory(str(tmp_path / "protocol.sqlite3"))
+    await history.append_assistant(
+        turn_id="message-1",
+        event_id="assistant:0",
+        content="legacy",
+    )
+
+    assert await history.claim_orphan_turns("chat-a", ["message-1"]) == 1
+    assert len(await history.history("chat-a")) == 1
+    await history.close()
+
+
 def test_protocol_event_wire_projection_hides_storage_metadata():
     from core.engine.turn_protocol_history import ProtocolEvent
 

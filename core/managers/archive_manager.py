@@ -607,7 +607,7 @@ class ArchiveManager:
         ctx.last_activity = time.time()
 
         # 8. 写入新数据（后台线程）。没有任何保留消息时必须删除 active
-        # JSONL；JSONLContextStore.flush([]) 为兼容旧行为会直接返回。
+        # history；具体存储由 ContextStore adapter 决定。
         if keep_msgs:
             await asyncio.to_thread(
                 store.flush,

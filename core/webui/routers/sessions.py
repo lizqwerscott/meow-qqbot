@@ -29,6 +29,20 @@ def _validate_date(date: str) -> None:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="无效的 date")
 
 
+def _session_kind(chat_id: str, context_manager) -> str:
+    if chat_id.startswith("heartbeat:"):
+        return "heartbeat"
+    if chat_id.startswith(("cron:", "task:", "exec:", "system:")):
+        return "system"
+    get_chat_type = getattr(context_manager, "get_chat_type", None)
+    chat_type = get_chat_type(chat_id) if callable(get_chat_type) else None
+    if chat_type is True:
+        return "group"
+    if chat_type is False:
+        return "private"
+    return "unknown"
+
+
 def _make_flash_redirect(url: str, category: str, message: str):
     separator = "&" if "?" in url else "?"
     return RedirectResponse(
@@ -48,20 +62,52 @@ async def _repair_timeline_from_legacy(context_manager, timeline, chat_id: str):
     await repair(chat_id, legacy_history)
 
 
+async def _legacy_protocol_history(context_manager, chat_id: str) -> list[dict]:
+    """Expose protocol records persisted before the protocol projection existed."""
+    get_history = getattr(context_manager, "get_chat_history_async", None)
+    if not callable(get_history):
+        return []
+    history = await get_history(chat_id)
+    return [
+        message for message in history if message.get("role") in {"assistant", "tool"}
+    ]
+
+
+async def _claim_legacy_protocol_history(
+    protocol_history, context_manager, chat_id: str
+) -> None:
+    claim = getattr(protocol_history, "claim_orphan_turns", None)
+    get_history = getattr(context_manager, "get_chat_history_async", None)
+    if not callable(claim) or not callable(get_history):
+        return
+    history = await get_history(chat_id)
+    turn_ids = [str(message.get("message_id") or "") for message in history]
+    await claim(chat_id, turn_ids)
+
+
 @router.get("/sessions", response_class=HTMLResponse)
 async def session_list(
     request: Request,
     q: Optional[str] = Query(None),
+    kind: str = Query("all"),
 ):
     managers = request.app.state.managers
     templates = request.app.state.templates
     context_manager = managers.get("context_manager")
+    protocol_history = managers.get("protocol_history")
 
     all_chat_ids = await context_manager.get_all_disk_chat_ids_async()
     if timeline := managers.get("conversation_timeline"):
         try:
             timeline_chat_ids = await timeline.chat_ids()
             all_chat_ids = list(dict.fromkeys(all_chat_ids + timeline_chat_ids))
+        except Exception:
+            pass
+    if protocol_history is not None:
+        try:
+            all_chat_ids = list(
+                dict.fromkeys(all_chat_ids + await protocol_history.chat_ids())
+            )
         except Exception:
             pass
     if q:
@@ -81,6 +127,37 @@ async def session_list(
     sessions = []
     for cid, timeline_summary in zip(all_chat_ids, summaries):
         summary = timeline_summary
+        protocol_summary = None
+        if protocol_history is not None:
+            try:
+                protocol_summary = await protocol_history.session_summary(cid)
+                if not protocol_summary.get("message_count", 0):
+                    await _claim_legacy_protocol_history(
+                        protocol_history, context_manager, cid
+                    )
+                    protocol_summary = await protocol_history.session_summary(cid)
+            except Exception:
+                protocol_summary = None
+        if not (protocol_summary or {}).get("message_count", 0):
+            try:
+                legacy_protocol = await _legacy_protocol_history(context_manager, cid)
+                if legacy_protocol:
+                    protocol_summary = {
+                        "message_count": len(legacy_protocol),
+                        "last_activity": max(
+                            (
+                                float(message.get("timestamp") or 0)
+                                for message in legacy_protocol
+                            ),
+                            default=0,
+                        ),
+                        "estimated_tokens": sum(
+                            max(0, len(str(message.get("content") or "")) // 4)
+                            for message in legacy_protocol
+                        ),
+                    }
+            except Exception:
+                pass
         try:
             if isinstance(summary, Exception):
                 summary = None
@@ -91,9 +168,18 @@ async def session_list(
                     summary = repaired
             if not summary or not summary.get("message_count", 0):
                 summary = await context_manager.get_session_summary_async(cid)
+            if (
+                (not summary or not summary.get("message_count", 0))
+                and protocol_summary
+                and protocol_summary.get("message_count", 0)
+            ):
+                summary = protocol_summary
         except Exception:
             summary = None
 
+        session_kind = _session_kind(cid, context_manager)
+        if kind != "all" and session_kind != kind:
+            continue
         if summary is None:
             sessions.append(
                 {
@@ -101,6 +187,10 @@ async def session_list(
                     "message_count": 0,
                     "last_activity": "-",
                     "estimated_tokens": 0,
+                    "session_kind": session_kind,
+                    "protocol_count": int(
+                        (protocol_summary or {}).get("message_count", 0)
+                    ),
                     "archived_count": archived_counts.get(cid, 0),
                 }
             )
@@ -114,6 +204,10 @@ async def session_list(
                         time.localtime(summary["last_activity"]),
                     ),
                     "estimated_tokens": summary["estimated_tokens"],
+                    "session_kind": session_kind,
+                    "protocol_count": int(
+                        (protocol_summary or {}).get("message_count", 0)
+                    ),
                     "archived_count": archived_counts.get(cid, 0),
                 }
             )
@@ -127,6 +221,7 @@ async def session_list(
             "request": request,
             "sessions": sessions,
             "query": q or "",
+            "kind": kind,
             "total_archived": len(archived_counts),
         },
     )
@@ -328,21 +423,48 @@ async def session_detail(request: Request, chat_id: str):
     templates = request.app.state.templates
     context_manager = managers.get("context_manager")
     timeline = managers.get("conversation_timeline")
+    protocol_history = managers.get("protocol_history")
 
-    history = await timeline.history(chat_id, max_events=200) if timeline else []
+    history = await timeline.history(chat_id) if timeline else []
     if timeline is not None:
         try:
             await _repair_timeline_from_legacy(context_manager, timeline, chat_id)
-            history = await timeline.history(chat_id, max_events=200)
+            history = await timeline.history(chat_id)
         except Exception:
             pass
     elif not history:
         history = visible_legacy_history(
-            await context_manager.get_chat_history_async(chat_id, max_messages=200)
+            await context_manager.get_chat_history_async(chat_id)
         )
     history.reverse()
 
     archived_files = await context_manager.get_archived_files_async(chat_id)
+    protocol_count = 0
+    if protocol_history is not None:
+        try:
+            protocol_count = int(
+                (await protocol_history.session_summary(chat_id)).get(
+                    "message_count", 0
+                )
+            )
+            if protocol_count == 0:
+                await _claim_legacy_protocol_history(
+                    protocol_history, context_manager, chat_id
+                )
+                protocol_count = int(
+                    (await protocol_history.session_summary(chat_id)).get(
+                        "message_count", 0
+                    )
+                )
+        except Exception:
+            pass
+    if protocol_count == 0:
+        try:
+            protocol_count = len(
+                await _legacy_protocol_history(context_manager, chat_id)
+            )
+        except Exception:
+            pass
 
     return templates.TemplateResponse(
         request,
@@ -352,6 +474,36 @@ async def session_detail(request: Request, chat_id: str):
             "chat_id": chat_id,
             "messages": history,
             "archived_count": len(archived_files),
+            "protocol_count": protocol_count,
+        },
+    )
+
+
+@router.get("/sessions/{chat_id}/protocol", response_class=HTMLResponse)
+async def session_protocol_detail(request: Request, chat_id: str):
+    _validate_chat_id(chat_id)
+    managers = request.app.state.managers
+    templates = request.app.state.templates
+    protocol_history = managers.get("protocol_history")
+    messages = []
+    if protocol_history is not None:
+        messages = await protocol_history.history(chat_id)
+        if not messages:
+            await _claim_legacy_protocol_history(
+                protocol_history, managers.get("context_manager"), chat_id
+            )
+            messages = await protocol_history.history(chat_id)
+    if not messages:
+        messages = await _legacy_protocol_history(
+            managers.get("context_manager"), chat_id
+        )
+    return templates.TemplateResponse(
+        request,
+        "sessions/protocol.html",
+        {
+            "request": request,
+            "chat_id": chat_id,
+            "messages": messages,
         },
     )
 
@@ -362,10 +514,13 @@ async def session_clear(request: Request, chat_id: str):
     managers = request.app.state.managers
     context_manager = managers.get("context_manager")
     timeline = managers.get("conversation_timeline")
+    protocol_history = managers.get("protocol_history")
 
     await context_manager.clear_chat_history_async(chat_id)
     if timeline is not None:
         await timeline.clear_chat(chat_id)
+    if protocol_history is not None:
+        await protocol_history.delete_chat(chat_id)
     return _make_flash_redirect("/sessions", "success", "会话已清空")
 
 

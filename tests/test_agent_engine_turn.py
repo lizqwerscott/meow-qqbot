@@ -100,6 +100,7 @@ async def test_user_admission_writes_conversation_timeline_projection():
             "content": "hello",
             "sender_id": "user",
             "timestamp": pending.message.timestamp,
+            "session_kind": "private",
         }
     ]
 

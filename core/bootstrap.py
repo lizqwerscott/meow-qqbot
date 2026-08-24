@@ -7,6 +7,7 @@ import asyncio
 import logging
 import sys
 from collections.abc import Mapping
+from pathlib import Path
 
 import httpx
 
@@ -36,7 +37,7 @@ from core.learners.orchestrator import LearningOrchestrator
 from core.managers.archive_manager import ArchiveManager
 from core.managers.context_compactor import ContextCompactor
 from core.managers.context_manager import ChatContextManager
-from core.managers.context_store import JSONLContextStore, MemoryContextStore
+from core.managers.context_store import MemoryContextStore, SQLiteContextStore
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager
 from core.managers.nickname_manager import NicknameManager
@@ -242,7 +243,10 @@ class ServiceGraph:
             else None
         )
         _store = (
-            JSONLContextStore(base_dir=_cache_dir)
+            SQLiteContextStore(
+                db_path=str(Path(_cache_dir).parent / "conversation_context.sqlite3"),
+                archive_dir=_cache_dir,
+            )
             if _cache_dir
             else MemoryContextStore()
         )
@@ -514,6 +518,7 @@ class ServiceGraph:
         self.agent_engine = AgentEngine(ctx)
         self.agent_engine.set_media_service(self.media_service)
         self.context_manager.set_timeline(self.agent_engine.timeline)
+        self.context_manager.set_protocol_history(self.agent_engine.protocol_history)
         if self.archive_manager is not None:
             self.archive_manager.set_timeline(self.agent_engine.timeline)
 
@@ -843,6 +848,7 @@ class ServiceGraph:
             self.bot_engine.command_manager,
             context_manager=self.context_manager,
             timeline=self.agent_engine.timeline,
+            protocol_history=self.agent_engine.protocol_history,
             emoji_manager=self.emoji_manager,
             agent_engine=self.agent_engine,
             skill_managers=self.skill_managers,
@@ -882,6 +888,7 @@ class ServiceGraph:
                     "nickname_manager": self.nickname_manager,
                     "context_manager": self.context_manager,
                     "conversation_timeline": self.agent_engine.timeline,
+                    "protocol_history": self.agent_engine.protocol_history,
                     "cost_tracker": self.cost_tracker,
                     "agent_engine": self.agent_engine,
                     "learning_orchestrator": self.learning_orchestrator,
@@ -916,6 +923,16 @@ class ServiceGraph:
 
     async def start(self):
         """启动所有后台服务。"""
+        if isinstance(self.context_manager.store, SQLiteContextStore):
+            migration = await asyncio.to_thread(
+                self.context_manager.store.migrate_legacy
+            )
+            if migration["sessions"] or migration["removed_duplicates"]:
+                _log.info(
+                    "SQLite 会话迁移完成: sessions=%d duplicates=%d",
+                    migration["sessions"],
+                    migration["removed_duplicates"],
+                )
         await self.check_hindsight_health()
         await self.media_service.open()
 

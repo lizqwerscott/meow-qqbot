@@ -160,6 +160,7 @@ class ToolLoop:
                 return
             await protocol_history.append_tool_result(
                 turn_id=protocol_turn_id,
+                chat_id=chat_id,
                 event_id=f"tool:{tool_call_id}",
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -470,6 +471,7 @@ class ToolLoop:
                 if protocol_history is not None:
                     await protocol_history.append_assistant(
                         turn_id=protocol_turn_id,
+                        chat_id=chat_id,
                         event_id=f"assistant:{round_idx}",
                         content=response_text or "",
                         tool_calls=tool_calls_data or (),

@@ -20,11 +20,18 @@
     </a>
 </div>
 
+<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
+    {% for value, label in [('all', '全部'), ('group', '群聊'), ('private', '私聊'), ('heartbeat', 'Heartbeat'), ('system', '后台任务')] %}
+    <a href="/sessions?kind={{ value }}{% if query %}&q={{ query }}{% endif %}" class="btn{% if kind == value %} btn-primary{% endif %}">{{ label }}</a>
+    {% endfor %}
+</div>
+
 <div class="table-wrap">
 <table>
     <thead>
         <tr>
             <th>会话 ID</th>
+            <th>类型</th>
             <th>消息数</th>
             <th>最后活动</th>
             <th>Tokens</th>
@@ -36,6 +43,13 @@
         {% for s in sessions %}
         <tr>
             <td><code>{{ s.chat_id[:12] }}..</code></td>
+            <td>
+                {% if s.session_kind == 'group' %}群聊
+                {% elif s.session_kind == 'private' %}私聊
+                {% elif s.session_kind == 'heartbeat' %}Heartbeat
+                {% elif s.session_kind == 'system' %}后台任务
+                {% else %}未知{% endif %}
+            </td>
             <td>{{ s.message_count }}</td>
             <td>{{ s.last_activity }}</td>
             <td>{{ s.estimated_tokens }}</td>
@@ -48,13 +62,16 @@
             </td>
             <td>
                 <a href="/sessions/{{ s.chat_id }}" class="btn btn-sm">查看</a>
+                {% if s.protocol_count > 0 %}
+                <a href="/sessions/{{ s.chat_id }}/protocol" class="btn btn-sm">协议</a>
+                {% endif %}
                 <form method="post" action="/sessions/{{ s.chat_id }}/clear" style="display:inline" onsubmit="return confirm('确定清空此会话？')">
                     <button type="submit" class="btn btn-sm btn-danger">清空</button>
                 </form>
             </td>
         </tr>
         {% else %}
-        <tr><td colspan="6" style="text-align:center;color:var(--text-secondary)">无活跃会话</td></tr>
+        <tr><td colspan="7" style="text-align:center;color:var(--text-secondary)">无活跃会话</td></tr>
         {% endfor %}
     </tbody>
 </table>

@@ -465,6 +465,7 @@ class AgentEngine:
                 content=pending.prepared_content,
                 sender_id=message.sender_id,
                 timestamp=message.timestamp,
+                session_kind="group" if message.is_group else "private",
             )
         except asyncio.CancelledError:
             raise

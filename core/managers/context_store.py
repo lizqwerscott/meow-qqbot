@@ -1,14 +1,48 @@
 import asyncio
 import functools
+import hashlib
 import json
 import logging
+import os
+import sqlite3
+import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 _log = logging.getLogger(__name__)
+
+
+def deduplicate_history(messages: List[dict]) -> List[dict]:
+    """Remove only logically identical persisted messages.
+
+    User messages use their platform message ID and tool results use their tool
+    call ID. Records without a stable identity are intentionally preserved,
+    including repeated assistant replies.
+    """
+    seen: set[tuple[str, str]] = set()
+    result: List[dict] = []
+    for message in messages:
+        key = _message_identity(message)
+        if key is not None and key in seen:
+            continue
+        if key is not None:
+            seen.add(key)
+        result.append(message)
+    return result
+
+
+def _message_identity(message: Any) -> Optional[tuple[str, str]]:
+    if not isinstance(message, dict):
+        return None
+    role = str(message.get("role") or "")
+    if role == "user" and message.get("message_id"):
+        return ("user", str(message["message_id"]))
+    if role == "tool" and message.get("tool_call_id"):
+        return ("tool", str(message["tool_call_id"]))
+    return None
 
 
 class ContextStore(ABC):
@@ -149,8 +183,24 @@ class JSONLContextStore(ContextStore):
 
     def _write_full(self, path: Path, messages: List[dict]) -> None:
         lines = [json.dumps(msg, ensure_ascii=False) + "\n" for msg in messages]
-        with open(path, "w", encoding="utf-8") as f:
-            f.writelines(lines)
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                handle.writelines(lines)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     def load(self, chat_id: str) -> Optional[List[dict]]:
         with self._acquire_file_lock(chat_id):
@@ -208,7 +258,31 @@ class JSONLContextStore(ContextStore):
                         path.stem[:12],
                         line[:80],
                     )
-        return data
+        return deduplicate_history(data)
+
+    def repair_duplicates(self, chat_id: str) -> int:
+        """Rewrite one legacy JSONL file without logical duplicates."""
+        with self._acquire_file_lock(chat_id):
+            path = self._get_path(chat_id)
+            if not path.exists():
+                return 0
+            raw = []
+            with open(path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        raw.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+            repaired = deduplicate_history(raw)
+            removed = len(raw) - len(repaired)
+            if removed:
+                self._write_full(path, repaired)
+            with self._lock:
+                self._flushed[chat_id] = len(repaired)
+            return removed
 
     def delete(self, chat_id: str) -> None:
         with self._acquire_file_lock(chat_id):
@@ -388,6 +462,181 @@ class JSONLContextStore(ContextStore):
         if removed:
             _log.info("归档清理完成: 移除了 %d 个文件", removed)
         return removed
+
+
+class SQLiteContextStore(ContextStore):
+    """Durable active context store with JSONL kept only for archives."""
+
+    def __init__(self, db_path: str, archive_dir: str):
+        self._db_path = Path(db_path)
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._archive_store = JSONLContextStore(archive_dir)
+        self._lock = threading.RLock()
+        self._chat_types_lock = asyncio.Lock()
+        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS context_messages (
+                chat_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                message_key TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                PRIMARY KEY (chat_id, seq),
+                UNIQUE (chat_id, message_key)
+            )
+            """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS context_chat_types (
+                chat_id TEXT PRIMARY KEY,
+                is_group INTEGER NOT NULL
+            )
+            """)
+        self._conn.commit()
+
+    @staticmethod
+    def _storage_key(message: dict, index: int) -> str:
+        identity = _message_identity(message)
+        if identity is not None:
+            kind, value = identity
+            return f"{kind}:{value}"
+        payload = json.dumps(
+            message, ensure_ascii=False, sort_keys=True, default=str
+        ).encode("utf-8")
+        digest = hashlib.sha256(payload).hexdigest()
+        return f"record:{index}:{digest}"
+
+    def flush(self, chat_id: str, messages: List[dict]) -> None:
+        if not chat_id:
+            return
+        messages = deduplicate_history(messages)
+        rows = [
+            (
+                chat_id,
+                index,
+                self._storage_key(message, index),
+                json.dumps(message, ensure_ascii=False, sort_keys=True),
+            )
+            for index, message in enumerate(messages)
+        ]
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM context_messages WHERE chat_id = ?", (chat_id,)
+            )
+            self._conn.executemany(
+                """
+                INSERT INTO context_messages (chat_id, seq, message_key, payload)
+                VALUES (?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def load(self, chat_id: str) -> Optional[List[dict]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT payload FROM context_messages
+                 WHERE chat_id = ? ORDER BY seq
+                """,
+                (chat_id,),
+            ).fetchall()
+        if rows:
+            return [json.loads(row["payload"]) for row in rows]
+
+        self._archive_store.repair_duplicates(chat_id)
+        legacy = self._archive_store.load(chat_id)
+        if legacy:
+            self.flush(chat_id, legacy)
+            return legacy
+        return None
+
+    async def load_async(self, chat_id: str) -> Optional[List[dict]]:
+        return await asyncio.to_thread(self.load, chat_id)
+
+    def migrate_legacy(self) -> dict[str, int]:
+        migrated = 0
+        removed_duplicates = 0
+        for chat_id in self._archive_store.get_all_disk_ids():
+            removed_duplicates += self._archive_store.repair_duplicates(chat_id)
+            messages = self._archive_store.load(chat_id)
+            if messages:
+                self.flush(chat_id, messages)
+                migrated += 1
+        return {
+            "sessions": migrated,
+            "removed_duplicates": removed_duplicates,
+        }
+
+    def delete(self, chat_id: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM context_messages WHERE chat_id = ?", (chat_id,)
+            )
+        self._archive_store.delete(chat_id)
+
+    def archive(self, chat_id: str, archive_ts: str) -> Optional[str]:
+        messages = self.load(chat_id)
+        if not messages:
+            return None
+        path = self.archive_messages(chat_id, archive_ts, messages)
+        self.delete(chat_id)
+        return path
+
+    def archive_messages(
+        self, chat_id: str, archive_ts: str, messages: List[dict]
+    ) -> Optional[str]:
+        return self._archive_store.archive_messages(
+            chat_id, archive_ts, deduplicate_history(messages)
+        )
+
+    def list_archives(self, chat_id: str) -> List[dict]:
+        return self._archive_store.list_archives(chat_id)
+
+    def read_archive(self, file_path: str, max_messages: int = 200) -> List[dict]:
+        return self._archive_store.read_archive(file_path, max_messages)
+
+    def get_all_disk_ids(self) -> List[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT chat_id FROM context_messages ORDER BY chat_id"
+            ).fetchall()
+        return list(
+            dict.fromkeys(
+                [str(row["chat_id"]) for row in rows]
+                + self._archive_store.get_all_disk_ids()
+            )
+        )
+
+    def get_archived_summary(self) -> Dict[str, int]:
+        return self._archive_store.get_archived_summary()
+
+    def cleanup_stale_archives(self, retention_seconds: float) -> int:
+        return self._archive_store.cleanup_stale_archives(retention_seconds)
+
+    def get_chat_type(self, chat_id: str) -> Optional[bool]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT is_group FROM context_chat_types WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchone()
+        if row is not None:
+            return bool(row["is_group"])
+        return self._archive_store.get_chat_type(chat_id)
+
+    async def set_chat_type(self, chat_id: str, is_group: bool) -> None:
+        async with self._chat_types_lock:
+            with self._lock, self._conn:
+                self._conn.execute(
+                    """
+                    INSERT INTO context_chat_types(chat_id, is_group)
+                    VALUES (?, ?)
+                    ON CONFLICT(chat_id) DO UPDATE SET is_group = excluded.is_group
+                    """,
+                    (chat_id, int(is_group)),
+                )
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
 
 
 class MemoryContextStore(ContextStore):

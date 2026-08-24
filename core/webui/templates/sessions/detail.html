@@ -7,6 +7,9 @@
 
 <div style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
     <a href="/sessions" class="btn">← 返回列表</a>
+    {% if protocol_count > 0 %}
+    <a href="/sessions/{{ chat_id }}/protocol" class="btn">🧪 协议历史 ({{ protocol_count }})</a>
+    {% endif %}
     {% if archived_count > 0 %}
     <a href="/sessions/archived/{{ chat_id }}" class="btn">📦 归档 ({{ archived_count }})</a>
     {% endif %}

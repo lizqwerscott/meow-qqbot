@@ -39,9 +39,13 @@ class ChatContextManager:
         self._ctx_lock = asyncio.Lock()
         self._chat_locks: Dict[str, asyncio.Lock] = {}
         self._timeline = None
+        self._protocol_history = None
 
     def set_timeline(self, timeline: Any) -> None:
         self._timeline = timeline
+
+    def set_protocol_history(self, protocol_history: Any) -> None:
+        self._protocol_history = protocol_history
 
     @property
     def store(self) -> ContextStore:
@@ -166,6 +170,13 @@ class ChatContextManager:
 
     async def get_session_summary_async(self, chat_id: str) -> Dict[str, Any]:
         """获取完整会话摘要（用于详情页面）。"""
+        if self._timeline is not None:
+            try:
+                summary = await self._timeline.session_summary(chat_id)
+                if summary.get("message_count", 0):
+                    return summary
+            except Exception:
+                pass
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
@@ -336,6 +347,8 @@ class ChatContextManager:
             await context.clear_history_async()
             if self._timeline is not None:
                 await self._timeline.clear_chat(chat_id)
+            if self._protocol_history is not None:
+                await self._protocol_history.delete_chat(chat_id)
             # 清空 token 缓存（历史已清空，token 应为 0）
             await self._invalidate_token_cache(chat_id)
 

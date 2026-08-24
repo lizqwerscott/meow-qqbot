@@ -30,6 +30,8 @@ class ProtocolEvent:
     tool_calls: tuple[dict[str, Any], ...] = ()
     reasoning_content: str = ""
     timestamp: float = 0.0
+    chat_id: str = ""
+    token_count: int = 0
 
     def to_wire(self) -> dict[str, Any]:
         """Project this protocol event into the provider message shape."""
@@ -50,6 +52,24 @@ class ProtocolEvent:
                 "content": self.content,
             }
         raise ProtocolInvariantError(f"invalid protocol role: {self.role}")
+
+    def to_history_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "role": self.role,
+            "content": self.content,
+            "timestamp": self.timestamp,
+            "event_id": self.event_id,
+            "turn_id": self.turn_id,
+        }
+        if self.tool_calls:
+            result["tool_calls"] = [dict(call) for call in self.tool_calls]
+        if self.tool_call_id:
+            result["tool_call_id"] = self.tool_call_id
+        if self.tool_name:
+            result["tool_name"] = self.tool_name
+        if self.reasoning_content:
+            result["reasoning_content"] = self.reasoning_content
+        return result
 
 
 class TurnProtocolHistory:
@@ -73,6 +93,7 @@ class TurnProtocolHistory:
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS turn_protocol_history (
                     turn_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL DEFAULT '',
                     seq INTEGER NOT NULL,
                     event_id TEXT NOT NULL,
                     role TEXT NOT NULL,
@@ -82,10 +103,33 @@ class TurnProtocolHistory:
                     tool_calls TEXT NOT NULL DEFAULT '[]',
                     reasoning_content TEXT NOT NULL DEFAULT '',
                     timestamp REAL NOT NULL,
+                    token_count INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (turn_id, seq),
                     UNIQUE (turn_id, event_id)
                 )
                 """)
+            columns = {
+                row["name"]
+                for row in self._conn.execute(
+                    "PRAGMA table_info(turn_protocol_history)"
+                ).fetchall()
+            }
+            if "chat_id" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE turn_protocol_history ADD COLUMN chat_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "token_count" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE turn_protocol_history ADD COLUMN token_count INTEGER NOT NULL DEFAULT 0"
+                )
+                self._conn.execute("""
+                    UPDATE turn_protocol_history
+                       SET token_count = (
+                           LENGTH(content)
+                           + LENGTH(tool_calls)
+                           + LENGTH(reasoning_content)
+                       ) / 4
+                    """)
             self._conn.commit()
         return self._conn
 
@@ -112,6 +156,24 @@ class TurnProtocolHistory:
             tool_calls=tuple(calls),
             reasoning_content=row["reasoning_content"],
             timestamp=float(row["timestamp"]),
+            chat_id=row["chat_id"] if "chat_id" in row.keys() else "",
+            token_count=(
+                int(row["token_count"])
+                if "token_count" in row.keys()
+                else TurnProtocolHistory._estimate_tokens(
+                    row["content"], row["tool_calls"], row["reasoning_content"]
+                )
+            ),
+        )
+
+    @staticmethod
+    def _estimate_tokens(
+        content: str, tool_calls: str = "", reasoning_content: str = ""
+    ) -> int:
+        return max(
+            0,
+            (len(content or "") + len(tool_calls or "") + len(reasoning_content or ""))
+            // 4,
         )
 
     async def append_assistant(
@@ -123,10 +185,12 @@ class TurnProtocolHistory:
         tool_calls: Sequence[dict[str, Any]] = (),
         reasoning_content: str = "",
         timestamp: float | None = None,
+        chat_id: str = "",
     ) -> ProtocolEvent:
         calls = tuple(dict(call) for call in tool_calls)
         return await self._append(
             turn_id=turn_id,
+            chat_id=chat_id,
             event_id=event_id,
             role="assistant",
             content=content,
@@ -144,6 +208,7 @@ class TurnProtocolHistory:
         tool_name: str,
         content: str,
         timestamp: float | None = None,
+        chat_id: str = "",
     ) -> ProtocolEvent:
         if not tool_call_id:
             raise ProtocolInvariantError("tool result requires tool_call_id")
@@ -184,6 +249,7 @@ class TurnProtocolHistory:
             return await self._append_locked(
                 conn,
                 turn_id=turn_id,
+                chat_id=chat_id,
                 event_id=event_id,
                 role="tool",
                 content=content,
@@ -196,6 +262,7 @@ class TurnProtocolHistory:
         self,
         *,
         turn_id: str,
+        chat_id: str = "",
         event_id: str,
         role: str,
         content: str,
@@ -210,6 +277,7 @@ class TurnProtocolHistory:
             return await self._append_locked(
                 conn,
                 turn_id=turn_id,
+                chat_id=chat_id,
                 event_id=event_id,
                 role=role,
                 content=content,
@@ -225,6 +293,7 @@ class TurnProtocolHistory:
         conn: sqlite3.Connection,
         *,
         turn_id: str,
+        chat_id: str = "",
         event_id: str,
         role: str,
         content: str,
@@ -249,15 +318,21 @@ class TurnProtocolHistory:
             (turn_id,),
         ).fetchone()[0]
         now = time.time() if timestamp is None else timestamp
+        token_count = self._estimate_tokens(
+            content,
+            json.dumps(list(tool_calls), ensure_ascii=False, sort_keys=True),
+            reasoning_content,
+        )
         conn.execute(
             """
             INSERT INTO turn_protocol_history
-                (turn_id, seq, event_id, role, content, tool_call_id,
-                 tool_name, tool_calls, reasoning_content, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (turn_id, chat_id, seq, event_id, role, content, tool_call_id,
+                 tool_name, tool_calls, reasoning_content, timestamp, token_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 turn_id,
+                chat_id,
                 seq,
                 event_id,
                 role,
@@ -267,6 +342,7 @@ class TurnProtocolHistory:
                 json.dumps(list(tool_calls), ensure_ascii=False, sort_keys=True),
                 reasoning_content,
                 now,
+                token_count,
             ),
         )
         conn.commit()
@@ -293,6 +369,86 @@ class TurnProtocolHistory:
     async def snapshot_wire(self, turn_id: str) -> list[dict[str, Any]]:
         """Read one turn's protocol snapshot in provider wire form."""
         return self.to_wire_messages(await self.snapshot(turn_id))
+
+    async def history(
+        self, chat_id: str, max_events: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Return protocol events for one chat in chronological order."""
+        conn = await self._ensure_open()
+        async with self._lock:
+            rows = conn.execute(
+                """
+                SELECT * FROM turn_protocol_history
+                 WHERE chat_id = ? ORDER BY timestamp, turn_id, seq
+                """,
+                (chat_id,),
+            ).fetchall()
+        events = [self._event(row) for row in rows]
+        if max_events is not None:
+            events = events[-max_events:] if max_events > 0 else []
+        return [event.to_history_dict() for event in events]
+
+    async def chat_ids(self) -> list[str]:
+        conn = await self._ensure_open()
+        async with self._lock:
+            rows = conn.execute("""
+                SELECT DISTINCT chat_id FROM turn_protocol_history
+                 WHERE chat_id != '' ORDER BY chat_id
+                """).fetchall()
+        return [str(row["chat_id"]) for row in rows]
+
+    async def session_summary(self, chat_id: str) -> dict[str, int | float]:
+        conn = await self._ensure_open()
+        async with self._lock:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS message_count,
+                       COALESCE(MAX(timestamp), 0) AS last_activity,
+                       COALESCE(SUM(token_count), 0) AS estimated_tokens
+                  FROM turn_protocol_history
+                 WHERE chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchone()
+        return {
+            "message_count": int(row["message_count"]),
+            "last_activity": float(row["last_activity"]),
+            "estimated_tokens": int(row["estimated_tokens"]),
+        }
+
+    async def delete_chat(self, chat_id: str) -> None:
+        """Delete all protocol events belonging to one chat."""
+        if not chat_id:
+            raise ValueError("chat_id is required")
+        conn = await self._ensure_open()
+        async with self._lock:
+            conn.execute(
+                "DELETE FROM turn_protocol_history WHERE chat_id = ?", (chat_id,)
+            )
+            conn.commit()
+
+    async def claim_orphan_turns(self, chat_id: str, turn_ids: Sequence[str]) -> int:
+        """Attach legacy rows whose turn ID identifies a message in this chat."""
+        if not chat_id or not turn_ids:
+            return 0
+        normalized_ids = tuple(
+            dict.fromkeys(str(turn_id) for turn_id in turn_ids if turn_id)
+        )
+        if not normalized_ids:
+            return 0
+        conn = await self._ensure_open()
+        placeholders = ", ".join("?" for _ in normalized_ids)
+        async with self._lock:
+            cursor = conn.execute(
+                f"""
+                UPDATE turn_protocol_history
+                   SET chat_id = ?
+                 WHERE chat_id = '' AND turn_id IN ({placeholders})
+                """,
+                (chat_id, *normalized_ids),
+            )
+            conn.commit()
+            return cursor.rowcount
 
     async def close(self) -> None:
         async with self._lock:

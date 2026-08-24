@@ -17,9 +17,12 @@ _log = logging.getLogger(__name__)
     description="上下文管理",
 )
 class HistoryCommand:
-    def __init__(self, context_manager: ChatContextManager, timeline=None):
+    def __init__(
+        self, context_manager: ChatContextManager, timeline=None, protocol_history=None
+    ):
         self.context_manager = context_manager
         self.timeline = timeline
+        self.protocol_history = protocol_history
 
     async def _get_visible_history(self, chat_id: str) -> List[Dict[str, Any]]:
         if self.timeline is not None:
@@ -147,6 +150,8 @@ class HistoryCommand:
             await self.context_manager.clear_chat_history_async(target)
             if self.timeline is not None:
                 await self.timeline.clear_chat(target)
+            if self.protocol_history is not None:
+                await self.protocol_history.delete_chat(target)
             return make_reply(input_message, f"会话 {target[:24]}… 历史已清空。")
         except Exception as e:
             return make_reply(input_message, f"清空失败: {e}")
