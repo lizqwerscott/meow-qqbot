@@ -1278,9 +1278,32 @@ class AgentEngine:
             self._outbox_task = asyncio.create_task(self._admission_outbox_worker())
 
     async def start(self) -> None:
+        await self._repair_model_context_on_startup()
         await self._process_admission_outbox()
         await self._ensure_delivery_recovery_worker()
         await self._resume_preserved_consumers()
+
+    async def _repair_model_context_on_startup(self) -> None:
+        if not getattr(self, "model_context_enabled", False):
+            return
+        try:
+            report = await self._get_model_context().repair()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.model_context_read_enabled = False
+            self.model_context_write_enabled = False
+            self.model_context_enabled = False
+            self.model_context_shadow = False
+            _log.warning("模型上下文投影启动 repair 失败，已禁用: %s", exc)
+            return
+        _log.info(
+            "模型上下文投影启动 repair 完成: abandoned=%d orphan=%d invalid=%d fallback=%d",
+            report.get("abandoned_compaction_count", 0),
+            report.get("orphan_event_count", 0),
+            report.get("invalid_event_count", 0) + report.get("invalid_pair_count", 0),
+            report.get("fallback_count", 0),
+        )
 
     async def _resume_preserved_consumers(self) -> None:
         claims = await self.session_manager.claim_existing_consumers(

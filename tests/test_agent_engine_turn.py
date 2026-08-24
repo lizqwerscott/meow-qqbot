@@ -408,6 +408,65 @@ def make_engine(tool_loop, *, rule_router=None, model_registry=None):
 
 
 @pytest.mark.asyncio
+async def test_start_repairs_enabled_model_context_before_workers():
+    engine = make_engine(FakeToolLoop())
+    events = []
+
+    class Transcript:
+        async def repair(self):
+            events.append("repair")
+            return {
+                "abandoned_compaction_count": 1,
+                "orphan_event_count": 0,
+                "invalid_event_count": 0,
+                "invalid_pair_count": 0,
+                "fallback_count": 0,
+            }
+
+    engine.model_context_enabled = True
+    engine.model_context = Transcript()
+    engine._process_admission_outbox = AsyncMock(
+        side_effect=lambda: events.append("outbox")
+    )
+    engine._ensure_delivery_recovery_worker = AsyncMock(
+        side_effect=lambda: events.append("delivery")
+    )
+    engine._resume_preserved_consumers = AsyncMock(
+        side_effect=lambda: events.append("consumers")
+    )
+
+    await engine.start()
+
+    assert events == ["repair", "outbox", "delivery", "consumers"]
+
+
+@pytest.mark.asyncio
+async def test_start_disables_model_context_when_repair_fails():
+    engine = make_engine(FakeToolLoop())
+
+    class Transcript:
+        async def repair(self):
+            raise RuntimeError("broken transcript")
+
+    engine.model_context_enabled = True
+    engine.model_context_read_enabled = True
+    engine.model_context_write_enabled = True
+    engine.model_context_shadow = True
+    engine.model_context = Transcript()
+    engine._process_admission_outbox = AsyncMock()
+    engine._ensure_delivery_recovery_worker = AsyncMock()
+    engine._resume_preserved_consumers = AsyncMock()
+
+    await engine.start()
+
+    assert engine.model_context_enabled is False
+    assert engine.model_context_read_enabled is False
+    assert engine.model_context_write_enabled is False
+    assert engine.model_context_shadow is False
+    engine._process_admission_outbox.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_tool_loop_isolates_send_message_callback_from_other_tools(monkeypatch):
     class FakeAI:
         model = "test"
