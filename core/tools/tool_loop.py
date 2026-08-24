@@ -13,7 +13,7 @@ import logging
 from typing import Any, Awaitable, Callable, List, Optional
 
 from core.ai.fallback_runner import FallbackRunner
-from core.ai.protocol import ensure_messages_consistent
+from core.ai.protocol import ContextOverflowError, ensure_messages_consistent
 from core.engine.assistant_output import decide_assistant_output
 from core.engine.delivery_ledger import DeliveryController, DeliveryReceipt
 from core.engine.turn_capabilities import TurnCapabilities
@@ -122,6 +122,12 @@ class ToolLoop:
         model_context_provider_callback: Optional[
             Callable[[Any, bool], Awaitable[Any]]
         ] = None,
+        model_context_overflow_callback: Optional[
+            Callable[[Any, float], Awaitable[Any]]
+        ] = None,
+        model_context_usage_callback: Optional[
+            Callable[[Optional[dict], Any, str, float], Awaitable[None]]
+        ] = None,
     ) -> tuple[bool, bool]:
         """执行工具调用循环。
 
@@ -220,6 +226,7 @@ class ToolLoop:
             # ── AI 调用（FallbackRunner 统一回退编排） ──
             message = None
             usage = None
+            overflow_rebuilt = False
             if runner:
                 runner.reset_failures()
             while True:
@@ -262,6 +269,7 @@ class ToolLoop:
                 )
 
                 was_exception = False
+                request_started = asyncio.get_running_loop().time()
                 try:
                     # 协议已声明 chat_completion_stream，直接调用（不防御式探测）
                     if self._stream_reply:
@@ -282,6 +290,30 @@ class ToolLoop:
                         )
                 except asyncio.CancelledError:
                     raise
+                except ContextOverflowError as e:
+                    delivery.complete()
+                    if (
+                        not delivery.forwarded
+                        and not overflow_rebuilt
+                        and model_context_overflow_callback is not None
+                    ):
+                        _log.warning(
+                            "模型上下文超限，尝试压缩后重试 [%s..]: %s",
+                            chat_id[:12],
+                            e,
+                        )
+                        rebuilt = await model_context_overflow_callback(
+                            svc,
+                            (asyncio.get_running_loop().time() - request_started)
+                            * 1000,
+                        )
+                        if rebuilt is not None:
+                            messages, tools = rebuilt
+                            overflow_rebuilt = True
+                            continue
+                    was_exception = True
+                    _log.warning("模型上下文超限且无法恢复 [%s..]: %s", chat_id[:12], e)
+                    message, usage = None, None
                 except Exception as e:
                     was_exception = True
                     _log.warning(f"模型 [{current_model_name}] 调用异常: {e}")
@@ -373,6 +405,13 @@ class ToolLoop:
                 )
                 self.cost_tracker.record_turn(
                     chat_id, model_for_cost, usage, metadata=metadata
+                )
+            if message is not None and model_context_usage_callback is not None:
+                await model_context_usage_callback(
+                    usage,
+                    provider_service,
+                    model_for_cost,
+                    (asyncio.get_running_loop().time() - request_started) * 1000,
                 )
 
             # 流式已转发部分文本但调用异常：终止整个循环（部分文本已送达）

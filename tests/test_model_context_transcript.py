@@ -1,9 +1,11 @@
+import asyncio
 import sqlite3
 from types import SimpleNamespace
 
 import pytest
 
 from core.engine.model_context_transcript import (
+    ModelContextCompactionInProgressError,
     ModelContextInvariantError,
     ModelContextScope,
     ModelContextTranscript,
@@ -349,6 +351,179 @@ async def test_transcript_prunes_complete_old_turns_to_configured_bound(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_local_waterline_compaction_snips_and_prunes_without_breaking_pairs(
+    tmp_path,
+):
+    transcript = ModelContextTranscript(
+        str(tmp_path / "model-context.sqlite3"),
+        max_tokens=160,
+        compaction_enabled=True,
+        compaction_keep_recent_tokens=1,
+        compaction_snip_max_chars=64,
+    )
+    scope = _scope()
+    for turn_id in ("turn-1", "turn-2", "turn-3"):
+        protocol = (
+            ProtocolEvent(
+                turn_id=turn_id,
+                seq=1,
+                event_id=f"assistant:{turn_id}",
+                role="assistant",
+                content="",
+                tool_calls=(
+                    {
+                        "id": f"call-{turn_id}",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    },
+                ),
+            ),
+            ProtocolEvent(
+                turn_id=turn_id,
+                seq=2,
+                event_id=f"tool:{turn_id}",
+                role="tool",
+                content="diagnostic output " * 300,
+                tool_call_id=f"call-{turn_id}",
+            ),
+        )
+        await transcript.append_turn(
+            scope, turn_id=turn_id, user_events=(), protocol_events=protocol
+        )
+        scope = await transcript.current_scope(scope)
+
+    result = await transcript.compact_if_needed(scope)
+
+    assert result.changed is True
+    assert result.tier in {1, 2, 3}
+    assert result.scope.generation > 1
+    assert any(event.operation in {"snip", "prune"} for event in result.snapshot.events)
+    protocol_events = [
+        event for event in result.snapshot.events if event.role in {"assistant", "tool"}
+    ]
+    transcript._validate_protocol(protocol_events)
+    status = await transcript.status()
+    assert status["compaction_committed_count"] == 1
+    await transcript.close()
+
+
+@pytest.mark.asyncio
+async def test_incremental_summary_replaces_only_safe_old_turns(tmp_path):
+    transcript = ModelContextTranscript(
+        str(tmp_path / "model-context.sqlite3"),
+        max_tokens=120,
+        compaction_enabled=True,
+        compaction_keep_recent_tokens=1,
+    )
+    scope = _scope()
+    for turn_id, content in (
+        ("turn-1", "old progress " * 300),
+        ("turn-2", "more old progress " * 300),
+        ("turn-3", "recent answer"),
+    ):
+        await transcript.append_turn(
+            scope,
+            turn_id=turn_id,
+            user_events=(),
+            protocol_events=_protocol(turn_id, content),
+        )
+        scope = await transcript.current_scope(scope)
+
+    calls = []
+
+    async def summarize(messages, max_tokens):
+        calls.append((messages, max_tokens))
+        return (
+            "进展：已完成旧任务\n文件：无\n待办：继续当前任务\n上下文：保留旧结论",
+            {"prompt_tokens": 20, "completion_tokens": 8},
+            42.5,
+        )
+
+    result = await transcript.compact_if_needed(scope, summary_factory=summarize)
+
+    assert result.tier == 3
+    assert result.operation == "compact_replace"
+    assert result.snapshot.scope.generation > scope.generation
+    assert len(calls) == 1
+    assert calls[0][1] == 500
+    assert result.snapshot.events[-1].compacted is True
+    assert result.snapshot.events[-1].operation == "compact_replace"
+    assert result.snapshot.events[-1].content.startswith("进展：")
+    assert result.elapsed_ms == 42.5
+    assert result.snapshot.events[-2].content == "recent answer"
+    status = await transcript.status()
+    assert status["compaction_committed_count"] == 1
+    assert status["summary_prompt_tokens"] == 20
+    assert status["summary_completion_tokens"] == 8
+    assert status["summary_elapsed_ms"] == 42.5
+    await transcript.close()
+
+
+@pytest.mark.asyncio
+async def test_later_summary_keeps_frozen_checkpoint_and_summarizes_delta(tmp_path):
+    transcript = ModelContextTranscript(
+        str(tmp_path / "model-context.sqlite3"),
+        max_tokens=120,
+        compaction_enabled=True,
+        compaction_keep_recent_tokens=1,
+    )
+    scope = _scope()
+    for turn_id, content in (
+        ("turn-1", "first old progress " * 300),
+        ("turn-2", "second old progress " * 300),
+        ("turn-3", "recent answer"),
+    ):
+        await transcript.append_turn(
+            scope,
+            turn_id=turn_id,
+            user_events=(),
+            protocol_events=_protocol(turn_id, content),
+        )
+        scope = await transcript.current_scope(scope)
+
+    calls = []
+
+    async def summarize(messages, max_tokens):
+        calls.append(messages)
+        return "进展：新的增量\n文件：无\n待办：继续\n上下文：新的结论"
+
+    first = await transcript.compact_if_needed(scope, summary_factory=summarize)
+    assert first.snapshot.events[-1].operation == "compact_replace"
+    scope = first.scope
+
+    await transcript.append_turn(
+        scope,
+        turn_id="turn-4",
+        user_events=(),
+        protocol_events=_protocol("turn-4", "third old progress " * 300),
+    )
+    scope = await transcript.current_scope(scope)
+    await transcript.append_turn(
+        scope,
+        turn_id="turn-5",
+        user_events=(),
+        protocol_events=_protocol("turn-5", "latest answer"),
+    )
+    scope = await transcript.current_scope(scope)
+
+    second = await transcript.compact_if_needed(scope, summary_factory=summarize)
+    compacted_events = [
+        event
+        for event in second.snapshot.events
+        if event.operation == "compact_replace"
+    ]
+
+    assert len(calls) == 2
+    assert calls[1][0]["content"] == first.snapshot.events[-1].content
+    assert len(compacted_events) == 2
+    assert "latest answer" in [event.content for event in second.snapshot.events]
+    assert not any(
+        "third old progress" in event.content for event in second.snapshot.events
+    )
+    await transcript.close()
+
+
+@pytest.mark.asyncio
 async def test_transcript_rejects_unsupported_schema_version(tmp_path):
     path = tmp_path / "model-context.sqlite3"
     conn = sqlite3.connect(path)
@@ -360,6 +535,303 @@ async def test_transcript_rejects_unsupported_schema_version(tmp_path):
     transcript = ModelContextTranscript(str(path))
     with pytest.raises(ModelContextInvariantError, match="schema version"):
         await transcript.snapshot(_scope())
+
+
+@pytest.mark.asyncio
+async def test_provider_usage_is_persisted_and_used_for_waterline(tmp_path):
+    transcript = ModelContextTranscript(
+        str(tmp_path / "model-context.sqlite3"),
+        max_tokens=100,
+        compaction_enabled=True,
+        compaction_keep_recent_tokens=4096,
+    )
+    scope = _scope()
+    await transcript.append_turn(
+        scope,
+        turn_id="turn-1",
+        user_events=(),
+        protocol_events=_protocol("turn-1", "short"),
+    )
+    scope = await transcript.current_scope(scope)
+    await transcript.record_provider_usage(
+        scope,
+        {
+            "prompt_tokens": 100,
+            "prompt_cache_hit_tokens": 80,
+            "prompt_cache_miss_tokens": 20,
+        },
+        provider="deepseek:flash",
+        model="deepseek-v4-flash",
+        turn_id="turn-1",
+    )
+
+    usage = await transcript.latest_provider_usage(scope, provider="deepseek:flash")
+    result = await transcript.compact_if_needed(scope)
+
+    assert usage is not None
+    assert usage.prompt_tokens == 100
+    assert usage.usage_present is True
+    assert usage.elapsed_ms == 0
+    assert result.before_tokens == 100
+    assert "provider usage" in result.reason
+    await transcript.close()
+
+
+@pytest.mark.asyncio
+async def test_force_compaction_bypasses_normal_waterline(tmp_path):
+    transcript = ModelContextTranscript(
+        str(tmp_path / "model-context.sqlite3"),
+        max_tokens=10_000,
+        compaction_enabled=False,
+        compaction_keep_recent_tokens=1,
+    )
+    scope = _scope()
+    for turn_id, content in (("turn-1", "old context"), ("turn-2", "recent")):
+        await transcript.append_turn(
+            scope,
+            turn_id=turn_id,
+            user_events=(),
+            protocol_events=_protocol(turn_id, content),
+        )
+        scope = await transcript.current_scope(scope)
+
+    calls = []
+
+    async def summarize(messages, max_tokens):
+        calls.append(messages)
+        return "进展：完成\n文件：无\n待办：继续\n上下文：保留"
+
+    result = await transcript.compact_if_needed(
+        scope, summary_factory=summarize, force=True
+    )
+
+    assert len(calls) == 1
+    assert result.operation == "compact_replace"
+    assert result.snapshot.events[-1].compacted is True
+    await transcript.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_provider_usage_is_explicit_fallback(tmp_path):
+    transcript = ModelContextTranscript(str(tmp_path / "model-context.sqlite3"))
+    scope = _scope()
+    observation = await transcript.record_provider_usage(
+        scope, {"prompt_tokens": 12}, provider="openai:gpt", turn_id="turn-1"
+    )
+
+    status = await transcript.status()
+
+    assert observation.usage_present is False
+    assert status["usage_observation_count"] == 1
+    assert status["usage_missing_count"] == 1
+    await transcript.close()
+
+
+@pytest.mark.asyncio
+async def test_status_reports_cache_totals_and_close_scope_cleans_observations(
+    tmp_path,
+):
+    transcript = ModelContextTranscript(str(tmp_path / "model-context.sqlite3"))
+    scope = _scope()
+    await transcript.record_provider_usage(
+        scope,
+        {
+            "prompt_tokens": 100,
+            "prompt_cache_hit_tokens": 75,
+            "prompt_cache_miss_tokens": 25,
+        },
+        elapsed_ms=12.5,
+    )
+    await transcript.record_incident(
+        scope,
+        "context_overflow",
+        recovered=True,
+        elapsed_ms=3.0,
+    )
+
+    status = await transcript.status()
+    assert status["prompt_tokens"] == 100
+    assert status["cache_hit_tokens"] == 75
+    assert status["cache_miss_tokens"] == 25
+    assert status["cache_hit_rate"] == 75.0
+    assert status["usage_elapsed_ms"] == 12.5
+    assert status["overflow_recovery_count"] == 1
+
+    await transcript.close_scope(scope)
+    status = await transcript.status()
+    assert status["usage_observation_count"] == 0
+    assert status["overflow_count"] == 0
+    await transcript.close()
+
+
+@pytest.mark.asyncio
+async def test_started_compaction_is_abandoned_after_restart(tmp_path):
+    path = str(tmp_path / "model-context.sqlite3")
+    transcript = ModelContextTranscript(path)
+    operation_id = await transcript.begin_compaction(
+        _scope(), operation="compact_replace", reason="test"
+    )
+    await transcript.close()
+
+    restarted = ModelContextTranscript(path)
+    status = await restarted.status()
+
+    assert operation_id
+    assert status["compaction_abandoned_count"] == 1
+    assert status["abandoned_compaction_count"] == 1
+    await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_v1_schema_migrates_operation_column(tmp_path):
+    path = str(tmp_path / "model-context.sqlite3")
+    initial = ModelContextTranscript(path)
+    scope = _scope()
+    await initial.append_turn(
+        scope,
+        turn_id="turn-1",
+        user_events=(),
+        protocol_events=_protocol(),
+    )
+    await initial.close()
+
+    conn = sqlite3.connect(path)
+    conn.execute("ALTER TABLE model_context_events DROP COLUMN operation")
+    conn.execute("UPDATE model_context_schema SET version = 1")
+    conn.commit()
+    conn.close()
+
+    migrated = ModelContextTranscript(path)
+    snapshot = await migrated.snapshot(scope)
+
+    assert snapshot.events[0].operation == "append"
+    assert (await migrated.status())["schema_version"] == 7
+    await migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_compaction_does_not_overwrite_append_during_summary(tmp_path):
+    transcript = ModelContextTranscript(
+        str(tmp_path / "model-context.sqlite3"),
+        max_tokens=120,
+        compaction_enabled=True,
+        compaction_keep_recent_tokens=1,
+    )
+    scope = _scope()
+    for turn_id, content in (
+        ("turn-1", "old context " * 300),
+        ("turn-2", "recent context " * 300),
+    ):
+        await transcript.append_turn(
+            scope,
+            turn_id=turn_id,
+            user_events=(),
+            protocol_events=_protocol(turn_id, content),
+        )
+        scope = await transcript.current_scope(scope)
+
+    summary_started = asyncio.Event()
+    release_summary = asyncio.Event()
+
+    async def summarize(messages, max_tokens):
+        summary_started.set()
+        await release_summary.wait()
+        return "进展：旧上下文\n文件：无\n待办：继续\n上下文：旧结论"
+
+    compaction_task = asyncio.create_task(
+        transcript.compact_if_needed(scope, summary_factory=summarize)
+    )
+    await summary_started.wait()
+    await transcript.append_turn(
+        scope,
+        turn_id="turn-3",
+        user_events=(),
+        protocol_events=_protocol("turn-3", "new append"),
+    )
+    release_summary.set()
+    result = await compaction_task
+
+    contents = [event.content for event in result.snapshot.events]
+    assert "new append" in contents
+    assert not any(content.startswith("进展：旧上下文") for content in contents)
+    assert (await transcript.status())["compaction_failed_count"] == 1
+    await transcript.close()
+
+
+@pytest.mark.asyncio
+async def test_scope_allows_only_one_active_compaction(tmp_path):
+    transcript = ModelContextTranscript(str(tmp_path / "model-context.sqlite3"))
+    scope = _scope()
+    first = await transcript.begin_compaction(
+        scope, operation="compact_replace", reason="first"
+    )
+
+    with pytest.raises(ModelContextCompactionInProgressError):
+        await transcript.begin_compaction(
+            scope, operation="compact_replace", reason="second"
+        )
+
+    await transcript.fail_compaction(first, "test release")
+    second = await transcript.begin_compaction(
+        scope, operation="compact_replace", reason="retry"
+    )
+    assert second != first
+    await transcript.close()
+
+
+@pytest.mark.asyncio
+async def test_compaction_conflict_returns_fresh_snapshot(tmp_path):
+    transcript = ModelContextTranscript(
+        str(tmp_path / "model-context.sqlite3"),
+        max_tokens=1,
+        compaction_enabled=True,
+        compaction_keep_recent_tokens=1,
+    )
+    scope = _scope()
+    for turn_id, content in (("turn-1", "old"), ("turn-2", "recent")):
+        await transcript.append_turn(
+            scope,
+            turn_id=turn_id,
+            user_events=(),
+            protocol_events=_protocol(turn_id, content),
+        )
+        scope = await transcript.current_scope(scope)
+
+    operation_id = await transcript.begin_compaction(
+        scope, operation="compact_replace", reason="test lock"
+    )
+    result = await transcript.compact_if_needed(
+        scope,
+        summary_factory=lambda messages, max_tokens: asyncio.sleep(0),
+        force=True,
+    )
+
+    assert result.changed is False
+    assert "already in progress" in result.reason
+    assert [event.content for event in result.snapshot.events] == ["old", "recent"]
+    await transcript.fail_compaction(operation_id, "test release")
+    await transcript.close()
+
+
+@pytest.mark.asyncio
+async def test_event_bound_pruning_records_provenance(tmp_path):
+    transcript = ModelContextTranscript(
+        str(tmp_path / "model-context.sqlite3"), max_events=2
+    )
+    scope = _scope()
+    for turn_id in ("turn-1", "turn-2", "turn-3"):
+        await transcript.append_turn(
+            scope,
+            turn_id=turn_id,
+            user_events=(),
+            protocol_events=_protocol(turn_id, turn_id),
+        )
+        scope = await transcript.current_scope(scope)
+
+    status = await transcript.status()
+    assert status["compaction_event_prune_count"] == 1
+    assert status["compaction_committed_count"] == 1
+    await transcript.close()
 
 
 def test_cost_tracker_records_missing_cache_usage_as_an_observation():

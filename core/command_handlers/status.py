@@ -89,7 +89,12 @@ class StatusCommand:
                 model_context_lines = [
                     "",
                     "**模型上下文投影**",
+                    f"- compaction: `done={model_context.get('compaction_committed_count', 0)}` `failed={model_context.get('compaction_failed_count', 0)}` `abandoned={model_context.get('compaction_abandoned_count', 0)}`",
                     f"- schema: `{model_context.get('schema_version', 0)}`，scope: `{model_context.get('scope_count', 0)}`，events: `{model_context.get('event_count', 0)}`",
+                    f"- usage: `observed={model_context.get('usage_observation_count', 0)}` `missing={model_context.get('usage_missing_count', 0)}` `hit={model_context.get('cache_hit_tokens', 0)}` `miss={model_context.get('cache_miss_tokens', 0)}` `rate={model_context.get('cache_hit_rate', 0)}%`，repair fallback: `{model_context.get('fallback_count', 0)}`",
+                    f"- summary: `prompt={model_context.get('summary_prompt_tokens', 0)}` `completion={model_context.get('summary_completion_tokens', 0)}` `elapsed={model_context.get('summary_elapsed_ms', 0)}ms`",
+                    f"- mode: `read={model_context.get('read_enabled', False)}` `write={model_context.get('write_enabled', False)}` `shadow={model_context.get('shadow', False)}`",
+                    f"- overflow: `detected={model_context.get('overflow_count', 0)}` `recovered={model_context.get('overflow_recovery_count', 0)}`",
                 ]
             engagement_lines = [
                 "",

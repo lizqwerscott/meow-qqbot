@@ -88,6 +88,29 @@ class StreamAbortedError(Exception):
     """
 
 
+class ContextOverflowError(Exception):
+    """Provider rejected a request because its context window was exceeded."""
+
+
+def is_context_overflow_error(error: BaseException) -> bool:
+    """Recognize provider-specific context-window failures conservatively."""
+    status = getattr(error, "status_code", None)
+    text = str(error).lower()
+    markers = (
+        "context length",
+        "context_length",
+        "context window",
+        "context_window",
+        "maximum context",
+        "max context",
+        "too many tokens",
+        "prompt is too long",
+        "input is too long",
+        "request too large",
+    )
+    return status in (None, 400, 413) and any(marker in text for marker in markers)
+
+
 def log_llm_error(
     e: Exception, model: str, *, service: str = "AI", tag: str = ""
 ) -> None:

@@ -6,6 +6,7 @@
 - 动态 system 消息（记忆、时间、用户列表、技能条目）
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -132,6 +133,8 @@ class PromptBuilder:
         self._deps = deps
         self.timeline = None
         self.model_context_transcript = None
+        self.model_context_read_enabled = True
+        self.model_context_write_enabled = True
         self.media_service = None
         self._dynamic_ctx_builder = DynamicContextBuilder(
             hindsight=self.hindsight,
@@ -162,6 +165,8 @@ class PromptBuilder:
         model_context_scope: Optional[ModelContextScope] = None,
         model_context_identity: Optional[Sequence[str]] = None,
         model_context_provider_identity: Optional[str] = None,
+        model_context_provider_service: Any = None,
+        force_model_context_compaction: bool = False,
         delivery_contract: Optional[DeliveryPromptContract] = None,
         media_context: Optional[BatchMediaContext] = None,
     ) -> PromptBuildResult:
@@ -282,18 +287,111 @@ class PromptBuilder:
                 ).encode("utf-8")
             ).hexdigest()
             try:
-                model_context_scope = (
-                    await self.model_context_transcript.ensure_generation(
-                        model_context_scope,
-                        fingerprint,
-                        provider_identity=model_context_provider_identity,
+                if self.model_context_write_enabled:
+                    model_context_scope = (
+                        await self.model_context_transcript.ensure_generation(
+                            model_context_scope,
+                            fingerprint,
+                            provider_identity=model_context_provider_identity,
+                        )
                     )
-                )
-                model_context_snapshot = await self.model_context_transcript.snapshot(
-                    model_context_scope
-                )
+                else:
+                    compatible = (
+                        await self.model_context_transcript.generation_compatible(
+                            model_context_scope,
+                            fingerprint,
+                            provider_identity=model_context_provider_identity,
+                        )
+                    )
+                    if not compatible:
+                        model_context_scope = None
+                        model_context_snapshot = None
+
+                async def _summary_factory(source_messages, max_summary_tokens):
+                    summary_service = model_context_provider_service or self.ai_service
+                    stable_tools = json.dumps(
+                        tools_to_use or [],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    summary_prompt = (
+                        "请压缩模型上下文中的旧对话，严格只保留原文事实。"
+                        "输出必须包含以下四个标题：进展、文件、待办、上下文。"
+                        "不要写入投递状态、审批状态或未被原文支持的工具结果。"
+                    )
+                    summary_messages = [
+                        {
+                            "role": "system",
+                            "content": (
+                                f"{static_prompt}\n\n"
+                                "【稳定工具定义】\n"
+                                f"{stable_tools}\n\n"
+                                "你正在为后续模型请求生成内部上下文摘要，"
+                                "不要直接回答用户。"
+                            ),
+                        },
+                        *source_messages,
+                        {"role": "user", "content": summary_prompt},
+                    ]
+                    started = asyncio.get_running_loop().time()
+                    summary, usage = await summary_service.chat_completion(
+                        messages=summary_messages, max_tokens=max_summary_tokens
+                    )
+                    elapsed_ms = (asyncio.get_running_loop().time() - started) * 1000
+                    if cost_tracker is not None and usage:
+                        record_turn = getattr(cost_tracker, "record_turn", None)
+                        if record_turn is not None:
+                            record_turn(
+                                chat_id,
+                                getattr(summary_service, "model", ""),
+                                usage,
+                                metadata={
+                                    "usage_kind": "model_context_compaction",
+                                    "scope_generation": model_context_scope.generation,
+                                    "compaction_reason": "tier3_summary",
+                                    "provider": getattr(
+                                        summary_service,
+                                        "provider_type",
+                                        type(summary_service).__name__,
+                                    ),
+                                    "elapsed_ms": elapsed_ms,
+                                },
+                            )
+                    summary = (summary or "").strip()
+                    required_sections = ("进展", "文件", "待办", "上下文")
+                    if not all(section in summary for section in required_sections):
+                        _log.warning("模型上下文摘要缺少结构化章节，拒绝提交")
+                        return "", usage, elapsed_ms
+                    return summary, usage, elapsed_ms
+
+                if self.model_context_write_enabled and model_context_scope is not None:
+                    provider_usage = (
+                        await self.model_context_transcript.latest_provider_usage(
+                            model_context_scope,
+                            provider=model_context_provider_identity,
+                        )
+                    )
+                    compression = await self.model_context_transcript.compact_if_needed(
+                        model_context_scope,
+                        provider_usage=provider_usage,
+                        summary_factory=_summary_factory,
+                        force=force_model_context_compaction,
+                    )
+                    model_context_scope = compression.scope
+                    model_context_snapshot = compression.snapshot
+                elif (
+                    self.model_context_read_enabled and model_context_scope is not None
+                ):
+                    model_context_snapshot = (
+                        await self.model_context_transcript.snapshot(
+                            model_context_scope
+                        )
+                    )
+                if not self.model_context_read_enabled:
+                    model_context_snapshot = None
             except Exception as exc:
-                _log.warning("模型上下文 generation 检查失败: %s", exc)
+                _log.warning("模型上下文 generation/compaction 检查失败: %s", exc)
                 model_context_scope = None
                 model_context_snapshot = None
 

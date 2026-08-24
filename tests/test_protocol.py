@@ -5,11 +5,21 @@ import pytest
 from core.ai.protocol import (
     AssistantMessage,
     AssistantToolCall,
+    ContextOverflowError,
     StreamCallbacks,
     StreamState,
     ensure_messages_consistent,
+    is_context_overflow_error,
     log_llm_error,
 )
+
+
+def test_context_overflow_error_detection_requires_provider_context_signal():
+    error = ContextOverflowError("context length exceeded")
+    error.status_code = 400
+
+    assert is_context_overflow_error(error) is True
+    assert is_context_overflow_error(RuntimeError("temporary network error")) is False
 
 
 def _tc(tc_id: str = "call_1", name: str = "web_search", args: str = "{}"):

@@ -60,6 +60,11 @@
 <div class="card" style="margin-top:20px">
     <h2>🧠 模型上下文投影</h2>
     <p>Schema: {{ stats.model_context.schema_version }} · Scope: {{ stats.model_context.scope_count }} · Events: {{ stats.model_context.event_count }}</p>
+    <p>Compaction: committed {{ stats.model_context.compaction_committed_count }} · failed {{ stats.model_context.compaction_failed_count }} · abandoned {{ stats.model_context.compaction_abandoned_count }}</p>
+    <p>Usage: {{ stats.model_context.usage_observation_count }}（缺失 {{ stats.model_context.usage_missing_count }}） · Cache hit {{ stats.model_context.cache_hit_tokens }} / miss {{ stats.model_context.cache_miss_tokens }}（{{ stats.model_context.cache_hit_rate }}%） · Repair fallback: {{ stats.model_context.fallback_count }}</p>
+    <p>Summary: prompt {{ stats.model_context.summary_prompt_tokens }} · completion {{ stats.model_context.summary_completion_tokens }} · elapsed {{ stats.model_context.summary_elapsed_ms }}ms</p>
+    <p>Mode: read={{ stats.model_context.read_enabled }} · write={{ stats.model_context.write_enabled }} · shadow={{ stats.model_context.shadow }}</p>
+    <p>Overflow: detected {{ stats.model_context.overflow_count }} · recovered {{ stats.model_context.overflow_recovery_count }}</p>
 </div>
 {% endif %}
 

@@ -27,10 +27,12 @@ from openai.types.chat import ChatCompletionMessageParam
 from core.ai.protocol import (
     AssistantMessage,
     AssistantToolCall,
+    ContextOverflowError,
     StreamAbortedError,
     StreamCallbacks,
     StreamState,
     ensure_messages_consistent,
+    is_context_overflow_error,
     log_llm_error,
 )
 
@@ -355,6 +357,8 @@ class DeepSeekResponsesService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            if is_context_overflow_error(e):
+                raise ContextOverflowError(str(e)) from e
             log_llm_error(e, model_to_use, service="DeepSeek")
             return None, None
 
@@ -379,6 +383,8 @@ class DeepSeekResponsesService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            if is_context_overflow_error(e):
+                raise ContextOverflowError(str(e)) from e
             log_llm_error(e, model_to_use, service="DeepSeek")
             return None, None
 
@@ -588,9 +594,13 @@ class DeepSeekResponsesService:
             return state.assemble()
         except asyncio.CancelledError:
             raise
-        except StreamAbortedError:
+        except StreamAbortedError as e:
+            if is_context_overflow_error(e):
+                raise ContextOverflowError(str(e)) from e
             raise
         except Exception as e:
+            if is_context_overflow_error(e):
+                raise ContextOverflowError(str(e)) from e
             log_llm_error(e, model_to_use, service="DeepSeek", tag="（流式）")
             # 聚合到一半断流：不把半截结果当完整返回（上层会误判成功、跳过
             # fallback、投递截断回复）。抛 StreamAbortedError，由 ToolLoop 依

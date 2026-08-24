@@ -9,10 +9,12 @@ from openai.types.chat import ChatCompletionMessageParam
 
 from core.ai.protocol import (
     AssistantMessage,
+    ContextOverflowError,
     StreamAbortedError,
     StreamCallbacks,
     StreamState,
     ensure_messages_consistent,
+    is_context_overflow_error,
     log_llm_error,
 )
 
@@ -146,6 +148,8 @@ class AIService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            if is_context_overflow_error(e):
+                raise ContextOverflowError(str(e)) from e
             log_llm_error(e, model_to_use)
             return None, None
 
@@ -214,7 +218,9 @@ class AIService:
             return state.assemble()
         except asyncio.CancelledError:
             raise
-        except StreamAbortedError:
+        except StreamAbortedError as e:
+            if is_context_overflow_error(e):
+                raise ContextOverflowError(str(e)) from e
             raise
         except Exception as e:
             err_str = str(e)
@@ -244,6 +250,8 @@ class AIService:
                     raise StreamAbortedError(f"流式降级重试失败: {e2}") from e2
                 state.finalize_all_tool_calls()
                 return state.assemble()
+            if is_context_overflow_error(e):
+                raise ContextOverflowError(str(e)) from e
             log_llm_error(e, model_to_use, tag="（流式）")
             # 聚合到一半断流：不把半截结果当完整返回——上层会误判成功、跳过
             # fallback、投递截断回复。抛 StreamAbortedError，由 ToolLoop 依
@@ -329,5 +337,7 @@ class AIService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            if is_context_overflow_error(e):
+                raise ContextOverflowError(str(e)) from e
             log_llm_error(e, model_to_use, tag="（带工具）")
             return None, None

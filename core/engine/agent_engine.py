@@ -118,6 +118,8 @@ class _TurnRequest:
         Callable[[ModelContextScope], Awaitable[None]]
     ] = None
     model_context_provider_callback: Optional[Callable[..., Awaitable[Any]]] = None
+    model_context_usage_callback: Optional[Callable[..., Awaitable[None]]] = None
+    model_context_overflow_callback: Optional[Callable[..., Awaitable[Any]]] = None
 
 
 @dataclass(frozen=True)
@@ -227,15 +229,68 @@ class AgentEngine:
         self.timeline = ConversationTimeline()
         self.protocol_history = TurnProtocolHistory()
         model_context_config = getattr(ctx.mgmt, "model_context_config", {}) or {}
-        self.model_context_enabled = bool(model_context_config.get("enabled", False))
+        projection_enabled = bool(model_context_config.get("enabled", False))
+        projection_mode = str(
+            model_context_config.get(
+                "mode", model_context_config.get("read_mode", "projection")
+            )
+        ).lower()
+        self.model_context_write_enabled = projection_enabled and bool(
+            model_context_config.get("write_enabled", True)
+        )
+        self.model_context_read_enabled = projection_enabled and bool(
+            model_context_config.get("read_enabled", True)
+        )
+        if projection_mode in {"off", "disabled"}:
+            self.model_context_write_enabled = False
+            self.model_context_read_enabled = False
+        elif projection_mode in {"shadow", "diagnostic", "write_only"}:
+            self.model_context_read_enabled = False
+        elif projection_mode == "read_only":
+            self.model_context_write_enabled = False
+        if bool(model_context_config.get("rollback", False)):
+            self.model_context_read_enabled = False
+        self.model_context_shadow = not self.model_context_read_enabled and (
+            self.model_context_write_enabled
+        )
+        self.model_context_enabled = (
+            self.model_context_write_enabled or self.model_context_read_enabled
+        )
+        compaction_config = model_context_config.get("compaction", {}) or {}
+        if not isinstance(compaction_config, dict):
+            compaction_config = {}
+
+        def _compaction_value(name, default):
+            return compaction_config.get(
+                name,
+                model_context_config.get(
+                    f"compaction_{name}", model_context_config.get(name, default)
+                ),
+            )
+
         self.model_context = ModelContextTranscript(
             model_context_config.get("path", "data/model_context_transcript.sqlite3"),
             max_events=int(model_context_config.get("max_events", 512)),
             max_tokens=int(model_context_config.get("max_tokens", 24000)),
+            compaction_enabled=bool(_compaction_value("enabled", False)),
+            compaction_tier1_ratio=float(_compaction_value("tier1_ratio", 0.60)),
+            compaction_tier2_ratio=float(_compaction_value("tier2_ratio", 0.80)),
+            compaction_tier3_ratio=float(_compaction_value("tier3_ratio", 0.95)),
+            compaction_keep_recent_tokens=int(
+                _compaction_value("keep_recent_tokens", 4096)
+            ),
+            compaction_snip_max_chars=int(_compaction_value("snip_max_chars", 1200)),
+            compaction_max_summary_tokens=int(
+                _compaction_value("max_summary_tokens", 500)
+            ),
         )
         self.prompt_builder = PromptBuilder(ctx)
         self.prompt_builder.timeline = self.timeline
         self.prompt_builder.model_context_transcript = self.model_context
+        self.prompt_builder.model_context_read_enabled = self.model_context_read_enabled
+        self.prompt_builder.model_context_write_enabled = (
+            self.model_context_write_enabled
+        )
         self.tool_loop = ToolLoop(
             ctx,
             prompt_builder=self.prompt_builder,
@@ -600,7 +655,7 @@ class AgentEngine:
         )
 
     async def _model_context_snapshot(self, scope: Optional[ModelContextScope]):
-        if scope is None:
+        if scope is None or not getattr(self, "model_context_read_enabled", False):
             return None
         try:
             return await self._get_model_context().snapshot(scope)
@@ -619,7 +674,7 @@ class AgentEngine:
         turn_id: str,
         message_ids: set[str],
     ) -> None:
-        if scope is None:
+        if scope is None or not getattr(self, "model_context_write_enabled", False):
             return
         scope = await self._get_model_context().current_scope(scope)
         timeline_events = await self._get_timeline().snapshot(scope.chat_id)
@@ -646,6 +701,34 @@ class AgentEngine:
             turn_id,
             len(user_events) + len(protocol_events),
         )
+
+    async def _record_model_context_usage(
+        self,
+        scope: Optional[ModelContextScope],
+        usage: Optional[dict[str, Any]],
+        service: Any,
+        model_name: str,
+        *,
+        turn_id: str,
+    ) -> None:
+        if scope is None or not getattr(self, "model_context_enabled", False):
+            return
+        try:
+            await self._get_model_context().record_provider_usage(
+                scope,
+                usage,
+                provider=self._provider_identity(service),
+                model=model_name or getattr(service, "model", ""),
+                turn_id=turn_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.warning(
+                "记录模型上下文 provider usage 失败 [%s..]: %s",
+                scope.chat_id[:12],
+                exc,
+            )
 
     async def _close_model_context_scope(self, pending: PendingInbound) -> None:
         if (
@@ -1668,6 +1751,23 @@ class AgentEngine:
                     )
                 return result
 
+            async def _model_context_usage(usage, service, model_name):
+                if request.model_context_usage_callback is None:
+                    return
+                await request.model_context_usage_callback(
+                    model_context_scope,
+                    usage,
+                    service,
+                    model_name,
+                )
+
+            async def _model_context_overflow(service, elapsed_ms):
+                if request.model_context_overflow_callback is None:
+                    return None
+                return await request.model_context_overflow_callback(
+                    service, elapsed_ms
+                )
+
             run = self.tool_loop.run(
                 messages=messages,
                 tools=tools or [],
@@ -1759,6 +1859,16 @@ class AgentEngine:
                 model_context_provider_callback=(
                     _model_context_provider
                     if request.model_context_provider_callback is not None
+                    else None
+                ),
+                model_context_usage_callback=(
+                    _model_context_usage
+                    if request.model_context_usage_callback is not None
+                    else None
+                ),
+                model_context_overflow_callback=(
+                    _model_context_overflow
+                    if request.model_context_overflow_callback is not None
                     else None
                 ),
             )
@@ -1995,7 +2105,9 @@ class AgentEngine:
         async def _build_prompt(
             provider_identity: Optional[str] = None,
             *,
+            provider_service: Any = None,
             admit: bool = True,
+            force_model_context_compaction: bool = False,
         ) -> PromptBuildResult:
             if admit:
                 admitted_messages: list[AdmittedMessage] = []
@@ -2033,6 +2145,8 @@ class AgentEngine:
                 model_context_scope=prompt_state["scope"],
                 model_context_identity=model_context_identity,
                 model_context_provider_identity=provider_identity,
+                model_context_provider_service=provider_service,
+                force_model_context_compaction=force_model_context_compaction,
                 delivery_contract=self._delivery_contract(
                     pending.intent, input_message.id
                 ),
@@ -2054,7 +2168,9 @@ class AgentEngine:
                 return None
             provider_identity = self._provider_identity(service)
             if can_rebuild:
-                return await _build_prompt(provider_identity, admit=False)
+                return await _build_prompt(
+                    provider_identity, provider_service=service, admit=False
+                )
             try:
                 bound_scope = await self._get_model_context().ensure_generation(
                     scope,
@@ -2072,6 +2188,54 @@ class AgentEngine:
                 return None
             prompt_state["scope"] = bound_scope
             return PromptBuildResult([], [], model_context_scope=bound_scope)
+
+        async def _compact_model_context_on_overflow(service, elapsed_ms):
+            overflow_scope = prompt_state["scope"]
+            if not self.model_context_write_enabled or overflow_scope is None:
+                return None
+            self._model_context_overflow_count = (
+                getattr(self, "_model_context_overflow_count", 0) + 1
+            )
+            rebuilt = await _build_prompt(
+                self._provider_identity(service),
+                provider_service=service,
+                admit=False,
+                force_model_context_compaction=True,
+            )
+            rebuilt_scope = getattr(rebuilt, "model_context_scope", None)
+            recovered = bool(
+                rebuilt is not None
+                and rebuilt_scope is not None
+                and rebuilt_scope.generation > overflow_scope.generation
+            )
+            try:
+                await self._get_model_context().record_incident(
+                    overflow_scope,
+                    "context_overflow",
+                    provider=self._provider_identity(service),
+                    model=getattr(service, "model", ""),
+                    recovered=recovered,
+                    detail="provider request exceeded context window",
+                    elapsed_ms=elapsed_ms,
+                )
+            except Exception:
+                _log.warning("持久化模型上下文 overflow incident 失败", exc_info=True)
+            if not recovered:
+                return None
+            if rebuilt is not None:
+                self._model_context_overflow_recovery_count = (
+                    getattr(self, "_model_context_overflow_recovery_count", 0) + 1
+                )
+            return rebuilt
+
+        async def _record_turn_model_context_usage(scope, usage, service, model_name):
+            await self._record_model_context_usage(
+                scope,
+                usage,
+                service,
+                model_name,
+                turn_id=input_message.id,
+            )
 
         async def _admit_steering(
             steering: PendingInbound,
@@ -2183,6 +2347,16 @@ class AgentEngine:
                     ),
                     model_context_provider_callback=(
                         _bind_model_context_provider
+                        if model_context_scope is not None
+                        else None
+                    ),
+                    model_context_usage_callback=(
+                        _record_turn_model_context_usage
+                        if model_context_scope is not None
+                        else None
+                    ),
+                    model_context_overflow_callback=(
+                        _compact_model_context_on_overflow
                         if model_context_scope is not None
                         else None
                     ),
@@ -2618,7 +2792,16 @@ class AgentEngine:
         }
 
         if getattr(self, "model_context_enabled", False):
-            stats["model_context"] = await self._get_model_context().status()
+            stats["model_context"] = {
+                **await self._get_model_context().status(),
+                "read_enabled": self.model_context_read_enabled,
+                "write_enabled": self.model_context_write_enabled,
+                "shadow": self.model_context_shadow,
+                "overflow_count": getattr(self, "_model_context_overflow_count", 0),
+                "overflow_recovery_count": getattr(
+                    self, "_model_context_overflow_recovery_count", 0
+                ),
+            }
 
         if self.learners:
             stats["learners"] = self.learners.get_stats()
