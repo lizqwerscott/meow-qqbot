@@ -161,6 +161,7 @@ async def _drain_pending() -> None:
     _running = True
     batch: list[PendingWake] = []
     current_index = 0
+    retry_scheduled = False
     try:
         batch = list(_pending.values())
         _pending.clear()
@@ -195,6 +196,7 @@ async def _drain_pending() -> None:
                     _retry_count[key] = MAX_RETRY_COUNT
                     pw.timestamp = time.time()
                     _merge_pending(key, pw)
+                    retry_scheduled = True
                     _schedule(RETRY_EXHAUSTED_MS)
                 else:
                     _retry_count[key] = retries
@@ -206,6 +208,7 @@ async def _drain_pending() -> None:
                         retries,
                         MAX_RETRY_COUNT,
                     )
+                    retry_scheduled = True
                     _schedule(DEFAULT_RETRY_MS)
                 continue
             if (
@@ -225,6 +228,7 @@ async def _drain_pending() -> None:
                     _retry_count[key] = MAX_RETRY_COUNT
                     pw.timestamp = time.time()
                     _merge_pending(key, pw)
+                    retry_scheduled = True
                     _schedule(RETRY_EXHAUSTED_MS)
                     continue
                 _retry_count[key] = retries
@@ -237,6 +241,7 @@ async def _drain_pending() -> None:
                     retries,
                     MAX_RETRY_COUNT,
                 )
+                retry_scheduled = True
                 _schedule(DEFAULT_RETRY_MS)
             else:
                 key = _target_key(pw)
@@ -248,11 +253,17 @@ async def _drain_pending() -> None:
     finally:
         _running = False
         if _pending:
-            _log.debug(
-                "[Coalescer] _drain_pending: 仍有 pending %d 项，继续调度",
-                len(_pending),
-            )
-            _schedule(DEFAULT_COALESCE_MS)
+            if retry_scheduled:
+                _log.debug(
+                    "[Coalescer] _drain_pending: 仍有 pending %d 项，已安排重试定时器",
+                    len(_pending),
+                )
+            else:
+                _log.debug(
+                    "[Coalescer] _drain_pending: 仍有 pending %d 项，继续调度",
+                    len(_pending),
+                )
+                _schedule(DEFAULT_COALESCE_MS)
         else:
             _log.info("[Coalescer] _drain_pending 完成: 无剩余 pending")
 

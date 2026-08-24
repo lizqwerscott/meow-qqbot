@@ -49,6 +49,112 @@ async def test_handler_exception_is_retried():
 
 
 @pytest.mark.asyncio
+async def test_retryable_skip_does_not_use_default_coalesce_delay(
+    monkeypatch,
+):
+    calls = []
+
+    async def handler(pending):
+        calls.append(pending)
+        if len(calls) == 1:
+            return coalescer.WakeRunResult(
+                status="skipped", skip_reason="requests-in-flight"
+            )
+        return coalescer.WakeRunResult()
+
+    monkeypatch.setattr(coalescer, "DEFAULT_COALESCE_MS", 1)
+    monkeypatch.setattr(coalescer, "DEFAULT_RETRY_MS", 40)
+    dispose = coalescer.set_wake_handler(handler)
+    try:
+        coalescer.request_wake(session_key="chat", coalesce_ms=1)
+        await asyncio.sleep(0.02)
+        assert len(calls) == 1
+        await asyncio.sleep(0.04)
+        assert len(calls) == 2
+        assert coalescer.get_status()["retry_count"] == {}
+    finally:
+        dispose()
+        coalescer.clear_pending()
+
+
+@pytest.mark.asyncio
+async def test_handler_exception_does_not_use_default_coalesce_delay(monkeypatch):
+    calls = []
+
+    async def handler(pending):
+        calls.append(pending)
+        if len(calls) == 1:
+            raise RuntimeError("temporary")
+        return coalescer.WakeRunResult()
+
+    monkeypatch.setattr(coalescer, "DEFAULT_COALESCE_MS", 1)
+    monkeypatch.setattr(coalescer, "DEFAULT_RETRY_MS", 40)
+    dispose = coalescer.set_wake_handler(handler)
+    try:
+        coalescer.request_wake(session_key="chat", coalesce_ms=1)
+        await asyncio.sleep(0.02)
+        assert len(calls) == 1
+        await asyncio.sleep(0.04)
+        assert len(calls) == 2
+        assert coalescer.get_status()["retry_count"] == {}
+    finally:
+        dispose()
+        coalescer.clear_pending()
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_preserves_extended_backoff(monkeypatch):
+    calls = []
+
+    async def handler(pending):
+        calls.append(pending)
+        return coalescer.WakeRunResult(
+            status="skipped", skip_reason="requests-in-flight"
+        )
+
+    monkeypatch.setattr(coalescer, "DEFAULT_COALESCE_MS", 1)
+    monkeypatch.setattr(coalescer, "RETRY_EXHAUSTED_MS", 40)
+    monkeypatch.setattr(coalescer, "MAX_RETRY_COUNT", 0)
+    dispose = coalescer.set_wake_handler(handler)
+    try:
+        coalescer.request_wake(session_key="chat", coalesce_ms=1)
+        await asyncio.sleep(0.02)
+        assert len(calls) == 1
+        await asyncio.sleep(0.04)
+        assert len(calls) == 2
+    finally:
+        dispose()
+        coalescer.clear_pending()
+
+
+@pytest.mark.asyncio
+async def test_wake_received_during_handler_is_processed():
+    calls = []
+    handler_started = asyncio.Event()
+    release_handler = asyncio.Event()
+
+    async def handler(pending):
+        calls.append(pending.session_key)
+        if pending.session_key == "first":
+            handler_started.set()
+            await release_handler.wait()
+        return coalescer.WakeRunResult()
+
+    dispose = coalescer.set_wake_handler(handler)
+    try:
+        coalescer.request_wake(session_key="first", coalesce_ms=1)
+        await asyncio.wait_for(handler_started.wait(), timeout=1)
+        coalescer.request_wake(session_key="second", coalesce_ms=1)
+        release_handler.set()
+        await asyncio.sleep(0.05)
+        assert calls == ["first", "second"]
+    finally:
+        release_handler.set()
+        dispose()
+        coalescer.clear_pending()
+
+
+@pytest.mark.asyncio
 async def test_exec_wakes_preserve_coalesced_notifications():
     prompts = []
 
