@@ -2,6 +2,7 @@
 
 import json
 import logging
+from dataclasses import replace
 from typing import Optional
 
 from core.tools._types import ToolContext, ToolEntry, ToolResult
@@ -123,7 +124,7 @@ class ToolRegistry:
         _log.info(f"[工具调用] {name}: {json.dumps(args, ensure_ascii=False)[:200]}")
         result = await entry.handler(args, ctx)
         _log.info(f"[工具调用] {name} 输出: {result.content[:200]}")
-        return result
+        return replace(result, delivery_kind=entry.delivery_kind)
 
     # ── 生成 OpenAI tool specs ──
 

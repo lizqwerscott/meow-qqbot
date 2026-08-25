@@ -21,6 +21,7 @@ from core.engine.turn_protocol_history import TurnProtocolHistory
 from core.engine.turn_state import TurnPhase, TurnStateError
 from core.managers.session_manager import InboundIntent, InboxLease, PendingInbound
 from core.tools._types import ToolContext
+from core.tools.delivery_evidence import DeliveryEvidence
 from core.tools.impl import execute as execute_tool
 from core.tools.stream_delivery import StreamDelivery, is_silent_reply_text
 
@@ -147,7 +148,8 @@ class ToolLoop:
         """
         sent_emoji = False
         text_committed = False
-        message_delivered = False
+        delivery_evidence = DeliveryEvidence()
+        reply_delivery_target = delivery_channel or chat_id
         current_model_name: Optional[str] = None
         suppress_reply = False
         inbound_message_ids = list(inbound_message_ids or [])
@@ -264,7 +266,9 @@ class ToolLoop:
                     stream_callback=(
                         None if defer_stream_delivery else stream_callback
                     ),
-                    message_delivered=lambda: message_delivered,
+                    message_delivered=lambda: delivery_evidence.has_completed_text_reply(
+                        reply_delivery_target
+                    ),
                     block_chars=self._stream_block_chars,
                     idle_seconds=self._stream_block_idle,
                 )
@@ -461,7 +465,9 @@ class ToolLoop:
                 response_text,
                 tool_calls,
                 capabilities=capabilities,
-                explicit_delivery_already_sent=message_delivered,
+                explicit_delivery_already_sent=delivery_evidence.has_completed_text_reply(
+                    reply_delivery_target
+                ),
                 suppress_reply=suppress_reply,
             )
             if output_decision.should_deliver and not await turn_is_active():
@@ -771,9 +777,15 @@ class ToolLoop:
                     if result.sent_emoji:
                         sent_emoji = True
                     receipt_status = getattr(result.delivery_receipt, "status", "")
+                    delivery_evidence.record(
+                        kind=result.delivery_kind,
+                        target_chat_id=reply_delivery_target,
+                        receipt=result.delivery_receipt,
+                    )
                     if receipt_status in {"accepted", "partial"}:
-                        message_delivered = True
-                        if tc.name == "send_message":
+                        if delivery_evidence.has_completed_text_reply(
+                            reply_delivery_target
+                        ):
                             text_committed = True
                         if delivery_state_callback:
                             await delivery_state_callback()
@@ -867,7 +879,7 @@ class ToolLoop:
                 )
                 if steer_msgs:
                     suppress_reply = False
-                    message_delivered = False
+                    delivery_evidence.reset()
                     messages.extend(steer_msgs)
 
         return sent_emoji, text_committed

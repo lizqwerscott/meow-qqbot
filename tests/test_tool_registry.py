@@ -118,11 +118,41 @@ async def test_registry_rejects_disallowed_delivery_kind_before_handler():
 
 
 @pytest.mark.asyncio
+async def test_registry_attaches_registered_delivery_kind_to_result():
+    registry = ToolRegistry()
+    registry.register(
+        ToolEntry(
+            name="synthesize_speech",
+            description="speak",
+            parameters={},
+            handler=AsyncMock(return_value=ToolResult(content="sent")),
+            delivery_kind="voice",
+        )
+    )
+
+    result = await registry.execute(
+        "synthesize_speech",
+        {},
+        ToolContext(
+            chat_id="chat",
+            is_group=False,
+            reply_to="message",
+            sender_id="user",
+            reply_callback=AsyncMock(),
+        ),
+    )
+
+    assert result.delivery_kind == "voice"
+
+
+@pytest.mark.asyncio
 async def test_registry_rejects_tool_after_turn_is_cancelled():
     handler = AsyncMock(return_value=ToolResult(content="should not run"))
     registry = ToolRegistry()
     registry.register(
-        ToolEntry(name="write_file", description="write", parameters={}, handler=handler)
+        ToolEntry(
+            name="write_file", description="write", parameters={}, handler=handler
+        )
     )
     context = ToolContext(
         chat_id="chat",

@@ -32,6 +32,7 @@ class ToolResult:
     sent_emoji: bool = False
     no_reply: bool = False
     delivery_receipt: Optional["DeliveryReceipt"] = None
+    delivery_kind: str = ""
 
 
 @dataclass

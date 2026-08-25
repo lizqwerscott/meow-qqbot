@@ -537,6 +537,7 @@ async def test_tool_loop_isolates_send_message_callback_from_other_tools(monkeyp
                 delivery_receipt=DeliveryReceipt(
                     status="accepted", logical_delivery_id="tool:task:1"
                 ),
+                delivery_kind="message",
             )
         assert tool_ctx.reply_callback is capture_callback
         await tool_ctx.reply_callback(
@@ -622,6 +623,7 @@ async def test_tool_loop_prepares_media_delivery_before_execution(monkeypatch):
             delivery_receipt=DeliveryReceipt(
                 status="accepted", logical_delivery_id="emoji:abc123"
             ),
+            delivery_kind="emoji",
         )
 
     monkeypatch.setattr("core.tools.tool_loop.execute_tool", fake_execute)
@@ -640,6 +642,96 @@ async def test_tool_loop_prepares_media_delivery_before_execution(monkeypatch):
     record = await controller.ledger.get("tool:chat:turn-1:send_emoji:emoji-call")
     assert record is not None
     assert record.status == "sent"
+    await controller.ledger.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "delivery_kind", "arguments"),
+    [
+        ("send_emoji", "emoji", '{"emoji_hash":"abc123"}'),
+        ("synthesize_speech", "voice", '{"text":"晚安，主人～"}'),
+    ],
+)
+async def test_tool_loop_delivers_final_text_after_sending_media(
+    monkeypatch,
+    tool_name,
+    delivery_kind,
+    arguments,
+):
+    class FakeAI:
+        model = "test"
+
+        def __init__(self):
+            self.responses = iter(
+                [
+                    AssistantMessage(
+                        content=None,
+                        tool_calls=[
+                            AssistantToolCall(
+                                "media-call",
+                                tool_name,
+                                arguments,
+                            )
+                        ],
+                    ),
+                    AssistantMessage(content="晚安，主人～"),
+                ]
+            )
+
+        async def chat_completion_with_tools(self, **kwargs):
+            return next(self.responses), None
+
+    class FakeContext:
+        async def add_assistant_message_async(self, *args, **kwargs):
+            return None
+
+        async def add_tool_result_async(self, *args, **kwargs):
+            return None
+
+    ctx = SimpleNamespace(
+        ai=SimpleNamespace(
+            ai_service=FakeAI(),
+            max_tool_rounds=3,
+            model_registry=None,
+            stream_reply=False,
+        ),
+        mgmt=SimpleNamespace(
+            permission_manager=None,
+            cost_tracker=None,
+            context_manager=FakeContext(),
+        ),
+        memory=SimpleNamespace(hindsight_memory=None),
+    )
+    loop = ToolLoop(ctx)
+    controller = DeliveryController(DeliveryLedger(":memory:"))
+    delivered = []
+
+    async def reply_callback(**kwargs):
+        delivered.append(kwargs["content"])
+
+    async def fake_execute(name, args, tool_ctx, permission_manager):
+        return ToolResult(
+            content="media sent",
+            delivery_receipt=DeliveryReceipt(
+                status="accepted", logical_delivery_id="media:abc123"
+            ),
+            delivery_kind=delivery_kind,
+        )
+
+    monkeypatch.setattr("core.tools.tool_loop.execute_tool", fake_execute)
+    await loop.run(
+        messages=[],
+        tools=[],
+        chat_id="chat",
+        is_group=True,
+        reply_to="reply",
+        reply_callback=reply_callback,
+        delivery_controller=controller,
+        turn_id="turn-1",
+    )
+
+    assert delivered == ["晚安，主人～"]
     await controller.ledger.close()
 
 
@@ -2267,6 +2359,98 @@ async def test_tool_loop_steers_pending_messages_only_after_full_tool_batch(
         "initial",
         "follow up",
     ]
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_delivers_final_text_after_steering_following_send_message(
+    monkeypatch,
+):
+    class FakeAI:
+        model = "test"
+
+        def __init__(self):
+            self.responses = iter(
+                [
+                    AssistantMessage(
+                        content="",
+                        tool_calls=[
+                            AssistantToolCall("send", "send_message", "{}"),
+                            AssistantToolCall("enqueue", "enqueue_steering", "{}"),
+                        ],
+                    ),
+                    AssistantMessage(content="follow-up final"),
+                ]
+            )
+
+        async def chat_completion_with_tools(self, **kwargs):
+            return next(self.responses), None
+
+    class FakeContext:
+        async def add_assistant_message_async(self, *args, **kwargs):
+            return None
+
+        async def add_tool_result_async(self, *args, **kwargs):
+            return None
+
+    session_manager = SessionTaskManager()
+    loop = ToolLoop(
+        SimpleNamespace(
+            ai=SimpleNamespace(
+                ai_service=FakeAI(),
+                max_tool_rounds=3,
+                model_registry=None,
+                stream_reply=False,
+            ),
+            mgmt=SimpleNamespace(
+                permission_manager=None,
+                cost_tracker=None,
+                context_manager=FakeContext(),
+            ),
+            memory=SimpleNamespace(hindsight_memory=None),
+        ),
+        session_manager=session_manager,
+    )
+    pending = PendingInbound(
+        InputMessage("steer", "user", "chat", "follow up", False),
+        "follow up",
+        "agent",
+        AdmissionOrigin.USER_MESSAGE,
+    )
+    delivered = []
+
+    async def execute(name, args, tool_ctx, permission_manager):
+        if name == "send_message":
+            return ToolResult(
+                content="sent",
+                delivery_receipt=DeliveryReceipt(
+                    status="accepted", logical_delivery_id="tool:chat:send"
+                ),
+                delivery_kind="message",
+            )
+        await session_manager.enqueue_and_claim_consumer("chat", pending)
+        return ToolResult(content="queued")
+
+    async def admit(item):
+        return SimpleNamespace(
+            prompt_message={"role": "user", "content": item.prepared_content}
+        )
+
+    async def reply_callback(**kwargs):
+        delivered.append(kwargs["content"])
+
+    monkeypatch.setattr("core.tools.tool_loop.execute_tool", execute)
+    await loop.run(
+        messages=[{"role": "user", "content": "initial"}],
+        tools=[],
+        chat_id="chat",
+        is_group=False,
+        reply_to="reply",
+        reply_callback=reply_callback,
+        steering_enabled=True,
+        steering_admission_callback=admit,
+    )
+
+    assert delivered == ["follow-up final"]
 
 
 @pytest.mark.asyncio
