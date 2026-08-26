@@ -196,7 +196,7 @@ class HindsightMemory:
 
     async def close(self) -> None:
         try:
-            await asyncio.to_thread(self._client.close)
+            await self._client.aclose()
         except Exception as e:
             _log.warning("HindsightMemory 关闭失败: %s", e)
         _log.info("HindsightMemory: 客户端已关闭")

@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -41,3 +41,15 @@ async def test_add_message_deduplicates_idempotency_key_in_process():
     assert await memory.add_message(**kwargs) is True
     assert await memory.add_message(**kwargs) is True
     client.aretain.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_close_uses_async_hindsight_client_close():
+    memory = HindsightMemory.__new__(HindsightMemory)
+    client = SimpleNamespace(aclose=AsyncMock(), close=Mock())
+    memory._client = client
+
+    await memory.close()
+
+    client.aclose.assert_awaited_once_with()
+    client.close.assert_not_called()

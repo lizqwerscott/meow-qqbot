@@ -73,6 +73,30 @@ from core.web_search.service import WebService
 from core.webui import create_app, start_webui
 
 _log = logging.getLogger(__name__)
+_GATEWAY_FETCH_MAX_ATTEMPTS = 3
+_GATEWAY_FETCH_RETRY_DELAYS = (1, 2)
+
+
+def _is_retryable_gateway_error(exc: BaseException) -> bool:
+    """Return whether a QQ gateway bootstrap error is a transient transport failure."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(
+            current,
+            (
+                asyncio.TimeoutError,
+                TimeoutError,
+                ConnectionError,
+                OSError,
+                httpx.TimeoutException,
+                httpx.NetworkError,
+            ),
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _resolve_tts_backend_and_base_url(tts_config: Mapping) -> tuple[str, str]:
@@ -936,7 +960,7 @@ class ServiceGraph:
         await self.check_hindsight_health()
         await self.media_service.open()
 
-        gateway_url = await self.bot_engine.api.get_gateway_url()
+        gateway_url = await self._get_gateway_url_with_retry()
         loop = asyncio.get_running_loop()
         self.bot_engine.start(gateway_url, loop)
         print(f"机器人已启动，WebSocket 网关: {gateway_url}")
@@ -954,6 +978,28 @@ class ServiceGraph:
             self._start_task_cleanup()
 
         self._start_context_cleanup()
+
+    async def _get_gateway_url_with_retry(self) -> str:
+        """Fetch the QQ gateway URL, retrying only transient transport failures."""
+        for attempt in range(1, _GATEWAY_FETCH_MAX_ATTEMPTS + 1):
+            try:
+                return await self.bot_engine.api.get_gateway_url()
+            except Exception as exc:
+                if (
+                    not _is_retryable_gateway_error(exc)
+                    or attempt == _GATEWAY_FETCH_MAX_ATTEMPTS
+                ):
+                    raise
+
+                delay = _GATEWAY_FETCH_RETRY_DELAYS[attempt - 1]
+                _log.warning(
+                    "QQ 网关获取失败，将在 %ss 后重试 " "attempt=%d/%d category=%s",
+                    delay,
+                    attempt,
+                    _GATEWAY_FETCH_MAX_ATTEMPTS,
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(delay)
 
     def _start_context_cleanup(self):
         async def _periodic_cleanup():

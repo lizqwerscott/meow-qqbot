@@ -3,10 +3,51 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from core.bootstrap import ServiceGraph
 from core.media.service import MediaService
+
+
+@pytest.mark.asyncio
+async def test_service_graph_retries_transient_gateway_tls_failure(monkeypatch):
+    graph = ServiceGraph.__new__(ServiceGraph)
+    attempts = 0
+
+    async def get_gateway_url():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            try:
+                raise httpx.ReadError("tls read failed")
+            except httpx.ReadError as exc:
+                raise RuntimeError("Failed to get QQ Bot access token") from exc
+        return "wss://gateway.example.test"
+
+    graph.bot_engine = SimpleNamespace(
+        api=SimpleNamespace(get_gateway_url=get_gateway_url)
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    assert await graph._get_gateway_url_with_retry() == "wss://gateway.example.test"
+    assert attempts == 2
+    sleep.assert_awaited_once_with(1)
+
+
+@pytest.mark.asyncio
+async def test_service_graph_does_not_retry_non_transport_gateway_failure():
+    graph = ServiceGraph.__new__(ServiceGraph)
+    get_gateway_url = AsyncMock(side_effect=RuntimeError("invalid credentials"))
+    graph.bot_engine = SimpleNamespace(
+        api=SimpleNamespace(get_gateway_url=get_gateway_url)
+    )
+
+    with pytest.raises(RuntimeError, match="invalid credentials"):
+        await graph._get_gateway_url_with_retry()
+
+    get_gateway_url.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
