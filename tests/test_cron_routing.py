@@ -347,6 +347,48 @@ async def test_user_target_cron_wake_uses_system_event_prompt():
     assert run_wake_turn.await_args.kwargs["work_plan_consumer"] is False
 
 
+@pytest.mark.asyncio
+async def test_wake_runner_tracks_active_same_session_wakes():
+    from core.tasks.wake_coalescer import SOURCE_CRON, PendingWake
+    from core.tasks.wake_runner import WakeRunner
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def run_wake_turn(**_kwargs):
+        started.set()
+        await release.wait()
+        return SimpleNamespace(error="")
+
+    agent = SimpleNamespace(
+        prompt_builder=SimpleNamespace(
+            build_system_event_messages=AsyncMock(return_value=([], []))
+        ),
+        run_wake_turn=run_wake_turn,
+        context_manager=None,
+        cost_tracker=None,
+    )
+    cooldown = SimpleNamespace(
+        should_defer=lambda **_: SimpleNamespace(defer=False),
+        record_run_start=lambda: None,
+    )
+    runner = WakeRunner(agent, None, cooldown)
+    task = asyncio.create_task(
+        runner(PendingWake(source=SOURCE_CRON, session_key="heartbeat:events"))
+    )
+    await started.wait()
+
+    result = await runner(
+        PendingWake(source=SOURCE_CRON, session_key="heartbeat:events")
+    )
+    assert result.status == "skipped"
+    assert result.skip_reason == "requests-in-flight"
+
+    release.set()
+    assert (await task).status == "ran"
+    assert runner._is_session_active("heartbeat:events") is False
+
+
 def test_wake_runner_cron_branch():
     """WakeRunner 收到 source=cron 时走 system event 路径。"""
     from core.tasks.wake_coalescer import (

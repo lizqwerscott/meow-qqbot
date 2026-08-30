@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -411,6 +412,32 @@ def make_engine(tool_loop, *, rule_router=None, model_registry=None):
     engine._dedup_lock = asyncio.Lock()
     engine._admission_in_progress = set()
     return engine
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_session_activity_is_isolated_from_user_activity():
+    engine = make_engine(FakeToolLoop())
+    engine.last_active_chat = "user-chat"
+    engine.last_active_time = time.time()
+
+    assert engine.is_session_active("user-chat") is True
+    assert engine.is_session_active("heartbeat:events") is False
+
+    pending = PendingInbound(
+        InputMessage(
+            "heartbeat-message", "system", "heartbeat:events", "wake", False
+        ),
+        "wake",
+        InboundIntent.PRIVATE_CONVERSATION,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+    await engine.session_manager.enqueue_and_claim_consumer(
+        "heartbeat:events", pending
+    )
+    try:
+        assert engine.is_session_active("heartbeat:events") is True
+    finally:
+        await engine.session_manager.cleanup_session("heartbeat:events")
 
 
 @pytest.mark.asyncio

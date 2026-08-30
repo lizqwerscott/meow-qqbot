@@ -72,6 +72,18 @@ class WakeRunner:
         self._session_lane_busy = session_lane_busy_check or (lambda _: False)
         self._resolve_isolated_key = isolated_session_key_fn
         self._delivery_pending = delivery_pending_check or (lambda: False)
+        self._active_wake_tasks: dict[str, set[asyncio.Task]] = {}
+
+    @staticmethod
+    def _wake_key(pw: PendingWake) -> str:
+        return pw.session_key or "heartbeat:events"
+
+    def _is_session_active(self, session_key: str) -> bool:
+        current_task = asyncio.current_task()
+        active_tasks = self._active_wake_tasks.get(session_key)
+        if active_tasks and any(task is not current_task for task in active_tasks):
+            return True
+        return self._session_active(session_key)
 
     def _release_event_lease(self, event_key: str) -> None:
         if not self._events:
@@ -84,9 +96,23 @@ class WakeRunner:
             _log.exception("释放系统事件 lease 失败 [%s]", event_key[:20])
 
     async def __call__(self, pw: PendingWake) -> WakeRunResult:
+        task = asyncio.current_task()
+        if task is None:
+            return await self._run(pw)
+        key = self._wake_key(pw)
+        active_tasks = self._active_wake_tasks.setdefault(key, set())
+        active_tasks.add(task)
+        try:
+            return await self._run(pw)
+        finally:
+            active_tasks.discard(task)
+            if not active_tasks:
+                self._active_wake_tasks.pop(key, None)
+
+    async def _run(self, pw: PendingWake) -> WakeRunResult:
         """handler 接口（传给 set_wake_handler）。"""
         started = time.time()
-        event_key = pw.session_key or "heartbeat:events"
+        event_key = self._wake_key(pw)
 
         # ── 1. Preflight ──
         preflight_events = bool(self._events and self._events.has_events(event_key))
@@ -99,7 +125,7 @@ class WakeRunner:
             active_hours=self._active_hours,
             has_system_events=preflight_events,
             has_extra_prompt=bool(pw.extra_prompt),
-            is_session_active=self._session_active(pw.session_key),
+            is_session_active=self._is_session_active(pw.session_key),
             has_cron_jobs=self._has_cron(),
             source_is_interval=(pw.source == SOURCE_INTERVAL),
             source_is_manual=(pw.source == SOURCE_MANUAL),

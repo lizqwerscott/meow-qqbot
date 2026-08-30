@@ -3776,7 +3776,7 @@ class AgentEngine:
 
     def is_session_active(self, session_key: str) -> bool:
         """检查指定 session 是否当前在对话中（供 WakeRunner preflight 使用）。"""
-        if session_key in (self.last_active_chat, "heartbeat:events"):
+        if session_key == self.last_active_chat and session_key != "heartbeat:events":
             return (time.time() - self.last_active_time) < 120
         return self.session_manager.has_active_consumer(session_key)
 
