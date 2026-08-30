@@ -313,6 +313,24 @@ async def test_settings_webui_group_picker_only_lists_group_chats(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_settings_page_uses_one_csrf_token_for_all_forms(tmp_path):
+    coordinator = await _coordinator(tmp_path)
+    app = create_app({"runtime_settings": coordinator}, {"token": "secret"})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/settings/engagement", headers={"Authorization": "Bearer secret"}
+        )
+        cookie = client.cookies.get("webui_csrf")
+
+    form_tokens = re.findall(r'name="_csrf" value="([^"]+)"', response.text)
+    assert cookie
+    assert form_tokens
+    assert set(form_tokens) == {cookie}
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
 async def test_settings_webui_active_mode_requires_server_confirmation(tmp_path):
     coordinator = await _coordinator(tmp_path)
     await coordinator.update(

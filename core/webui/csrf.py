@@ -19,6 +19,9 @@ def csrf_token(request: Request) -> str:
     token = request.cookies.get(COOKIE_NAME)
     if token:
         return token
+    token = getattr(request.state, "csrf_token", "")
+    if token:
+        return token
     token = secrets.token_urlsafe(32)
     request.state.csrf_token = token
     return token
