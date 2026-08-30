@@ -852,10 +852,14 @@ tr:hover td {
 .protection-settings .settings-fields { margin: 0 0 14px 24px; }
 .settings-form-actions { align-items: center; display: flex; justify-content: space-between; gap: 16px; padding: 4px 2px 10px; }
 .settings-form-actions p { color: var(--text-secondary); font-size: 12px; }
+.settings-form-actions .btn { min-width: 156px; }
 .target-status-card { padding: 22px; }
 .target-status-card .settings-card-heading { margin-bottom: 6px; }
 .target-status-card h3, .settings-secondary-grid h3, .audit-card h3 { color: var(--text); font-size: 17px; margin-bottom: 5px; }
 .target-status-card td { vertical-align: middle; }
+.target-status-card td:last-child { min-width: 140px; }
+.target-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; }
+.target-actions form { margin: 0; }
 .settings-secondary-grid { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
 .settings-secondary-grid .card { margin-bottom: 0; }
 .settings-secondary-grid p, .audit-card p { color: var(--text-secondary); font-size: 12px; margin-bottom: 14px; }
@@ -873,7 +877,8 @@ tr:hover td {
 .confirmation-targets h3 { color: var(--text); font-size: 14px; margin-bottom: 10px; }
 .confirmation-target { align-items: center; border-bottom: 1px solid #f0f2f6; display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; }
 .confirmation-target code { overflow-wrap: anywhere; }
-.confirmation-actions { border-top: 1px solid #edf0f5; display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; padding-top: 18px; }
+.confirmation-actions { border-top: 1px solid #edf0f5; display: flex; justify-content: flex-end; gap: 12px; margin-top: 18px; padding-top: 18px; }
+.confirmation-actions .btn { min-width: 132px; }
 .confirmation-actions .btn[disabled] { cursor: not-allowed; opacity: .5; }
 
 @media (max-width: 800px) {
