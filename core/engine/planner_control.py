@@ -111,7 +111,10 @@ def planner_control_tool(
             "name": "planner_control",
             "description": "Internal turn control. Never combine with visible text or another tool call.",
             "strict": True,
-            "parameters": {"oneOf": variants},
+            "parameters": {
+                "type": "object",
+                "oneOf": variants,
+            },
         },
     }
 

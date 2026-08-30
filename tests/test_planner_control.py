@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from core.ai.deepseek_service import _convert_tools
 from core.ai.protocol import AssistantMessage, AssistantToolCall
 from core.engine.planner_control import (
     MAX_REASON_CHARS,
@@ -15,10 +16,12 @@ from core.engine.planner_control import (
 
 def test_schema_is_a_strict_discriminated_union():
     schema = planner_control_tool()
-    variants = schema["function"]["parameters"]["oneOf"]
+    parameters = schema["function"]["parameters"]
+    variants = parameters["oneOf"]
 
     assert schema["function"]["name"] == "planner_control"
     assert schema["function"]["strict"] is True
+    assert parameters["type"] == "object"
     assert {variant["properties"]["action"]["const"] for variant in variants} == {
         "wait",
         "no_reply",
@@ -28,6 +31,15 @@ def test_schema_is_a_strict_discriminated_union():
     assert all(
         set(variant["required"]) == set(variant["properties"]) for variant in variants
     )
+
+
+def test_deepseek_wire_schema_has_object_root():
+    converted = _convert_tools([planner_control_tool()])
+
+    assert converted is not None
+    parameters = converted[0]["parameters"]
+    assert parameters["type"] == "object"
+    assert len(parameters["oneOf"]) == 3
 
 
 def test_schema_can_exclude_agent_handoff_for_ambient_profiles():
