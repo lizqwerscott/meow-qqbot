@@ -1,6 +1,6 @@
 """工具系统核心类型"""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 if TYPE_CHECKING:
@@ -21,6 +21,9 @@ class ToolContext:
     turn_id: str = ""
     turn_revision: int = 0
     principal_id: str = ""
+    planner_lease_id: str = ""
+    planner_plan_id: str = ""
+    consumer_evidence_callback: Optional[Callable[[str], Awaitable[None]]] = None
     transition_turn: Optional[Callable[..., Awaitable[Any]]] = None
     capabilities: Optional["TurnCapabilities"] = None
     turn_active_callback: Optional[Callable[[], Awaitable[bool]]] = None

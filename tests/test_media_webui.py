@@ -42,6 +42,55 @@ async def test_status_page_shows_media_provider_status(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_status_page_shows_proactive_scheduler_state(tmp_path):
+    service = MediaService(http_client=SimpleNamespace(), storage_dir=tmp_path)
+    app = create_app({"media_service": service}, {})
+    app.state.managers["agent_engine"] = SimpleNamespace(
+        hindsight=None,
+        get_stats=AsyncMock(
+            return_value={
+                "queue_sizes": {},
+                "active_chats": 0,
+                "total_messages": 0,
+                "hindsight_health": {"status": "disabled"},
+                "cost": {
+                    "turn_count": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cache_hit_rate": 0,
+                    "total_cost": 0,
+                },
+                "learners": {},
+            }
+        ),
+        get_engagement_status=AsyncMock(
+            return_value={
+                "proactive": {
+                    "mode": "shadow",
+                    "active_chats": 1,
+                    "interval_seconds": 900,
+                    "running": True,
+                    "reserved": 3,
+                    "delivered": 0,
+                    "silent": 2,
+                    "session_busy": 1,
+                    "failed": 0,
+                }
+            }
+        ),
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/status")
+
+    assert response.status_code == 200
+    assert "群聊主动参与" in response.text
+    assert "shadow" in response.text
+    assert "allowlist: 1" in response.text
+    assert "900s" in response.text
+
+
+@pytest.mark.asyncio
 async def test_media_webui_list_renders_usage(tmp_path):
     service = MediaService(http_client=SimpleNamespace(), storage_dir=tmp_path)
     await service.open()

@@ -63,6 +63,7 @@ class PendingWake:
     agent_id: str = ""
     session_key: str = ""
     delivery_target: str = ""
+    work_plan_id: str = ""
     extra_prompt: str = ""
     timestamp: float = field(default_factory=time.time)
 
@@ -119,7 +120,7 @@ def _ensure_loop() -> asyncio.AbstractEventLoop:
 
 
 def _target_key(pw: PendingWake) -> str:
-    return f"{pw.agent_id or ''}::{pw.session_key or ''}"
+    return f"{pw.agent_id or ''}::{pw.session_key or ''}::{pw.work_plan_id or ''}"
 
 
 def _merge_pending(key: str, pw: PendingWake) -> None:
@@ -309,6 +310,7 @@ def request_wake(
     agent_id: str = "",
     session_key: str = "",
     delivery_target: str = "",
+    work_plan_id: str = "",
     extra_prompt: str = "",
     coalesce_ms: int = DEFAULT_COALESCE_MS,
 ) -> None:
@@ -322,6 +324,7 @@ def request_wake(
         agent_id=agent_id,
         session_key=session_key,
         delivery_target=delivery_target or session_key,
+        work_plan_id=work_plan_id,
         extra_prompt=extra_prompt,
     )
     key = _target_key(pw)
@@ -344,6 +347,7 @@ async def execute_immediate(
     reason: str = "",
     session_key: str = "",
     delivery_target: str = "",
+    work_plan_id: str = "",
     extra_prompt: str = "",
 ) -> WakeRunResult:
     """同步路径 — 跳过合并，立即由 handler 执行并返回结果。
@@ -356,6 +360,7 @@ async def execute_immediate(
         reason=reason,
         session_key=session_key,
         delivery_target=delivery_target or session_key,
+        work_plan_id=work_plan_id,
         extra_prompt=extra_prompt,
     )
     if _handler:

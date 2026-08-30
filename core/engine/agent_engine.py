@@ -10,6 +10,7 @@
 """
 
 import asyncio
+import json
 import logging
 import time
 from collections import OrderedDict
@@ -36,13 +37,30 @@ from core.engine.delivery_ledger import (
 )
 from core.engine.delivery_prompt_contract import DeliveryPromptContract
 from core.engine.group_engagement import GroupEngagementManager
+from core.engine.group_proactive import GroupProactiveScheduler
+from core.engine.mode_router import (
+    ActiveWorkPlanHint,
+    ModeRouteInput,
+    ModeRouter,
+    ModeRouteSource,
+)
 from core.engine.model_context_transcript import (
     ModelContextInvariantError,
     ModelContextScope,
     ModelContextTranscript,
 )
+from core.engine.proactive_state import ProactiveStateStore
 from core.engine.prompt_builder import PromptBuilder, PromptBuildResult
+from core.engine.prompt_snapshot import PromptMode
+from core.engine.reply_necessity import ReplyNecessityGate, ReplyNecessityInput
+from core.engine.routing_metrics import RoutingMetrics
 from core.engine.turn_capabilities import TurnCapabilities
+from core.engine.turn_planner import (
+    PlannerRequest,
+    PlannerResult,
+    PlannerResultKind,
+    TurnPlanner,
+)
 from core.engine.turn_protocol_history import TurnProtocolHistory
 from core.engine.turn_state import TurnPhase, TurnState, TurnStateError
 from core.learners.base import sanitize_for_learners
@@ -51,11 +69,14 @@ from core.managers.emoji_manager import EmojiManager
 from core.managers.session_manager import (
     AdmissionOrigin,
     InboundIntent,
+    ModeRoutingMetadata,
     PendingInbound,
     SessionTaskManager,
 )
 from core.media.models import MediaTurnContext
 from core.message import InputMessage, MessageType, ResourceMeta
+from core.orchestration.background_task_runner import BackgroundTaskRunner
+from core.orchestration.work_plan_store import BackgroundTask, WorkPlanStatus
 from core.tasks.wake_coalescer import WakeTurnResult
 from core.tools.policy import filter_internal_control_tools
 from core.tools.tool_loop import ToolLoop
@@ -120,6 +141,10 @@ class _TurnRequest:
     model_context_provider_callback: Optional[Callable[..., Awaitable[Any]]] = None
     model_context_usage_callback: Optional[Callable[..., Awaitable[None]]] = None
     model_context_overflow_callback: Optional[Callable[..., Awaitable[Any]]] = None
+    planner_control_callback: Optional[Callable[[Any], Awaitable[None]]] = None
+    planner_lease_id: str = ""
+    planner_plan_id: str = ""
+    consumer_evidence_callback: Optional[Callable[[str], Awaitable[None]]] = None
 
 
 @dataclass(frozen=True)
@@ -221,8 +246,31 @@ class AgentEngine:
             ),
             task_state_store=ctx.mgmt.task_state_store,
         )
-        self.group_engagement = GroupEngagementManager(engagement_config)
+        self.proactive_state_store = ProactiveStateStore()
+        self.group_engagement = GroupEngagementManager(
+            engagement_config,
+            state_store=self.proactive_state_store,
+        )
+        self.reply_necessity_gate = ReplyNecessityGate(
+            threshold=engagement_config.group_reply_necessity_threshold,
+            frequency_factor=engagement_config.group_reply_frequency,
+        )
+        self.routing_metrics = RoutingMetrics()
         self.engagement_config = engagement_config
+        self.mode_routing_enabled = engagement_config.mode_routing_enabled
+        self.mode_router = ModeRouter() if self.mode_routing_enabled else None
+        from core.orchestration.work_plan_service import WorkPlanService
+        from core.orchestration.work_plan_store import WorkPlanStore
+
+        self.work_plan_store = WorkPlanStore()
+        self.work_plan_service = WorkPlanService(self.work_plan_store)
+        self.work_plan_background_runner = BackgroundTaskRunner(
+            self.work_plan_store,
+            self._run_work_plan_background,
+            on_result=self._on_work_plan_background_result,
+            routing_metrics=self.routing_metrics,
+        )
+        self.turn_planner = TurnPlanner()
         self.delivery_controller: Optional[DeliveryController] = None
         self._delivery_recovery_locks: dict[str, asyncio.Lock] = {}
         self._delivery_recovery_task: Optional[asyncio.Task] = None
@@ -316,7 +364,7 @@ class AgentEngine:
         self._dedup_lock = asyncio.Lock()
         self._admitted_ids: OrderedDict[tuple[str, str], bool] = OrderedDict()
         self._admission_side_effect_status: OrderedDict[
-            tuple[str, str], Dict[str, str]
+            tuple[str, str], dict[str, str]
         ] = OrderedDict()
         self._pending_ids: Set[str] = set()
         self._admission_in_progress: set[tuple[str, str]] = set()
@@ -410,6 +458,85 @@ class AgentEngine:
             _log.warning("媒体批次上下文构建失败 [%s]: %s", turn_id, exc)
             return BatchMediaContext(turn_id, (), MediaTurnContext())
 
+    async def _refresh_mode_routing(
+        self, pending: PendingInbound, *, scheduler_revision: int
+    ) -> PendingInbound:
+        """Recompute a queued decision at claim time and validate its plan hint."""
+        if not getattr(self, "mode_routing_enabled", False) or self.mode_router is None:
+            return pending
+        message = pending.message
+        role = (
+            self._permission_manager.get_user_role(message.sender_id)
+            if self._permission_manager is not None
+            else "default"
+        )
+        active_work_plan = None
+        previous = pending.mode_routing
+        if previous is not None and previous.work_plan_hint:
+            try:
+                from core.orchestration.work_plan_service import PlanPrincipal
+
+                plan = await self.work_plan_service.get(
+                    PlanPrincipal(message.chat_id, message.sender_id, role),
+                    previous.work_plan_hint,
+                )
+                active_work_plan = ActiveWorkPlanHint(
+                    work_plan_id=plan.id,
+                    chat_id=plan.chat_id,
+                    owner_id=plan.owner_id,
+                    revision=plan.revision,
+                    scheduler_revision=scheduler_revision,
+                    is_eligible=plan.status
+                    not in {
+                        WorkPlanStatus.COMPLETED,
+                        WorkPlanStatus.FAILED,
+                        WorkPlanStatus.CANCELLED,
+                    },
+                )
+            except Exception:
+                _log.info(
+                    "queued WorkPlan hint failed revalidation: %s",
+                    previous.work_plan_hint,
+                )
+        source = (
+            ModeRouteSource.AMBIENT
+            if pending.intent is InboundIntent.GROUP_AMBIENT
+            else ModeRouteSource.USER
+        )
+        decision = self.mode_router.route(
+            ModeRouteInput(
+                message=message,
+                source=source,
+                intent=pending.intent,
+                role=role,
+                scheduler_revision=scheduler_revision,
+                active_work_plan=active_work_plan,
+            )
+        )
+        _log.info(
+            "mode route chat=%s message=%s mode=%s reason_code=%s policy=%s revision=%d",
+            message.chat_id[:12],
+            message.id[:12],
+            decision.mode.value,
+            decision.reason_code,
+            decision.policy_version,
+            scheduler_revision,
+        )
+        routing_metrics = getattr(self, "routing_metrics", None)
+        if routing_metrics is not None:
+            routing_metrics.record_route(
+                mode=decision.mode.value, reason_code=decision.reason_code
+            )
+        return replace(pending, mode_routing=decision.to_metadata())
+
+    @staticmethod
+    def _planner_source(pending: PendingInbound, capabilities: TurnCapabilities) -> str:
+        if not pending.message.is_group:
+            return "private"
+        if capabilities.capability_profile == "group_explicit":
+            return "explicit"
+        return "ambient"
+
     def _turn_capabilities(
         self,
         intent: InboundIntent,
@@ -418,7 +545,18 @@ class AgentEngine:
         sender_id: str,
         reply_to: str,
         allowed_media_uris: frozenset[str] | None = None,
+        mode_routing: ModeRoutingMetadata | None = None,
     ) -> TurnCapabilities:
+        if mode_routing is not None:
+            return TurnCapabilities.for_mode(
+                mode=PromptMode(mode_routing.mode),
+                capability_profile=mode_routing.capability_profile,
+                intent=intent,
+                chat_id=chat_id,
+                sender_id=sender_id,
+                reply_to=reply_to,
+                allowed_media_uris=allowed_media_uris,
+            )
         return TurnCapabilities.for_intent(
             intent,
             chat_id=chat_id,
@@ -845,6 +983,67 @@ class AgentEngine:
                 )
             return result
 
+    async def _recover_proactive_deliveries(
+        self, chat_id: str, *, allow_transport_retry: bool = True
+    ) -> DeliveryRecoveryResult:
+        """Recover proactive rows only for configured proactive groups."""
+        config = getattr(self, "engagement_config", None)
+        if config is None:
+            config = self._get_group_engagement().config
+        if chat_id not in config.group_proactive_active_chats:
+            return DeliveryRecoveryResult()
+        locks = getattr(self, "_delivery_recovery_locks", None)
+        if locks is None:
+            locks = {}
+            self._delivery_recovery_locks = locks
+        lock = locks.setdefault(f"proactive:{chat_id}", asyncio.Lock())
+        async with lock:
+            async def _resolve_content(record: DeliveryRecord) -> Optional[str]:
+                if record.content:
+                    return record.content
+                history = await self.timeline.history(chat_id)
+                expected = record.logical_delivery_id or record.key
+                for item in reversed(history):
+                    if item.get("event_id") != f"delivery:{expected}":
+                        continue
+                    content = item.get("content")
+                    return content if isinstance(content, str) and content else None
+                return None
+
+            async def _transport(record: DeliveryRecord, content: str) -> object:
+                if not self._reply_callback:
+                    raise RuntimeError("proactive reply callback unavailable")
+                return await self._reply_callback(
+                    chat_id=record.chat_id,
+                    content=content,
+                    message_id="",
+                    is_group=True,
+                    delivery_id=record.logical_delivery_id or record.key,
+                )
+
+            config = getattr(self, "engagement_config", None)
+            if config is None:
+                from core.engine.engagement_config import EngagementConfig
+
+                config = EngagementConfig()
+            result = await self._get_delivery_controller().recover_prepared(
+                chat_id=chat_id,
+                key_prefix="proactive:",
+                older_than=time.time() - config.delivery_recovery_after_seconds,
+                content_resolver=_resolve_content,
+                transport=_transport,
+                allow_transport_retry=allow_transport_retry,
+            )
+            if result.scanned:
+                _log.info(
+                    "proactive delivery recovery [%s..]: sent=%d unknown=%d failed=%d",
+                    chat_id[:12],
+                    result.sent,
+                    result.unknown,
+                    result.failed,
+                )
+            return result
+
     async def _delivery_recovery_worker(self) -> None:
         config = getattr(self, "engagement_config", None)
         interval = max(
@@ -859,6 +1058,10 @@ class AgentEngine:
                     if not self._get_group_engagement().is_active_chat(chat_id):
                         continue
                     await self._recover_ambient_deliveries(chat_id, callbacks[0])
+                proactive_config = self._get_group_engagement().config
+                if proactive_config.group_proactive_mode == "active":
+                    for chat_id in proactive_config.group_proactive_active_chats:
+                        await self._recover_proactive_deliveries(chat_id)
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 raise
@@ -867,7 +1070,10 @@ class AgentEngine:
                 await asyncio.sleep(interval)
 
     async def _ensure_delivery_recovery_worker(self) -> None:
-        if self._get_group_engagement().config.group_ambient_mode != "active":
+        if (
+            self._get_group_engagement().config.group_ambient_mode != "active"
+            and self._get_group_engagement().config.group_proactive_mode != "active"
+        ):
             return
         task = getattr(self, "_delivery_recovery_task", None)
         if task is None or task.done():
@@ -882,7 +1088,37 @@ class AgentEngine:
         controller = getattr(self, "delivery_controller", None)
         if controller is not None:
             delivery = await controller.ledger.status_counts()
-        return {"engagement": metrics, "delivery": delivery}
+        routing_metrics = getattr(self, "routing_metrics", None)
+        engagement_config = self._get_group_engagement().config
+        proactive = {
+            "mode": engagement_config.group_proactive_mode,
+            "active_chats": len(engagement_config.group_proactive_active_chats),
+            "interval_seconds": engagement_config.group_proactive_interval_seconds,
+            "running": False,
+            "next_due": {},
+        }
+        scheduler = getattr(self, "group_proactive_scheduler", None)
+        if scheduler is not None:
+            proactive.update(scheduler.snapshot_metrics())
+            proactive["running"] = scheduler.running
+            proactive["next_due"] = scheduler.next_due()
+        proactive_state_store = getattr(self, "proactive_state_store", None)
+        if proactive_state_store is not None:
+            since = time.time() - 24 * 60 * 60
+            proactive["metrics_24h"] = {
+                "engagement": await proactive_state_store.metric_totals(
+                    "engagement", since=since
+                ),
+                "scheduler": await proactive_state_store.metric_totals(
+                    "scheduler", since=since
+                ),
+            }
+        return {
+            "engagement": metrics,
+            "delivery": delivery,
+            "routing": routing_metrics.snapshot() if routing_metrics else {},
+            "proactive": proactive,
+        }
 
     # ── 懒注入 ──
 
@@ -961,6 +1197,43 @@ class AgentEngine:
             except Exception as e:
                 _log.error(f"消息钩子执行异常: {e}", exc_info=True)
 
+    async def _recover_waiting_turns_for_inbound(
+        self, input_message: InputMessage, intent: InboundIntent
+    ) -> None:
+        """Attach a restart-safe waiting hint to the new inbound turn only."""
+        if not getattr(self, "mode_routing_enabled", False) or intent not in {
+            InboundIntent.PRIVATE_CONVERSATION,
+            InboundIntent.DIRECT_TASK,
+        }:
+            return
+        store = getattr(self, "_task_state_store", None)
+        if store is None:
+            return
+        recovered = await store.claim_waiting_recoveries(
+            chat_id=input_message.chat_id,
+            principal_id=input_message.sender_id,
+            intent=intent.value,
+        )
+        if not recovered:
+            return
+        if self._system_events is not None:
+            self._system_events.enqueue(
+                session_key=input_message.chat_id,
+                text=(
+                    "A prior waiting turn was recovered after restart. Treat this "
+                    "incoming message as a new trigger; do not replay prior tools "
+                    "or assume old pending messages still exist."
+                ),
+                context_key=f"recovered-wait:{input_message.sender_id}",
+                replace=True,
+            )
+        _log.info(
+            "recovered %d waiting turn(s) from new inbound chat=%s principal=%s",
+            len(recovered),
+            input_message.chat_id[:12],
+            input_message.sender_id[:12],
+        )
+
     # ── 消息分发 ──
 
     async def dispatch(
@@ -968,6 +1241,9 @@ class AgentEngine:
         input_message: InputMessage,
         reply_callback: Callable,
         get_user_nickname: Callable[[str], str],
+        *,
+        _source: ModeRouteSource | None = None,
+        _intent: InboundIntent | None = None,
     ) -> None:
         await self._process_admission_outbox()
         await self._ensure_outbox_worker()
@@ -986,7 +1262,29 @@ class AgentEngine:
         self.last_active_chat = chat_id
         self.last_active_time = time.time()
 
-        intent = self._classify_inbound_intent(input_message)
+        intent = _intent or self._classify_inbound_intent(input_message)
+        await self._recover_waiting_turns_for_inbound(input_message, intent)
+        mode_routing = None
+        if self.mode_routing_enabled and self.mode_router is not None:
+            source = _source or (
+                ModeRouteSource.AMBIENT
+                if intent is InboundIntent.GROUP_AMBIENT
+                else ModeRouteSource.USER
+            )
+            role = (
+                self._permission_manager.get_user_role(input_message.sender_id)
+                if self._permission_manager is not None
+                else "default"
+            )
+            mode_routing = self.mode_router.route(
+                ModeRouteInput(
+                    message=input_message,
+                    source=source,
+                    intent=intent,
+                    role=role,
+                    scheduler_revision=self._get_scheduler().revision(chat_id),
+                )
+            ).to_metadata()
         needs_ai = intent is not InboundIntent.GROUP_AMBIENT
         if needs_ai and self.rule_router and self.model_registry:
             tier = self.rule_router.classify(input_message.content)
@@ -997,6 +1295,7 @@ class AgentEngine:
             pending = await self._prepare_pending_inbound(
                 input_message,
                 intent=intent,
+                mode_routing=mode_routing,
             )
             enqueued = await self._get_scheduler().enqueue(chat_id, pending)
         except BaseException:
@@ -1061,11 +1360,180 @@ class AgentEngine:
             task.add_done_callback(self._consumer_tasks.discard)
             _log.debug("已启动会话 %s.. 的消费者", chat_id[:12])
 
+    async def dispatch_proactive(
+        self,
+        chat_id: str,
+        content: str,
+        reply_callback: Callable,
+        get_user_nickname: Callable[[str], str],
+    ) -> None:
+        """Enqueue a runtime-owned group proactive Chat turn.
+
+        Proactive work shares the ambient queue and admission path, but keeps a
+        distinct route profile so it cannot inherit user/direct-task tools.
+        """
+        if not chat_id or not content.strip():
+            raise ValueError("chat_id and content are required")
+        message = InputMessage(
+            id=f"proactive_{chat_id}_{time.time_ns()}",
+            sender_id="system",
+            chat_id=chat_id,
+            content=content,
+            is_group=True,
+            is_at_mention=False,
+        )
+        await self.dispatch(
+            message,
+            reply_callback,
+            get_user_nickname,
+            _source=ModeRouteSource.PROACTIVE,
+            _intent=InboundIntent.GROUP_AMBIENT,
+        )
+
+    async def run_proactive_group_turn(self, decision) -> _TurnResult:
+        """Run one fixed-target proactive Chat turn without user admission."""
+        if not getattr(self, "_reply_callback", None):
+            raise RuntimeError("proactive turn has no reply callback")
+        chat_id = decision.chat_id
+        turn_id = f"proactive_{chat_id}_{uuid4().hex}"
+        input_message = InputMessage(
+            id=turn_id,
+            sender_id="system",
+            chat_id=chat_id,
+            content="检查当前群聊上下文，判断是否有必要主动参与。",
+            is_group=True,
+        )
+        routing = self.mode_router.route(
+            ModeRouteInput(
+                message=input_message,
+                source=ModeRouteSource.PROACTIVE,
+                intent=InboundIntent.GROUP_AMBIENT,
+                scheduler_revision=self._get_scheduler().revision(chat_id),
+            )
+        ).to_metadata()
+        capabilities = self._turn_capabilities(
+            InboundIntent.GROUP_AMBIENT,
+            chat_id=chat_id,
+            sender_id="system",
+            reply_to="",
+            mode_routing=routing,
+        )
+        timeline_snapshot = await self.timeline.snapshot(chat_id)
+        controller = self._get_delivery_controller()
+        delivered = False
+        tool_delivered = False
+
+        async def _final_deliver(**kwargs):
+            nonlocal delivered
+            if kwargs.get("chat_id") != chat_id:
+                raise RuntimeError("proactive delivery target mismatch")
+            content = str(kwargs.get("content") or "").strip()
+            if not content:
+                return DeliveryReceipt(status="failed", error_code="empty_content")
+            delivery, record = await controller.prepare_ambient(
+                chat_id=chat_id,
+                turn_id=turn_id,
+                content=content,
+                delivery_mode="message_tool_only",
+                tool_delivered=tool_delivered,
+                reply_anchor_id="",
+                key_prefix="proactive",
+            )
+            if not delivery.should_deliver or record is None:
+                return DeliveryReceipt(
+                    status="accepted", logical_delivery_id=record.logical_delivery_id if record else ""
+                )
+            receipt = await self._reply_callback(
+                chat_id=chat_id,
+                content=content,
+                message_id="",
+                is_group=True,
+                delivery_id=record.logical_delivery_id or record.key,
+            )
+            if not isinstance(receipt, DeliveryReceipt):
+                receipt = DeliveryReceipt(status="accepted", logical_delivery_id=record.key)
+            await controller.settle_receipt(record, receipt, content=content, delivery_kind="proactive")
+            if receipt.status == "accepted":
+                delivered = True
+            return receipt
+
+        async def _tool_deliver(**kwargs):
+            nonlocal tool_delivered
+            if kwargs.get("chat_id") != chat_id:
+                raise RuntimeError("proactive delivery target mismatch")
+            receipt = await self._reply_callback(
+                chat_id=chat_id,
+                content=str(kwargs.get("content") or ""),
+                message_id="",
+                is_group=True,
+                media_file_info=kwargs.get("media_file_info"),
+                delivery_id=kwargs.get("delivery_id") or f"proactive:{turn_id}:tool",
+            )
+            if isinstance(receipt, DeliveryReceipt) and receipt.status == "accepted":
+                tool_delivered = True
+            return receipt
+
+
+        async def _build_prompt(
+            provider_identity: str | None = None,
+            *,
+            provider_service: Any = None,
+            admit: bool = True,
+            force_model_context_compaction: bool = False,
+        ) -> PromptBuildResult:
+            return await self.prompt_builder.build(
+                chat_id=chat_id,
+                is_group=True,
+                user_nickname="",
+                sender_id="system",
+                input_message=input_message,
+                cost_tracker=self.cost_tracker,
+                timeline_snapshot=timeline_snapshot,
+                protocol_snapshot=await self.protocol_history.snapshot(turn_id),
+                delivery_contract=DeliveryPromptContract(
+                    intent=InboundIntent.GROUP_AMBIENT,
+                    delivery_mode="message_tool_only",
+                    reply_target="",
+                    proactive=True,
+                ),
+                mode=PromptMode.CHAT,
+                capability_profile="group_proactive",
+                policy_version=routing.policy_version,
+                capabilities=capabilities,
+            )
+
+        turn = await self._run_turn(
+            _TurnRequest(
+                chat_id=chat_id,
+                sender_id="system",
+                is_group=True,
+                reply_to="",
+                route_text=input_message.content,
+                prompt_factory=_build_prompt,
+                reply_callback=_final_deliver,
+                tool_reply_callback=_tool_deliver,
+                tool_reply_names=frozenset({"send_message", "send_emoji"}),
+                get_user_nickname=lambda _sender: "",
+                capabilities=capabilities,
+                intent=InboundIntent.GROUP_AMBIENT,
+                turn_id=turn_id,
+                internal_control=True,
+                steering_enabled=False,
+                track_tool_delivery=True,
+            )
+        )
+        return replace(
+            turn,
+            tool_text_delivered=turn.tool_text_delivered or tool_delivered,
+            text_committed=turn.text_committed or delivered,
+        )
+
     async def _prepare_pending_inbound(
         self,
         input_message: InputMessage,
         *,
         intent: InboundIntent,
+        mode_routing: ModeRoutingMetadata | None = None,
     ) -> PendingInbound:
         """Build lightweight immutable ingress context without media analysis."""
         content = input_message.content
@@ -1089,6 +1557,7 @@ class AgentEngine:
             intent,
             AdmissionOrigin.USER_MESSAGE,
             resource_refs=media_refs,
+            mode_routing=mode_routing,
         )
 
     async def _admit_pending_message(
@@ -1279,6 +1748,22 @@ class AgentEngine:
             self._outbox_task = asyncio.create_task(self._admission_outbox_worker())
 
     async def start(self) -> None:
+        work_plan_service = getattr(self, "work_plan_service", None)
+        if work_plan_service is not None:
+            reconcile_result = await work_plan_service.reconcile()
+            routing_metrics = getattr(self, "routing_metrics", None)
+            if routing_metrics is not None:
+                routing_metrics.record_reconcile(reconcile_result)
+        work_plan_runner = getattr(self, "work_plan_background_runner", None)
+        if work_plan_runner is not None:
+            resumed = await work_plan_runner.resume()
+            if resumed:
+                _log.info("已恢复 %d 个 WorkPlan 后台任务", resumed)
+        task_state_store = getattr(self, "_task_state_store", None)
+        if task_state_store is not None:
+            expired_waits = await task_state_store.expire_waiting_turns()
+            if expired_waits:
+                _log.info("已终止 %d 个重启后已过期的 WAITING turn", len(expired_waits))
         await self._repair_model_context_on_startup()
         await self._process_admission_outbox()
         await self._ensure_delivery_recovery_worker()
@@ -1492,7 +1977,9 @@ class AgentEngine:
                         return
                     continue
 
-                pending = work.pending
+                pending = await self._refresh_mode_routing(
+                    work.pending, scheduler_revision=work.queue_revision
+                )
                 batch = work.items[1:]
                 message = pending.message
                 scheduler_turn_id = message.id
@@ -1503,20 +1990,101 @@ class AgentEngine:
                         turn_id=scheduler_turn_id,
                         principal_id=message.sender_id,
                     )
+                    planner_result = None
                     if pending.intent is not InboundIntent.GROUP_AMBIENT:
-                        if batch:
-                            await self._process_message(
+
+                        async def _run_planner_batch(
+                            followups: tuple[PendingInbound, ...] = (),
+                        ) -> PlannerResult | None:
+                            return await self._process_message(
                                 pending,
                                 reply_callback,
                                 get_user_nickname,
-                                batch=batch,
+                                batch=followups,
+                                scheduler_turn_id=scheduler_turn_id,
                             )
-                        else:
-                            await self._process_message(
+
+                        planner_result = await _run_planner_batch(batch)
+                        private_timeout_retry = 0
+                        while (
+                            planner_result is not None
+                            and planner_result.kind is PlannerResultKind.WAITING
+                        ):
+                            current_turn = await self._get_scheduler().get_turn(
+                                scheduler_turn_id
+                            )
+                            if (
+                                current_turn is not None
+                                and current_turn.phase is TurnPhase.ACTIVE
+                            ):
+                                await self._get_scheduler().transition_turn(
+                                    scheduler_turn_id,
+                                    expected_revision=current_turn.revision,
+                                    phase=TurnPhase.WAITING,
+                                    wait_reason=planner_result.reason,
+                                    wait_deadline=time.time()
+                                    + planner_result.wait_seconds,
+                                )
+                            wait_source = self._planner_source(
                                 pending,
-                                reply_callback,
-                                get_user_nickname,
+                                self._turn_capabilities(
+                                    pending.intent,
+                                    chat_id=chat_id,
+                                    sender_id=message.sender_id,
+                                    reply_to=message.id,
+                                    mode_routing=pending.mode_routing,
+                                ),
                             )
+                            if wait_source == "private":
+                                woke = (
+                                    await self._get_scheduler().wait_for_queue_change(
+                                        chat_id,
+                                        since_revision=work.queue_revision,
+                                        timeout=planner_result.wait_seconds,
+                                    )
+                                )
+                            else:
+                                intents = frozenset({InboundIntent.DIRECT_TASK})
+                                woke = await self._get_scheduler().wait_for_intent_queue_change(
+                                    chat_id,
+                                    since_revision=work.queue_revision,
+                                    timeout=planner_result.wait_seconds,
+                                    intents=intents,
+                                )
+                            current_turn = await self._get_scheduler().get_turn(
+                                scheduler_turn_id
+                            )
+                            if (
+                                current_turn is None
+                                or current_turn.phase is not TurnPhase.WAITING
+                            ):
+                                break
+                            await self._get_scheduler().transition_turn(
+                                scheduler_turn_id,
+                                expected_revision=current_turn.revision,
+                                phase=TurnPhase.ACTIVE,
+                            )
+                            if woke:
+                                steer_lease = await self._get_scheduler().claim_steer(
+                                    scheduler_turn_id
+                                )
+                                if steer_lease is None:
+                                    break
+                                try:
+                                    planner_result = await _run_planner_batch(
+                                        steer_lease.items
+                                    )
+                                finally:
+                                    for steering in steer_lease.items:
+                                        await self._get_scheduler().commit_steer(
+                                            scheduler_turn_id, steer_lease, steering
+                                        )
+                                continue
+                            if wait_source == "private" and private_timeout_retry < 1:
+                                private_timeout_retry += 1
+                                planner_result = await _run_planner_batch()
+                                continue
+                            break
                     else:
                         if (
                             turn_state.phase is not TurnPhase.ACTIVE
@@ -1527,6 +2095,36 @@ class AgentEngine:
                             decision = await self._get_group_engagement().evaluate(
                                 chat_id, batch=work.items
                             )
+                            if (
+                                getattr(self, "mode_routing_enabled", False)
+                                and decision.allowed
+                            ):
+                                gate = getattr(self, "reply_necessity_gate", None)
+                                if gate is None:
+                                    gate = ReplyNecessityGate()
+                                gate = gate.evaluate(
+                                    ReplyNecessityInput(
+                                        source="ambient",
+                                        chat_id=chat_id,
+                                        batch=work.items,
+                                        pending_count=len(work.items),
+                                        active_chat=True,
+                                        mode="active",
+                                        window_budget_remaining=1,
+                                    )
+                                )
+                                if not gate.admitted:
+                                    _log.info(
+                                        "ambient reply necessity skipped [%s..] reason=%s score=%s",
+                                        chat_id[:12],
+                                        gate.reason,
+                                        gate.score,
+                                    )
+                                    decision = replace(
+                                        decision,
+                                        allowed=False,
+                                        reason=f"necessity:{gate.reason}",
+                                    )
                             self._get_group_engagement().observe(decision)
                         if decision is not None and decision.shadow:
                             _log.info(
@@ -1582,7 +2180,7 @@ class AgentEngine:
                         await self._get_scheduler().drop_turn(current_turn.turn_id)
                     else:
                         finalizing = current_turn
-                        if current_turn.phase is TurnPhase.ACTIVE:
+                        if current_turn.phase in {TurnPhase.ACTIVE, TurnPhase.WAITING}:
                             finalizing = await self._get_scheduler().transition_turn(
                                 scheduler_turn_id,
                                 expected_revision=current_turn.revision,
@@ -1702,6 +2300,13 @@ class AgentEngine:
                 replies.append(content)
             await request.reply_callback(*args, **kwargs)
 
+        async def _planner_control_callback(control) -> None:
+            nonlocal final_reply_silent
+            if getattr(control, "action", None) in {"no_reply", "wait"}:
+                final_reply_silent = True
+            if request.planner_control_callback is not None:
+                await request.planner_control_callback(control)
+
         prompt_built = False
 
         async def _steering_admission_callback(
@@ -1714,10 +2319,22 @@ class AgentEngine:
             prompt_result = await request.prompt_factory()
             messages, tools = prompt_result
             model_context_scope = getattr(prompt_result, "model_context_scope", None)
+            prompt_snapshot = getattr(prompt_result, "snapshot", None)
+            if prompt_snapshot is not None:
+                _log.info(
+                    "prompt snapshot turn=%s mode=%s profile=%s version=%s hash=%s tools=%s chars=%d",
+                    request.turn_id[:12],
+                    prompt_snapshot.mode.value,
+                    prompt_snapshot.capability_profile,
+                    prompt_snapshot.prompt_version,
+                    prompt_snapshot.prompt_hash[:16],
+                    prompt_snapshot.tool_schema_digest[:16],
+                    prompt_snapshot.budget.used_chars,
+                )
             if request.internal_control:
                 tools = filter_internal_control_tools(tools)
             if request.capabilities is not None:
-                tools = request.capabilities.filter_tools(tools)
+                tools = request.capabilities.model_tool_schemas(tools)
             prompt_built = True
             model_chain = request.model_chain
             tier = request.tier
@@ -1895,6 +2512,12 @@ class AgentEngine:
                     if request.model_context_overflow_callback is not None
                     else None
                 ),
+                planner_control_callback=_planner_control_callback,
+                planner_lease_id=request.planner_lease_id,
+                planner_plan_id=request.planner_plan_id,
+                prompt_snapshot=prompt_snapshot,
+                routing_metrics=getattr(self, "routing_metrics", None),
+                consumer_evidence_callback=request.consumer_evidence_callback,
             )
             if request.timeout is not None:
                 sent_emoji, text_committed = await asyncio.wait_for(
@@ -1951,12 +2574,31 @@ class AgentEngine:
                         )
                 raise
 
+        async def _release_turn_planner_leases() -> None:
+            if request.planner_lease_id or not request.turn_id:
+                return
+            service = getattr(self, "work_plan_service", None)
+            if service is None:
+                return
+            try:
+                await service.store.release_leases_by_id(request.turn_id)
+            except Exception:
+                _log.exception(
+                    "释放 turn planner leases 失败 [%s]", request.turn_id[:12]
+                )
+
         if not request.serialize_session:
-            return await _execute_with_rollback()
+            try:
+                return await _execute_with_rollback()
+            finally:
+                await _release_turn_planner_leases()
 
         session_lock = await self.session_manager.get_lock(request.chat_id)
         async with session_lock:
-            return await _execute_with_rollback()
+            try:
+                return await _execute_with_rollback()
+            finally:
+                await _release_turn_planner_leases()
 
     async def _process_ambient_active(
         self,
@@ -1967,7 +2609,9 @@ class AgentEngine:
         get_user_nickname: Callable[[str], str],
     ) -> None:
         """Run an opted-in ambient turn behind the durable delivery gate."""
-        input_message = (batch[-1] if batch else pending).message
+        current_pending = pending
+        current_batch = batch
+        input_message = (current_batch[-1] if current_batch else current_pending).message
         chat_id = input_message.chat_id
         admitted_any = False
         final_delivered = False
@@ -1979,11 +2623,40 @@ class AgentEngine:
             for resource in (*item.message.resources, *item.message.replied_resources)
             if resource.media_uri
         )
+        capabilities = self._turn_capabilities(
+            pending.intent,
+            chat_id=chat_id,
+            sender_id=input_message.sender_id,
+            reply_to=decision.reply_anchor_id or input_message.id,
+            allowed_media_uris=allowed_media_uris,
+            mode_routing=pending.mode_routing,
+        )
+        planner_config = getattr(self, "engagement_config", None)
+        if planner_config is None:
+            planner_config = self.group_engagement.config
+        planner_request = PlannerRequest(
+            turn_id=turn_id,
+            mode=capabilities.mode.value,
+            source="ambient",
+            messages=[],
+            tools=[],
+            wait_seconds=max(
+                1, int(planner_config.planner_wait_max_seconds)
+            ),
+            max_waits=max(1, int(planner_config.planner_max_consecutive_waits)),
+        )
+        planner_result: PlannerResult | None = None
+
+        async def _handle_planner_control(control) -> None:
+            nonlocal planner_result
+            planner_result = await self.turn_planner.consume_control(
+                planner_request, control
+            )
 
         async def _build_prompt() -> tuple[list[dict], Optional[list[dict]]]:
             nonlocal admitted_any
             admitted_messages: list[AdmittedMessage] = []
-            for item in (pending, *batch):
+            for item in (current_pending, *current_batch):
                 admitted = await self._admit_pending_message(
                     item,
                     source="ambient",
@@ -1995,7 +2668,7 @@ class AgentEngine:
             if not admitted_messages:
                 raise _AdmissionAlreadyCommitted
             media_context = await self._build_batch_media_context(
-                turn_id, (pending, *batch)
+                turn_id, (current_pending, *current_batch)
             )
             return await self.prompt_builder.build(
                 chat_id=chat_id,
@@ -2007,9 +2680,17 @@ class AgentEngine:
                 timeline_snapshot=await self._get_timeline().snapshot(chat_id),
                 protocol_snapshot=await self._get_protocol_history().snapshot(turn_id),
                 delivery_contract=self._delivery_contract(
-                    pending.intent, decision.reply_anchor_id or input_message.id
+                    current_pending.intent, decision.reply_anchor_id or input_message.id
                 ),
                 media_context=media_context,
+                mode=(capabilities.mode if current_pending.mode_routing is not None else None),
+                capability_profile=capabilities.capability_profile,
+                policy_version=(
+                    current_pending.mode_routing.policy_version
+                    if current_pending.mode_routing is not None
+                    else "legacy/v1"
+                ),
+                capabilities=capabilities,
             )
 
         async def _tool_reply_callback(**kwargs):
@@ -2046,43 +2727,121 @@ class AgentEngine:
                 "ambient decision expired before provider start [%s..]", chat_id[:12]
             )
             return
+        turn = None
+        wait_revision = self._get_scheduler().revision(chat_id)
+        steered_lease = None
         try:
-            turn = await self._run_turn(
-                _TurnRequest(
-                    chat_id=chat_id,
-                    sender_id=input_message.sender_id,
-                    is_group=True,
-                    reply_to=decision.reply_anchor_id or input_message.id,
-                    route_text=input_message.content,
-                    prompt_factory=_build_prompt,
-                    reply_callback=_final_reply_callback,
-                    tool_reply_callback=_tool_reply_callback,
-                    tool_reply_names=frozenset({"send_message"}),
-                    get_user_nickname=get_user_nickname,
-                    model_chain=input_message.model_chain,
-                    tier=input_message.tier,
-                    rollback_message_id=pending.message.id,
-                    steering_enabled=False,
-                    capabilities=self._turn_capabilities(
-                        pending.intent,
+            while True:
+                turn = await self._run_turn(
+                    _TurnRequest(
+                        chat_id=chat_id,
+                        sender_id=input_message.sender_id,
+                        is_group=True,
+                        reply_to=decision.reply_anchor_id or input_message.id,
+                        route_text=input_message.content,
+                        prompt_factory=_build_prompt,
+                        reply_callback=_final_reply_callback,
+                        tool_reply_callback=_tool_reply_callback,
+                        tool_reply_names=frozenset({"send_message"}),
+                        get_user_nickname=get_user_nickname,
+                        model_chain=input_message.model_chain,
+                        tier=input_message.tier,
+                        rollback_message_id=current_pending.message.id,
+                        steering_enabled=False,
+                        capabilities=capabilities,
+                        intent=current_pending.intent,
+                        turn_id=turn_id,
+                        planner_control_callback=_handle_planner_control,
+                        track_tool_delivery=True,
+                    )
+                )
+                if (
+                    planner_result is None
+                    or planner_result.kind is not PlannerResultKind.WAITING
+                ):
+                    break
+
+                current_turn = await self._get_scheduler().get_turn(turn_id)
+                if (
+                    current_turn is None
+                    or current_turn.phase is not TurnPhase.ACTIVE
+                ):
+                    break
+                await self._get_scheduler().transition_turn(
+                    turn_id,
+                    expected_revision=current_turn.revision,
+                    phase=TurnPhase.WAITING,
+                    wait_reason=planner_result.reason,
+                    wait_deadline=time.time() + planner_result.wait_seconds,
+                )
+                woke = await self._get_scheduler().wait_for_intent_queue_change(
+                    chat_id,
+                    since_revision=wait_revision,
+                    timeout=planner_result.wait_seconds,
+                    intents=frozenset({InboundIntent.GROUP_AMBIENT}),
+                )
+                current_turn = await self._get_scheduler().get_turn(turn_id)
+                if (
+                    not woke
+                    or current_turn is None
+                    or current_turn.phase is not TurnPhase.WAITING
+                ):
+                    break
+                await self._get_scheduler().transition_turn(
+                    turn_id,
+                    expected_revision=current_turn.revision,
+                    phase=TurnPhase.ACTIVE,
+                )
+                steered_lease = await self._get_scheduler().claim_steer(turn_id)
+                if steered_lease is None:
+                    break
+                try:
+                    current_pending = steered_lease.items[0]
+                    current_batch = steered_lease.items[1:]
+                    input_message = (
+                        current_batch[-1] if current_batch else current_pending
+                    ).message
+                    allowed_media_uris = frozenset(
+                        resource.media_uri
+                        for item in steered_lease.items
+                        for resource in (
+                            *item.message.resources,
+                            *item.message.replied_resources,
+                        )
+                        if resource.media_uri
+                    )
+                    capabilities = self._turn_capabilities(
+                        current_pending.intent,
                         chat_id=chat_id,
                         sender_id=input_message.sender_id,
                         reply_to=decision.reply_anchor_id or input_message.id,
                         allowed_media_uris=allowed_media_uris,
+                        mode_routing=current_pending.mode_routing,
+                    )
+                    planner_request = replace(
+                        planner_request,
+                        mode=capabilities.mode.value,
+                    )
+                    wait_revision = self._get_scheduler().revision(chat_id)
+                    planner_result = None
+                finally:
+                    for steering in steered_lease.items:
+                        await self._get_scheduler().commit_steer(
+                            turn_id, steered_lease, steering
+                        )
+                    steered_lease = None
+
+            if turn is not None:
+                await self.group_engagement.complete(
+                    decision,
+                    delivered=turn.sent_emoji
+                    or turn.tool_text_delivered
+                    or final_delivered,
+                    silent=turn.final_reply_silent
+                    or not (
+                        turn.sent_emoji or turn.tool_text_delivered or final_delivered
                     ),
-                    intent=pending.intent,
-                    turn_id=turn_id,
-                    track_tool_delivery=True,
                 )
-            )
-            await self.group_engagement.complete(
-                decision,
-                delivered=turn.sent_emoji
-                or turn.tool_text_delivered
-                or final_delivered,
-                silent=turn.final_reply_silent
-                or not (turn.sent_emoji or turn.tool_text_delivered or final_delivered),
-            )
         except _AdmissionAlreadyCommitted:
             await self.group_engagement.complete(decision, delivered=False, silent=True)
         except Exception:
@@ -2096,7 +2855,9 @@ class AgentEngine:
         get_user_nickname: Callable[[str], str],
         *,
         batch: tuple[PendingInbound, ...] = (),
-    ) -> None:
+        already_admitted: bool = False,
+        scheduler_turn_id: str | None = None,
+    ) -> PlannerResult | None:
         if not isinstance(pending, PendingInbound):
             raise TypeError(
                 "_process_message requires PendingInbound with explicit origin"
@@ -2106,12 +2867,35 @@ class AgentEngine:
         is_group = input_message.is_group
         user_nickname = get_user_nickname(input_message.sender_id)
         system_event_snapshot = []
+        planner_result: PlannerResult | None = None
+
         capabilities = self._turn_capabilities(
             pending.intent,
             chat_id=chat_id,
             sender_id=input_message.sender_id,
             reply_to=input_message.id,
+            mode_routing=pending.mode_routing,
         )
+        planner_request = PlannerRequest(
+            turn_id=scheduler_turn_id or input_message.id,
+            mode=capabilities.mode.value,
+            source=self._planner_source(pending, capabilities),
+            messages=[],
+            tools=[],
+        )
+
+        async def _handle_planner_control(control) -> None:
+            nonlocal planner_result
+            planner_result = await self.turn_planner.consume_control(
+                planner_request, control
+            )
+            _log.info(
+                "planner result [%s] kind=%s reason=%s",
+                input_message.id,
+                planner_result.kind,
+                planner_result.reason,
+            )
+
         model_context_scope = await self._model_context_scope(
             pending, input_message, capabilities=capabilities, batch=batch
         )
@@ -2133,7 +2917,7 @@ class AgentEngine:
             admit: bool = True,
             force_model_context_compaction: bool = False,
         ) -> PromptBuildResult:
-            if admit:
+            if admit and not already_admitted:
                 admitted_messages: list[AdmittedMessage] = []
                 for item in (pending, *batch):
                     admitted = await self._admit_pending_message(
@@ -2175,6 +2959,14 @@ class AgentEngine:
                     pending.intent, input_message.id
                 ),
                 media_context=media_context,
+                mode=(capabilities.mode if pending.mode_routing is not None else None),
+                capability_profile=capabilities.capability_profile,
+                policy_version=(
+                    pending.mode_routing.policy_version
+                    if pending.mode_routing is not None
+                    else "legacy/v1"
+                ),
+                capabilities=capabilities,
             )
             result = (
                 built
@@ -2341,7 +3133,7 @@ class AgentEngine:
                 _log.warning("流式转发失败 [%s..]: %s", chat_id[:12], cb_err)
 
         try:
-            await self._run_turn(
+            turn_result = await self._run_turn(
                 _TurnRequest(
                     chat_id=chat_id,
                     sender_id=input_message.sender_id,
@@ -2361,11 +3153,12 @@ class AgentEngine:
                     steering_admission_callback=_admit_steering,
                     rollback_after_prompt_failure_only=True,
                     capabilities=capabilities,
-                    turn_id=input_message.id,
+                    planner_control_callback=_handle_planner_control,
+                    turn_id=scheduler_turn_id or input_message.id,
                     model_context_commit_callback=(
                         lambda scope: self._materialize_model_context(
                             scope,
-                            turn_id=input_message.id,
+                            turn_id=scheduler_turn_id or input_message.id,
                             message_ids=message_ids,
                         )
                     ),
@@ -2386,6 +3179,18 @@ class AgentEngine:
                     ),
                 )
             )
+            if (
+                planner_result is not None
+                and planner_result.kind is PlannerResultKind.HANDED_OFF
+            ):
+                await self._handoff_chat_to_agent(
+                    pending,
+                    batch=batch,
+                    control=planner_result,
+                    reply_callback=reply_callback,
+                    get_user_nickname=get_user_nickname,
+                    text_committed=turn_result.text_committed,
+                )
         except _AdmissionAlreadyCommitted:
             _log.info("消息已在历史中，跳过重复 turn: %s", input_message.id)
 
@@ -2394,6 +3199,145 @@ class AgentEngine:
                 chat_id, expected_events=system_event_snapshot
             )
         _log.info("消息处理完成: %s", input_message.id)
+        return planner_result
+
+    async def _on_work_plan_background_result(
+        self, task: BackgroundTask, result: Any
+    ) -> None:
+        """Request a durable WorkPlan wake; the wake consumer claims inbox later."""
+        plan = await self.work_plan_store.get_plan(task.work_plan_id)
+        if plan is None:
+            _log.warning("background result references missing WorkPlan: %s", task.id)
+            return
+        from core.tasks.wake_coalescer import INTENT_EVENT, SOURCE_TASK, request_wake
+
+        request_wake(
+            source=SOURCE_TASK,
+            intent=INTENT_EVENT,
+            session_key=plan.chat_id,
+            delivery_target=plan.chat_id,
+            work_plan_id=plan.id,
+            reason=f"workplan:{plan.short_handle}:background-result",
+        )
+
+    async def _run_work_plan_background(self, task: BackgroundTask) -> dict[str, Any]:
+        """Execute a persisted delegation in an isolated internal session only."""
+        try:
+            brief = json.loads(task.brief_json)
+        except json.JSONDecodeError:
+            return {"status": "failed", "error": "invalid durable task brief"}
+        if not isinstance(brief, dict):
+            return {"status": "failed", "error": "durable task brief must be an object"}
+        prompt = str(brief.get("task_summary") or brief.get("prompt") or "").strip()
+        if not prompt:
+            return {"status": "needs_input", "error": "task_summary is required"}
+        result = await self.execute_background_task(
+            chat_id=f"workplan:{task.id}",
+            prompt=prompt,
+            sender_id="system",
+            is_group=False,
+            delivery_channel="",
+            reply_to_message_id="",
+        )
+        return {
+            "status": "failed" if result.error else "completed",
+            "result": result.result,
+            "error": result.error or "",
+        }
+
+    async def _handoff_chat_to_agent(
+        self,
+        pending: PendingInbound,
+        *,
+        batch: tuple[PendingInbound, ...],
+        control: Any,
+        reply_callback: Callable,
+        get_user_nickname: Callable[[str], str],
+        text_committed: bool,
+    ) -> None:
+        """Persist a single pre-delivery Chat-to-Agent transfer and continue it.
+
+        The source message was admitted before the Chat provider request.  The
+        Agent continuation must reuse that one history entry rather than enqueue
+        a duplicate or emit an intermediate Chat acknowledgement.
+        """
+        handoff_started = time.monotonic()
+        routing_metrics = getattr(self, "routing_metrics", None)
+        if text_committed:
+            if routing_metrics is not None:
+                routing_metrics.record_handoff(status="rejected_after_output")
+            _log.warning(
+                "拒绝已投递 Chat turn 的 Agent handoff: %s", pending.message.id
+            )
+            return
+        message = pending.message
+        store = getattr(self, "work_plan_store", None)
+        if store is None:
+            raise RuntimeError("Chat-to-Agent handoff store is unavailable")
+        handoff_key = f"{message.chat_id}:{message.id}:request_agent"
+        accepted = await store.record_handoff(
+            handoff_key=handoff_key,
+            source_message_id=message.id,
+            chat_turn_id=message.id,
+            chat_id=message.chat_id,
+            sender_id=message.sender_id,
+            task_summary=str(getattr(control, "task_summary", "")),
+            reason=str(getattr(control, "reason", "")),
+        )
+        if not accepted:
+            handoff_status = await store.get_handoff_status(handoff_key)
+            for _ in range(100):
+                if handoff_status != "RESERVED":
+                    break
+                await asyncio.sleep(0.05)
+                handoff_status = await store.get_handoff_status(handoff_key)
+            if handoff_status is None:
+                accepted = await store.record_handoff(
+                    handoff_key=handoff_key,
+                    source_message_id=message.id,
+                    chat_turn_id=message.id,
+                    chat_id=message.chat_id,
+                    sender_id=message.sender_id,
+                    task_summary=str(getattr(control, "task_summary", "")),
+                    reason=str(getattr(control, "reason", "")),
+                )
+        if not accepted:
+            if routing_metrics is not None:
+                routing_metrics.record_handoff(status="duplicate")
+            _log.info("跳过重复 Chat-to-Agent handoff: %s", handoff_key)
+            return
+        agent_metadata = ModeRoutingMetadata(
+            mode=PromptMode.AGENT.value,
+            capability_profile="agent_full",
+            reason_code="chat_handoff",
+            policy_version="chat-handoff/v1",
+            scheduler_revision=self._get_scheduler().revision(message.chat_id),
+            work_plan_hint=(
+                pending.mode_routing.work_plan_hint if pending.mode_routing else None
+            ),
+        )
+        try:
+            await self._process_message(
+                replace(pending, mode_routing=agent_metadata),
+                reply_callback,
+                get_user_nickname,
+                batch=batch,
+                already_admitted=True,
+            )
+            if routing_metrics is not None:
+                routing_metrics.record_handoff(
+                    status="accepted",
+                    latency_ms=(time.monotonic() - handoff_started) * 1000,
+                )
+            await store.complete_handoff(handoff_key)
+        except BaseException:
+            if routing_metrics is not None:
+                routing_metrics.record_handoff(
+                    status="failed",
+                    latency_ms=(time.monotonic() - handoff_started) * 1000,
+                )
+            await store.delete_handoff(handoff_key)
+            raise
 
     # ── 后台任务执行 ──
 
@@ -2618,6 +3562,11 @@ class AgentEngine:
         messages: Optional[list[dict]] = None,
         tools: Optional[list[dict]] = None,
         timeout: int = 120,
+        planner_sender_id: str = "",
+        planner_lease_id: str = "",
+        planner_plan_id: str = "",
+        consumer_evidence_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+        work_plan_consumer: bool = False,
     ) -> Any:
         """统一的 wake/heartbeat AI turn。
 
@@ -2628,6 +3577,7 @@ class AgentEngine:
             source: 触发来源(interval/exec-event/cron/manual/system)
             session_key: chat_id 或 heartbeat:events
             delivery_target: 投递目标 chat_id
+            planner_sender_id: 内部 WorkPlan wake 使用的 owner 身份；仅由 WakeRunner 从持久计划推导
             extra_prompt: 额外 prompt（HEARTBEAT.md 内容等）
             messages: 预制消息列表（由 WakeRunner 传入）
             tools: 预制工具列表（由 WakeRunner 传入）
@@ -2654,9 +3604,10 @@ class AgentEngine:
         if source in ("interval", "manual") and not chat_id.startswith("heartbeat:"):
             chat_id = f"heartbeat:{int(_time.time())}"
 
+        planner_sender_id = planner_sender_id or "system"
         msg = InputMessage(
             id=f"wake_{chat_id}_{_time.time_ns()}",
-            sender_id="system",
+            sender_id=planner_sender_id,
             chat_id=chat_id,
             content=extra_prompt or "[系统事件]",
             is_group=is_group,
@@ -2688,7 +3639,7 @@ class AgentEngine:
                     chat_id=session_key,
                     is_group=is_group,
                     user_nickname="系统",
-                    sender_id="system",
+                    sender_id=planner_sender_id,
                     input_message=msg,
                     cost_tracker=self.cost_tracker,
                     timeline_snapshot=await self._get_timeline().snapshot(session_key),
@@ -2701,7 +3652,7 @@ class AgentEngine:
             turn = await self._run_turn(
                 _TurnRequest(
                     chat_id=chat_id,
-                    sender_id="system",
+                    sender_id=planner_sender_id,
                     is_group=is_group,
                     reply_to=msg.id,
                     route_text=extra_prompt or "[系统事件]",
@@ -2710,14 +3661,28 @@ class AgentEngine:
                     timeout=timeout,
                     internal_control=True,
                     steering_enabled=False,
-                    capabilities=self._turn_capabilities(
-                        InboundIntent.PRIVATE_CONVERSATION,
-                        chat_id=chat_id,
-                        sender_id="system",
-                        reply_to=msg.id,
+                    capabilities=(
+                        TurnCapabilities.for_mode(
+                            mode=PromptMode.AGENT,
+                            capability_profile="work_plan_consumer",
+                            intent=InboundIntent.DIRECT_TASK,
+                            chat_id=chat_id,
+                            sender_id=planner_sender_id,
+                            reply_to=msg.id,
+                        )
+                        if work_plan_consumer
+                        else self._turn_capabilities(
+                            InboundIntent.PRIVATE_CONVERSATION,
+                            chat_id=chat_id,
+                            sender_id=planner_sender_id,
+                            reply_to=msg.id,
+                        )
                     ),
                     intent=InboundIntent.DIRECT_TASK,
                     turn_id=msg.id,
+                    planner_lease_id=planner_lease_id,
+                    planner_plan_id=planner_plan_id,
+                    consumer_evidence_callback=consumer_evidence_callback,
                 )
             )
 
@@ -2835,6 +3800,11 @@ class AgentEngine:
     # ── 生命周期 ──
 
     async def stop(self):
+        work_plan_runner = getattr(self, "work_plan_background_runner", None)
+        if work_plan_runner is not None:
+            await work_plan_runner.stop()
+        if getattr(self, "work_plan_store", None) is not None:
+            await self.work_plan_store.close()
         if self._sub_agent_manager:
             await self._sub_agent_manager.cancel_all()
 
@@ -2873,5 +3843,8 @@ class AgentEngine:
 
         if self.hindsight:
             await self.hindsight.close()
+        proactive_state_store = getattr(self, "proactive_state_store", None)
+        if proactive_state_store is not None:
+            await proactive_state_store.close()
 
         _log.info("AgentEngine 已停止")

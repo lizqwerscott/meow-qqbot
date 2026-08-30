@@ -13,6 +13,7 @@ SECTIONS: dict[str, set[str]] = {
     "task": {"task"},
     "tts": {"synthesize_speech"},
     "sub_agent": {"spawn_subagent", "subagents"},
+    "work_plan": {"work_plan"},
     "heartbeat": {"heartbeat_respond"},
     "learner": {"define_jargon", "report_behavior_effect"},
     "message": {"send_message"},
@@ -28,6 +29,7 @@ _NORMAL_EXCLUDE: set[str] = set()
 
 PROFILES: dict[str, set[str]] = {
     "normal": _ALL_TOOLS - _NORMAL_EXCLUDE,
+    "work_plan": {"work_plan"},
     "heartbeat": {
         "heartbeat_respond",
         "memory",

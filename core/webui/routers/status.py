@@ -17,6 +17,10 @@ async def status_page(request: Request):
     if agent_engine and agent_engine.hindsight:
         await agent_engine.hindsight.health()
     stats = await agent_engine.get_stats() if agent_engine else {}
+    get_engagement_status = getattr(agent_engine, "get_engagement_status", None)
+    stats["engagement_status"] = (
+        await get_engagement_status() if get_engagement_status is not None else {}
+    )
 
     context_manager = managers.get("context_manager")
     archived_counts = (

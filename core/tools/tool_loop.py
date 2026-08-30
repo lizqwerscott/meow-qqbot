@@ -23,7 +23,7 @@ from core.managers.session_manager import InboundIntent, InboxLease, PendingInbo
 from core.tools._types import ToolContext
 from core.tools.delivery_evidence import DeliveryEvidence
 from core.tools.impl import execute as execute_tool
-from core.tools.stream_delivery import StreamDelivery, is_silent_reply_text
+from core.tools.stream_delivery import StreamDelivery
 
 _log = logging.getLogger(__name__)
 
@@ -129,6 +129,12 @@ class ToolLoop:
         model_context_usage_callback: Optional[
             Callable[[Optional[dict], Any, str, float], Awaitable[None]]
         ] = None,
+        planner_control_callback: Optional[Callable[[Any], Awaitable[None]]] = None,
+        planner_lease_id: str = "",
+        planner_plan_id: str = "",
+        prompt_snapshot: Any = None,
+        routing_metrics: Any = None,
+        consumer_evidence_callback: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> tuple[bool, bool]:
         """执行工具调用循环。
 
@@ -154,6 +160,15 @@ class ToolLoop:
         suppress_reply = False
         inbound_message_ids = list(inbound_message_ids or [])
         protocol_turn_id = turn_id or reply_to
+        if prompt_snapshot is not None:
+            messages = prompt_snapshot.to_wire_messages()
+            tools = prompt_snapshot.to_wire_tools()
+
+        async def record_tool_rejection(tool_name: str, reason: str) -> None:
+            if routing_metrics is not None:
+                routing_metrics.record_tool_rejection(
+                    tool_name=tool_name, reason=reason
+                )
 
         async def record_protocol_tool(
             tool_name: str, tool_call_id: str, content: str
@@ -249,7 +264,11 @@ class ToolLoop:
                     rebound = await model_context_provider_callback(
                         svc, not protocol_started
                     )
-                    if not protocol_started and rebound is not None:
+                    if (
+                        not protocol_started
+                        and rebound is not None
+                        and prompt_snapshot is None
+                    ):
                         messages, tools = rebound
                     bound_provider_identity = provider_identity
 
@@ -439,6 +458,26 @@ class ToolLoop:
             response_text = message.content or ""
             tool_calls = message.tool_calls or []
 
+            # planner_control is a protocol action, never a registry tool. It is
+            # consumed before history persistence or delivery so a Chat draft
+            # cannot leak while wait/no_reply/handoff is being decided.
+            control_calls = [
+                call for call in tool_calls if call.name == "planner_control"
+            ]
+            if control_calls:
+                from core.engine.planner_control import (
+                    classify_planner_control_response,
+                )
+
+                if capabilities is None or capabilities.mode.value != "chat":
+                    raise RuntimeError("planner_control is only valid in Chat mode")
+                control = classify_planner_control_response(
+                    message, allowed_actions=capabilities.planner_actions
+                )
+                if planner_control_callback is not None:
+                    await planner_control_callback(control)
+                return sent_emoji, text_committed
+
             reasoning = message.reasoning_content
             if reasoning:
                 _log.info(f"[工具循环 第{round_idx + 1}轮 思考过程]\n{reasoning}")
@@ -548,6 +587,9 @@ class ToolLoop:
                 turn_id=turn_id or reply_to,
                 turn_revision=current_turn_revision,
                 principal_id=sender_id,
+                planner_lease_id=planner_lease_id,
+                planner_plan_id=planner_plan_id,
+                consumer_evidence_callback=consumer_evidence_callback,
                 transition_turn=(
                     transition_turn_and_track if transition_turn is not None else None
                 ),
@@ -615,6 +657,9 @@ class ToolLoop:
                             turn_id=ctx.turn_id,
                             turn_revision=current_turn_revision,
                             principal_id=ctx.principal_id,
+                            planner_lease_id=ctx.planner_lease_id,
+                            planner_plan_id=ctx.planner_plan_id,
+                            consumer_evidence_callback=ctx.consumer_evidence_callback,
                             transition_turn=ctx.transition_turn,
                             capabilities=ctx.capabilities,
                             turn_active_callback=ctx.turn_active_callback,
@@ -640,6 +685,12 @@ class ToolLoop:
                                 tool_call_id=tc.id,
                                 content=str(kwargs.get("content", "")),
                                 reply_anchor_id=reply_to,
+                                key_prefix=(
+                                    "proactive"
+                                    if capabilities is not None
+                                    and capabilities.capability_profile == "group_proactive"
+                                    else "tool"
+                                ),
                             )
                             if not await turn_is_active():
                                 receipt = DeliveryReceipt(
@@ -650,7 +701,12 @@ class ToolLoop:
                                 )
                             else:
                                 try:
-                                    receipt = await base_callback(**kwargs)
+                                    receipt = await base_callback(
+                                        **{
+                                            **kwargs,
+                                            "delivery_id": record.logical_delivery_id,
+                                        }
+                                    )
                                 except Exception:
                                     receipt = DeliveryReceipt(
                                         status="failed",
@@ -681,6 +737,9 @@ class ToolLoop:
                             turn_id=tool_ctx.turn_id,
                             turn_revision=current_turn_revision,
                             principal_id=tool_ctx.principal_id,
+                            planner_lease_id=tool_ctx.planner_lease_id,
+                            planner_plan_id=tool_ctx.planner_plan_id,
+                            consumer_evidence_callback=tool_ctx.consumer_evidence_callback,
                             transition_turn=tool_ctx.transition_turn,
                             capabilities=tool_ctx.capabilities,
                             turn_active_callback=tool_ctx.turn_active_callback,
@@ -690,6 +749,7 @@ class ToolLoop:
                         sender_id=tool_ctx.sender_id,
                         reply_to=tool_ctx.reply_to,
                     ):
+                        await record_tool_rejection(tc.name, "context")
                         content = json.dumps(
                             {"error": "工具上下文不匹配当前 turn capability"},
                             ensure_ascii=False,
@@ -703,6 +763,7 @@ class ToolLoop:
                     if capabilities is not None and not capabilities.allows_tool(
                         tc.name
                     ):
+                        await record_tool_rejection(tc.name, "tool")
                         content = json.dumps(
                             {"error": f"工具不在当前 turn capability 内: {tc.name}"},
                             ensure_ascii=False,
@@ -716,6 +777,7 @@ class ToolLoop:
                     if capabilities is not None and not capabilities.allows_tool_args(
                         tc.name, args
                     ):
+                        await record_tool_rejection(tc.name, "arguments")
                         content = json.dumps(
                             {"error": "工具参数不在当前 turn capability 内"},
                             ensure_ascii=False,
@@ -742,6 +804,32 @@ class ToolLoop:
                                 )
                             )
                     result = await execute_tool(tc.name, args, tool_ctx, self._perm)
+                    if (
+                        tc.name == "work_plan"
+                        and consumer_evidence_callback is not None
+                        and isinstance(result.content, str)
+                    ):
+                        try:
+                            result_payload = json.loads(result.content)
+                        except json.JSONDecodeError:
+                            result_payload = {}
+                        evidence_action = str(args.get("action", ""))
+                        if evidence_action in {
+                            "acknowledge",
+                            "update",
+                            "select",
+                            "pause",
+                            "resume",
+                            "complete",
+                            "cancel",
+                            "reopen",
+                            "share",
+                            "delegate_background",
+                            "retry_background",
+                            "add_step",
+                            "update_step",
+                        } and not result_payload.get("error"):
+                            await consumer_evidence_callback(evidence_action)
                     if preprepared_record is not None:
                         receipt = result.delivery_receipt or DeliveryReceipt(
                             status="failed",

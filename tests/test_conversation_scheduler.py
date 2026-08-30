@@ -46,7 +46,15 @@ async def test_scheduler_returns_intent_and_revision_snapshot():
 
 
 @pytest.mark.asyncio
-async def test_scheduler_collects_same_intent_messages_after_quiet_window():
+async def test_wait_for_queue_change_wakes_on_new_inbound():
+    scheduler = ConversationScheduler(SessionTaskManager())
+    waiting = asyncio.create_task(
+        scheduler.wait_for_queue_change("chat", since_revision=0, timeout=1)
+    )
+    await asyncio.sleep(0)
+    await scheduler.enqueue("chat", pending("wake", InboundIntent.PRIVATE_CONVERSATION))
+    assert await waiting is True
+
     scheduler = ConversationScheduler(
         SessionTaskManager(),
         collect_idle_ms=10,

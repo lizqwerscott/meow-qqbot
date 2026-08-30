@@ -293,6 +293,42 @@ async def test_send_reply_returns_transport_receipt():
 
 
 @pytest.mark.asyncio
+async def test_proactive_delivery_id_maps_to_stable_msg_seq():
+    api = make_api()
+    engine = make_engine(api)
+
+    first = await engine.send_proactive(
+        "group-1", "hello", is_group=True, delivery_id="proactive:group-1:turn-1"
+    )
+    second = await engine.send_proactive(
+        "group-1", "hello", is_group=True, delivery_id="proactive:group-1:turn-1"
+    )
+
+    assert first.status == second.status == "accepted"
+    first_msg = api.post_group_message.await_args_list[0].args[1]
+    second_msg = api.post_group_message.await_args_list[1].args[1]
+    assert first_msg.msg_seq == second_msg.msg_seq
+    assert first_msg.msg_seq != 0
+
+
+@pytest.mark.asyncio
+async def test_proactive_delivery_chunks_have_stable_distinct_msg_seq(monkeypatch):
+    api = make_api()
+    engine = make_engine(api)
+    monkeypatch.setattr(
+        "core.engine.client.split_markdown", lambda _content: ["one", "two"]
+    )
+
+    await engine.send_proactive(
+        "group-1", "ignored", is_group=True, delivery_id="proactive:group-1:turn-2"
+    )
+
+    messages = [call.args[1] for call in api.post_group_message.await_args_list]
+    assert [message.msg_seq for message in messages][0] != messages[1].msg_seq
+    assert all(message.msg_seq != 0 for message in messages)
+
+
+@pytest.mark.asyncio
 async def test_send_proactive_timeout_returns_unknown_receipt():
     api = make_api()
     api.post_group_message.side_effect = TimeoutError("channel timeout")

@@ -131,6 +131,37 @@ class ConversationScheduler:
                 self._revision_condition.notify_all()
         return result
 
+    async def wait_for_queue_change(
+        self, chat_id: str, *, since_revision: int, timeout: float
+    ) -> bool:
+        """Wait for a newly accepted message without exposing scheduler internals."""
+        return await self._wait_for_queue_change(chat_id, since_revision, timeout)
+
+    async def wait_for_intent_queue_change(
+        self,
+        chat_id: str,
+        *,
+        since_revision: int,
+        timeout: float,
+        intents: frozenset[InboundIntent],
+    ) -> bool:
+        """Wait for a new queue revision that contains an allowed pending intent."""
+        if timeout <= 0:
+            return False
+        deadline = asyncio.get_running_loop().time() + timeout
+        revision = since_revision
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return False
+            changed = await self._wait_for_queue_change(chat_id, revision, remaining)
+            if not changed:
+                return False
+            for intent in intents:
+                if await self.session_manager.has_pending_intent(chat_id, intent):
+                    return True
+            revision = self._revision(chat_id)
+
     async def _wait_for_queue_change(
         self, chat_id: str, revision: int, timeout: float
     ) -> bool:
@@ -380,7 +411,7 @@ class ConversationScheduler:
             state = self._turn_states.get(turn_id)
             if (
                 state is None
-                or state.phase is not TurnPhase.ACTIVE
+                or state.phase not in {TurnPhase.ACTIVE, TurnPhase.WAITING}
                 or not self._principal_role_is_current(state)
             ):
                 return None
@@ -465,7 +496,7 @@ class ConversationScheduler:
             state = self._turn_states.get(turn_id)
             if (
                 state is None
-                or state.phase is not TurnPhase.ACTIVE
+                or state.phase not in {TurnPhase.ACTIVE, TurnPhase.WAITING}
                 or not self._principal_role_is_current(state)
             ):
                 raise StaleScheduledWork(f"steer turn is no longer active: {turn_id}")
@@ -478,6 +509,8 @@ class ConversationScheduler:
         expected_revision: int,
         phase: TurnPhase,
         approval_plan_id: str | None = None,
+        wait_reason: str | None = None,
+        wait_deadline: float | None = None,
     ) -> TurnState:
         """Apply one compare-and-swap lifecycle transition owned by the scheduler."""
         async with self._revision_condition:
@@ -488,6 +521,8 @@ class ConversationScheduler:
                 phase,
                 expected_revision=expected_revision,
                 approval_plan_id=approval_plan_id,
+                wait_reason=wait_reason,
+                wait_deadline=wait_deadline,
             )
             self._turn_states[turn_id] = updated
             if self._task_state_store is not None:
@@ -546,6 +581,10 @@ class ConversationScheduler:
             if state.phase not in {TurnPhase.COMPLETED, TurnPhase.CANCELLED}:
                 raise TurnStateError(f"cannot drop nonterminal turn: {state.phase}")
             self._turn_states.pop(turn_id, None)
+
+    def routing_revision_is_valid(self, chat_id: str, scheduler_revision: int) -> bool:
+        """Accept only ingress snapshots that are not from a future queue revision."""
+        return scheduler_revision <= self._revision(chat_id)
 
     def revision(self, chat_id: str) -> int:
         """Return the latest revision without exposing inbox internals."""

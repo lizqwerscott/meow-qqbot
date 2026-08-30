@@ -58,6 +58,90 @@ async def test_task_state_store_leaves_terminal_turn_unchanged(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_task_state_store_terminates_expired_wait_without_replaying_it(tmp_path):
+    store = TaskStateStore(str(tmp_path))
+    active = TurnState(
+        turn_id="expired-wait",
+        chat_id="chat-1",
+        intent=InboundIntent.PRIVATE_CONVERSATION,
+        principal_id="principal",
+        queue_revision=3,
+    )
+    waiting = active.transition(
+        TurnPhase.WAITING,
+        expected_revision=active.revision,
+        wait_reason="more input",
+        wait_deadline=10.0,
+    )
+    await store.put(waiting)
+
+    expired = await store.expire_waiting_turns(now=10.0)
+
+    assert [state.turn_id for state in expired] == ["expired-wait"]
+    current = store.get("expired-wait")
+    assert current is not None
+    assert current.phase == TurnPhase.CANCELLED.value
+    assert current.cancellation_generation == 1
+    assert (
+        await store.claim_waiting_recoveries(
+            chat_id="chat-1",
+            principal_id="principal",
+            intent=InboundIntent.PRIVATE_CONVERSATION.value,
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_task_state_store_retains_waiting_turn_until_matching_recovery(
+    tmp_path,
+):
+    store = TaskStateStore(str(tmp_path))
+    active = TurnState(
+        turn_id="wait-1",
+        chat_id="chat-1",
+        intent=InboundIntent.PRIVATE_CONVERSATION,
+        principal_id="principal",
+        queue_revision=3,
+    )
+    waiting = active.transition(
+        TurnPhase.WAITING,
+        expected_revision=active.revision,
+        wait_reason="more input",
+        wait_deadline=9999999999.0,
+    )
+    await store.put(waiting)
+
+    recovered = TaskStateStore(str(tmp_path))
+    assert await recovered.mark_interrupted_on_restart() == []
+    assert recovered.get("wait-1").phase == TurnPhase.WAITING.value
+    assert (
+        await recovered.claim_waiting_recoveries(
+            chat_id="chat-1",
+            principal_id="other",
+            intent=InboundIntent.PRIVATE_CONVERSATION.value,
+        )
+        == []
+    )
+    assert (
+        await recovered.claim_waiting_recoveries(
+            chat_id="chat-1",
+            principal_id="principal",
+            intent=InboundIntent.DIRECT_TASK.value,
+        )
+        == []
+    )
+
+    claimed = await recovered.claim_waiting_recoveries(
+        chat_id="chat-1",
+        principal_id="principal",
+        intent=InboundIntent.PRIVATE_CONVERSATION.value,
+    )
+    assert [state.turn_id for state in claimed] == ["wait-1"]
+    assert recovered.get("wait-1").phase == TurnPhase.CANCELLED.value
+
+
+@pytest.mark.asyncio
 async def test_task_state_store_skips_invalid_legacy_records_without_losing_valid_state(
     tmp_path,
 ):

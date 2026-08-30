@@ -26,7 +26,33 @@ async def test_wake_timer_is_rearmed_after_it_fires():
 
 
 @pytest.mark.asyncio
-async def test_handler_exception_is_retried():
+async def test_work_plan_wakes_in_same_chat_do_not_coalesce_across_plans():
+    calls = []
+
+    async def handler(pending):
+        calls.append(pending.work_plan_id)
+        return coalescer.WakeRunResult()
+
+    dispose = coalescer.set_wake_handler(handler)
+    try:
+        coalescer.request_wake(
+            source=coalescer.SOURCE_TASK,
+            session_key="chat",
+            work_plan_id="first-plan",
+            coalesce_ms=1,
+        )
+        coalescer.request_wake(
+            source=coalescer.SOURCE_TASK,
+            session_key="chat",
+            work_plan_id="second-plan",
+            coalesce_ms=1,
+        )
+        await asyncio.sleep(0.03)
+        assert calls == ["first-plan", "second-plan"]
+    finally:
+        dispose()
+        coalescer.clear_pending()
+
     calls = []
 
     async def handler(pending):

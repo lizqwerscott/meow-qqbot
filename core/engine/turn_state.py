@@ -8,6 +8,7 @@ from core.managers.session_manager import InboundIntent
 
 class TurnPhase(StrEnum):
     ACTIVE = "active"
+    WAITING = "waiting"
     AWAITING_APPROVAL = "awaiting_approval"
     FINALIZING = "finalizing"
     COMPLETED = "completed"
@@ -20,7 +21,15 @@ class TurnStateError(RuntimeError):
 
 _ALLOWED_TRANSITIONS = {
     TurnPhase.ACTIVE: frozenset(
-        {TurnPhase.AWAITING_APPROVAL, TurnPhase.FINALIZING, TurnPhase.CANCELLED}
+        {
+            TurnPhase.WAITING,
+            TurnPhase.AWAITING_APPROVAL,
+            TurnPhase.FINALIZING,
+            TurnPhase.CANCELLED,
+        }
+    ),
+    TurnPhase.WAITING: frozenset(
+        {TurnPhase.ACTIVE, TurnPhase.FINALIZING, TurnPhase.CANCELLED}
     ),
     TurnPhase.AWAITING_APPROVAL: frozenset(
         {TurnPhase.ACTIVE, TurnPhase.FINALIZING, TurnPhase.CANCELLED}
@@ -47,6 +56,9 @@ class TurnState:
     approval_plan_id: str = ""
     task_anchor_message_id: str = ""
     task_correlation_id: str = ""
+    wait_count: int = 0
+    wait_reason: str = ""
+    wait_deadline: float | None = None
 
     def transition(
         self,
@@ -54,6 +66,8 @@ class TurnState:
         *,
         expected_revision: int,
         approval_plan_id: str | None = None,
+        wait_reason: str | None = None,
+        wait_deadline: float | None = None,
     ) -> "TurnState":
         if expected_revision != self.revision:
             raise TurnStateError(
@@ -71,6 +85,12 @@ class TurnState:
             raise TurnStateError(
                 "approval plan can only be replaced from an active turn"
             )
+        if phase is TurnPhase.WAITING and wait_deadline is None:
+            raise TurnStateError("waiting turn requires a deadline")
+        if wait_reason is not None and phase is not TurnPhase.WAITING:
+            raise TurnStateError("wait metadata is only valid while waiting")
+        if wait_deadline is not None and phase is not TurnPhase.WAITING:
+            raise TurnStateError("wait metadata is only valid while waiting")
         return replace(
             self,
             phase=phase,
@@ -82,5 +102,10 @@ class TurnState:
                 approval_plan_id
                 if approval_plan_id is not None
                 else self.approval_plan_id
+            ),
+            wait_count=self.wait_count + (phase is TurnPhase.WAITING),
+            wait_reason=wait_reason if wait_reason is not None else self.wait_reason,
+            wait_deadline=(
+                wait_deadline if wait_deadline is not None else self.wait_deadline
             ),
         )

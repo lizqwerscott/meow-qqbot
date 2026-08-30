@@ -171,6 +171,37 @@ class HindsightMemory:
             _log.warning(f"Hindsight search 失败 (user={user_id[:16]}..): {e!r}")
             return {"episodes": [], "profiles": []}
 
+    async def search_shared(
+        self,
+        chat_id: str,
+        query: str = "",
+        top_k: int = 10,
+        method: str = "hybrid",
+    ) -> Dict[str, Any]:
+        """Recall only shared events retained for one chat, never a user profile."""
+        try:
+            response = await self._client.arecall(
+                bank_id=self._bank_id,
+                query=query,
+                tags=[f"chat:{chat_id}"],
+                tags_match="all_strict",
+                max_tokens=top_k * 500,
+            )
+            episodes: List[Dict] = []
+            for result in response.results:
+                if result.type in ("experience", "observation"):
+                    episodes.append(
+                        {"summary": result.text, "memory_type": result.type}
+                    )
+            self._cache_health({"status": "ok"})
+            return {"episodes": episodes, "profiles": []}
+        except Exception as exc:
+            self._cache_health({"status": "unreachable", "error": str(exc)})
+            _log.warning(
+                "Hindsight shared search failed (chat=%s..): %r", chat_id[:16], exc
+            )
+            return {"episodes": [], "profiles": []}
+
     async def health(self) -> Dict[str, Any]:
         cached = self.last_health_status
         if cached is not None:

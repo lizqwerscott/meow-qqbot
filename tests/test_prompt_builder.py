@@ -4,10 +4,42 @@
 这是少数情况下测试私有函数是合理的，因为它是纯 PII 过滤逻辑。
 """
 
-from core.engine.dynamic_context.memory import _DIRTY_PATTERNS, _DIRTY_REGEX, _is_dirty
+from types import SimpleNamespace
 
+import pytest
+
+from core.engine.dynamic_context.memory import _DIRTY_PATTERNS, _is_dirty
+from core.engine.prompt_builder import PromptBuilder
 
 # ── 内部模式 ──
+
+
+@pytest.mark.asyncio
+async def test_system_event_work_plan_consumer_uses_agent_tool_profile(monkeypatch):
+    profiles = []
+
+    def fake_build_tools(profile, context, *, deps):
+        profiles.append(profile)
+        return [{"function": {"name": "work_plan"}}]
+
+    monkeypatch.setattr("core.engine.prompt_builder.build_tools", fake_build_tools)
+    builder = PromptBuilder.__new__(PromptBuilder)
+    builder.hindsight = None
+    builder._workspace_manager = None
+    builder._has_tasks = False
+    builder._deps = SimpleNamespace()
+    builder._system_events = None
+
+    messages, tools = await builder.build_system_event_messages(
+        "background result", work_plan_consumer=True
+    )
+
+    assert profiles == ["work_plan"]
+    assert tools == [{"function": {"name": "work_plan"}}]
+    assert "WorkPlan 结果消费" in messages[0]["content"]
+
+    await builder.build_system_event_messages("cron result")
+    assert profiles == ["work_plan", "cron"]
 
 
 def test_internal_pattern_detectable():

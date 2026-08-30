@@ -146,10 +146,14 @@ class ChatReplyDeliveryStrategy(DeliveryStrategy):
         reply_callback: Callable,
         context_manager: Any = None,
         delivery_controller: Optional[DeliveryController] = None,
+        require_delivery: bool = False,
+        allow_result_target: bool = True,
     ):
         self._send = reply_callback
         self._ctx = context_manager
         self._delivery_controller = delivery_controller
+        self._require_delivery = require_delivery
+        self._allow_result_target = allow_result_target
 
     async def _send_text(
         self, text: str, target: str, *, delivery_id: str = ""
@@ -160,7 +164,7 @@ class ChatReplyDeliveryStrategy(DeliveryStrategy):
             if chat_type is not None:
                 is_group = chat_type
         if self._delivery_controller:
-            await self._delivery_controller.deliver_text(
+            receipt = await self._delivery_controller.deliver_text(
                 delivery_id=delivery_id or f"chat-reply:{target}",
                 chat_id=target,
                 content=text,
@@ -168,6 +172,8 @@ class ChatReplyDeliveryStrategy(DeliveryStrategy):
                 message_id="",
                 is_group=is_group,
             )
+            if receipt.status != "accepted":
+                raise RuntimeError(f"chat delivery was not confirmed: {receipt.status}")
             return
         await self._send(
             chat_id=target,
@@ -183,8 +189,12 @@ class ChatReplyDeliveryStrategy(DeliveryStrategy):
         ):
             text = result.notification_text.strip()
             if text:
-                target = getattr(result, "deliver_to_user", "") or delivery_target
+                target = delivery_target
+                if self._allow_result_target:
+                    target = getattr(result, "deliver_to_user", "") or delivery_target
                 if not target:
+                    if self._require_delivery:
+                        raise RuntimeError("work-plan delivery has no target")
                     _log.debug("[Delivery] ChatReply 跳过(通知): 无投递目标")
                     return
                 _log.info(
@@ -201,6 +211,10 @@ class ChatReplyDeliveryStrategy(DeliveryStrategy):
 
         # Normal chat path: AI 直接输出文本
         if not result.captured_replies or not delivery_target:
+            if self._require_delivery:
+                if not delivery_target:
+                    raise RuntimeError("work-plan delivery has no target")
+                raise RuntimeError("work-plan wake produced no deliverable reply")
             _log.debug("[Delivery] ChatReply 跳过: 无回复或投递目标为空")
             return
 
@@ -216,6 +230,8 @@ class ChatReplyDeliveryStrategy(DeliveryStrategy):
             if not should_skip:
                 non_silent.append(cleaned)
         if not non_silent:
+            if self._require_delivery:
+                raise RuntimeError("work-plan wake produced only silent replies")
             _log.debug("[Delivery] ChatReply 跳过: 全部被标准化过滤")
             return
         combined = "\n\n".join(non_silent)

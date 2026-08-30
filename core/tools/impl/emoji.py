@@ -102,6 +102,14 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
             emoji_hash=emoji_hash,
             is_group=ctx.is_group,
             reply_to=effective_reply_to,
+            delivery_callback=(
+                ctx.reply_callback
+                if (
+                    ctx.capabilities is not None
+                    and ctx.capabilities.capability_profile == "group_proactive"
+                )
+                else None
+            ),
         )
 
         if success:
@@ -140,6 +148,7 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
         emoji_hash: str,
         is_group: bool,
         reply_to: str | None = None,
+        delivery_callback=None,
     ) -> tuple[bool, str, str, str, DeliveryReceipt | None]:
         record = emoji_manager.find_by_hash(emoji_hash)
         if not record:
@@ -168,7 +177,15 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
                 file_name=file_name,
             )
 
-            if reply_to:
+            if delivery_callback is not None:
+                transport_result = await delivery_callback(
+                    chat_id=chat_id,
+                    content="",
+                    message_id=reply_to or "",
+                    is_group=is_group,
+                    media_file_info=file_info,
+                )
+            elif reply_to:
                 transport_result = await bot_engine.send_reply(
                     chat_id=chat_id,
                     is_group=is_group,

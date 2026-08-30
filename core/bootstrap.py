@@ -5,7 +5,6 @@
 
 import asyncio
 import logging
-import sys
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -29,6 +28,7 @@ from core.engine.context import (
     SysContext,
 )
 from core.engine.engagement_config import normalize_engagement_config
+from core.engine.group_proactive import GroupProactiveScheduler
 from core.engine.hindsight_memory import HindsightMemory
 from core.engine.router import Router
 from core.engine.system_events import SystemEventQueue
@@ -117,6 +117,7 @@ class ServiceGraph:
         self.media_service = None
         self.bot_engine = None
         self.webui_task = None
+        self.group_proactive_scheduler = None
 
     # ── build: 三阶段构造 ──────────────────────────────────────────
 
@@ -540,6 +541,34 @@ class ServiceGraph:
 
         # ── AgentEngine ──
         self.agent_engine = AgentEngine(ctx)
+        work_plan_cfg = self.cfg.work_plans
+        self.agent_engine.work_plan_store.max_pending_events_per_plan = int(
+            work_plan_cfg.get("max_pending_events_per_plan", 100)
+        )
+        self.agent_engine.work_plan_store.terminal_retention_seconds = (
+            float(work_plan_cfg.get("terminal_retention_days", 30)) * 24 * 60 * 60
+        )
+        self.agent_engine.work_plan_service.max_open_per_chat = int(
+            work_plan_cfg.get("max_open_per_chat", 8)
+        )
+        self.agent_engine.work_plan_service.max_open_per_owner = int(
+            work_plan_cfg.get("max_open_per_owner", 3)
+        )
+        self.agent_engine.work_plan_service.planner_lease_seconds = int(
+            work_plan_cfg.get("planner_lease_seconds", 60)
+        )
+        self.agent_engine.work_plan_service.max_running_background_per_plan = int(
+            work_plan_cfg.get("max_running_background_per_plan", 2)
+        )
+        self.agent_engine.work_plan_service.max_running_background_per_chat = int(
+            work_plan_cfg.get("max_running_background_per_chat", 4)
+        )
+        self.agent_engine.work_plan_background_runner.max_running_per_plan = int(
+            work_plan_cfg.get("max_running_background_per_plan", 2)
+        )
+        self.agent_engine.work_plan_background_runner.max_running_per_chat = int(
+            work_plan_cfg.get("max_running_background_per_chat", 4)
+        )
         self.agent_engine.set_media_service(self.media_service)
         self.context_manager.set_timeline(self.agent_engine.timeline)
         self.context_manager.set_protocol_history(self.agent_engine.protocol_history)
@@ -577,6 +606,8 @@ class ServiceGraph:
             background_task_runner=Ref(self.background_task_runner),
         )
         self.agent_engine._deps = self.tool_deps
+        self.tool_deps.work_plan_service = self.agent_engine.work_plan_service
+        self.tool_deps.work_plan_runner = self.agent_engine.work_plan_background_runner
         self.agent_engine.prompt_builder._deps = self.tool_deps
 
         entries = create_all_tool_entries(self.tool_deps)
@@ -785,6 +816,13 @@ class ServiceGraph:
             delivery_controller=self.agent_engine._get_delivery_controller(),
         )
 
+        work_plan_delivery = ChatReplyDeliveryStrategy(
+            reply_callback=self.bot_engine._send_reply,
+            context_manager=self.context_manager,
+            delivery_controller=self.agent_engine._get_delivery_controller(),
+            require_delivery=True,
+            allow_result_target=False,
+        )
         hb_delivery = None
         if self.heartbeat_manager is not None:
             show_ok = self.cfg.heartbeat.get("show_ok", False)
@@ -812,6 +850,7 @@ class ServiceGraph:
             delivery_strategies["manual"] = hb_delivery
         delivery_strategies["cron-heartbeat"] = cron_hb_delivery
         delivery_strategies["cron"] = chat_delivery
+        delivery_strategies["work-plan"] = work_plan_delivery
 
         hb_isolated_key_fn = (
             self.heartbeat_manager.resolve_isolated_session_key
@@ -844,6 +883,36 @@ class ServiceGraph:
         )
         set_wake_handler(self._wake_runner)
         _log.info("WakeCoalescer + WakeRunner 已初始化")
+
+        # ── Proactive 群聊调度器 ──
+        engagement_config = self.agent_engine.engagement_config
+        if (
+            self.agent_engine.mode_routing_enabled
+            and engagement_config.group_proactive_mode != "off"
+        ):
+            async def _proactive_turn(decision):
+                return await self.agent_engine.run_proactive_group_turn(decision)
+
+            def _proactive_busy(chat_id: str) -> bool:
+                phase = self.agent_engine._get_group_engagement().phase(chat_id)
+                return (
+                    self.agent_engine.session_manager.has_active_consumer(chat_id)
+                    or bool(self.agent_engine.session_manager.get_queue_sizes().get(chat_id))
+                    or phase.value in {"reserved", "thinking"}
+                )
+
+            self.group_proactive_scheduler = GroupProactiveScheduler(
+                engagement_config,
+                self.agent_engine._get_group_engagement(),
+                _proactive_turn,
+                is_busy=_proactive_busy,
+                state_store=self.agent_engine.proactive_state_store,
+            )
+            _log.info(
+                "GroupProactiveScheduler 已初始化 (mode=%s, chats=%d)",
+                engagement_config.group_proactive_mode,
+                len(engagement_config.group_proactive_active_chats),
+            )
 
         # ── exec 进程退出回调 ──
         async def _on_exec_exit(session):
@@ -973,6 +1042,10 @@ class ServiceGraph:
         if self.heartbeat_manager:
             await self.heartbeat_manager.start()
 
+        if self.group_proactive_scheduler:
+            await self.group_proactive_scheduler.start()
+            await self.agent_engine._ensure_delivery_recovery_worker()
+
         self.task_cleanup_task = None
         if self.task_manager:
             self._start_task_cleanup()
@@ -1098,6 +1171,11 @@ class ServiceGraph:
         heartbeat_manager = getattr(self, "heartbeat_manager", None)
         if heartbeat_manager:
             await self._safe_cleanup("heartbeat_manager", heartbeat_manager.stop)
+
+        proactive_scheduler = getattr(self, "group_proactive_scheduler", None)
+        self.group_proactive_scheduler = None
+        if proactive_scheduler:
+            await self._safe_cleanup("group_proactive_scheduler", proactive_scheduler.stop)
 
         bot_engine = getattr(self, "bot_engine", None)
         self.bot_engine = None

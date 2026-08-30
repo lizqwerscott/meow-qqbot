@@ -30,6 +30,9 @@ class PersistedTurnState:
     task_anchor_message_id: str
     updated_at: float
     task_correlation_id: str = ""
+    wait_count: int = 0
+    wait_reason: str = ""
+    wait_deadline: float | None = None
     interrupted_by_restart: bool = False
     delivery_ids: tuple[str, ...] = ()
     last_delivery_status: str = ""
@@ -50,6 +53,9 @@ class PersistedTurnState:
             task_anchor_message_id=state.task_anchor_message_id,
             updated_at=time.time(),
             task_correlation_id=state.task_correlation_id,
+            wait_count=state.wait_count,
+            wait_reason=state.wait_reason,
+            wait_deadline=state.wait_deadline,
         )
 
 
@@ -93,6 +99,9 @@ class TaskStateStore:
                         "task_correlation_id": str(
                             payload.get("task_correlation_id", "")
                         ),
+                        "wait_count": int(payload.get("wait_count", 0)),
+                        "wait_reason": str(payload.get("wait_reason", "")),
+                        "wait_deadline": payload.get("wait_deadline"),
                         "delivery_ids": tuple(
                             str(delivery_id)
                             for delivery_id in delivery_ids
@@ -124,13 +133,19 @@ class TaskStateStore:
             await asyncio.to_thread(self._save)
 
     async def mark_interrupted_on_restart(self) -> list[PersistedTurnState]:
-        """Terminally record old active work without reconstructing its execution."""
+        """Terminally record active work without replaying side-effecting loops.
+
+        A persisted WAITING turn has no in-flight provider or tool call.  Keep it
+        as a recovery hint until a matching later inbound message safely starts a
+        new turn; all other nonterminal phases are cancelled immediately.
+        """
         async with self._lock:
             interrupted = []
             for turn_id, state in tuple(self._states.items()):
                 if state.phase in {
                     TurnPhase.COMPLETED.value,
                     TurnPhase.CANCELLED.value,
+                    TurnPhase.WAITING.value,
                 }:
                     continue
                 updated = PersistedTurnState(
@@ -148,6 +163,74 @@ class TaskStateStore:
             if interrupted:
                 await asyncio.to_thread(self._save)
             return interrupted
+
+    async def claim_waiting_recoveries(
+        self,
+        *,
+        chat_id: str,
+        principal_id: str,
+        intent: str,
+    ) -> list[PersistedTurnState]:
+        """Consume restart-surviving waits that a new authorized message resumes.
+
+        This deliberately returns audit metadata only. Callers must create a new
+        scheduler turn for the new inbound message rather than replay the old
+        turn, its provider request, or any prior tool authorization.
+        """
+        async with self._lock:
+            claimed: list[PersistedTurnState] = []
+            for turn_id, state in tuple(self._states.items()):
+                if (
+                    state.phase != TurnPhase.WAITING.value
+                    or state.chat_id != chat_id
+                    or state.principal_id != principal_id
+                    or state.intent != intent
+                ):
+                    continue
+                updated = PersistedTurnState(
+                    **{
+                        **asdict(state),
+                        "phase": TurnPhase.CANCELLED.value,
+                        "revision": state.revision + 1,
+                        "cancellation_generation": state.cancellation_generation + 1,
+                        "updated_at": time.time(),
+                        "interrupted_by_restart": True,
+                    }
+                )
+                self._states[turn_id] = updated
+                claimed.append(updated)
+            if claimed:
+                await asyncio.to_thread(self._save)
+            return claimed
+
+    async def expire_waiting_turns(
+        self, *, now: float | None = None
+    ) -> list[PersistedTurnState]:
+        """Terminate expired restart-surviving waits without replaying side effects."""
+        current_time = time.time() if now is None else now
+        async with self._lock:
+            expired: list[PersistedTurnState] = []
+            for turn_id, state in tuple(self._states.items()):
+                if (
+                    state.phase != TurnPhase.WAITING.value
+                    or state.wait_deadline is None
+                    or state.wait_deadline > current_time
+                ):
+                    continue
+                updated = PersistedTurnState(
+                    **{
+                        **asdict(state),
+                        "phase": TurnPhase.CANCELLED.value,
+                        "revision": state.revision + 1,
+                        "cancellation_generation": state.cancellation_generation + 1,
+                        "updated_at": current_time,
+                    }
+                )
+                self._states[turn_id] = updated
+                expired.append(updated)
+            if expired:
+                await asyncio.to_thread(self._save)
+            return expired
 
     async def record_delivery(
         self, turn_id: str, delivery_id: str, status: str

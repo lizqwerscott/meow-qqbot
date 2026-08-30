@@ -23,6 +23,7 @@ def create_all_tool_entries(deps: ToolDeps) -> list[ToolEntry]:
     from core.tools.impl.tts import create_tts_entries
     from core.tools.impl.user import create_user_entries
     from core.tools.impl.web import create_web_entries
+    from core.tools.impl.work_plan import create_work_plan_entries
 
     entries = []
     entries.extend(create_emoji_entries(deps))
@@ -34,6 +35,7 @@ def create_all_tool_entries(deps: ToolDeps) -> list[ToolEntry]:
     entries.extend(create_file_entries(deps))
     entries.extend(create_search_entries(deps))
     entries.extend(create_web_entries(deps))
+    entries.extend(create_work_plan_entries(deps))
     entries.extend(create_heartbeat_entries(deps))
     entries.extend(create_sub_agent_entries(deps))
     entries.extend(create_tts_entries(deps))

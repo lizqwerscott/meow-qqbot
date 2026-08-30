@@ -47,6 +47,30 @@ async def test_chat_reply_strategy_settles_wake_delivery_receipt(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_work_plan_delivery_ignores_model_selected_target():
+    sent = []
+
+    async def callback(**kwargs):
+        sent.append(kwargs)
+        return DeliveryReceipt(status="accepted", platform_message_id="qq-1")
+
+    strategy = ChatReplyDeliveryStrategy(
+        callback, require_delivery=True, allow_result_target=False
+    )
+    result = SimpleNamespace(
+        should_notify=True,
+        notification_text="plan result",
+        deliver_to_user="other-chat",
+        captured_replies=[],
+        turn_id="wake-fixed-target",
+    )
+
+    await strategy.deliver(result, delivery_target="plan-chat")
+
+    assert sent[0]["chat_id"] == "plan-chat"
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_admin_delivery_is_ledgered_and_idempotent(tmp_path):
     class Heartbeat:
         _cooldown_hours = 1
@@ -120,7 +144,8 @@ async def test_heartbeat_admin_delivery_is_ledgered_and_idempotent(tmp_path):
         turn_id="wake-unknown",
     )
 
-    await strategy.deliver(result, delivery_target="chat")
+    with pytest.raises(RuntimeError, match="not confirmed: unknown"):
+        await strategy.deliver(result, delivery_target="chat")
 
     record = await controller.ledger.get("external:wake:wake-unknown:notification")
     assert record is not None

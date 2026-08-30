@@ -32,6 +32,18 @@ class InboundIntent(StrEnum):
 
 
 @dataclass(frozen=True)
+class ModeRoutingMetadata:
+    """Frozen capability-route metadata; it does not replace ``InboundIntent``."""
+
+    mode: Literal["chat", "agent"]
+    capability_profile: str
+    reason_code: str
+    policy_version: str
+    scheduler_revision: int
+    work_plan_hint: str | None = None
+
+
+@dataclass(frozen=True)
 class PendingInbound:
     """Immutable inbound envelope kept out of shared chat history until admission."""
 
@@ -41,6 +53,7 @@ class PendingInbound:
     origin: AdmissionOrigin
     enqueued_at: float = field(default_factory=time.time)
     resource_refs: tuple[str, ...] = ()
+    mode_routing: ModeRoutingMetadata | None = None
 
     def __post_init__(self) -> None:
         # Read compatibility for pre-intent inbox rows and old test fixtures.

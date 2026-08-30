@@ -18,7 +18,7 @@ from typing import Any, Callable, Optional
 from core.engine.system_events import SystemEventBusy
 
 from .delivery_strategy import DeliveryStrategy
-from .preflight import PreflightContext, PreflightResult, run_preflight
+from .preflight import PreflightContext, run_preflight
 from .system_event_prompt import build_system_events_prompt
 from .wake_coalescer import (
     SOURCE_CRON,
@@ -28,7 +28,6 @@ from .wake_coalescer import (
     SOURCE_TASK,
     PendingWake,
     WakeRunResult,
-    WakeTurnResult,
 )
 
 _log = logging.getLogger(__name__)
@@ -132,7 +131,68 @@ class WakeRunner:
             pw.intent,
         )
 
+        if pw.source == SOURCE_TASK and not pw.work_plan_id:
+            _log.warning(
+                "[WakeRunner] 拒绝无 WorkPlan scope 的 task wake: session=%s",
+                pw.session_key[:40],
+            )
+            return WakeRunResult(
+                status="skipped",
+                skip_reason="missing-work-plan-scope",
+                duration_ms=(time.time() - started) * 1000,
+            )
+
         # ── 2. 系统事件注入 ──
+        work_plan_leases = []
+
+        async def _release_work_plan_leases() -> None:
+            if work_plan_leases:
+                await self._agent.work_plan_service.settle_wake_inbox(
+                    work_plan_leases, success=False
+                )
+
+        if pw.source == SOURCE_TASK:
+            claim_wake_inbox = getattr(
+                getattr(self._agent, "work_plan_service", None),
+                "claim_wake_inbox",
+                None,
+            )
+            if claim_wake_inbox is None:
+                raise RuntimeError("work-plan inbox service is unavailable")
+            work_plan_leases = await claim_wake_inbox(
+                pw.session_key, work_plan_id=pw.work_plan_id
+            )
+            if not work_plan_leases:
+                return WakeRunResult(
+                    status="skipped",
+                    skip_reason="no-pending-work-plan-events",
+                    duration_ms=(time.time() - started) * 1000,
+                )
+            pw.extra_prompt = "\n\n".join(
+                [pw.extra_prompt, *(lease.prompt for lease in work_plan_leases)]
+            ).strip()
+
+        planner_ids = {lease.owner_id for lease in work_plan_leases}
+        planner_sender_id = (
+            next(iter(planner_ids)) if len(planner_ids) == 1 else "system"
+        )
+        planner_lease_id = (
+            work_plan_leases[0].lease_id if len(work_plan_leases) == 1 else ""
+        )
+        planner_plan_id = (
+            work_plan_leases[0].plan_id if len(work_plan_leases) == 1 else ""
+        )
+        consumer_evidence_recorded = False
+        consumer_evidence_callback = None
+        if len(work_plan_leases) == 1:
+            wake_lease = work_plan_leases[0]
+
+            async def consumer_evidence_callback(action: str) -> None:
+                nonlocal consumer_evidence_recorded
+                await self._agent.work_plan_service.record_consumer_evidence(
+                    wake_lease, action
+                )
+                consumer_evidence_recorded = True
 
         try:
             if pw.source in (SOURCE_INTERVAL, SOURCE_MANUAL):
@@ -160,7 +220,15 @@ class WakeRunner:
                         system_event_key=event_key,
                     )
                 )
-            elif pw.source in (SOURCE_EXEC, SOURCE_TASK):
+            elif pw.source == SOURCE_TASK:
+                messages, tools = (
+                    await self._agent.prompt_builder.build_system_event_messages(
+                        prompt=pw.extra_prompt or "[系统事件]",
+                        system_event_key=event_key,
+                        work_plan_consumer=True,
+                    )
+                )
+            elif pw.source == SOURCE_EXEC:
                 messages, tools = (
                     await self._agent.prompt_builder.build_system_event_messages(
                         prompt=pw.extra_prompt or "[系统事件]",
@@ -202,6 +270,7 @@ class WakeRunner:
                     protocol_snapshot=(),
                 )
         except SystemEventBusy:
+            await _release_work_plan_leases()
             return WakeRunResult(
                 status="skipped",
                 skip_reason="requests-in-flight",
@@ -209,9 +278,11 @@ class WakeRunner:
             )
         except asyncio.CancelledError:
             self._release_event_lease(event_key)
+            await _release_work_plan_leases()
             raise
         except Exception as e:
             self._release_event_lease(event_key)
+            await _release_work_plan_leases()
             _log.error("wake prompt 构建异常 [%s]: %s", pw.source, e)
             raise
 
@@ -226,16 +297,23 @@ class WakeRunner:
                 reason=pw.reason,
                 session_key=pw.session_key,
                 delivery_target=pw.delivery_target,
+                planner_sender_id=planner_sender_id,
+                planner_lease_id=planner_lease_id,
+                planner_plan_id=planner_plan_id,
+                consumer_evidence_callback=consumer_evidence_callback,
+                work_plan_consumer=(pw.source == SOURCE_TASK),
                 messages=messages,
                 tools=tools,
             )
             turn_ok = not bool(getattr(result, "error", ""))
         except asyncio.CancelledError:
             self._release_event_lease(event_key)
+            await _release_work_plan_leases()
             raise
         except Exception as e:
             _log.error("run_wake_turn 异常 [%s]: %s", pw.source, e)
             self._release_event_lease(event_key)
+            await _release_work_plan_leases()
             raise
 
         if not turn_ok:
@@ -243,6 +321,7 @@ class WakeRunner:
                 self._release_event_lease(event_key)
             except Exception:
                 pass
+            await _release_work_plan_leases()
             _log.debug("AI turn 失败，保留系统事件快照供重试 [%s]", event_key[:20])
             raise RuntimeError(result.error or "wake turn failed")
 
@@ -250,17 +329,24 @@ class WakeRunner:
         strategy_key = pw.source
         if pw.source == SOURCE_CRON and pw.session_key == "heartbeat:events":
             strategy_key = "cron-heartbeat"
-        elif pw.source in (SOURCE_EXEC, SOURCE_TASK):
+        elif pw.source == SOURCE_EXEC:
             strategy_key = "cron-heartbeat"
+        elif pw.source == SOURCE_TASK:
+            strategy_key = "work-plan"
         strategy = self._delivery.get(strategy_key)
+        if pw.source == SOURCE_TASK and strategy is None:
+            await _release_work_plan_leases()
+            raise RuntimeError("work-plan delivery strategy is unavailable")
         if strategy:
             try:
                 await strategy.deliver(result, delivery_target=pw.delivery_target)
             except asyncio.CancelledError:
                 self._release_event_lease(event_key)
+                await _release_work_plan_leases()
                 raise
             except Exception as e:
                 self._release_event_lease(event_key)
+                await _release_work_plan_leases()
                 _log.error(
                     "[WakeRunner] delivery 异常: source=%s strategy=%s err=%s",
                     pw.source,
@@ -275,7 +361,13 @@ class WakeRunner:
                 self._events.consume_snapshot(event_key)
             except Exception:
                 pass
-
+        if work_plan_leases:
+            if not consumer_evidence_recorded:
+                await _release_work_plan_leases()
+                raise RuntimeError("WorkPlan consumer produced no acknowledgement")
+            await self._agent.work_plan_service.settle_wake_inbox(
+                work_plan_leases, success=True
+            )
         duration = (time.time() - started) * 1000
         status = "ran" if turn_ok else "failed"
         _log.info(

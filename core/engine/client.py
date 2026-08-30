@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import time
 from dataclasses import dataclass
@@ -35,6 +36,15 @@ from core.message import InputMessage
 
 _log = logging.getLogger(__name__)
 _REPLY_DELIVERY_STATE_TTL = 600.0
+
+
+def _stable_msg_seq(delivery_id: str, chunk_index: int = 1) -> int:
+    """Map one logical delivery chunk to QQ's idempotent msg_seq field."""
+    digest = hashlib.sha256(
+        f"{delivery_id}:{max(1, chunk_index)}".encode("utf-8")
+    ).digest()
+    # QQ treats 0 as "no deduplication"; keep the value in 1..65535.
+    return int.from_bytes(digest[:4], "big") % 65535 + 1
 
 
 @dataclass
@@ -379,6 +389,7 @@ class BotEngine:
         keyboard: Optional[InlineKeyboard] = None,
         delivery_state: Optional[_ReplyDeliveryState] = None,
         chunk_index: Optional[int] = None,
+        delivery_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         chat_type = "group" if is_group else "c2c"
         state = delivery_state or _ReplyDeliveryState(
@@ -399,20 +410,29 @@ class BotEngine:
             return await self.api.post_c2c_message(chat_id, msg, keyboard=keyboard)
 
         async def send_proactive_message(
-            current_content: str, *, current_markdown: bool
+            current_content: str,
+            *,
+            current_markdown: bool,
+            current_chunk_index: int,
         ) -> Dict[str, Any]:
             if media_file_info:
-                msg = make_media_message()
+                msg = make_media_message(current_chunk_index)
             else:
                 msg = self.api.build_text_body(
                     current_content, reply_to=None, markdown=current_markdown
                 )
+                if delivery_id:
+                    msg.msg_seq = _stable_msg_seq(delivery_id, current_chunk_index)
             return await send_message(msg)
 
-        def make_media_message() -> MessageToCreate:
+        def make_media_message(current_chunk_index: int = 1) -> MessageToCreate:
             msg = MessageToCreate(
                 msg_type=QQMessageType.RICH_MEDIA,
-                msg_seq=self.api.next_msg_seq(),
+                msg_seq=(
+                    _stable_msg_seq(delivery_id, current_chunk_index)
+                    if delivery_id
+                    else self.api.next_msg_seq()
+                ),
                 media=MediaInfo(file_info=media_file_info),
             )
             if state.mode == "passive":
@@ -429,10 +449,12 @@ class BotEngine:
             try:
                 if state.mode == "proactive":
                     return await send_proactive_message(
-                        current_content, current_markdown=current_markdown
+                        current_content,
+                        current_markdown=current_markdown,
+                        current_chunk_index=log_chunk_index,
                     )
                 if media_file_info:
-                    result = await send_message(make_media_message())
+                    result = await send_message(make_media_message(log_chunk_index))
                 elif keyboard:
                     msg = self.api.build_text_body(
                         current_content,
@@ -475,7 +497,9 @@ class BotEngine:
                 )
                 try:
                     result = await send_proactive_message(
-                        current_content, current_markdown=current_markdown
+                        current_content,
+                        current_markdown=current_markdown,
+                        current_chunk_index=log_chunk_index,
                     )
                 except Exception as fallback_exc:
                     _log.error(
@@ -553,8 +577,9 @@ class BotEngine:
         media_file_info: Optional[str] = None,
         markdown: bool = True,
         keyboard: Optional[InlineKeyboard] = None,
+        delivery_id: Optional[str] = None,
     ) -> DeliveryReceipt:
-        logical_delivery_id = f"reply:{chat_id}:{message_id or 'proactive'}"
+        logical_delivery_id = delivery_id or f"reply:{chat_id}:{message_id or 'proactive'}"
         state = self._get_reply_delivery_state(chat_id, message_id, is_group)
         try:
             await self._send(
@@ -566,6 +591,7 @@ class BotEngine:
                 markdown=markdown,
                 keyboard=keyboard,
                 delivery_state=state,
+                delivery_id=logical_delivery_id,
             )
         except Exception as exc:
             return self._delivery_failure_receipt(logical_delivery_id, state, exc)
@@ -580,8 +606,9 @@ class BotEngine:
         media_file_info: Optional[str] = None,
         markdown: bool = True,
         keyboard: Optional[InlineKeyboard] = None,
+        delivery_id: Optional[str] = None,
     ) -> DeliveryReceipt:
-        logical_delivery_id = f"proactive:{chat_id}:{time.time_ns()}"
+        logical_delivery_id = delivery_id or f"proactive:{chat_id}:{time.time_ns()}"
         state = _ReplyDeliveryState(mode="proactive", last_used=time.monotonic())
         try:
             await self._send(
@@ -593,15 +620,24 @@ class BotEngine:
                 markdown=markdown,
                 keyboard=keyboard,
                 delivery_state=state,
+                delivery_id=logical_delivery_id,
             )
         except Exception as exc:
             return self._delivery_failure_receipt(logical_delivery_id, state, exc)
         return self._delivery_success_receipt(logical_delivery_id, state)
 
     async def _send_reply(
-        self, chat_id: str, content: str, message_id: str, is_group: bool = False
+        self,
+        chat_id: str,
+        content: str,
+        message_id: str,
+        is_group: bool = False,
+        media_file_info: Optional[str] = None,
+        markdown: bool = True,
+        keyboard: Optional[InlineKeyboard] = None,
+        delivery_id: Optional[str] = None,
     ) -> DeliveryReceipt:
-        logical_delivery_id = f"reply:{chat_id}:{message_id or 'proactive'}"
+        logical_delivery_id = delivery_id or f"reply:{chat_id}:{message_id or 'proactive'}"
         try:
             reply_to = message_id if message_id else None
             state = self._get_reply_delivery_state(chat_id, message_id, is_group)
@@ -610,7 +646,11 @@ class BotEngine:
                 content,
                 reply_to=reply_to,
                 is_group=is_group,
+                media_file_info=media_file_info,
+                markdown=markdown,
+                keyboard=keyboard,
                 delivery_state=state,
+                delivery_id=logical_delivery_id,
             )
             return self._delivery_success_receipt(logical_delivery_id, state)
         except Exception as e:

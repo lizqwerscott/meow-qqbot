@@ -247,6 +247,43 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
 
         return ToolResult(content="\n".join(lines))
 
+    async def _search_shared_memory(args: dict, ctx: ToolContext) -> ToolResult:
+        """Search only group-shared history; the model never supplies the chat id."""
+        hindsight = deps.hindsight
+        query = (args.get("query") or "").strip()
+        if hindsight is None:
+            return ToolResult(
+                content=json.dumps({"error": "记忆系统未就绪"}, ensure_ascii=False)
+            )
+        if not ctx.is_group:
+            return ToolResult(
+                content=json.dumps({"error": "共享记忆仅限群聊"}, ensure_ascii=False)
+            )
+        if not query:
+            return ToolResult(
+                content=json.dumps({"error": "搜索关键词为空"}, ensure_ascii=False)
+            )
+        try:
+            result = await hindsight.search_shared(
+                chat_id=ctx.chat_id,
+                query=query,
+                top_k=deps.search_top_k,
+                method=args.get("method", "hybrid"),
+            )
+        except Exception as exc:
+            _log.warning("search_shared_memory 异常: %s", exc)
+            return ToolResult(
+                content=json.dumps({"error": "共享记忆搜索失败"}, ensure_ascii=False)
+            )
+        lines = ["本群共同讨论的检索结果："]
+        for episode in result.get("episodes", [])[:5]:
+            content = episode.get("summary", "") or episode.get("episode", "")
+            if content:
+                lines.append(f"- {content[:200]}")
+        if len(lines) == 1:
+            lines.append("（未找到相关共同记忆）")
+        return ToolResult(content="\n".join(lines))
+
     async def _memory(args: dict, ctx: ToolContext) -> ToolResult:
         action = (args.get("action") or "").strip()
         match action:
@@ -254,6 +291,8 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
                 return await _search_memory(args, ctx)
             case "relation":
                 return await _search_relation(args, ctx)
+            case "search_shared":
+                return await _search_shared_memory(args, ctx)
             case _:
                 return ToolResult(
                     content=json.dumps(
@@ -344,8 +383,8 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["search", "relation"],
-                "description": "操作类型：search 搜索记忆 | relation 查询两人关系",
+                "enum": ["search", "search_shared", "relation"],
+                "description": "操作类型：search 搜索自己的个人记忆 | search_shared 搜索本群共同记忆 | relation 查询两人关系",
             },
             **_SEARCH_FIELDS,
             **_RELATION_FIELDS,
@@ -381,8 +420,8 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
             name="memory",
             section="memory",
             description=(
-                "记忆搜索和关系查询工具。action=search 搜索人物画像/经历/事实（指定 person_name 可查群友）；"
-                "action=relation 查询两人关系（指定 person_a + person_b）。"
+                "记忆搜索和关系查询工具。action=search 搜索当前说话者的个人画像/经历/事实；"
+                "action=search_shared 只搜索当前群的共同讨论；action=relation 查询两人关系。"
                 "person_name/person_a/person_b 支持模糊搜索，输入昵称的一部分也能匹配到。"
                 "当需要了解某人的背景、确认某件事、查找说过的话时使用。"
             ),

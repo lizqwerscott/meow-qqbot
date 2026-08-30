@@ -344,6 +344,7 @@ async def test_user_target_cron_wake_uses_system_event_prompt():
         system_event_key="user_001",
     )
     assert run_wake_turn.await_args.kwargs["messages"] == system_messages
+    assert run_wake_turn.await_args.kwargs["work_plan_consumer"] is False
 
 
 def test_wake_runner_cron_branch():

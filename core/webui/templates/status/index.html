@@ -68,6 +68,26 @@
 </div>
 {% endif %}
 
+{% set proactive = stats.engagement_status.proactive if stats.engagement_status else {} %}
+<div class="card" style="margin-top:20px">
+    <h2>群聊主动参与</h2>
+    <p>模式: <code>{{ proactive.mode or "off" }}</code> · allowlist: {{ proactive.active_chats or 0 }} · 间隔: {{ proactive.interval_seconds or 0 }}s · 调度器: {{ "运行中" if proactive.running else "未运行" }}</p>
+    {% set m24 = proactive.metrics_24h if proactive.metrics_24h else {} %}
+    <p>过去 24 小时: 已发送 {{ (m24.scheduler.delivered if m24.scheduler else 0) }} · 静默 {{ (m24.scheduler.silent if m24.scheduler else 0) }} · 失败 {{ (m24.scheduler.failed if m24.scheduler else 0) }} · 跳过 {{ (m24.scheduler.not_due if m24.scheduler else 0) }}</p>
+    <div class="table-wrap">
+    <table>
+        <thead><tr><th>指标</th><th>数量</th></tr></thead>
+        <tbody>
+            <tr><td>候选</td><td>{{ proactive.candidate or proactive.reserved or 0 }}</td></tr>
+            <tr><td>已发送</td><td>{{ proactive.delivered or 0 }}</td></tr>
+            <tr><td>静默</td><td>{{ proactive.silent or 0 }}</td></tr>
+            <tr><td>忙碌跳过</td><td>{{ proactive.session_busy or 0 }}</td></tr>
+            <tr><td>失败</td><td>{{ proactive.failed or 0 }}</td></tr>
+        </tbody>
+    </table>
+    </div>
+</div>
+
 <div class="card" style="margin-top:20px">
     <h2>🤖 Hindsight 记忆系统</h2>
     {% set e = stats.hindsight_health %}

@@ -28,7 +28,13 @@ def decide_assistant_output(
         return AssistantOutputDecision(False, "tool_calls_present")
     if explicit_delivery_already_sent:
         return AssistantOutputDecision(False, "explicit_delivery_already_sent")
-    if suppress_reply or is_silent_reply_text(content or ""):
+    if suppress_reply or (
+        is_silent_reply_text(content or "")
+        and not (
+            capabilities is not None
+            and getattr(getattr(capabilities, "mode", None), "value", "") == "chat"
+        )
+    ):
         return AssistantOutputDecision(False, "silent_reply")
     if capabilities is not None and not capabilities.allow_automatic_reply:
         return AssistantOutputDecision(False, "automatic_delivery_not_allowed")

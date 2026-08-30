@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from core.engine.conversation_scheduler import ConversationScheduler, StaleScheduledWork
@@ -74,7 +76,34 @@ async def test_scheduler_turn_state_freezes_identity_and_approval_plan():
 
 
 @pytest.mark.asyncio
-async def test_scheduler_cross_principal_steer_requires_enabled_anchor_and_role():
+async def test_scheduler_turn_waiting_is_durable_and_can_finalize():
+    scheduler = ConversationScheduler(SessionTaskManager())
+    enqueued = await scheduler.enqueue("chat", _pending())
+    work = await scheduler.next_work("chat", owner_token=enqueued.consumer_token)
+    assert work is not None
+    active = await scheduler.start_turn(
+        work, turn_id="turn-wait", principal_id="principal"
+    )
+
+    waiting = await scheduler.transition_turn(
+        "turn-wait",
+        expected_revision=active.revision,
+        phase=TurnPhase.WAITING,
+        wait_reason="quiet period",
+        wait_deadline=123.0,
+    )
+    assert waiting.phase is TurnPhase.WAITING
+    assert not await scheduler.is_turn_execution_allowed(
+        waiting.turn_id, waiting.cancellation_generation
+    )
+    finalizing = await scheduler.transition_turn(
+        "turn-wait", expected_revision=waiting.revision, phase=TurnPhase.FINALIZING
+    )
+    completed = await scheduler.transition_turn(
+        "turn-wait", expected_revision=finalizing.revision, phase=TurnPhase.COMPLETED
+    )
+    await scheduler.drop_turn(completed.turn_id)
+
     session = SessionTaskManager()
     roles = {"principal": "trusted", "collaborator": "trusted"}
     scheduler = ConversationScheduler(
@@ -434,3 +463,32 @@ async def test_scheduler_turn_state_only_drops_terminal_turns():
     await scheduler.drop_turn(completed.turn_id)
 
     assert await scheduler.get_turn("turn-1") is None
+
+
+@pytest.mark.asyncio
+async def test_wait_for_intent_queue_change_ignores_unmatched_messages():
+    scheduler = ConversationScheduler(SessionTaskManager())
+    await scheduler.enqueue("chat", _ambient_pending())
+    revision = scheduler._revision("chat")
+
+    wait = asyncio.create_task(
+        scheduler.wait_for_intent_queue_change(
+            "chat",
+            since_revision=revision,
+            timeout=0.1,
+            intents=frozenset({InboundIntent.DIRECT_TASK}),
+        )
+    )
+    await scheduler.enqueue("chat", _ambient_pending())
+    assert not await wait
+
+    wait = asyncio.create_task(
+        scheduler.wait_for_intent_queue_change(
+            "chat",
+            since_revision=scheduler._revision("chat"),
+            timeout=1,
+            intents=frozenset({InboundIntent.DIRECT_TASK}),
+        )
+    )
+    await scheduler.enqueue("chat", _pending())
+    assert await wait

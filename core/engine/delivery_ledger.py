@@ -48,6 +48,7 @@ class DeliveryRecord:
     reason: str
     reply_anchor_id: str
     content_hash: str
+    content: str = ""
     transport_id: str = ""
     attempts: int = 0
     created_at: float = 0.0
@@ -99,6 +100,7 @@ class DeliveryLedger:
                     reason TEXT NOT NULL DEFAULT '',
                     reply_anchor_id TEXT NOT NULL DEFAULT '',
                     content_hash TEXT NOT NULL DEFAULT '',
+                    content TEXT NOT NULL DEFAULT '',
                     transport_id TEXT NOT NULL DEFAULT '',
                     attempts INTEGER NOT NULL DEFAULT 0,
                     receipt_status TEXT NOT NULL DEFAULT '',
@@ -120,6 +122,10 @@ class DeliveryLedger:
             if "attempts" not in columns:
                 self._conn.execute(
                     "ALTER TABLE delivery_ledger ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
+                )
+            if "content" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE delivery_ledger ADD COLUMN content TEXT NOT NULL DEFAULT ''"
                 )
             for column, definition in (
                 ("receipt_status", "TEXT NOT NULL DEFAULT ''"),
@@ -153,6 +159,7 @@ class DeliveryLedger:
             reason=row["reason"],
             reply_anchor_id=row["reply_anchor_id"],
             content_hash=row["content_hash"],
+            content=row["content"] if "content" in row.keys() else "",
             transport_id=row["transport_id"],
             attempts=int(row["attempts"]),
             created_at=row["created_at"],
@@ -184,6 +191,7 @@ class DeliveryLedger:
         content_hash: str,
         status: str = "prepared",
         logical_delivery_id: str = "",
+        content: str | None = None,
     ) -> DeliveryRecord:
         if status not in {"prepared", "suppressed"}:
             raise ValueError(f"invalid delivery preparation status: {status}")
@@ -194,9 +202,9 @@ class DeliveryLedger:
                 """
                 INSERT INTO delivery_ledger
                     (delivery_key, chat_id, turn_id, status, reason,
-                     reply_anchor_id, content_hash, attempts, receipt_status,
+                     reply_anchor_id, content_hash, content, attempts, receipt_status,
                      logical_delivery_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, '', ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, '', ?, ?, ?)
                 ON CONFLICT(delivery_key) DO NOTHING
                 """,
                 (
@@ -207,6 +215,7 @@ class DeliveryLedger:
                     reason,
                     reply_anchor_id,
                     content_hash,
+                    content or "",
                     logical_delivery_id or key,
                     now,
                     now,
@@ -410,6 +419,7 @@ class DeliveryController:
         delivery_mode: str,
         tool_delivered: bool = False,
         reply_anchor_id: str = "",
+        key_prefix: str = "ambient",
     ) -> tuple[AmbientDeliveryDecision, Optional[DeliveryRecord]]:
         decision = decide_ambient_delivery(
             content,
@@ -417,7 +427,7 @@ class DeliveryController:
             tool_delivered=tool_delivered,
             reply_anchor_id=reply_anchor_id,
         )
-        key = f"ambient:{chat_id}:{turn_id}"
+        key = f"{key_prefix}:{chat_id}:{turn_id}"
         record = await self.ledger.prepare(
             key=key,
             chat_id=chat_id,
@@ -427,6 +437,7 @@ class DeliveryController:
             content_hash=self.ledger.content_hash(content),
             status="prepared" if decision.should_deliver else "suppressed",
             logical_delivery_id=key,
+            content=(content if key_prefix == "proactive" else None),
         )
         await self._audit(record, record.status)
         if record.status != "prepared" and decision.should_deliver:
@@ -733,8 +744,9 @@ class DeliveryController:
         tool_call_id: str,
         content: str,
         reply_anchor_id: str = "",
+        key_prefix: str = "tool",
     ) -> DeliveryRecord:
-        key = f"tool:{chat_id}:{turn_id}:{tool_name}:{tool_call_id}"
+        key = f"{key_prefix}:{chat_id}:{turn_id}:{tool_name}:{tool_call_id}"
         record = await self.ledger.prepare(
             key=key,
             chat_id=chat_id,
@@ -743,6 +755,7 @@ class DeliveryController:
             reply_anchor_id=reply_anchor_id,
             content_hash=self.ledger.content_hash(content),
             logical_delivery_id=key,
+            content=(content if key_prefix == "proactive" else None),
         )
         await self._audit(record, record.status)
         return record

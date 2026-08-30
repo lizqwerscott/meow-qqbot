@@ -17,12 +17,16 @@ from core.engine.delivery_ledger import (
     DeliveryController,
     DeliveryLedger,
     DeliveryReceipt,
+    DeliveryRecoveryResult,
 )
 from core.engine.engagement_config import EngagementConfig
 from core.engine.group_engagement import GroupEngagementManager
+from core.engine.planner_control import PlannerAction, PlannerControl
 from core.engine.prompt_builder import PromptBuildResult
+from core.engine.system_events import SystemEventQueue
 from core.engine.turn_capabilities import TurnCapabilities
-from core.engine.turn_state import TurnPhase
+from core.engine.turn_planner import PlannerResult, PlannerResultKind, TurnPlanner
+from core.engine.turn_state import TurnPhase, TurnState
 from core.managers.session_manager import (
     AdmissionOrigin,
     InboundIntent,
@@ -30,6 +34,7 @@ from core.managers.session_manager import (
     SessionTaskManager,
 )
 from core.message import InputMessage
+from core.tasks.task_state_store import TaskStateStore
 from core.tools._types import ToolResult
 from core.tools.tool_loop import ToolLoop
 
@@ -406,6 +411,49 @@ def make_engine(tool_loop, *, rule_router=None, model_registry=None):
     engine._dedup_lock = asyncio.Lock()
     engine._admission_in_progress = set()
     return engine
+
+
+@pytest.mark.asyncio
+async def test_matching_inbound_consumes_restart_wait_as_new_turn_hint(tmp_path):
+    state_store = TaskStateStore(str(tmp_path))
+    active = TurnState(
+        turn_id="old-wait",
+        chat_id="chat",
+        intent=InboundIntent.PRIVATE_CONVERSATION,
+        principal_id="user",
+        queue_revision=1,
+    )
+    await state_store.put(
+        active.transition(
+            TurnPhase.WAITING,
+            expected_revision=0,
+            wait_reason="more input",
+            wait_deadline=9999999999.0,
+        )
+    )
+    await TaskStateStore(str(tmp_path)).mark_interrupted_on_restart()
+    engine = make_engine(FakeToolLoop())
+    engine.mode_routing_enabled = True
+    engine._task_state_store = TaskStateStore(str(tmp_path))
+    engine._system_events = SystemEventQueue()
+
+    await engine._recover_waiting_turns_for_inbound(
+        InputMessage("new-message", "user", "chat", "follow up", False),
+        InboundIntent.PRIVATE_CONVERSATION,
+    )
+
+    recovered = engine._task_state_store.get("old-wait")
+    assert recovered is not None
+    assert recovered.phase == TurnPhase.CANCELLED.value
+    events = engine._system_events.peek("chat")
+    assert len(events) == 1
+    assert "new trigger" in events[0].text
+
+    await engine._recover_waiting_turns_for_inbound(
+        InputMessage("other", "other-user", "chat", "follow up", False),
+        InboundIntent.PRIVATE_CONVERSATION,
+    )
+    assert len(engine._system_events.peek("chat")) == 1
 
 
 @pytest.mark.asyncio
@@ -2264,12 +2312,18 @@ async def test_wake_turn_uses_prebuilt_prompt_and_captured_reply():
         session_key="wake-chat",
         messages=[{"role": "system", "content": "wake"}],
         tools=[{"name": "heartbeat_respond"}],
+        planner_sender_id="owner",
+        planner_lease_id="lease-1",
+        planner_plan_id="plan-1",
     )
 
     assert result.captured_replies == ["reply"]
     assert result.should_notify is True
     assert tool_loop.calls[0]["messages"] == [{"role": "system", "content": "wake"}]
     assert tool_loop.calls[0]["tools"] == [{"name": "heartbeat_respond"}]
+    assert tool_loop.calls[0]["sender_id"] == "owner"
+    assert tool_loop.calls[0]["planner_lease_id"] == "lease-1"
+    assert tool_loop.calls[0]["planner_plan_id"] == "plan-1"
 
 
 @pytest.mark.asyncio
@@ -2953,8 +3007,240 @@ async def test_engine_recovery_preserves_failed_transport_receipt(tmp_path):
     await ledger.close()
 
 
+@pytest.mark.asyncio
+async def test_proactive_recovery_ignores_non_allowlisted_group(tmp_path):
+    engine = make_engine(FakeToolLoop())
+    ledger = DeliveryLedger(str(tmp_path / "delivery.sqlite3"))
+    engine.delivery_controller = DeliveryController(ledger)
+    engine.engagement_config = EngagementConfig(
+        group_proactive_active_chats=("other-chat",)
+    )
+
+    result = await engine._recover_proactive_deliveries("chat")
+
+    assert result == DeliveryRecoveryResult()
+    await ledger.close()
+
+
+    engine = make_engine(FakeToolLoop())
+    ledger = DeliveryLedger(str(tmp_path / "delivery.sqlite3"))
+    engine.delivery_controller = DeliveryController(ledger)
+    engine.engagement_config = EngagementConfig(
+        delivery_recovery_after_seconds=1,
+        group_proactive_active_chats=("chat",),
+    )
+    from core.engine.conversation_timeline import ConversationTimeline
+
+    engine.timeline = ConversationTimeline(str(tmp_path / "timeline.sqlite3"))
+    delivered = []
+
+    async def reply_callback(**kwargs):
+        delivered.append(kwargs)
+        return DeliveryReceipt(status="accepted", platform_message_id="qq-1")
+
+    engine._reply_callback = reply_callback
+    prepared = await ledger.prepare(
+        key="proactive:chat:turn",
+        chat_id="chat",
+        turn_id="turn",
+        reason="final_reply",
+        reply_anchor_id="",
+        content_hash=ledger.content_hash("proactive answer"),
+        content="proactive answer",
+    )
+    conn = await ledger._ensure_open()
+    conn.execute(
+        "UPDATE delivery_ledger SET updated_at = 0 WHERE delivery_key = ?",
+        (prepared.key,),
+    )
+    conn.commit()
+
+    result = await engine._recover_proactive_deliveries("chat")
+
+    assert result.scanned == 1
+    assert result.sent == 1
+    assert delivered[0]["content"] == "proactive answer"
+    assert delivered[0]["delivery_id"] == prepared.logical_delivery_id
+    recovered = await ledger.get(prepared.key)
+    assert recovered is not None
+    assert recovered.status == "sent"
+    await engine.timeline.close()
+    await ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_proactive_recovery_fails_without_payload_or_timeline(tmp_path):
+    engine = make_engine(FakeToolLoop())
+    ledger = DeliveryLedger(str(tmp_path / "delivery.sqlite3"))
+    engine.delivery_controller = DeliveryController(ledger)
+    engine.engagement_config = EngagementConfig(
+        delivery_recovery_after_seconds=1,
+        group_proactive_active_chats=("chat",),
+    )
+    engine.timeline = SimpleNamespace(history=AsyncMock(return_value=[]))
+    engine._reply_callback = AsyncMock()
+    prepared = await ledger.prepare(
+        key="proactive:chat:missing",
+        chat_id="chat",
+        turn_id="missing",
+        reason="final_reply",
+        reply_anchor_id="",
+        content_hash=ledger.content_hash("missing"),
+    )
+    conn = await ledger._ensure_open()
+    conn.execute(
+        "UPDATE delivery_ledger SET updated_at = 0 WHERE delivery_key = ?",
+        (prepared.key,),
+    )
+    conn.commit()
+
+    result = await engine._recover_proactive_deliveries("chat")
+
+    assert result.failed == 1
+    assert engine._reply_callback.await_count == 0
+    recovered = await ledger.get(prepared.key)
+    assert recovered is not None
+    assert recovered.status == "failed"
+    assert recovered.reason == "recovery_content_unavailable"
+    await ledger.close()
+
+
 async def _history_with_ambient_answer():
     return [
         {"role": "user", "content": "question", "message_id": "anchor"},
         {"role": "assistant", "content": "answer", "message_id": "anchor"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_consumer_replans_waiting_private_turn_with_steered_message():
+    engine = make_engine(FakeToolLoop())
+    calls = []
+    first = PendingInbound(
+        InputMessage("first", "user", "chat", "please wait", False),
+        "please wait",
+        InboundIntent.PRIVATE_CONVERSATION,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+    second = PendingInbound(
+        InputMessage("second", "user", "chat", "new detail", False),
+        "new detail",
+        InboundIntent.PRIVATE_CONVERSATION,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+
+    async def process(
+        pending, _reply, _nickname, *, batch=(), scheduler_turn_id=None, **_
+    ):
+        calls.append((scheduler_turn_id, tuple(item.message.id for item in batch)))
+        if len(calls) == 1:
+            await engine._get_scheduler().enqueue("chat", second)
+            return PlannerResult(
+                PlannerResultKind.WAITING, scheduler_turn_id, wait_seconds=1
+            )
+        return PlannerResult(PlannerResultKind.COMPLETED, scheduler_turn_id)
+
+    engine._process_message = process
+    enqueued = await engine._get_scheduler().enqueue("chat", first)
+
+    await engine._consumer(
+        "chat",
+        lambda **kwargs: _none(),
+        lambda _sender: "user",
+        enqueued.consumer_token,
+    )
+
+    assert calls == [("first", ()), ("first", ("second",))]
+    assert engine.session_manager.get_queue_sizes() == {}
+    assert engine.session_manager.has_active_consumer("chat") is False
+
+
+@pytest.mark.asyncio
+async def test_consumer_replans_waiting_ambient_turn_with_new_ambient_message():
+    engine = make_engine(FakeToolLoop())
+    engine.group_engagement = GroupEngagementManager(
+        EngagementConfig(
+            group_ambient_mode="active",
+            group_ambient_active_chats=("chat",),
+            group_ambient_delivery_mode="automatic",
+            group_ambient_cooldown_seconds=0,
+            group_ambient_quiet_cooldown_seconds=0,
+            group_ambient_min_messages=1,
+            planner_wait_max_seconds=1,
+            planner_max_consecutive_waits=2,
+        )
+    )
+    ledger = DeliveryLedger(":memory:")
+    engine.delivery_controller = DeliveryController(ledger)
+    engine.prompt_builder = SimpleNamespace(
+        build=AsyncMock(return_value=([], [])),
+    )
+    engine.turn_planner = TurnPlanner()
+    calls = []
+    first = PendingInbound(
+        InputMessage("ambient-first", "user", "chat", "hello?", True),
+        "hello?",
+        InboundIntent.GROUP_AMBIENT,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+    second = PendingInbound(
+        InputMessage("ambient-second", "user", "chat", "more context", True),
+        "more context",
+        InboundIntent.GROUP_AMBIENT,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+
+    async def fake_run(request):
+        calls.append(request.turn_id)
+        if len(calls) == 1:
+            await request.planner_control_callback(
+                PlannerControl(PlannerAction.WAIT, reason="need more context", wait_seconds=1)
+            )
+            await engine._get_scheduler().enqueue("chat", second)
+        return _TurnResult(final_reply_silent=True)
+
+    engine._run_turn = fake_run
+    scheduler = engine._get_scheduler()
+    enqueued = await scheduler.enqueue("chat", first)
+    work = await scheduler.next_work("chat", owner_token=enqueued.consumer_token)
+    await scheduler.start_turn(work, turn_id="ambient-first", principal_id="user")
+    decision = await engine.group_engagement.evaluate("chat", batch=[first])
+
+    await engine._process_ambient_active(
+        first, (), decision, AsyncMock(), lambda sender_id: sender_id
+    )
+
+    assert calls == ["ambient-first", "ambient-first"]
+    assert (await scheduler.get_turn("ambient-first")).phase is TurnPhase.ACTIVE
+    await ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_consumer_retries_private_wait_once_after_timeout():
+    engine = make_engine(FakeToolLoop())
+    calls = []
+    pending = PendingInbound(
+        InputMessage("wait", "user", "chat", "wait", False),
+        "wait",
+        InboundIntent.PRIVATE_CONVERSATION,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+
+    async def process(_pending, _reply, _nickname, *, scheduler_turn_id=None, **_):
+        calls.append(scheduler_turn_id)
+        if len(calls) == 1:
+            return PlannerResult(
+                PlannerResultKind.WAITING, scheduler_turn_id, wait_seconds=0.01
+            )
+        return PlannerResult(PlannerResultKind.COMPLETED, scheduler_turn_id)
+
+    engine._process_message = process
+    enqueued = await engine._get_scheduler().enqueue("chat", pending)
+    await engine._consumer(
+        "chat",
+        lambda **kwargs: _none(),
+        lambda _sender: "user",
+        enqueued.consumer_token,
+    )
+
+    assert calls == ["wait", "wait"]
