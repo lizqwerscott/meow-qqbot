@@ -38,6 +38,7 @@
                 <td>{{ entry.member_count or 0 }}</td>
                 <td>
                     <form method="post" action="/learners/scenes/{{ entry.cluster_id }}/delete" style="display:inline" onsubmit="return confirm('确定删除？')">
+                        {{ csrf_input(request) }}
                         <button type="submit" class="btn btn-sm btn-danger">删除</button>
                     </form>
                 </td>

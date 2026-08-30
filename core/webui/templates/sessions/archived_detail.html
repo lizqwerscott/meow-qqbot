@@ -33,6 +33,7 @@
                 <td style="display:flex;gap:4px;flex-wrap:wrap">
                     <a href="/sessions/archived/{{ chat_id }}/messages/{{ f.timestamp_str }}" class="btn btn-sm">查看消息</a>
                     <form method="post" action="/sessions/archived/{{ chat_id }}/delete/{{ f.timestamp_str }}" style="display:inline" onsubmit="return confirm('确定删除此归档？')">
+                        {{ csrf_input(request) }}
                         <button type="submit" class="btn btn-sm btn-danger">删除</button>
                     </form>
                 </td>

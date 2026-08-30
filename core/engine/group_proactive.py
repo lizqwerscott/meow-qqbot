@@ -37,6 +37,8 @@ class GroupProactiveScheduler:
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
         state_store: ProactiveStateStore | None = None,
+        admission_lock: asyncio.Lock | None = None,
+        target_allowed: Callable[[str], bool | Awaitable[bool]] | None = None,
     ):
         self.config = config
         self.engagement = engagement
@@ -51,6 +53,34 @@ class GroupProactiveScheduler:
         self._loaded_due_chats: set[str] = set()
         self._metrics_hydrated = False
         self._zone = self._load_zone(config.group_proactive_timezone)
+        self._wake_event = asyncio.Event()
+        self._admission_lock = admission_lock
+        self._target_allowed = target_allowed
+        self._stop_requested = False
+        self._run_turn_accepts_provider_gate = self._accepts_provider_gate(run_turn)
+
+    @staticmethod
+    def _accepts_provider_gate(run_turn) -> bool:
+        try:
+            parameters = inspect.signature(run_turn).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        positional = [
+            parameter
+            for parameter in parameters
+            if parameter.kind
+            in {
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            }
+        ]
+        return (
+            any(
+                parameter.kind is inspect.Parameter.VAR_POSITIONAL
+                for parameter in parameters
+            )
+            or len(positional) >= 2
+        )
 
     @staticmethod
     def _load_zone(name: str):
@@ -87,11 +117,39 @@ class GroupProactiveScheduler:
         result = self._is_busy(chat_id)
         return bool(await result) if inspect.isawaitable(result) else bool(result)
 
+    async def _call_target_allowed(self, chat_id: str) -> bool:
+        if self._target_allowed is None:
+            return True
+        result = self._target_allowed(chat_id)
+        return bool(await result) if inspect.isawaitable(result) else bool(result)
+
+    async def _run_with_provider_gate(self, decision):
+        async def provider_start_gate() -> bool:
+            async def check_and_start() -> bool:
+                current = self.engagement.config
+                if (
+                    current.group_proactive_mode != "active"
+                    or decision.chat_id not in current.group_proactive_active_chats
+                ):
+                    return False
+                if not await self._call_target_allowed(decision.chat_id):
+                    return False
+                return await self.engagement.start(decision)
+
+            if self._admission_lock is None:
+                return await check_and_start()
+            async with self._admission_lock:
+                return await check_and_start()
+
+        if self._run_turn_accepts_provider_gate:
+            return await self._run_turn(decision, provider_start_gate)
+        if not await provider_start_gate():
+            return None
+        return await self._run_turn(decision)
+
     async def _metric(self, name: str) -> None:
         if self._state_store is not None and not self._metrics_hydrated:
-            self._metrics.update(
-                await self._state_store.metric_totals("scheduler")
-            )
+            self._metrics.update(await self._state_store.metric_totals("scheduler"))
             self._metrics_hydrated = True
         self._metrics[name] += 1
         if self._state_store is not None:
@@ -122,8 +180,12 @@ class GroupProactiveScheduler:
             if due is not None and now < due:
                 await self._metric("not_due")
                 continue
-            self._next_due[chat_id] = now + self.config.group_proactive_interval_seconds + self._jitter_seconds(
-                chat_id, self.config.group_proactive_jitter_seconds
+            self._next_due[chat_id] = (
+                now
+                + self.config.group_proactive_interval_seconds
+                + self._jitter_seconds(
+                    chat_id, self.config.group_proactive_jitter_seconds
+                )
             )
             if self._state_store is not None:
                 await self._state_store.set_next_due(
@@ -137,6 +199,9 @@ class GroupProactiveScheduler:
             if await self._call_busy(chat_id):
                 await self._metric("session_busy")
                 continue
+            if not await self._call_target_allowed(chat_id):
+                await self._metric("skip:target_unverified")
+                continue
 
             decision = await self.engagement.reserve_proactive(chat_id)
             await self.engagement.observe_proactive(decision)
@@ -148,13 +213,15 @@ class GroupProactiveScheduler:
                 await self._metric(f"skip:{decision.reason}")
                 continue
 
-            if not await self.engagement.start(decision):
-                await self.engagement.complete(decision, delivered=False, silent=True)
-                await self._metric("skip:reservation_expired")
-                continue
             await self._metric("reserved")
             try:
-                result = await self._run_turn(decision)
+                result = await self._run_with_provider_gate(decision)
+                if result is None:
+                    await self.engagement.complete(
+                        decision, delivered=False, silent=True
+                    )
+                    await self._metric("skip:provider_start_denied")
+                    continue
                 delivered = bool(
                     getattr(result, "delivered", False)
                     or getattr(result, "text_committed", False)
@@ -180,27 +247,68 @@ class GroupProactiveScheduler:
 
     async def _run(self) -> None:
         try:
-            while True:
+            while not self._stop_requested:
                 await self.tick_once()
-                await asyncio.sleep(min(60.0, float(self.config.group_proactive_interval_seconds)))
+                if self._stop_requested:
+                    break
+                try:
+                    await asyncio.wait_for(
+                        self._wake_event.wait(),
+                        timeout=min(
+                            60.0, float(self.config.group_proactive_interval_seconds)
+                        ),
+                    )
+                except asyncio.TimeoutError:
+                    pass
+                self._wake_event.clear()
         except asyncio.CancelledError:
             raise
 
     async def start(self) -> None:
         """Start the idempotent scheduler loop."""
         if self._task is None or self._task.done():
+            self._stop_requested = False
             self._task = asyncio.create_task(self._run())
+
+    async def reconfigure(
+        self,
+        config: EngagementConfig,
+        *,
+        admission_lock: asyncio.Lock | None = None,
+    ) -> None:
+        """Apply settings and wake a running loop without discarding history."""
+
+        async def apply():
+            previous = set(self.config.group_proactive_active_chats)
+            self.config = config
+            current = set(config.group_proactive_active_chats)
+            for chat_id in previous - current:
+                self._next_due.pop(chat_id, None)
+                self._loaded_due_chats.discard(chat_id)
+            self._zone = self._load_zone(config.group_proactive_timezone)
+            self._wake_event.set()
+
+        if admission_lock is None:
+            await apply()
+        else:
+            self._admission_lock = admission_lock
+            async with admission_lock:
+                await apply()
 
     async def stop(self) -> None:
         """Cancel the scheduler loop without leaving a timer task behind."""
         task, self._task = self._task, None
         if task is None:
             return
-        task.cancel()
+        self._stop_requested = True
+        self._wake_event.set()
         try:
-            await task
+            await asyncio.wait_for(task, timeout=30.0)
         except asyncio.CancelledError:
             pass
+        except asyncio.TimeoutError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     def snapshot_metrics(self) -> dict[str, int]:
         return dict(self._metrics)

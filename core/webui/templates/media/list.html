@@ -17,7 +17,7 @@
 <table class="media-table"><tr><th>时间</th><th>类型</th><th>大小</th><th>文件名</th><th>状态</th><th>摘要</th><th class="media-actions-heading">操作</th></tr>
 {% for item in items %}
 <tr class="media-row" tabindex="0" role="link" data-href="/media/{{ item.media_id }}" aria-label="查看 {{ item.filename or item.media_id }}"><td>{{ item.created_at|format_timestamp }}</td><td>{{ item.mime_type }}</td><td>{{ item.size }} bytes</td><td><a class="media-row-link" href="/media/{{ item.media_id }}">{{ item.filename or '未命名媒体' }}</a></td>
-<td><span class="media-badge {{ item.storage_status }}">{{ '可用' if item.storage_status == 'ready' else '文件缺失' }}</span></td><td><span class="media-summary {{ 'present' if item.has_summary else '' }}">{{ '已生成' if item.has_summary else '暂无' }}</span></td><td><div class="media-actions"><form method="post" action="/media/{{ item.media_id }}/delete" onsubmit="return confirm('确认删除此媒体？关联 {{ item.references_count }} 条消息将一并解除引用。');"><button class="btn btn-sm btn-danger" type="submit">删除</button></form></div></td></tr>
+<td><span class="media-badge {{ item.storage_status }}">{{ '可用' if item.storage_status == 'ready' else '文件缺失' }}</span></td><td><span class="media-summary {{ 'present' if item.has_summary else '' }}">{{ '已生成' if item.has_summary else '暂无' }}</span></td><td><div class="media-actions"><form method="post" action="/media/{{ item.media_id }}/delete" onsubmit="return confirm('确认删除此媒体？关联 {{ item.references_count }} 条消息将一并解除引用。');">{{ csrf_input(request) }}<button class="btn btn-sm btn-danger" type="submit">删除</button></form></div></td></tr>
 {% else %}<tr><td class="media-empty" colspan="7">暂无媒体对象</td></tr>{% endfor %}
 </table>
 </div>

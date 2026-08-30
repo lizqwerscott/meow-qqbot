@@ -66,6 +66,7 @@
                 <a href="/sessions/{{ s.chat_id }}/protocol" class="btn btn-sm">协议</a>
                 {% endif %}
                 <form method="post" action="/sessions/{{ s.chat_id }}/clear" style="display:inline" onsubmit="return confirm('确定清空此会话？')">
+                    {{ csrf_input(request) }}
                     <button type="submit" class="btn btn-sm btn-danger">清空</button>
                 </form>
             </td>

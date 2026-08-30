@@ -135,6 +135,7 @@ class ToolLoop:
         prompt_snapshot: Any = None,
         routing_metrics: Any = None,
         consumer_evidence_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+        provider_start_callback: Optional[Callable[[], Awaitable[bool]]] = None,
     ) -> tuple[bool, bool]:
         """执行工具调用循环。
 
@@ -295,6 +296,12 @@ class ToolLoop:
                 was_exception = False
                 request_started = asyncio.get_running_loop().time()
                 try:
+                    if (
+                        provider_start_callback is not None
+                        and not await provider_start_callback()
+                    ):
+                        delivery.complete()
+                        return sent_emoji, text_committed
                     # 协议已声明 chat_completion_stream，直接调用（不防御式探测）
                     if self._stream_reply:
                         # Capability-governed turns buffer provider output until the
@@ -688,7 +695,8 @@ class ToolLoop:
                                 key_prefix=(
                                     "proactive"
                                     if capabilities is not None
-                                    and capabilities.capability_profile == "group_proactive"
+                                    and capabilities.capability_profile
+                                    == "group_proactive"
                                     else "tool"
                                 ),
                             )

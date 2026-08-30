@@ -27,6 +27,6 @@
 <div class="media-meta-row"><dt>关联消息</dt><dd>{{ item.references_count }} 条</dd></div>
 <div class="media-meta-row media-meta-row-wide"><dt>媒体引用</dt><dd>{{ "media://inbound/" ~ item.media_id }}</dd></div>
 <div class="media-meta-row media-meta-row-wide"><dt>SHA-256</dt><dd>{{ item.sha256 }}</dd></div>
-</dl><div class="media-detail-actions">{% if item.storage_status == "ready" %}<a class="btn btn-primary" href="/media/{{ item.media_id }}/content?download=true">下载原文件</a>{% endif %}<form method="post" action="/media/{{ item.media_id }}/delete" onsubmit="return confirm('确认删除此媒体？关联 {{ item.references_count }} 条消息将一并解除引用。');"><button class="btn btn-danger" type="submit">删除媒体</button></form></div></section>
+</dl><div class="media-detail-actions">{% if item.storage_status == "ready" %}<a class="btn btn-primary" href="/media/{{ item.media_id }}/content?download=true">下载原文件</a>{% endif %}<form method="post" action="/media/{{ item.media_id }}/delete" onsubmit="return confirm('确认删除此媒体？关联 {{ item.references_count }} 条消息将一并解除引用。');">{{ csrf_input(request) }}<button class="btn btn-danger" type="submit">删除媒体</button></form></div></section>
 </div>
 {% endblock %}

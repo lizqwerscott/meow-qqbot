@@ -35,6 +35,7 @@
 <div class="card">
     <h2>✏️ 编辑自定义描述/标签</h2>
     <form method="post" action="/emojis/{{ emoji.hash }}">
+        {{ csrf_input(request) }}
         <div class="form-group">
             <label for="description">自定义描述</label>
             <input type="text" id="description" name="description" value="{{ emoji.user_description or '' }}" placeholder="输入描述文字">
@@ -54,9 +55,11 @@
     <h2>🔧 高级操作</h2>
     <div class="form-actions">
         <form method="post" action="/emojis/{{ emoji.hash }}/reanalyze" style="display:inline">
+            {{ csrf_input(request) }}
             <button type="submit" class="btn">重新使用 VLM 分析</button>
         </form>
         <form method="post" action="/emojis/{{ emoji.hash }}/delete" style="display:inline" onsubmit="return confirm('确定要永久删除这个表情吗？此操作不可撤销。')">
+            {{ csrf_input(request) }}
             <button type="submit" class="btn btn-danger">删除此表情</button>
         </form>
     </div>

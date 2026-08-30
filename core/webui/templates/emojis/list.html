@@ -53,6 +53,7 @@
             <td>
                 <a href="/emojis/{{ emoji.hash }}" class="btn btn-sm">详情</a>
                 <form method="post" action="/emojis/{{ emoji.hash }}/delete" style="display:inline" onsubmit="return confirm('确定要删除这个表情吗？')">
+                    {{ csrf_input(request) }}
                     <button type="submit" class="btn btn-sm btn-danger">删除</button>
                 </form>
             </td>

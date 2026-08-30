@@ -74,6 +74,10 @@ class GroupEngagementManager:
         self._loaded_proactive_chats: set[str] = set()
         self._metrics_hydrated = False
 
+    def reconfigure(self, config: EngagementConfig) -> None:
+        """Install a complete engagement snapshot for future decisions."""
+        self.config = config
+
     async def _ensure_proactive_state(self, chat_id: str) -> _SessionState:
         now = self._clock()
         state = self._state(chat_id, now)
@@ -92,16 +96,16 @@ class GroupEngagementManager:
         else:
             state.proactive_window_started = now
             state.proactive_turns_in_window = 0
-        cooldown_remaining = max(
-            0.0, persisted.proactive_cooldown_until - wall_now
-        )
+        cooldown_remaining = max(0.0, persisted.proactive_cooldown_until - wall_now)
         state.proactive_cooldown_until = (
             now + cooldown_remaining if cooldown_remaining > 0 else 0.0
         )
         self._loaded_proactive_chats.add(chat_id)
         return state
 
-    async def _persist_proactive_state(self, chat_id: str, state: _SessionState) -> None:
+    async def _persist_proactive_state(
+        self, chat_id: str, state: _SessionState
+    ) -> None:
         if self._state_store is None:
             return
         now = self._clock()
@@ -285,7 +289,10 @@ class GroupEngagementManager:
             return denied("session_busy")
         if now < state.cooldown_until or now < state.proactive_cooldown_until:
             return denied("cooldown")
-        if state.proactive_turns_in_window >= self.config.group_proactive_max_turns_per_window:
+        if (
+            state.proactive_turns_in_window
+            >= self.config.group_proactive_max_turns_per_window
+        ):
             return denied("proactive_budget_exhausted")
 
         shadow = self.config.group_proactive_mode == "shadow"
@@ -303,12 +310,25 @@ class GroupEngagementManager:
         state.phase = EngagementPhase.RESERVED
         state.provider_started = False
         return decision
+
     async def start(self, decision: GroupEngagementDecision) -> bool:
         """Consume one budget turn exactly when the provider request starts."""
         state = self._sessions.get(decision.chat_id)
         now = self._clock()
         if state is None or state.reservation != decision or now >= decision.expires_at:
             return False
+        if state.provider_started:
+            return True
+        if decision.trigger is EngagementTrigger.PROACTIVE:
+            if self.config.group_proactive_mode != "active":
+                return False
+            if decision.chat_id not in self.config.group_proactive_active_chats:
+                return False
+            if (
+                state.proactive_turns_in_window
+                >= self.config.group_proactive_max_turns_per_window
+            ):
+                return False
         state.provider_started = True
         if decision.trigger is EngagementTrigger.PROACTIVE:
             state.proactive_turns_in_window += 1
@@ -367,9 +387,11 @@ class GroupEngagementManager:
         self._metrics[f"reason:{decision.reason}"] += 1
         if decision.allowed:
             self._metrics[
-                "active_reserved"
-                if decision.trigger is EngagementTrigger.REACTIVE
-                else "proactive_reserved"
+                (
+                    "active_reserved"
+                    if decision.trigger is EngagementTrigger.REACTIVE
+                    else "proactive_reserved"
+                )
             ] += 1
         if decision.shadow:
             if decision.trigger is EngagementTrigger.PROACTIVE:
@@ -383,9 +405,7 @@ class GroupEngagementManager:
             self.observe(decision)
             return
         if self._state_store is not None and not self._metrics_hydrated:
-            self._metrics.update(
-                await self._state_store.metric_totals("engagement")
-            )
+            self._metrics.update(await self._state_store.metric_totals("engagement"))
             self._metrics_hydrated = True
         self.observe(decision)
         if self._state_store is None:
@@ -394,9 +414,7 @@ class GroupEngagementManager:
             "engagement", f"reason:{decision.reason}"
         )
         if decision.allowed:
-            await self._state_store.increment_metric(
-                "engagement", "proactive_reserved"
-            )
+            await self._state_store.increment_metric("engagement", "proactive_reserved")
         if decision.shadow:
             await self._state_store.increment_metric(
                 "engagement", "proactive_shadow_candidates"
@@ -404,7 +422,6 @@ class GroupEngagementManager:
 
     def snapshot_metrics(self) -> dict[str, int]:
         return dict(self._metrics)
-
 
     def phase(self, chat_id: str) -> EngagementPhase:
         state = self._sessions.get(chat_id)

@@ -1,4 +1,6 @@
+import ipaddress
 import logging
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -13,6 +15,7 @@ from starlette.responses import RedirectResponse as StarletteRedirectResponse
 from starlette.status import HTTP_303_SEE_OTHER, HTTP_429_TOO_MANY_REQUESTS
 
 from core.webui.auth import AuthMiddleware, verify_token
+from core.webui.csrf import CSRFMiddleware, csrf_input
 
 # 登录速率限制（内存中，每 IP 5 次/分钟）
 _LOGIN_ATTEMPTS: Dict[str, list] = {}
@@ -41,6 +44,28 @@ def _check_login_rate(client_ip: str) -> None:
                 break
 
 
+def _client_ip(request: Request, webui_config: dict) -> str:
+    peer = request.client.host if request.client else "unknown"
+    configured = webui_config.get("trusted_proxies", ())
+    if isinstance(configured, str):
+        configured = (configured,)
+    try:
+        peer_address = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer
+    trusted = False
+    for value in configured or ():
+        try:
+            trusted = peer_address in ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            continue
+        if trusted:
+            break
+    if trusted:
+        return request.headers.get("x-forwarded-for", peer).split(",")[0].strip()
+    return peer
+
+
 from core.webui.routers import (
     emojis,
     learners,
@@ -48,6 +73,7 @@ from core.webui.routers import (
     nicknames,
     routing,
     sessions,
+    settings,
     status,
     tasks,
 )
@@ -77,11 +103,14 @@ def create_app(managers: Dict[str, Any], webui_config: Dict[str, Any]) -> FastAP
 
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
     templates.env.globals["get_flashed_messages"] = _get_flashed_messages
+    templates.env.globals["csrf_input"] = csrf_input
     templates.env.filters["format_timestamp"] = _format_timestamp
 
     app.state.managers = managers
     app.state.webui_config = webui_config
     app.state.templates = templates
+    app.state.settings_nonces = {}
+    app.add_middleware(CSRFMiddleware)
 
     # Mount emoji images directory first so it takes precedence over /static
     emoji_dir = Path("data/emojis")
@@ -106,13 +135,7 @@ def create_app(managers: Dict[str, Any], webui_config: Dict[str, Any]) -> FastAP
 
     @app.post("/login")
     async def login_post(request: Request, token: str = Form(...)):
-        client_ip = (
-            request.headers.get(
-                "x-forwarded-for", request.client.host if request.client else "unknown"
-            )
-            .split(",")[0]
-            .strip()
-        )
+        client_ip = _client_ip(request, webui_config)
         _check_login_rate(client_ip)
         expected = webui_config.get("token", "")
         if token == expected:
@@ -123,6 +146,15 @@ def create_app(managers: Dict[str, Any], webui_config: Dict[str, Any]) -> FastAP
                 httponly=True,
                 max_age=86400 * 7,
                 samesite="lax",
+                secure=request.url.scheme == "https",
+            )
+            resp.set_cookie(
+                "webui_csrf",
+                secrets.token_urlsafe(32),
+                httponly=True,
+                max_age=86400,
+                samesite="lax",
+                secure=request.url.scheme == "https",
             )
             return resp
         return templates.TemplateResponse(
@@ -142,6 +174,7 @@ def create_app(managers: Dict[str, Any], webui_config: Dict[str, Any]) -> FastAP
     app.include_router(tasks.router)
     app.include_router(media.router)
     app.include_router(routing.router)
+    app.include_router(settings.router)
 
     return app
 

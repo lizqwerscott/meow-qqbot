@@ -48,6 +48,7 @@
                 <td>{{ entry.frequency or 0 }}</td>
                 <td>
                     <form method="post" action="/learners/jargons/{{ entry.term }}/delete" style="display:inline" onsubmit="return confirm('确定删除词条「{{ entry.term }}」？')">
+                        {{ csrf_input(request) }}
                         <button type="submit" class="btn btn-sm btn-danger">删除</button>
                     </form>
                 </td>

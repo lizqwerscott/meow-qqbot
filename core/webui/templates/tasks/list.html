@@ -56,14 +56,17 @@
                 <td class="actions">
                     {% if job.enabled %}
                     <form method="post" action="/tasks/cron/{{ job.id }}/pause" style="display:inline">
+                        {{ csrf_input(request) }}
                         <button type="submit" class="btn btn-sm">⏸️ 暂停</button>
                     </form>
                     {% else %}
                     <form method="post" action="/tasks/cron/{{ job.id }}/resume" style="display:inline">
+                        {{ csrf_input(request) }}
                         <button type="submit" class="btn btn-sm">▶️ 恢复</button>
                     </form>
                     {% endif %}
                     <form method="post" action="/tasks/cron/{{ job.id }}/delete" style="display:inline" onsubmit="return confirm('确定删除定时任务「{{ job.name }}」？')">
+                        {{ csrf_input(request) }}
                         <button type="submit" class="btn btn-sm btn-danger">🗑️ 删除</button>
                     </form>
                 </td>
@@ -114,11 +117,13 @@
                     <a href="/tasks/detail/{{ t.id }}" class="btn btn-sm">📄 查看</a>
                     {% if t.status.value in ("pending", "running") %}
                     <form method="post" action="/tasks/task/{{ t.id }}/cancel" style="display:inline">
+                        {{ csrf_input(request) }}
                         <button type="submit" class="btn btn-sm">🚫 取消</button>
                     </form>
                     {% endif %}
                     {% if t.status.value in ("success", "failed", "cancelled", "timeout", "lost") %}
                     <form method="post" action="/tasks/task/{{ t.id }}/delete" style="display:inline" onsubmit="return confirm('确定删除此任务记录？')">
+                        {{ csrf_input(request) }}
                         <button type="submit" class="btn btn-sm btn-danger">🗑️ 删除</button>
                     </form>
                     {% endif %}

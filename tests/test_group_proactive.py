@@ -139,6 +139,47 @@ async def test_scheduler_start_stop_is_idempotent():
 
 
 @pytest.mark.asyncio
+async def test_scheduler_releases_admission_lock_after_provider_start():
+    config = EngagementConfig(
+        group_proactive_mode="active",
+        group_proactive_active_chats=("chat",),
+        group_proactive_active_hours_start="00:00",
+        group_proactive_active_hours_end="00:00",
+    )
+    manager = GroupEngagementManager(config)
+    admission_lock = asyncio.Lock()
+    provider_started = asyncio.Event()
+    release_turn = asyncio.Event()
+
+    async def run_turn(_decision, provider_start_gate):
+        assert await provider_start_gate() is True
+        provider_started.set()
+        await release_turn.wait()
+        return type("Result", (), {"delivered": True, "silent": False})()
+
+    scheduler = GroupProactiveScheduler(
+        config,
+        manager,
+        run_turn,
+        admission_lock=admission_lock,
+    )
+    tick = asyncio.create_task(scheduler.tick_once())
+    await asyncio.wait_for(provider_started.wait(), timeout=1)
+
+    updated = EngagementConfig(
+        group_proactive_mode="off",
+        group_proactive_active_chats=("chat",),
+    )
+    await asyncio.wait_for(
+        scheduler.reconfigure(updated, admission_lock=admission_lock), timeout=1
+    )
+    assert scheduler.config.group_proactive_mode == "off"
+
+    release_turn.set()
+    await tick
+
+
+@pytest.mark.asyncio
 async def test_proactive_metric_buckets_survive_restart(tmp_path):
     from core.engine.proactive_state import ProactiveStateStore
 
@@ -162,7 +203,6 @@ async def test_proactive_metric_buckets_survive_restart(tmp_path):
         {"metric": "delivered", "bucket_start": 7200, "count": 2}
     ]
     await second.close()
-
 
     now = [100.0]
     wall = [1000.0]

@@ -14,6 +14,7 @@
     <a href="/sessions/archived/{{ chat_id }}" class="btn">📦 归档 ({{ archived_count }})</a>
     {% endif %}
     <form method="post" action="/sessions/{{ chat_id }}/clear" style="display:inline" onsubmit="return confirm('确定清空此会话？')">
+        {{ csrf_input(request) }}
         <button type="submit" class="btn btn-danger">清空会话</button>
     </form>
 </div>

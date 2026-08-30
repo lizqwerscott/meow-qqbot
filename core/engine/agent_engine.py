@@ -10,6 +10,7 @@
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -146,6 +147,7 @@ class _TurnRequest:
     planner_lease_id: str = ""
     planner_plan_id: str = ""
     consumer_evidence_callback: Optional[Callable[[str], Awaitable[None]]] = None
+    provider_start_callback: Optional[Callable[[], Awaitable[bool]]] = None
 
 
 @dataclass(frozen=True)
@@ -276,6 +278,8 @@ class AgentEngine:
         self.delivery_controller: Optional[DeliveryController] = None
         self._delivery_recovery_locks: dict[str, asyncio.Lock] = {}
         self._delivery_recovery_task: Optional[asyncio.Task] = None
+        self._engagement_admission_lock = asyncio.Lock()
+        self._group_target_observer = None
         self.timeline = ConversationTimeline()
         self.protocol_history = TurnProtocolHistory()
         model_context_config = getattr(ctx.mgmt, "model_context_config", {}) or {}
@@ -427,6 +431,23 @@ class AgentEngine:
             manager = GroupEngagementManager(EngagementConfig())
             self.group_engagement = manager
         return manager
+
+    async def apply_engagement_config(self, config) -> None:
+        """Install one complete engagement snapshot for all consumers."""
+        async with self._engagement_admission_lock:
+            self.engagement_config = config
+            self._get_group_engagement().reconfigure(config)
+            if hasattr(self, "reply_necessity_gate"):
+                self.reply_necessity_gate.threshold = float(
+                    config.group_reply_necessity_threshold
+                )
+                self.reply_necessity_gate.frequency_factor = max(
+                    0.0, min(1.0, float(config.group_reply_frequency))
+                )
+            self.mode_routing_enabled = config.mode_routing_enabled
+
+    def set_group_target_observer(self, observer) -> None:
+        self._group_target_observer = observer
 
     def _get_batch_media_context_builder(self) -> BatchMediaContextBuilder:
         builder = getattr(self, "media_context_builder", None)
@@ -1021,6 +1042,7 @@ class AgentEngine:
             self._delivery_recovery_locks = locks
         lock = locks.setdefault(f"proactive:{chat_id}", asyncio.Lock())
         async with lock:
+
             async def _resolve_content(record: DeliveryRecord) -> Optional[str]:
                 if record.content:
                     return record.content
@@ -1280,6 +1302,10 @@ class AgentEngine:
             self._pending_ids.add(input_message.id)
 
         chat_id = input_message.chat_id
+        if input_message.is_group and self._group_target_observer is not None:
+            observed = self._group_target_observer(chat_id)
+            if inspect.isawaitable(observed):
+                await observed
         if self._workspace_manager:
             self._workspace_manager.sandbox_dir(input_message.is_group, chat_id)
         self.last_active_chat = chat_id
@@ -1413,11 +1439,21 @@ class AgentEngine:
             _intent=InboundIntent.GROUP_AMBIENT,
         )
 
-    async def run_proactive_group_turn(self, decision) -> _TurnResult:
+    async def run_proactive_group_turn(
+        self, decision, provider_start_callback=None
+    ) -> _TurnResult:
         """Run one fixed-target proactive Chat turn without user admission."""
         if not getattr(self, "_reply_callback", None):
             raise RuntimeError("proactive turn has no reply callback")
         chat_id = decision.chat_id
+        config = self._get_group_engagement().config
+        if (
+            config.group_proactive_mode != "active"
+            or chat_id not in config.group_proactive_active_chats
+        ):
+            raise RuntimeError("proactive target is no longer active")
+        if self.mode_router is None:
+            raise RuntimeError("proactive mode routing capability is unavailable")
         turn_id = f"proactive_{chat_id}_{uuid4().hex}"
         input_message = InputMessage(
             id=turn_id,
@@ -1464,7 +1500,8 @@ class AgentEngine:
             )
             if not delivery.should_deliver or record is None:
                 return DeliveryReceipt(
-                    status="accepted", logical_delivery_id=record.logical_delivery_id if record else ""
+                    status="accepted",
+                    logical_delivery_id=record.logical_delivery_id if record else "",
                 )
             receipt = await self._reply_callback(
                 chat_id=chat_id,
@@ -1474,8 +1511,12 @@ class AgentEngine:
                 delivery_id=record.logical_delivery_id or record.key,
             )
             if not isinstance(receipt, DeliveryReceipt):
-                receipt = DeliveryReceipt(status="accepted", logical_delivery_id=record.key)
-            await controller.settle_receipt(record, receipt, content=content, delivery_kind="proactive")
+                receipt = DeliveryReceipt(
+                    status="accepted", logical_delivery_id=record.key
+                )
+            await controller.settle_receipt(
+                record, receipt, content=content, delivery_kind="proactive"
+            )
             if receipt.status == "accepted":
                 delivered = True
             return receipt
@@ -1495,7 +1536,6 @@ class AgentEngine:
             if isinstance(receipt, DeliveryReceipt) and receipt.status == "accepted":
                 tool_delivered = True
             return receipt
-
 
         async def _build_prompt(
             provider_identity: str | None = None,
@@ -1543,6 +1583,7 @@ class AgentEngine:
                 internal_control=True,
                 steering_enabled=False,
                 track_tool_delivery=True,
+                provider_start_callback=provider_start_callback,
             )
         )
         return replace(
@@ -2541,6 +2582,7 @@ class AgentEngine:
                 prompt_snapshot=prompt_snapshot,
                 routing_metrics=getattr(self, "routing_metrics", None),
                 consumer_evidence_callback=request.consumer_evidence_callback,
+                provider_start_callback=request.provider_start_callback,
             )
             if request.timeout is not None:
                 sent_emoji, text_committed = await asyncio.wait_for(
@@ -2634,7 +2676,9 @@ class AgentEngine:
         """Run an opted-in ambient turn behind the durable delivery gate."""
         current_pending = pending
         current_batch = batch
-        input_message = (current_batch[-1] if current_batch else current_pending).message
+        input_message = (
+            current_batch[-1] if current_batch else current_pending
+        ).message
         chat_id = input_message.chat_id
         admitted_any = False
         final_delivered = False
@@ -2663,9 +2707,7 @@ class AgentEngine:
             source="ambient",
             messages=[],
             tools=[],
-            wait_seconds=max(
-                1, int(planner_config.planner_wait_max_seconds)
-            ),
+            wait_seconds=max(1, int(planner_config.planner_wait_max_seconds)),
             max_waits=max(1, int(planner_config.planner_max_consecutive_waits)),
         )
         planner_result: PlannerResult | None = None
@@ -2706,7 +2748,11 @@ class AgentEngine:
                     current_pending.intent, decision.reply_anchor_id or input_message.id
                 ),
                 media_context=media_context,
-                mode=(capabilities.mode if current_pending.mode_routing is not None else None),
+                mode=(
+                    capabilities.mode
+                    if current_pending.mode_routing is not None
+                    else None
+                ),
                 capability_profile=capabilities.capability_profile,
                 policy_version=(
                     current_pending.mode_routing.policy_version
@@ -2785,10 +2831,7 @@ class AgentEngine:
                     break
 
                 current_turn = await self._get_scheduler().get_turn(turn_id)
-                if (
-                    current_turn is None
-                    or current_turn.phase is not TurnPhase.ACTIVE
-                ):
+                if current_turn is None or current_turn.phase is not TurnPhase.ACTIVE:
                     break
                 await self._get_scheduler().transition_turn(
                     turn_id,

@@ -8,6 +8,7 @@
 <div class="card">
     <h2>📝 手动昵称（优先）</h2>
     <form method="post" action="/nicknames/manual" style="display:flex;gap:8px;margin-bottom:12px">
+        {{ csrf_input(request) }}
         <input type="text" name="user_id" placeholder="用户 ID" required style="flex:1">
         <input type="text" name="nickname" placeholder="昵称" required style="flex:1">
         <button type="submit" class="btn btn-primary">添加/更新</button>
@@ -25,6 +26,7 @@
                 <td>{{ name }}</td>
                 <td>
                     <form method="post" action="/nicknames/manual/{{ uid }}/delete" style="display:inline" onsubmit="return confirm('确定删除？')">
+                        {{ csrf_input(request) }}
                         <button type="submit" class="btn btn-sm btn-danger">删除</button>
                     </form>
                 </td>
@@ -61,9 +63,11 @@
                 <td>{{ full_alias }}</td>
                 <td>
                     <form method="post" action="/nicknames/auto/{{ uid }}/promote" style="display:inline">
+                        {{ csrf_input(request) }}
                         <button type="submit" class="btn btn-sm btn-primary" title="提升为手动昵称">提升</button>
                     </form>
                     <form method="post" action="/nicknames/auto/{{ uid }}/delete" style="display:inline" onsubmit="return confirm('确定删除？')">
+                        {{ csrf_input(request) }}
                         <button type="submit" class="btn btn-sm btn-danger">删除</button>
                     </form>
                 </td>
