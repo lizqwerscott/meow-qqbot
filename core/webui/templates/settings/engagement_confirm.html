@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}确认主动模式 - 猫猫管理{% endblock %}
+{% set nav_active = "settings" %}
+{% block content %}
+<div class="settings-page-header">
+    <div>
+        <div class="eyebrow">FINAL CHECK</div>
+        <h2>确认开启主动模式</h2>
+        <p class="page-subtitle">请确认目标群聊和验证状态，确认后猫猫可能向目标群发送消息。</p>
+    </div>
+</div>
+<div class="settings-card confirmation-card">
+    <div class="confirmation-warning"><span>!</span><div><strong>这是一个有外部影响的操作</strong><p>主动模式只会作用于下方目标，未验证目标会被服务端拒绝。</p></div></div>
+    <div class="confirmation-summary"><div><strong>{{ selected_targets|length }}</strong><span>个目标</span></div><div><strong>{{ verified_count }}</strong><span>个已验证</span></div><div><strong>{{ target_limit }}</strong><span>个上限</span></div></div>
+    <div class="confirmation-targets"><h3>本次目标</h3>{% for target in selected_targets %}<div class="confirmation-target"><code>{{ target.chat_id }}</code><span class="target-status status-{{ target.verification_status }}">{{ "已验证" if target.verification_status == "verified" else "待验证" }}</span></div>{% else %}<p>未选择目标群聊。</p>{% endfor %}</div>
+    <form method="post" action="/settings/engagement/confirm" class="confirmation-actions">{{ csrf_input(request) }}<input type="hidden" name="revision" value="{{ revision }}"><input type="hidden" name="confirmation_nonce" value="{{ confirmation_nonce }}"><a class="btn" href="/settings/engagement">返回修改</a><button class="btn btn-primary" type="submit" {% if verified_count != selected_targets|length or not selected_targets %}disabled{% endif %}>确认开启主动模式</button></form>
+</div>
+{% endblock %}

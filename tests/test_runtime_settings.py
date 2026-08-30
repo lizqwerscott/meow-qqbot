@@ -1,3 +1,4 @@
+import re
 import sqlite3
 
 import httpx
@@ -266,7 +267,7 @@ async def test_settings_webui_updates_with_token_and_csrf(tmp_path):
                 "_csrf": csrf,
                 "revision": "0",
                 "mode": "shadow",
-                "active_chats": "g1",
+                "active_chats": ["g1", "g2"],
                 "interval_seconds": "900",
                 "jitter_seconds": "0",
                 "active_hours_start": "09:00",
@@ -281,4 +282,97 @@ async def test_settings_webui_updates_with_token_and_csrf(tmp_path):
         )
     assert response.status_code == 303
     assert coordinator.snapshot().config.group_proactive_mode == "shadow"
+    assert coordinator.snapshot().config.group_proactive_active_chats == ("g1", "g2")
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_settings_webui_group_picker_only_lists_group_chats(tmp_path):
+    coordinator = await _coordinator(tmp_path)
+
+    class ContextManager:
+        async def get_all_disk_chat_ids_async(self):
+            return ["group-1", "private-1", "group-2"]
+
+        def get_chat_type(self, chat_id):
+            return chat_id.startswith("group-")
+
+    app = create_app(
+        {"runtime_settings": coordinator, "context_manager": ContextManager()}, {}
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/settings/engagement")
+
+    assert response.status_code == 200
+    assert 'value="group-1"' in response.text
+    assert 'value="group-2"' in response.text
+    assert 'value="private-1"' not in response.text
+    assert "搜索群 ID 或状态" in response.text
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_settings_webui_active_mode_requires_server_confirmation(tmp_path):
+    coordinator = await _coordinator(tmp_path)
+    await coordinator.update(
+        expected_revision=0,
+        patch={
+            "group_proactive_mode": "shadow",
+            "group_proactive_active_chats": ["g1"],
+        },
+    )
+    await coordinator.verify_target("g1")
+    app = create_app({"runtime_settings": coordinator}, {"token": "secret"})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        headers = {"Authorization": "Bearer secret"}
+        page = await client.get("/settings/engagement", headers=headers)
+        csrf = client.cookies.get("webui_csrf")
+        active_nonce = re.search(
+            r'name="active_nonce" value="([^"]+)"', page.text
+        ).group(1)
+        response = await client.post(
+            "/settings/engagement/update",
+            headers=headers,
+            data={
+                "_csrf": csrf,
+                "revision": "1",
+                "mode": "active",
+                "active_chats": "g1",
+                "interval_seconds": "900",
+                "jitter_seconds": "0",
+                "active_hours_start": "09:00",
+                "active_hours_end": "23:00",
+                "timezone": "Asia/Shanghai",
+                "cooldown_seconds": "900",
+                "quiet_cooldown_seconds": "300",
+                "window_seconds": "3600",
+                "max_turns_per_window": "2",
+                "reservation_seconds": "120",
+                "active_nonce": active_nonce,
+            },
+        )
+        assert response.status_code == 200
+        confirmation_nonce = re.search(
+            r'name="confirmation_nonce" value="([^"]+)"', response.text
+        ).group(1)
+        response = await client.post(
+            "/settings/engagement/confirm",
+            headers=headers,
+            data={
+                "_csrf": csrf,
+                "revision": "1",
+                "confirmation_nonce": confirmation_nonce,
+            },
+        )
+        assert response.status_code == 303
+        assert coordinator.snapshot().config.group_proactive_mode == "active"
+        response = await client.post(
+            "/settings/engagement/pause",
+            headers=headers,
+            data={"_csrf": csrf, "revision": "2"},
+        )
+    assert response.status_code == 303
+    assert coordinator.snapshot().config.group_proactive_mode == "off"
     await coordinator.close()

@@ -2,46 +2,86 @@
 {% block title %}群聊参与设置 - 猫猫管理{% endblock %}
 {% set nav_active = "settings" %}
 {% block content %}
-<h2 style="margin-bottom:20px">⚙️ 群聊主动参与</h2>
+<div class="settings-page-header">
+    <div>
+        <div class="eyebrow">RUNTIME CONTROL</div>
+        <h2>群聊主动参与</h2>
+        <p class="page-subtitle">控制猫猫何时、在哪些群聊中主动发言。</p>
+    </div>
+    <div class="settings-revision"><span>当前版本</span><strong>R{{ snapshot.revision }}</strong></div>
+</div>
 {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
 {% if degraded %}<div class="flash error">运行时设置处于降级状态（{{ degraded_reason }}），已阻止新的设置变更；请先检查日志和重启验收。</div>{% endif %}
-<div class="card">
-    <p>Revision: <code>{{ snapshot.revision }}</code> · 能力: <strong>{{ "可用" if snapshot.capability_enabled else "不可用" }}</strong></p>
-    {% if not snapshot.capability_enabled %}<p class="notice warning">部署期 mode routing 未启用，shadow/active 不能生效。</p>{% endif %}
-    <form method="post" action="/settings/engagement/update">
-        {{ csrf_input(request) }}
-        <input type="hidden" name="revision" value="{{ snapshot.revision }}">
-        <input type="hidden" name="active_nonce" value="{{ active_nonce }}">
-        <label>模式
-            <select name="mode">
-                {% for value in ("off", "shadow", "active") %}<option value="{{ value }}" {% if snapshot.effective.group_proactive_mode == value %}selected{% endif %}>{{ value }}</option>{% endfor %}
-            </select>
-        </label>
-        <label>目标群 ID（每行一个）<textarea name="active_chats" rows="4">{{ snapshot.effective.group_proactive_active_chats|join('\n') }}</textarea></label>
-        <div class="form-grid">
-            <label>间隔秒数<input type="number" name="interval_seconds" min="10" max="86400" value="{{ snapshot.effective.group_proactive_interval_seconds }}"></label>
-            <label>抖动秒数<input type="number" name="jitter_seconds" min="0" max="3600" value="{{ snapshot.effective.group_proactive_jitter_seconds }}"></label>
+<div class="settings-status-banner {% if snapshot.capability_enabled %}is-ready{% else %}is-muted{% endif %}">
+    <span class="status-dot"></span>
+    <div><strong>主动参与能力{{ "已就绪" if snapshot.capability_enabled else "未启用" }}</strong><p>配置会即时应用，并保留版本与审计记录。</p></div>
+    {% if snapshot.effective.group_proactive_mode != "off" %}<form method="post" action="/settings/engagement/pause" class="quick-pause-form">{{ csrf_input(request) }}<input type="hidden" name="revision" value="{{ snapshot.revision }}"><button class="btn btn-danger btn-sm" type="submit" onclick="return confirm('立即暂停主动参与？')">紧急暂停</button></form>{% endif %}
+</div>
+{% if not snapshot.capability_enabled %}<div class="notice warning">部署期 mode routing 未启用，shadow/active 不能生效。</div>{% endif %}
+<form method="post" action="/settings/engagement/update" class="settings-form">
+    {{ csrf_input(request) }}
+    <input type="hidden" name="revision" value="{{ snapshot.revision }}">
+    <input type="hidden" name="active_nonce" value="{{ active_nonce }}">
+    <section class="settings-card">
+        <div class="settings-card-heading"><div><span class="section-kicker">01</span><h3>运行模式</h3><p>先用观察模式确认行为，再切换到实际发送。</p></div></div>
+        <div class="mode-options">
+            {% for value, title, desc in (("off", "关闭", "暂停主动参与，不影响普通对话。"), ("shadow", "观察", "运行判断但不向群里发送消息。"), ("active", "主动", "通过目标验证后，允许实际发送。")) %}
+            <label class="mode-option {% if snapshot.effective.group_proactive_mode == value %}is-selected{% endif %}"><input type="radio" name="mode" value="{{ value }}" {% if snapshot.effective.group_proactive_mode == value %}checked{% endif %}><span class="mode-option-copy"><strong>{{ title }}</strong><small>{{ desc }}</small></span></label>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section class="settings-card">
+        <div class="settings-card-heading"><div><span class="section-kicker">02</span><h3>目标群聊</h3><p>从已观察到的群聊中搜索并勾选目标，群 ID 仍由服务端校验。</p></div><span class="selection-count" data-selection-count>0 个已选</span></div>
+        <div class="target-picker">
+            <div class="target-picker-toolbar"><label class="search-field"><span>⌕</span><input type="search" data-group-search placeholder="搜索群 ID 或状态" autocomplete="off"></label><span class="target-catalog-count">{{ group_catalog|length }} 个可选群聊</span></div>
+            <div class="target-options" data-group-options>
+                {% for group in group_catalog %}
+                <label class="target-option" data-group-option data-search="{{ group.chat_id|lower }} {{ group.display_name|lower }} {{ group.verification_status|lower }}">
+                    <input type="checkbox" name="active_chats" value="{{ group.chat_id }}" {% if group.selected %}checked{% endif %}>
+                    <span class="target-option-main"><strong>{{ group.display_name }}</strong><code>{{ group.chat_id }}</code></span>
+                    <span class="target-option-meta"><span class="target-status status-{{ group.verification_status }}">{{ {"verified":"已验证", "unverified":"待验证", "removed":"已移除"}.get(group.verification_status, group.verification_status) }}</span>{% if group.last_observed_at %}<small>{{ group.last_observed_at|format_timestamp }}</small>{% endif %}</span>
+                </label>
+                {% else %}<div class="empty-state" data-group-empty>还没有发现群聊。收到群消息后，群聊会出现在这里。</div>{% endfor %}
+                <div class="empty-state" data-group-no-results hidden>没有匹配的群聊。</div>
+            </div>
+            <div class="selected-targets" data-selected-targets><span class="selected-targets-label">已选目标</span><div data-selected-list></div></div>
+        </div>
+        <details class="advanced-settings"><summary>高级：手动输入群 ID</summary><p>仅在列表中找不到目标时使用。添加后仍需等待群消息观察或手动验证。</p><div class="advanced-inline"><input name="chat_id" form="manual-target-form" placeholder="例如 group_123" maxlength="128"><button class="btn" type="submit" form="manual-target-form">添加到目标</button></div></details>
+    </section>
+
+    <section class="settings-card">
+        <div class="settings-card-heading"><div><span class="section-kicker">03</span><h3>调度策略</h3><p>决定主动参与检查的频率与允许时段。</p></div></div>
+        <div class="settings-fields settings-fields-schedule">
+            <label>检查间隔<span class="input-with-suffix"><input type="number" name="interval_seconds" min="60" max="86400" value="{{ snapshot.effective.group_proactive_interval_seconds }}"><em>秒</em></span></label>
+            <label>随机抖动<span class="input-with-suffix"><input type="number" name="jitter_seconds" min="0" max="3600" value="{{ snapshot.effective.group_proactive_jitter_seconds }}"><em>秒</em></span></label>
             <label>活动开始<input type="time" name="active_hours_start" value="{{ snapshot.effective.group_proactive_active_hours_start }}"></label>
             <label>活动结束<input type="time" name="active_hours_end" value="{{ snapshot.effective.group_proactive_active_hours_end }}"></label>
-            <label>时区<input name="timezone" value="{{ snapshot.effective.group_proactive_timezone }}"></label>
-            <label>正常冷却<input type="number" name="cooldown_seconds" min="0" max="604800" step="0.1" value="{{ snapshot.effective.group_proactive_cooldown_seconds }}"></label>
-            <label>静默冷却<input type="number" name="quiet_cooldown_seconds" min="0" max="604800" step="0.1" value="{{ snapshot.effective.group_proactive_quiet_cooldown_seconds }}"></label>
-            <label>窗口秒数<input type="number" name="window_seconds" min="10" max="604800" step="0.1" value="{{ snapshot.effective.group_proactive_window_seconds }}"></label>
-            <label>窗口最大轮次<input type="number" name="max_turns_per_window" min="1" max="100" value="{{ snapshot.effective.group_proactive_max_turns_per_window }}"></label>
-            <label>预留秒数<input type="number" name="reservation_seconds" min="1" max="3600" step="0.1" value="{{ snapshot.effective.group_proactive_reservation_seconds }}"></label>
+            <label class="field-wide">时区<input name="timezone" value="{{ snapshot.effective.group_proactive_timezone }}"></label>
         </div>
-        <button class="btn btn-primary" type="submit">保存设置</button>
-    </form>
-</div>
-<div class="card">
-    <h2>目标验证状态</h2>
-    <form method="post" action="/settings/engagement/targets/add" style="display:flex;gap:8px;margin-bottom:12px">
-        {{ csrf_input(request) }}<input type="hidden" name="revision" value="{{ snapshot.revision }}"><input name="chat_id" placeholder="群 ID" maxlength="128" required><button class="btn" type="submit">加入目标</button>
-    </form>
+    </section>
+
+    <section class="settings-card">
+        <div class="settings-card-heading"><div><span class="section-kicker">04</span><h3>频率控制</h3><p>避免在短时间内重复打扰同一个群聊。</p></div></div>
+        <div class="settings-fields">
+            <label>正常冷却<span class="input-with-suffix"><input type="number" name="cooldown_seconds" min="0" max="604800" step="0.1" value="{{ snapshot.effective.group_proactive_cooldown_seconds }}"><em>秒</em></span></label>
+            <label>静默冷却<span class="input-with-suffix"><input type="number" name="quiet_cooldown_seconds" min="0" max="604800" step="0.1" value="{{ snapshot.effective.group_proactive_quiet_cooldown_seconds }}"><em>秒</em></span></label>
+            <label>统计窗口<span class="input-with-suffix"><input type="number" name="window_seconds" min="1" max="604800" step="0.1" value="{{ snapshot.effective.group_proactive_window_seconds }}"><em>秒</em></span></label>
+            <label>窗口最大轮次<input type="number" name="max_turns_per_window" min="1" max="1000" value="{{ snapshot.effective.group_proactive_max_turns_per_window }}"></label>
+        </div>
+    </section>
+
+    <details class="settings-card advanced-settings protection-settings"><summary><span><span class="section-kicker">05</span><strong>高级：执行保护</strong><small>控制一次主动轮次最多占用的预留时间。</small></span></summary><div class="settings-fields"><label>预留秒数<span class="input-with-suffix"><input type="number" name="reservation_seconds" min="1" max="3600" step="0.1" value="{{ snapshot.effective.group_proactive_reservation_seconds }}"><em>秒</em></span></label></div></details>
+
+    <div class="settings-form-actions"><p>保存后会立即创建新版本；主动模式仅允许已验证目标。</p><button class="btn btn-primary" type="submit">保存运行时设置</button></div>
+</form>
+<form id="manual-target-form" method="post" action="/settings/engagement/targets/add">{{ csrf_input(request) }}<input type="hidden" name="revision" value="{{ snapshot.revision }}"></form>
+<div class="card target-status-card">
+    <div class="settings-card-heading"><div><span class="section-kicker">STATUS</span><h3>目标验证状态</h3><p>验证状态决定目标是否可以进入主动模式。</p></div></div>
     <div class="table-wrap"><table><thead><tr><th>群 ID</th><th>状态</th><th>最近观察</th><th>操作</th></tr></thead><tbody>
-    {% for target in targets %}<tr><td><code>{{ target.chat_id }}</code></td><td>{{ target.verification_status }}</td><td>{{ target.last_observed_at or '—' }}</td><td><form method="post" action="/settings/engagement/targets/{{ target.chat_id }}/verify" style="display:inline">{{ csrf_input(request) }}<button class="btn btn-sm" type="submit">验证</button></form> <form method="post" action="/settings/engagement/targets/{{ target.chat_id }}/remove" style="display:inline">{{ csrf_input(request) }}<input type="hidden" name="revision" value="{{ snapshot.revision }}"><button class="btn btn-sm btn-danger" type="submit">移出</button></form></td></tr>{% else %}<tr><td colspan="4">暂无目标</td></tr>{% endfor %}
+    {% for target in targets %}<tr><td><code>{{ target.chat_id }}</code></td><td><span class="target-status status-{{ target.verification_status }}">{{ {"verified":"已验证", "unverified":"待验证", "removed":"已移出"}.get(target.verification_status, target.verification_status) }}</span></td><td>{{ target.last_observed_at|format_timestamp if target.last_observed_at else '—' }}</td><td><form method="post" action="/settings/engagement/targets/{{ target.chat_id }}/verify" style="display:inline">{{ csrf_input(request) }}<button class="btn btn-sm" type="submit">验证</button></form> <form method="post" action="/settings/engagement/targets/{{ target.chat_id }}/remove" style="display:inline">{{ csrf_input(request) }}<input type="hidden" name="revision" value="{{ snapshot.revision }}"><button class="btn btn-sm btn-danger" type="submit">移出</button></form></td></tr>{% else %}<tr><td colspan="4">暂无目标</td></tr>{% endfor %}
     </tbody></table></div>
 </div>
-<div class="card"><h2>动态覆盖</h2><p>{{ snapshot.overrides|length }} 个字段覆盖 TOML 默认值。</p><form method="post" action="/settings/engagement/clear">{{ csrf_input(request) }}<input type="hidden" name="revision" value="{{ snapshot.revision }}"><button class="btn btn-danger" type="submit" onclick="return confirm('恢复全部 TOML 默认值？')">恢复全部默认值</button></form></div>
-<div class="card"><h2>变更历史</h2><div class="table-wrap"><table><thead><tr><th>版本</th><th>结果</th><th>动作</th><th>来源</th><th>时间</th></tr></thead><tbody>{% for audit in audits %}<tr><td>{{ audit.new_revision }}</td><td>{{ audit.outcome }}{% if audit.failure_class %} · {{ audit.failure_class }}{% endif %}</td><td>{{ audit.change.action }} · {{ audit.change.fields|join(', ') }}</td><td>{{ audit.source }}</td><td>{{ audit.created_at|format_timestamp }}</td></tr>{% else %}<tr><td colspan="5">暂无变更</td></tr>{% endfor %}</tbody></table></div></div>
+<div class="settings-secondary-grid"><div class="card"><h3>动态覆盖</h3><p>{{ snapshot.overrides|length }} 个字段覆盖 TOML 默认值。</p><form method="post" action="/settings/engagement/clear">{{ csrf_input(request) }}<input type="hidden" name="revision" value="{{ snapshot.revision }}"><button class="btn btn-danger" type="submit" onclick="return confirm('恢复全部 TOML 默认值？')">恢复全部默认值</button></form></div></div>
+<div class="card audit-card"><h3>变更历史</h3><div class="table-wrap"><table><thead><tr><th>版本</th><th>结果</th><th>动作</th><th>来源</th><th>时间</th></tr></thead><tbody>{% for audit in audits %}<tr><td>{{ audit.new_revision }}</td><td>{{ audit.outcome }}{% if audit.failure_class %} · {{ audit.failure_class }}{% endif %}</td><td>{{ audit.change.action }} · {{ audit.change.fields|join(', ') }}</td><td>{{ audit.source }}</td><td>{{ audit.created_at|format_timestamp }}</td></tr>{% else %}<tr><td colspan="5">暂无变更</td></tr>{% endfor %}</tbody></table></div></div>
 {% endblock %}
