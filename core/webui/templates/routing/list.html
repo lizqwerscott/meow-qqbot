@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}路由审计 - 猫猫管理{% endblock %}
+{% set nav_active = "routing" %}
+{% block content %}
+<div class="page-header">
+    <h2>🧭 路由审计</h2>
+    <p class="meta">只保留确定性路由元数据，不包含消息正文、提示词或模型推理。</p>
+</div>
+
+<section class="card">
+    <form method="get" action="/routing" class="filter-form">
+        <label>模式
+            <select name="mode">
+                <option value="">全部</option>
+                <option value="chat" {% if filters.mode == "chat" %}selected{% endif %}>Chat</option>
+                <option value="agent" {% if filters.mode == "agent" %}selected{% endif %}>Agent</option>
+            </select>
+        </label>
+        <label>原因码 <input name="reason_code" value="{{ filters.reason_code }}" placeholder="default_chat"></label>
+        <label>来源 <input name="source" value="{{ filters.source }}" placeholder="user"></label>
+        <label>Chat 前缀 <input name="chat_prefix" value="{{ filters.chat_prefix }}" placeholder="59C552"></label>
+        <button type="submit" class="btn">筛选</button>
+        <a class="btn" href="/routing">清除</a>
+    </form>
+</section>
+
+<section class="card">
+    {% if records %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>Chat / 消息</th>
+                    <th>结果</th>
+                    <th>原因</th>
+                    <th>能力</th>
+                    <th>来源</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for record in records %}
+                <tr>
+                    <td>{{ record.created_at|format_timestamp }}</td>
+                    <td><code>{{ record.chat_id[:16] }}{% if record.chat_id|length > 16 %}..{% endif %}</code><br><code>{{ record.message_id[:16] }}{% if record.message_id|length > 16 %}..{% endif %}</code></td>
+                    <td><strong>{{ record.mode }}</strong><br><code>{{ record.reason_code }}</code></td>
+                    <td>{{ record.reason }}</td>
+                    <td><code>{{ record.capability_profile }}</code></td>
+                    <td><code>{{ record.source }}</code></td>
+                    <td><a class="btn btn-sm" href="/routing/{{ record.id }}">详情</a></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="empty">尚无路由记录。启用 mode routing 后，新的非命令消息会在这里出现。</p>
+    {% endif %}
+</section>
+{% endblock %}

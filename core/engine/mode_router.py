@@ -83,6 +83,7 @@ class ModeDecision:
     policy_version: str
     scheduler_revision: int
     work_plan_hint: str | None = None
+    trace: tuple[str, ...] = ()
 
     def to_metadata(self) -> ModeRoutingMetadata:
         """Freeze the decision fields that must survive ingress and queueing."""
@@ -231,7 +232,30 @@ class ModeRouter:
             policy_version=self.policy_version,
             scheduler_revision=request.scheduler_revision,
             work_plan_hint=work_plan_hint,
+            trace=self._trace(request, reason_code, work_plan_hint),
         )
+
+    @staticmethod
+    def _trace(
+        request: ModeRouteInput,
+        reason_code: ModeReasonCode,
+        work_plan_hint: str | None,
+    ) -> tuple[str, ...]:
+        """Return fixed-rule evidence without retaining message content."""
+        trace = [
+            f"source:{request.source.value}",
+            f"intent:{request.intent.value}",
+            f"selected_rule:{reason_code.value}",
+        ]
+        if work_plan_hint:
+            trace.append("active_work_plan:eligible")
+        if request.message.is_group:
+            trace.append(
+                "group_wake:explicit"
+                if ModeRouter._is_explicit_group_wake(request.message)
+                else "group_wake:implicit"
+            )
+        return tuple(trace)
 
     def _is_explicit_work_request(self, message: InputMessage, text: str) -> bool:
         if not text or not self._WORK_ACTION.search(text):

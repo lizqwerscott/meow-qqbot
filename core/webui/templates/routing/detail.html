@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}路由记录 - 猫猫管理{% endblock %}
+{% set nav_active = "routing" %}
+{% block content %}
+<div class="page-header">
+    <h2>🧭 路由记录</h2>
+    <a class="btn" href="/routing">返回列表</a>
+</div>
+
+<section class="card detail-grid">
+    <dl>
+        <dt>时间</dt><dd>{{ record.created_at|format_timestamp }}</dd>
+        <dt>模式</dt><dd><strong>{{ record.mode }}</strong></dd>
+        <dt>原因码</dt><dd><code>{{ record.reason_code }}</code></dd>
+        <dt>确定性判断</dt><dd>{{ record.reason }}</dd>
+        <dt>能力 profile</dt><dd><code>{{ record.capability_profile }}</code></dd>
+        <dt>来源 / intent</dt><dd><code>{{ record.source }}</code> / <code>{{ record.intent }}</code></dd>
+        <dt>策略 / 队列 revision</dt><dd><code>{{ record.policy_version }}</code> / {{ record.scheduler_revision }}</dd>
+        <dt>Chat ID</dt><dd><code>{{ record.chat_id }}</code></dd>
+        <dt>消息 ID</dt><dd><code>{{ record.message_id }}</code></dd>
+        <dt>WorkPlan</dt><dd>{% if record.work_plan_hint %}<code>{{ record.work_plan_hint }}</code>{% else %}—{% endif %}</dd>
+    </dl>
+</section>
+
+<section class="card">
+    <h3>规则依据</h3>
+    <ul>
+        {% for item in record.trace %}
+        <li><code>{{ item }}</code></li>
+        {% endfor %}
+    </ul>
+</section>
+{% endblock %}

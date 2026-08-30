@@ -41,7 +41,16 @@ def _check_login_rate(client_ip: str) -> None:
                 break
 
 
-from core.webui.routers import emojis, learners, media, nicknames, sessions, status, tasks
+from core.webui.routers import (
+    emojis,
+    learners,
+    media,
+    nicknames,
+    routing,
+    sessions,
+    status,
+    tasks,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -132,6 +141,7 @@ def create_app(managers: Dict[str, Any], webui_config: Dict[str, Any]) -> FastAP
     app.include_router(learners.router)
     app.include_router(tasks.router)
     app.include_router(media.router)
+    app.include_router(routing.router)
 
     return app
 

@@ -336,6 +336,16 @@ tr:hover td {
 .media-detail-actions { border-top: 1px solid #e7ebf1; display: flex; flex-wrap: wrap; gap: 12px; margin-top: 22px; padding-top: 18px; }
 .media-detail-actions form { margin: 0; }
 
+/* ── Routing audit ── */
+
+.filter-form { align-items: end; display: flex; flex-wrap: wrap; gap: 12px; }
+.filter-form label { color: var(--text-secondary); display: grid; font-size: 12px; gap: 4px; }
+.filter-form input, .filter-form select { border: 1px solid var(--border); border-radius: 4px; font: inherit; min-width: 132px; padding: 6px 8px; }
+.detail-grid dl { display: grid; grid-template-columns: minmax(150px, 0.3fr) minmax(0, 1fr); margin: 0; }
+.detail-grid dt, .detail-grid dd { border-top: 1px solid #edf0f5; margin: 0; padding: 10px 0; }
+.detail-grid dt { color: var(--text-secondary); font-size: 12px; }
+.detail-grid dd { overflow-wrap: anywhere; }
+
 /* ── Forms ── */
 
 .form-group {

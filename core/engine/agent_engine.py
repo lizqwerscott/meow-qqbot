@@ -53,6 +53,7 @@ from core.engine.proactive_state import ProactiveStateStore
 from core.engine.prompt_builder import PromptBuilder, PromptBuildResult
 from core.engine.prompt_snapshot import PromptMode
 from core.engine.reply_necessity import ReplyNecessityGate, ReplyNecessityInput
+from core.engine.routing_audit import RoutingAuditStore
 from core.engine.routing_metrics import RoutingMetrics
 from core.engine.turn_capabilities import TurnCapabilities
 from core.engine.turn_planner import (
@@ -256,6 +257,7 @@ class AgentEngine:
             frequency_factor=engagement_config.group_reply_frequency,
         )
         self.routing_metrics = RoutingMetrics()
+        self.routing_audit_store = RoutingAuditStore()
         self.engagement_config = engagement_config
         self.mode_routing_enabled = engagement_config.mode_routing_enabled
         self.mode_router = ModeRouter() if self.mode_routing_enabled else None
@@ -513,6 +515,27 @@ class AgentEngine:
                 active_work_plan=active_work_plan,
             )
         )
+        routing_audit = getattr(self, "routing_audit_store", None)
+        if routing_audit is not None:
+            try:
+                await routing_audit.append(
+                    chat_id=message.chat_id,
+                    message_id=message.id,
+                    source=source.value,
+                    intent=pending.intent.value,
+                    mode=decision.mode.value,
+                    reason_code=decision.reason_code.value,
+                    reason=decision.reason,
+                    capability_profile=decision.capability_profile,
+                    policy_version=decision.policy_version,
+                    scheduler_revision=scheduler_revision,
+                    work_plan_hint=decision.work_plan_hint,
+                    trace=decision.trace,
+                )
+            except Exception as exc:
+                _log.warning(
+                    "routing audit append failed [%s..]: %s", message.id[:12], exc
+                )
         _log.info(
             "mode route chat=%s message=%s mode=%s reason_code=%s policy=%s revision=%d",
             message.chat_id[:12],
@@ -3843,6 +3866,9 @@ class AgentEngine:
 
         if self.hindsight:
             await self.hindsight.close()
+        routing_audit = getattr(self, "routing_audit_store", None)
+        if routing_audit is not None:
+            await routing_audit.close()
         proactive_state_store = getattr(self, "proactive_state_store", None)
         if proactive_state_store is not None:
             await proactive_state_store.close()
