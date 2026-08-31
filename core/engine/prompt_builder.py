@@ -204,6 +204,9 @@ class PromptBuilder:
             - messages: OpenAI 格式的消息列表
             - tools_to_use: 本次可用的工具定义列表，或 None
         """
+        if timeline_snapshot is None:
+            raise ValueError("timeline_snapshot is required for prompt assembly")
+
         # ── 1. Token 阈值触发 compaction ──
         try:
             _, compact_usage, _ = await self.context_manager.compact_history_if_needed(
@@ -428,15 +431,10 @@ class PromptBuilder:
                 model_context_snapshot = None
 
         # ── 4. 完整历史 ──
-        if model_context_snapshot is not None and timeline_snapshot is not None:
+        if model_context_snapshot is not None:
             history = self._model_context_history(
                 model_context_snapshot, timeline_snapshot
             )
-        elif timeline_snapshot is None:
-            history = await self.context_manager.get_history_as_dicts_merged_async(
-                chat_id
-            )
-            history = self._apply_timeline_snapshot(history, timeline_snapshot)
         else:
             history = self._timeline_history(timeline_snapshot)
         if protocol_snapshot:
@@ -653,42 +651,6 @@ class PromptBuilder:
                 content = event.content
             history.append({"role": event.role, "content": content})
         return history
-
-    @staticmethod
-    def _apply_timeline_snapshot(
-        history: List[dict], timeline_snapshot: Optional[Sequence["TimelineEvent"]]
-    ) -> List[dict]:
-        """Use the frozen timeline as authority for matching user message text.
-
-        The legacy context still defines protocol ordering and display metadata.
-        Replacing only message-id matches avoids duplicating user content or
-        separating assistant tool calls from their result messages during the
-        dual-write migration.
-        """
-        if not timeline_snapshot:
-            return history
-        user_events = {
-            event.message_id: event
-            for event in timeline_snapshot
-            if event.role == "user" and event.message_id
-        }
-        if not user_events:
-            return history
-        projected: List[dict] = []
-        for message in history:
-            event = user_events.get(message.get("message_id"))
-            if message.get("role") != "user" or event is None:
-                projected.append(message)
-                continue
-            copied = dict(message)
-            name = copied.get("name") or copied.get("sender_id") or event.sender_id
-            timestamp = time.strftime(
-                "%Y-%m-%d %H:%M:%S", time.localtime(event.timestamp)
-            )
-            copied["raw_content"] = event.content
-            copied["content"] = f"[{name} 在 {timestamp}]: {event.content}"
-            projected.append(copied)
-        return projected
 
     def _resolve_task_tools(
         self,

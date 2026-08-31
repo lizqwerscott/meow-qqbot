@@ -301,7 +301,6 @@ class ServiceGraph:
             keep_last_assistants=ctx_mgmt.get("keep_last_assistants", 3),
             soft_trim=ctx_mgmt.get("soft_trim", 20000),
             hard_clear=ctx_mgmt.get("hard_clear", 180000),
-            merge_window_seconds=_merge_ws,
         )
 
         # ── ArchiveManager ──

@@ -24,7 +24,6 @@ class ChatContextManager:
         keep_last_assistants: int = 3,
         soft_trim: int = 20000,
         hard_clear: int = 180000,
-        merge_window_seconds: int = 15,
     ):
         self._store = store
         self._compactor = compactor
@@ -34,7 +33,6 @@ class ChatContextManager:
         self.keep_last_assistants = keep_last_assistants
         self.soft_trim = soft_trim
         self.hard_clear = hard_clear
-        self.merge_window_seconds = merge_window_seconds
         self.contexts: Dict[str, ChatContext] = {}
         self._ctx_lock = asyncio.Lock()
         self._chat_locks: Dict[str, asyncio.Lock] = {}
@@ -67,7 +65,6 @@ class ChatContextManager:
                 chat_id=chat_id,
                 store=self._store,
                 max_history=self.max_history_per_chat,
-                merge_window_seconds=self.merge_window_seconds,
             )
             await context.restore_from_store_async()
             async with self._ctx_lock:
@@ -147,14 +144,6 @@ class ChatContextManager:
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
             return context.get_history_as_dicts(max_messages)
-
-    async def get_history_as_dicts_merged_async(
-        self, chat_id: str, max_messages: Optional[int] = None
-    ) -> List[Dict]:
-        lock = await self._get_chat_lock(chat_id)
-        async with lock:
-            context = await self._get_or_restore_context_locked(chat_id)
-            return context.get_history_as_dicts_merged(max_messages)
 
     # Token 估算缓存：避免重复计算，key=chat_id, value=token_count
     # 使用 OrderedDict 实现 LRU，自动维护访问顺序

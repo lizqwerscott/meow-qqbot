@@ -1,62 +1,29 @@
+import pytest
+
 from core.engine.conversation_timeline import TimelineEvent
 from core.engine.model_context_transcript import ModelContextScope, ModelContextSnapshot
 from core.engine.prompt_builder import PromptBuilder
+from core.message import InputMessage
 
 
-def test_timeline_snapshot_replaces_matching_user_content_without_reordering_protocol():
-    history = [
-        {
-            "role": "user",
-            "content": "[old-name 在 2020-01-01 00:00:00]: stale",
-            "raw_content": "stale",
-            "message_id": "m1",
-            "sender_id": "user",
-            "name": "old-name",
-        },
-        {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [{"id": "call-1", "type": "function"}],
-        },
-        {"role": "tool", "tool_call_id": "call-1", "content": "result"},
-    ]
-    snapshot = (
-        TimelineEvent(
+@pytest.mark.asyncio
+async def test_prompt_build_requires_authoritative_timeline_snapshot():
+    builder = PromptBuilder.__new__(PromptBuilder)
+
+    with pytest.raises(ValueError, match="timeline_snapshot is required"):
+        await builder.build(
             chat_id="chat",
-            seq=1,
-            event_id="user:m1",
-            role="user",
-            content="authoritative",
-            message_id="m1",
-            sender_id="user",
-            timestamp=1_700_000_000,
-        ),
-    )
-
-    projected = PromptBuilder._apply_timeline_snapshot(history, snapshot)
-
-    assert [message["role"] for message in projected] == ["user", "assistant", "tool"]
-    assert projected[0]["raw_content"] == "authoritative"
-    assert projected[0]["content"].endswith(": authoritative")
-    assert projected[1] == history[1]
-    assert projected[2] == history[2]
-
-
-def test_timeline_snapshot_does_not_inject_events_missing_from_legacy_history():
-    history = [{"role": "assistant", "content": "existing"}]
-    snapshot = (
-        TimelineEvent(
-            chat_id="chat",
-            seq=1,
-            event_id="user:m1",
-            role="user",
-            content="not inserted",
-            message_id="m1",
-            sender_id="user",
-        ),
-    )
-
-    assert PromptBuilder._apply_timeline_snapshot(history, snapshot) == history
+            is_group=False,
+            user_nickname="alice",
+            sender_id="alice",
+            input_message=InputMessage(
+                id="message",
+                sender_id="alice",
+                chat_id="chat",
+                content="hello",
+                is_group=False,
+            ),
+        )
 
 
 def test_timeline_history_is_authoritative_and_keeps_only_visible_events():
