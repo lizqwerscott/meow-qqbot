@@ -1,5 +1,4 @@
 import pytest
-from unittest.mock import AsyncMock
 
 from core.engine.mode_router import (
     ActiveWorkPlanHint,
@@ -87,27 +86,20 @@ def test_group_work_requires_an_explicit_wake():
     assert woken.capability_profile == "agent_full"
 
 
-@pytest.mark.parametrize(
-    ("source", "expected_reason", "expected_profile"),
-    [
-        (ModeRouteSource.AMBIENT, ModeReasonCode.AMBIENT_CHAT, "group_ambient"),
-        (ModeRouteSource.PROACTIVE, ModeReasonCode.PROACTIVE_CHAT, "group_proactive"),
-    ],
-)
-def test_ambient_and_proactive_always_stay_chat(
-    source, expected_reason, expected_profile
-):
+def test_ambient_always_stays_chat():
     decision = ModeRouter().route(
         ModeRouteInput(
-            message("先给方案，不要修改 core/foo.py", is_group=True, is_at_mention=True),
-            source=source,
+            message(
+                "先给方案，不要修改 core/foo.py", is_group=True, is_at_mention=True
+            ),
+            source=ModeRouteSource.AMBIENT,
             intent=InboundIntent.GROUP_AMBIENT,
         )
     )
 
     assert decision.mode is PromptMode.CHAT
-    assert decision.reason_code is expected_reason
-    assert decision.capability_profile == expected_profile
+    assert decision.reason_code is ModeReasonCode.AMBIENT_CHAT
+    assert decision.capability_profile == "group_ambient"
 
 
 def test_validated_work_plan_follow_up_has_the_highest_priority():
@@ -163,25 +155,3 @@ def test_mode_decision_projects_immutable_pending_inbound_metadata():
     assert metadata.capability_profile == "agent_full"
     assert metadata.reason_code == "explicit_work"
     assert metadata.policy_version == "test-policy/v2"
-
-
-@pytest.mark.asyncio
-async def test_dispatch_proactive_uses_group_ambient_intent_and_proactive_source():
-    from core.engine.agent_engine import AgentEngine
-
-    engine = object.__new__(AgentEngine)
-    engine.dispatch = AsyncMock()
-    reply_callback = AsyncMock()
-    nickname = lambda _: "system"
-
-    await AgentEngine.dispatch_proactive(
-        engine, "group-1", "分享一个今天的冷知识", reply_callback, nickname
-    )
-
-    engine.dispatch.assert_awaited_once()
-    kwargs = engine.dispatch.await_args.kwargs
-    assert kwargs["_source"] is ModeRouteSource.PROACTIVE
-    assert kwargs["_intent"] is InboundIntent.GROUP_AMBIENT
-    proactive_message = engine.dispatch.await_args.args[0]
-    assert proactive_message.is_group is True
-    assert proactive_message.sender_id == "system"

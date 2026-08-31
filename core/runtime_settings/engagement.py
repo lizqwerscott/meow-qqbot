@@ -1,4 +1,4 @@
-"""Strict validation and application model for proactive engagement settings."""
+"""Strict validation and application model for group engagement settings."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Awaitable, Callable, Mapping, Protocol
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from core.engine.engagement_config import EngagementConfig, normalize_engagement_config
 from core.runtime_settings.store import (
@@ -17,18 +16,19 @@ from core.runtime_settings.store import (
 )
 
 ENGAGEMENT_RUNTIME_FIELDS = (
-    "group_proactive_mode",
-    "group_proactive_active_chats",
-    "group_proactive_interval_seconds",
-    "group_proactive_jitter_seconds",
-    "group_proactive_active_hours_start",
-    "group_proactive_active_hours_end",
-    "group_proactive_timezone",
-    "group_proactive_cooldown_seconds",
-    "group_proactive_quiet_cooldown_seconds",
-    "group_proactive_window_seconds",
-    "group_proactive_max_turns_per_window",
-    "group_proactive_reservation_seconds",
+    "group_ambient_mode",
+    "group_ambient_active_chats",
+    "group_ambient_idle_ms",
+    "group_ambient_cooldown_seconds",
+    "group_ambient_quiet_cooldown_seconds",
+    "group_ambient_window_seconds",
+    "group_ambient_max_turns_per_window",
+    "group_ambient_max_age_seconds",
+    "group_ambient_min_messages",
+    "group_ambient_allow_single_question",
+    "group_ambient_allow_single_media",
+    "group_ambient_quote",
+    "group_ambient_stale_quote_seconds",
 )
 
 _CHAT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -83,8 +83,8 @@ class EngagementSnapshot:
 
     def to_dict(self) -> dict[str, Any]:
         values = {key: getattr(self.config, key) for key in ENGAGEMENT_RUNTIME_FIELDS}
-        values["group_proactive_active_chats"] = list(
-            values["group_proactive_active_chats"]
+        values["group_ambient_active_chats"] = list(
+            values["group_ambient_active_chats"]
         )
         return {
             "revision": self.revision,
@@ -108,14 +108,6 @@ def _error(field: str, message: str) -> ValueError:
     return ValueError(f"{field}: {message}")
 
 
-def _validate_clock(field: str, value: Any) -> str:
-    if not isinstance(value, str) or not re.fullmatch(
-        r"(?:[01]\d|2[0-3]):[0-5]\d", value
-    ):
-        raise _error(field, "must be HH:MM")
-    return value
-
-
 def _validate_number(
     field: str,
     value: Any,
@@ -133,19 +125,25 @@ def _validate_number(
     return int(value) if integer else float(value)
 
 
-def _validate_chat_ids(value: Any) -> tuple[str, ...]:
+def _validate_chat_ids(value: Any, field: str) -> tuple[str, ...]:
     if isinstance(value, str) or not isinstance(value, (list, tuple)):
-        raise _error("group_proactive_active_chats", "must be an array of IDs")
+        raise _error(field, "must be an array of IDs")
     if len(value) > 100:
-        raise _error("group_proactive_active_chats", "at most 100 targets are allowed")
+        raise _error(field, "at most 100 targets are allowed")
     result = []
     for chat_id in value:
         if not isinstance(chat_id, str) or not _CHAT_ID_RE.fullmatch(chat_id):
-            raise _error("group_proactive_active_chats", "contains an invalid group ID")
+            raise _error(field, "contains an invalid group ID")
         if chat_id in result:
-            raise _error("group_proactive_active_chats", "contains duplicate group IDs")
+            raise _error(field, "contains duplicate group IDs")
         result.append(chat_id)
     return tuple(result)
+
+
+def _validate_bool(field: str, value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise _error(field, "must be a boolean")
+    return value
 
 
 def validate_engagement_patch(
@@ -170,87 +168,83 @@ def validate_engagement_patch(
     merged = dict(base)
     merged.update(merged_override)
     clean: dict[str, Any] = {}
-    mode = merged.get("group_proactive_mode", "off")
-    if mode not in {"off", "shadow", "active"}:
-        raise _error("group_proactive_mode", "must be off, shadow, or active")
-    clean["group_proactive_mode"] = mode
-    clean["group_proactive_active_chats"] = _validate_chat_ids(
-        merged.get("group_proactive_active_chats", ())
+    ambient_mode = merged.get("group_ambient_mode", "off")
+    if ambient_mode not in {"off", "shadow", "active"}:
+        raise _error("group_ambient_mode", "must be off, shadow, or active")
+    clean["group_ambient_mode"] = ambient_mode
+    clean["group_ambient_active_chats"] = _validate_chat_ids(
+        merged.get("group_ambient_active_chats", ()),
+        "group_ambient_active_chats",
     )
-    clean["group_proactive_interval_seconds"] = _validate_number(
-        "group_proactive_interval_seconds",
-        merged.get("group_proactive_interval_seconds", 900),
-        minimum=60,
+    clean["group_ambient_idle_ms"] = _validate_number(
+        "group_ambient_idle_ms",
+        merged.get("group_ambient_idle_ms", 1000),
+        minimum=0,
+        maximum=120000,
+        integer=True,
+    )
+    clean["group_ambient_cooldown_seconds"] = _validate_number(
+        "group_ambient_cooldown_seconds",
+        merged.get("group_ambient_cooldown_seconds", 30.0),
+        minimum=0,
         maximum=86400,
-        integer=True,
     )
-    clean["group_proactive_jitter_seconds"] = _validate_number(
-        "group_proactive_jitter_seconds",
-        merged.get("group_proactive_jitter_seconds", 0),
+    clean["group_ambient_quiet_cooldown_seconds"] = _validate_number(
+        "group_ambient_quiet_cooldown_seconds",
+        merged.get("group_ambient_quiet_cooldown_seconds", 10.0),
         minimum=0,
-        maximum=3600,
-        integer=True,
+        maximum=86400,
     )
-    clean["group_proactive_active_hours_start"] = _validate_clock(
-        "group_proactive_active_hours_start",
-        merged.get("group_proactive_active_hours_start", "09:00"),
-    )
-    clean["group_proactive_active_hours_end"] = _validate_clock(
-        "group_proactive_active_hours_end",
-        merged.get("group_proactive_active_hours_end", "23:00"),
-    )
-    timezone = merged.get("group_proactive_timezone", "Asia/Shanghai")
-    if not isinstance(timezone, str) or len(timezone) > 64:
-        raise _error("group_proactive_timezone", "must be a valid timezone")
-    try:
-        ZoneInfo(timezone)
-    except ZoneInfoNotFoundError as exc:
-        raise _error("group_proactive_timezone", "is not installed") from exc
-    clean["group_proactive_timezone"] = timezone
-    clean["group_proactive_cooldown_seconds"] = _validate_number(
-        "group_proactive_cooldown_seconds",
-        merged.get("group_proactive_cooldown_seconds", 900.0),
-        minimum=0,
-        maximum=604800,
-    )
-    clean["group_proactive_quiet_cooldown_seconds"] = _validate_number(
-        "group_proactive_quiet_cooldown_seconds",
-        merged.get("group_proactive_quiet_cooldown_seconds", 300.0),
-        minimum=0,
-        maximum=604800,
-    )
-    clean["group_proactive_window_seconds"] = _validate_number(
-        "group_proactive_window_seconds",
-        merged.get("group_proactive_window_seconds", 3600.0),
+    clean["group_ambient_window_seconds"] = _validate_number(
+        "group_ambient_window_seconds",
+        merged.get("group_ambient_window_seconds", 300.0),
         minimum=1,
         maximum=604800,
     )
-    clean["group_proactive_max_turns_per_window"] = _validate_number(
-        "group_proactive_max_turns_per_window",
-        merged.get("group_proactive_max_turns_per_window", 2),
+    clean["group_ambient_max_turns_per_window"] = _validate_number(
+        "group_ambient_max_turns_per_window",
+        merged.get("group_ambient_max_turns_per_window", 4),
         minimum=1,
         maximum=1000,
         integer=True,
     )
-    clean["group_proactive_reservation_seconds"] = _validate_number(
-        "group_proactive_reservation_seconds",
-        merged.get("group_proactive_reservation_seconds", 120.0),
+    clean["group_ambient_max_age_seconds"] = _validate_number(
+        "group_ambient_max_age_seconds",
+        merged.get("group_ambient_max_age_seconds", 600.0),
         minimum=1,
-        maximum=3600,
+        maximum=604800,
     )
-    if mode in {"shadow", "active"} and not clean["group_proactive_active_chats"]:
-        raise _error("group_proactive_active_chats", "is required when enabled")
-    if mode in {"shadow", "active"} and not capability_enabled:
-        raise _error("group_proactive_mode", "mode routing capability is disabled")
-    if mode == "active":
-        missing = set(clean["group_proactive_active_chats"]) - set(
-            verified_targets or ()
-        )
+    clean["group_ambient_min_messages"] = _validate_number(
+        "group_ambient_min_messages",
+        merged.get("group_ambient_min_messages", 2),
+        minimum=1,
+        maximum=100,
+        integer=True,
+    )
+    for field, default in (
+        ("group_ambient_allow_single_question", True),
+        ("group_ambient_allow_single_media", False),
+        ("group_ambient_quote", False),
+    ):
+        clean[field] = _validate_bool(field, merged.get(field, default))
+    clean["group_ambient_stale_quote_seconds"] = _validate_number(
+        "group_ambient_stale_quote_seconds",
+        merged.get("group_ambient_stale_quote_seconds", 120.0),
+        minimum=0,
+        maximum=604800,
+    )
+    if ambient_mode in {"shadow", "active"} and not clean["group_ambient_active_chats"]:
+        raise _error("group_ambient_active_chats", "is required when enabled")
+    if ambient_mode in {"shadow", "active"} and not capability_enabled:
+        raise _error("group_ambient_mode", "mode routing capability is disabled")
+    if ambient_mode == "active":
+        missing = set(clean["group_ambient_active_chats"]) - set(verified_targets or ())
         if missing:
             raise _error(
-                "group_proactive_active_chats",
+                "group_ambient_active_chats",
                 f"unverified targets: {', '.join(sorted(missing))}",
             )
+
     effective = dict(merged)
     effective.update(clean)
     return (
@@ -323,7 +317,8 @@ class EngagementSettingsAdapter:
             capability_enabled=self._capability_enabled,
             verified_targets=verified_targets,
         )
-        targets = await self._target_records(config.group_proactive_active_chats)
+        target_ids = tuple(dict.fromkeys(config.group_ambient_active_chats))
+        targets = await self._target_records(target_ids)
         return EngagementSnapshot(
             config=config,
             revision=revision,
@@ -337,7 +332,8 @@ class EngagementSettingsAdapter:
             snapshot = await self.build(record.overrides, revision=record.revision)
         else:
             config = normalize_engagement_config(self._base)
-            targets = await self._target_records(config.group_proactive_active_chats)
+            target_ids = tuple(dict.fromkeys(config.group_ambient_active_chats))
+            targets = await self._target_records(target_ids)
             snapshot = EngagementSnapshot(
                 config=config,
                 revision=record.revision,
@@ -364,8 +360,8 @@ class EngagementSettingsAdapter:
             {},
             revision=current_revision,
             patch={
-                "group_proactive_mode": "off",
-                "group_proactive_active_chats": [],
+                "group_ambient_mode": "off",
+                "group_ambient_active_chats": [],
             },
         )
         await self.install(snapshot)

@@ -19,8 +19,8 @@ from core.webui.app import create_app
 def _base_config():
     return {
         "mode_routing_enabled": True,
-        "group_proactive_mode": "off",
-        "group_proactive_active_chats": [],
+        "group_ambient_mode": "off",
+        "group_ambient_active_chats": [],
     }
 
 
@@ -44,23 +44,23 @@ async def test_runtime_settings_requires_verified_target_for_active(tmp_path):
     snapshot = await coordinator.update(
         expected_revision=0,
         patch={
-            "group_proactive_mode": "shadow",
-            "group_proactive_active_chats": ["g1"],
+            "group_ambient_mode": "shadow",
+            "group_ambient_active_chats": ["g1"],
         },
     )
     assert snapshot.revision == 1
     with pytest.raises(ValueError, match="unverified"):
         await coordinator.update(
             expected_revision=1,
-            patch={"group_proactive_mode": "active"},
+            patch={"group_ambient_mode": "active"},
         )
 
     await coordinator.verify_target("g1")
     snapshot = await coordinator.update(
         expected_revision=1,
-        patch={"group_proactive_mode": "active"},
+        patch={"group_ambient_mode": "active"},
     )
-    assert snapshot.config.group_proactive_mode == "active"
+    assert snapshot.config.group_ambient_mode == "active"
 
 
 @pytest.mark.asyncio
@@ -68,29 +68,29 @@ async def test_runtime_settings_cas_and_rollback(tmp_path):
     installed = []
 
     async def install(config: EngagementConfig):
-        installed.append(config.group_proactive_interval_seconds)
-        if config.group_proactive_interval_seconds == 70:
+        installed.append(config.group_ambient_idle_ms)
+        if config.group_ambient_idle_ms == 70:
             raise RuntimeError("install failed")
 
     coordinator = await _coordinator(tmp_path, install=install)
     with pytest.raises(RuntimeError, match="install failed"):
         await coordinator.update(
             expected_revision=0,
-            patch={"group_proactive_interval_seconds": 70},
+            patch={"group_ambient_idle_ms": 70},
         )
     assert coordinator.snapshot().revision == 0
-    assert coordinator.snapshot().config.group_proactive_interval_seconds == 900
+    assert coordinator.snapshot().config.group_ambient_idle_ms == 1000
 
     await coordinator.update(
         expected_revision=0,
-        patch={"group_proactive_interval_seconds": 80},
+        patch={"group_ambient_idle_ms": 80},
     )
     with pytest.raises(RuntimeSettingsConflict):
         await coordinator.update(
             expected_revision=0,
-            patch={"group_proactive_interval_seconds": 40},
+            patch={"group_ambient_idle_ms": 40},
         )
-    assert installed == [70, 900, 80]
+    assert installed == [70, 1000, 80]
     audits = await coordinator.audit(limit=10)
     assert [(item.outcome, item.failure_class) for item in audits[:2]] == [
         ("failure", "conflict"),
@@ -112,10 +112,10 @@ async def test_runtime_settings_persist_failure_restores_old_snapshot(tmp_path):
     with pytest.raises(OSError, match="database unavailable"):
         await coordinator.update(
             expected_revision=0,
-            patch={"group_proactive_interval_seconds": 80},
+            patch={"group_ambient_idle_ms": 80},
         )
     assert coordinator.snapshot().revision == 0
-    assert coordinator.snapshot().config.group_proactive_interval_seconds == 900
+    assert coordinator.snapshot().config.group_ambient_idle_ms == 1000
     audits = await coordinator.audit(limit=10)
     assert any(item.failure_class == "persist_failed" for item in audits)
     await coordinator.close()
@@ -124,21 +124,21 @@ async def test_runtime_settings_persist_failure_restores_old_snapshot(tmp_path):
 @pytest.mark.asyncio
 async def test_runtime_settings_rollback_failure_enters_degraded_state(tmp_path):
     async def install(config: EngagementConfig):
-        if config.group_proactive_interval_seconds in {70, 900}:
+        if config.group_ambient_idle_ms in {70, 1000}:
             raise RuntimeError("installation unavailable")
 
     coordinator = await _coordinator(tmp_path, install=install)
     with pytest.raises(RuntimeSettingsDegraded, match="rollback failed"):
         await coordinator.update(
             expected_revision=0,
-            patch={"group_proactive_interval_seconds": 70},
+            patch={"group_ambient_idle_ms": 70},
         )
     assert coordinator.degraded
     assert coordinator.degraded_reason == "rollback_failed"
     with pytest.raises(RuntimeSettingsDegraded):
         await coordinator.update(
             expected_revision=0,
-            patch={"group_proactive_interval_seconds": 80},
+            patch={"group_ambient_idle_ms": 80},
         )
     audits = await coordinator.audit(limit=10)
     assert {item.failure_class for item in audits} >= {
@@ -153,7 +153,7 @@ async def test_runtime_settings_target_remove_preserves_metadata(tmp_path):
     coordinator = await _coordinator(tmp_path)
     await coordinator.update(
         expected_revision=0,
-        patch={"group_proactive_active_chats": ["g1"]},
+        patch={"group_ambient_active_chats": ["g1"]},
     )
     target = await coordinator.remove_target("g1")
     assert target.verification_status == "removed"
@@ -268,21 +268,20 @@ async def test_settings_webui_updates_with_token_and_csrf(tmp_path):
                 "revision": "0",
                 "mode": "shadow",
                 "active_chats": ["g1", "g2"],
-                "interval_seconds": "900",
-                "jitter_seconds": "0",
-                "active_hours_start": "09:00",
-                "active_hours_end": "23:00",
-                "timezone": "Asia/Shanghai",
-                "cooldown_seconds": "900",
-                "quiet_cooldown_seconds": "300",
-                "window_seconds": "3600",
-                "max_turns_per_window": "2",
-                "reservation_seconds": "120",
+                "idle_ms": "1000",
+                "cooldown_seconds": "30",
+                "quiet_cooldown_seconds": "10",
+                "window_seconds": "300",
+                "max_turns_per_window": "4",
+                "max_age_seconds": "600",
+                "min_messages": "2",
+                "allow_single_question": "true",
+                "stale_quote_seconds": "120",
             },
         )
     assert response.status_code == 303
-    assert coordinator.snapshot().config.group_proactive_mode == "shadow"
-    assert coordinator.snapshot().config.group_proactive_active_chats == ("g1", "g2")
+    assert coordinator.snapshot().config.group_ambient_mode == "shadow"
+    assert coordinator.snapshot().config.group_ambient_active_chats == ("g1", "g2")
     await coordinator.close()
 
 
@@ -309,6 +308,8 @@ async def test_settings_webui_group_picker_only_lists_group_chats(tmp_path):
     assert 'value="group-2"' in response.text
     assert 'value="private-1"' not in response.text
     assert "搜索群 ID 或状态" in response.text
+    assert "群聊自动回复" in response.text
+    assert "检查间隔" not in response.text
     await coordinator.close()
 
 
@@ -336,8 +337,8 @@ async def test_settings_webui_active_mode_requires_server_confirmation(tmp_path)
     await coordinator.update(
         expected_revision=0,
         patch={
-            "group_proactive_mode": "shadow",
-            "group_proactive_active_chats": ["g1"],
+            "group_ambient_mode": "shadow",
+            "group_ambient_active_chats": ["g1"],
         },
     )
     await coordinator.verify_target("g1")
@@ -358,16 +359,15 @@ async def test_settings_webui_active_mode_requires_server_confirmation(tmp_path)
                 "revision": "1",
                 "mode": "active",
                 "active_chats": "g1",
-                "interval_seconds": "900",
-                "jitter_seconds": "0",
-                "active_hours_start": "09:00",
-                "active_hours_end": "23:00",
-                "timezone": "Asia/Shanghai",
-                "cooldown_seconds": "900",
-                "quiet_cooldown_seconds": "300",
-                "window_seconds": "3600",
-                "max_turns_per_window": "2",
-                "reservation_seconds": "120",
+                "idle_ms": "1000",
+                "cooldown_seconds": "30",
+                "quiet_cooldown_seconds": "10",
+                "window_seconds": "300",
+                "max_turns_per_window": "4",
+                "max_age_seconds": "600",
+                "min_messages": "2",
+                "allow_single_question": "true",
+                "stale_quote_seconds": "120",
                 "active_nonce": active_nonce,
             },
         )
@@ -385,12 +385,12 @@ async def test_settings_webui_active_mode_requires_server_confirmation(tmp_path)
             },
         )
         assert response.status_code == 303
-        assert coordinator.snapshot().config.group_proactive_mode == "active"
+        assert coordinator.snapshot().config.group_ambient_mode == "active"
         response = await client.post(
             "/settings/engagement/pause",
             headers=headers,
             data={"_csrf": csrf, "revision": "2"},
         )
     assert response.status_code == 303
-    assert coordinator.snapshot().config.group_proactive_mode == "off"
+    assert coordinator.snapshot().config.group_ambient_mode == "off"
     await coordinator.close()

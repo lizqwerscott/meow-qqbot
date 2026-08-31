@@ -34,18 +34,6 @@ class EngagementConfig:
     group_ambient_allow_single_media: bool = False
     group_ambient_quote: bool = False
     group_ambient_stale_quote_seconds: float = 120.0
-    group_proactive_mode: str = "off"
-    group_proactive_active_chats: tuple[str, ...] = ()
-    group_proactive_interval_seconds: int = 900
-    group_proactive_cooldown_seconds: float = 900.0
-    group_proactive_quiet_cooldown_seconds: float = 300.0
-    group_proactive_window_seconds: float = 3600.0
-    group_proactive_max_turns_per_window: int = 2
-    group_proactive_reservation_seconds: float = 120.0
-    group_proactive_active_hours_start: str = "09:00"
-    group_proactive_active_hours_end: str = "23:00"
-    group_proactive_timezone: str = "Asia/Shanghai"
-    group_proactive_jitter_seconds: int = 0
     delivery_recovery_after_seconds: float = 60.0
     delivery_retry_base_seconds: float = 30.0
     delivery_retry_max_attempts: int = 5
@@ -117,32 +105,6 @@ def _chat_allowlist(raw: Mapping[str, Any], logger: logging.Logger) -> tuple[str
     return tuple(dict.fromkeys(chat_id.strip() for chat_id in value))
 
 
-def _proactive_allowlist(raw: Mapping[str, Any], logger: logging.Logger) -> tuple[str, ...]:
-    value = raw.get("group_proactive_active_chats", ())
-    if isinstance(value, str):
-        value = (value,)
-    if not isinstance(value, (list, tuple, set)) or any(
-        not isinstance(chat_id, str) or not chat_id.strip() for chat_id in value
-    ):
-        logger.warning("[ai].group_proactive_active_chats 无效，使用空 allowlist")
-        return ()
-    return tuple(dict.fromkeys(chat_id.strip() for chat_id in value))
-
-
-def _clock_value(raw: Mapping[str, Any], key: str, default: str, logger: logging.Logger) -> str:
-    value = raw.get(key, default)
-    if not isinstance(value, str) or len(value) != 5 or value[2] != ":":
-        logger.warning("[ai].%s 无效，使用默认值 %s", key, default)
-        return default
-    try:
-        hour, minute = (int(part) for part in value.split(":"))
-    except ValueError:
-        logger.warning("[ai].%s 无效，使用默认值 %s", key, default)
-        return default
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        logger.warning("[ai].%s 无效，使用默认值 %s", key, default)
-        return default
-    return value
 def normalize_engagement_config(
     raw: Mapping[str, Any] | None,
     *,
@@ -352,86 +314,6 @@ def normalize_engagement_config(
             minimum=0,
             maximum=604800,
             logger=logger,
-        ),
-        group_proactive_mode=_enum(
-            raw, "group_proactive_mode", "off", {"off", "shadow", "active"}, logger
-        ),
-        group_proactive_active_chats=_proactive_allowlist(raw, logger),
-        group_proactive_interval_seconds=int(
-            _number(
-                raw,
-                "group_proactive_interval_seconds",
-                900,
-                minimum=60,
-                maximum=86400,
-                logger=logger,
-                integer=True,
-            )
-        ),
-        group_proactive_cooldown_seconds=_number(
-            raw,
-            "group_proactive_cooldown_seconds",
-            900.0,
-            minimum=0,
-            maximum=604800,
-            logger=logger,
-        ),
-        group_proactive_quiet_cooldown_seconds=_number(
-            raw,
-            "group_proactive_quiet_cooldown_seconds",
-            300.0,
-            minimum=0,
-            maximum=604800,
-            logger=logger,
-        ),
-        group_proactive_window_seconds=_number(
-            raw,
-            "group_proactive_window_seconds",
-            3600.0,
-            minimum=1,
-            maximum=604800,
-            logger=logger,
-        ),
-        group_proactive_max_turns_per_window=int(
-            _number(
-                raw,
-                "group_proactive_max_turns_per_window",
-                2,
-                minimum=1,
-                maximum=1000,
-                logger=logger,
-                integer=True,
-            )
-        ),
-        group_proactive_reservation_seconds=_number(
-            raw,
-            "group_proactive_reservation_seconds",
-            120.0,
-            minimum=1,
-            maximum=3600,
-            logger=logger,
-        ),
-        group_proactive_active_hours_start=_clock_value(
-            raw, "group_proactive_active_hours_start", "09:00", logger
-        ),
-        group_proactive_active_hours_end=_clock_value(
-            raw, "group_proactive_active_hours_end", "23:00", logger
-        ),
-        group_proactive_timezone=str(
-            raw.get("group_proactive_timezone", "Asia/Shanghai")
-            if isinstance(raw.get("group_proactive_timezone", "Asia/Shanghai"), str)
-            else "Asia/Shanghai"
-        ),
-        group_proactive_jitter_seconds=int(
-            _number(
-                raw,
-                "group_proactive_jitter_seconds",
-                0,
-                minimum=0,
-                maximum=3600,
-                logger=logger,
-                integer=True,
-            )
         ),
         delivery_recovery_after_seconds=_number(
             raw,

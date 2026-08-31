@@ -42,7 +42,7 @@ async def test_status_page_shows_media_provider_status(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_status_page_shows_proactive_scheduler_state(tmp_path):
+async def test_status_page_shows_ambient_settings(tmp_path):
     service = MediaService(http_client=SimpleNamespace(), storage_dir=tmp_path)
     app = create_app({"media_service": service}, {})
     app.state.managers["agent_engine"] = SimpleNamespace(
@@ -65,17 +65,17 @@ async def test_status_page_shows_proactive_scheduler_state(tmp_path):
         ),
         get_engagement_status=AsyncMock(
             return_value={
-                "proactive": {
+                "ambient": {
                     "mode": "shadow",
                     "active_chats": 1,
-                    "interval_seconds": 900,
-                    "running": True,
-                    "reserved": 3,
-                    "delivered": 0,
-                    "silent": 2,
-                    "session_busy": 1,
-                    "failed": 0,
-                }
+                    "idle_ms": 1000,
+                    "cooldown_seconds": 30,
+                    "max_turns_per_window": 4,
+                },
+                "engagement": {
+                    "active_reserved": 3,
+                    "shadow_candidates": 2,
+                },
             }
         ),
     )
@@ -84,10 +84,11 @@ async def test_status_page_shows_proactive_scheduler_state(tmp_path):
         response = await client.get("/status")
 
     assert response.status_code == 200
-    assert "群聊主动参与" in response.text
+    assert "群聊自动回复" in response.text
     assert "shadow" in response.text
-    assert "allowlist: 1" in response.text
-    assert "900s" in response.text
+    assert "目标群: 1" in response.text
+    assert "1000ms" in response.text
+    assert "不执行空闲群聊定时扫描" in response.text
 
 
 @pytest.mark.asyncio

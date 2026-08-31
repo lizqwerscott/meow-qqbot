@@ -98,7 +98,7 @@ def _consume_confirmation(
         expires_at,
         patch,
     ) = item
-    active_chats = _chat_ids(patch["group_proactive_active_chats"])
+    active_chats = _chat_ids(patch["group_ambient_active_chats"])
     if (
         time.time() > expires_at
         or expected_revision != revision
@@ -137,7 +137,7 @@ async def _group_catalog(request: Request, targets, snapshot) -> list[dict]:
     """Build a conservative picker from groups the bot has already observed."""
     managers = request.app.state.managers
     context_manager = managers.get("context_manager")
-    group_ids: set[str] = set(snapshot.config.group_proactive_active_chats)
+    group_ids: set[str] = set(snapshot.config.group_ambient_active_chats)
     observed_group_ids: set[str] = set()
 
     if context_manager is not None:
@@ -176,7 +176,7 @@ async def _group_catalog(request: Request, targets, snapshot) -> list[dict]:
                 "last_observed_at": (
                     target.last_observed_at if target is not None else None
                 ),
-                "selected": chat_id in snapshot.config.group_proactive_active_chats,
+                "selected": chat_id in snapshot.config.group_ambient_active_chats,
             }
         )
     return catalog
@@ -201,34 +201,36 @@ async def engagement_update(
     revision: int = Form(...),
     mode: str = Form(...),
     active_chats: list[str] = Form([]),
-    interval_seconds: int = Form(...),
-    jitter_seconds: int = Form(...),
-    active_hours_start: str = Form(...),
-    active_hours_end: str = Form(...),
-    timezone: str = Form(...),
+    idle_ms: int = Form(...),
     cooldown_seconds: float = Form(...),
     quiet_cooldown_seconds: float = Form(...),
     window_seconds: float = Form(...),
     max_turns_per_window: int = Form(...),
-    reservation_seconds: float = Form(...),
+    max_age_seconds: float = Form(...),
+    min_messages: int = Form(...),
+    allow_single_question: bool = Form(False),
+    allow_single_media: bool = Form(False),
+    quote: bool = Form(False),
+    stale_quote_seconds: float = Form(...),
     active_nonce: str = Form(""),
 ):
     coordinator = _coordinator(request)
     targets = await coordinator.targets()
     active_chat_ids = _chat_ids(active_chats)
     patch = {
-        "group_proactive_mode": mode,
-        "group_proactive_active_chats": active_chat_ids,
-        "group_proactive_interval_seconds": interval_seconds,
-        "group_proactive_jitter_seconds": jitter_seconds,
-        "group_proactive_active_hours_start": active_hours_start,
-        "group_proactive_active_hours_end": active_hours_end,
-        "group_proactive_timezone": timezone,
-        "group_proactive_cooldown_seconds": cooldown_seconds,
-        "group_proactive_quiet_cooldown_seconds": quiet_cooldown_seconds,
-        "group_proactive_window_seconds": window_seconds,
-        "group_proactive_max_turns_per_window": max_turns_per_window,
-        "group_proactive_reservation_seconds": reservation_seconds,
+        "group_ambient_mode": mode,
+        "group_ambient_active_chats": active_chat_ids,
+        "group_ambient_idle_ms": idle_ms,
+        "group_ambient_cooldown_seconds": cooldown_seconds,
+        "group_ambient_quiet_cooldown_seconds": quiet_cooldown_seconds,
+        "group_ambient_window_seconds": window_seconds,
+        "group_ambient_max_turns_per_window": max_turns_per_window,
+        "group_ambient_max_age_seconds": max_age_seconds,
+        "group_ambient_min_messages": min_messages,
+        "group_ambient_allow_single_question": allow_single_question,
+        "group_ambient_allow_single_media": allow_single_media,
+        "group_ambient_quote": quote,
+        "group_ambient_stale_quote_seconds": stale_quote_seconds,
     }
     if mode == "active" and not _consume_nonce(
         request, active_nonce, revision, targets
@@ -312,7 +314,7 @@ async def engagement_pause(request: Request, revision: int = Form(...)):
     try:
         await coordinator.update(
             expected_revision=revision,
-            patch={"group_proactive_mode": "off"},
+            patch={"group_ambient_mode": "off"},
             remote_ip=request.client.host if request.client else None,
         )
     except RuntimeSettingsConflict as exc:
@@ -362,12 +364,12 @@ async def add_target(
     chat_id: str = Form(...),
 ):
     coordinator = _coordinator(request)
-    current = coordinator.snapshot().config.group_proactive_active_chats
+    current = coordinator.snapshot().config.group_ambient_active_chats
     try:
         await coordinator.update(
             expected_revision=revision,
             patch={
-                "group_proactive_active_chats": list(
+                "group_ambient_active_chats": list(
                     dict.fromkeys((*current, chat_id.strip()))
                 )
             },
@@ -387,12 +389,12 @@ async def remove_target(
     revision: int = Form(...),
 ):
     coordinator = _coordinator(request)
-    current = coordinator.snapshot().config.group_proactive_active_chats
+    current = coordinator.snapshot().config.group_ambient_active_chats
     try:
         await coordinator.update(
             expected_revision=revision,
             patch={
-                "group_proactive_active_chats": [
+                "group_ambient_active_chats": [
                     item for item in current if item != chat_id
                 ]
             },

@@ -19,7 +19,6 @@ from core.message import InputMessage
 class ModeRouteSource(StrEnum):
     USER = "user"
     AMBIENT = "ambient"
-    PROACTIVE = "proactive"
     BACKGROUND = "background"
 
 
@@ -28,7 +27,6 @@ class ModeReasonCode(StrEnum):
     DISCUSSION_ONLY = "discussion_only"
     EXPLICIT_WORK = "explicit_work"
     AMBIENT_CHAT = "ambient_chat"
-    PROACTIVE_CHAT = "proactive_chat"
     DEFAULT_CHAT = "default_chat"
 
 
@@ -154,16 +152,6 @@ class ModeRouter:
                 reason_code=ModeReasonCode.AMBIENT_CHAT,
                 capability_profile="group_ambient",
             )
-        if request.source is ModeRouteSource.PROACTIVE:
-            return self._decision(
-                request,
-                mode=PromptMode.CHAT,
-                confidence=1.0,
-                reason="proactive turns always use the low-risk Chat profile",
-                reason_code=ModeReasonCode.PROACTIVE_CHAT,
-                capability_profile="group_proactive",
-            )
-
         if self._DISCUSSION_ONLY.search(text):
             return self._decision(
                 request,

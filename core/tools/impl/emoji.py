@@ -102,14 +102,7 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
             emoji_hash=emoji_hash,
             is_group=ctx.is_group,
             reply_to=effective_reply_to,
-            delivery_callback=(
-                ctx.reply_callback
-                if (
-                    ctx.capabilities is not None
-                    and ctx.capabilities.capability_profile == "group_proactive"
-                )
-                else None
-            ),
+            delivery_callback=None,
         )
 
         if success:

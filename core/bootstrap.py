@@ -28,7 +28,6 @@ from core.engine.context import (
     SysContext,
 )
 from core.engine.engagement_config import normalize_engagement_config
-from core.engine.group_proactive import GroupProactiveScheduler
 from core.engine.hindsight_memory import HindsightMemory
 from core.engine.router import Router
 from core.engine.system_events import SystemEventQueue
@@ -128,7 +127,6 @@ class ServiceGraph:
         self.media_service = None
         self.bot_engine = None
         self.webui_task = None
-        self.group_proactive_scheduler = None
         self._services_started = False
         self.group_target_verifier = (
             group_target_verifier or ObservedGroupTargetVerifier()
@@ -820,66 +818,9 @@ class ServiceGraph:
         self.tool_deps.exec_reviewer.value = self.exec_reviewer
         _log.info("exec auto-reviewer 已注入 (model=%s)", model_name)
 
-    def _create_proactive_scheduler(self, config):
-        async def _proactive_turn(decision, provider_start_gate=None):
-            return await self.agent_engine.run_proactive_group_turn(
-                decision, provider_start_gate
-            )
-
-        def _proactive_busy(chat_id: str) -> bool:
-            phase = self.agent_engine._get_group_engagement().phase(chat_id)
-            return (
-                self.agent_engine.session_manager.has_active_consumer(chat_id)
-                or bool(
-                    self.agent_engine.session_manager.get_queue_sizes().get(chat_id)
-                )
-                or phase.value in {"reserved", "thinking"}
-            )
-
-        async def _target_allowed(chat_id: str) -> bool:
-            snapshot = self.runtime_settings.snapshot()
-            if not snapshot.overrides:
-                return True
-            target = await self.runtime_settings_store.get_target(chat_id)
-            return bool(target and target.verification_status == "verified")
-
-        return GroupProactiveScheduler(
-            config,
-            self.agent_engine._get_group_engagement(),
-            _proactive_turn,
-            is_busy=_proactive_busy,
-            state_store=self.agent_engine.proactive_state_store,
-            admission_lock=self.agent_engine._engagement_admission_lock,
-            target_allowed=_target_allowed,
-        )
-
     async def _apply_engagement_config(self, config) -> None:
         await self.agent_engine.apply_engagement_config(config)
-        scheduler = self.group_proactive_scheduler
-        if not self.agent_engine.mode_routing_enabled:
-            if scheduler is not None:
-                await scheduler.stop()
-                self.group_proactive_scheduler = None
-                self.agent_engine.group_proactive_scheduler = None
-            return
-        if config.group_proactive_mode == "off":
-            if scheduler is not None:
-                await scheduler.stop()
-                self.group_proactive_scheduler = None
-                self.agent_engine.group_proactive_scheduler = None
-            return
-        if scheduler is None:
-            scheduler = self._create_proactive_scheduler(config)
-            self.group_proactive_scheduler = scheduler
-        else:
-            await scheduler.reconfigure(
-                config,
-                admission_lock=self.agent_engine._engagement_admission_lock,
-            )
-        self.agent_engine.group_proactive_scheduler = scheduler
-        if self._services_started:
-            await scheduler.start()
-            await self.agent_engine._ensure_delivery_recovery_worker()
+        _log.info("群聊定时主动参与已停用，仅保留入站消息触发的 ambient 回复")
 
     # ── 阶段 4: 心跳 / 命令 / 插件 / WebUI ─────────────────────────
 
@@ -979,17 +920,8 @@ class ServiceGraph:
         set_wake_handler(self._wake_runner)
         _log.info("WakeCoalescer + WakeRunner 已初始化")
 
-        # ── Proactive 群聊调度器 ──
+        # ── 群聊参与配置（仅响应入站消息）──
         self.engagement_settings_adapter.set_install(self._apply_engagement_config)
-        engagement_config = self.agent_engine.engagement_config
-        if (
-            self.agent_engine.mode_routing_enabled
-            and engagement_config.group_proactive_mode != "off"
-        ):
-            self.group_proactive_scheduler = self._create_proactive_scheduler(
-                engagement_config
-            )
-            self.agent_engine.group_proactive_scheduler = self.group_proactive_scheduler
 
         # ── exec 进程退出回调 ──
         async def _on_exec_exit(session):
@@ -1120,9 +1052,6 @@ class ServiceGraph:
         if self.heartbeat_manager:
             await self.heartbeat_manager.start()
 
-        if self.group_proactive_scheduler:
-            await self.group_proactive_scheduler.start()
-            await self.agent_engine._ensure_delivery_recovery_worker()
         self._services_started = True
 
         self.task_cleanup_task = None
@@ -1250,13 +1179,6 @@ class ServiceGraph:
         heartbeat_manager = getattr(self, "heartbeat_manager", None)
         if heartbeat_manager:
             await self._safe_cleanup("heartbeat_manager", heartbeat_manager.stop)
-
-        proactive_scheduler = getattr(self, "group_proactive_scheduler", None)
-        self.group_proactive_scheduler = None
-        if proactive_scheduler:
-            await self._safe_cleanup(
-                "group_proactive_scheduler", proactive_scheduler.stop
-            )
 
         bot_engine = getattr(self, "bot_engine", None)
         self.bot_engine = None

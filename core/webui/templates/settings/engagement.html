@@ -1,12 +1,12 @@
 {% extends "base.html" %}
-{% block title %}群聊参与设置 - 猫猫管理{% endblock %}
+{% block title %}群聊自动回复 - 猫猫管理{% endblock %}
 {% set nav_active = "settings" %}
 {% block content %}
 <div class="settings-page-header">
     <div>
         <div class="eyebrow">RUNTIME CONTROL</div>
-        <h2>群聊主动参与</h2>
-        <p class="page-subtitle">控制猫猫何时、在哪些群聊中主动发言。</p>
+        <h2>群聊自动回复</h2>
+        <p class="page-subtitle">控制收到群消息后，猫猫是否参与回复以及回复策略。</p>
     </div>
     <div class="settings-revision"><span>当前版本</span><strong>R{{ snapshot.revision }}</strong></div>
 </div>
@@ -14,25 +14,25 @@
 {% if degraded %}<div class="flash error">运行时设置处于降级状态（{{ degraded_reason }}），已阻止新的设置变更；请先检查日志和重启验收。</div>{% endif %}
 <div class="settings-status-banner {% if snapshot.capability_enabled %}is-ready{% else %}is-muted{% endif %}">
     <span class="status-dot"></span>
-    <div><strong>主动参与能力{{ "已就绪" if snapshot.capability_enabled else "未启用" }}</strong><p>配置会即时应用，并保留版本与审计记录。</p></div>
-    {% if snapshot.effective.group_proactive_mode != "off" %}<form method="post" action="/settings/engagement/pause" class="quick-pause-form">{{ csrf_input(request) }}<input type="hidden" name="revision" value="{{ snapshot.revision }}"><button class="btn btn-danger btn-sm" type="submit" onclick="return confirm('立即暂停主动参与？')">紧急暂停</button></form>{% endif %}
+    <div><strong>群聊自动回复能力{{ "已就绪" if snapshot.capability_enabled else "未启用" }}</strong><p>只处理收到的群消息，不会定时扫描空闲群聊。</p></div>
+    {% if snapshot.effective.group_ambient_mode != "off" %}<form method="post" action="/settings/engagement/pause" class="quick-pause-form">{{ csrf_input(request) }}<input type="hidden" name="revision" value="{{ snapshot.revision }}"><button class="btn btn-danger btn-sm" type="submit" onclick="return confirm('立即暂停群聊自动回复？')">立即暂停</button></form>{% endif %}
 </div>
-{% if not snapshot.capability_enabled %}<div class="notice warning">部署期 mode routing 未启用，shadow/active 不能生效。</div>{% endif %}
+{% if not snapshot.capability_enabled %}<div class="notice warning">部署期 mode routing 未启用，观察/启用模式不能生效。</div>{% endif %}
 <form method="post" action="/settings/engagement/update" class="settings-form">
     {{ csrf_input(request) }}
     <input type="hidden" name="revision" value="{{ snapshot.revision }}">
     <input type="hidden" name="active_nonce" value="{{ active_nonce }}">
     <section class="settings-card">
-        <div class="settings-card-heading"><div><span class="section-kicker">01</span><h3>运行模式</h3><p>先用观察模式确认行为，再切换到实际发送。</p></div></div>
+        <div class="settings-card-heading"><div><span class="section-kicker">01</span><h3>自动回复模式</h3><p>只在收到群消息后触发判断；可先观察，再启用实际回复。</p></div></div>
         <div class="mode-options">
-            {% for value, title, desc in (("off", "关闭", "暂停主动参与，不影响普通对话。"), ("shadow", "观察", "运行判断但不向群里发送消息。"), ("active", "主动", "通过目标验证后，允许实际发送。")) %}
-            <label class="mode-option {% if snapshot.effective.group_proactive_mode == value %}is-selected{% endif %}"><input type="radio" name="mode" value="{{ value }}" {% if snapshot.effective.group_proactive_mode == value %}checked{% endif %}><span class="mode-option-copy"><strong>{{ title }}</strong><small>{{ desc }}</small></span></label>
+            {% for value, title, desc in (("off", "关闭", "不参与群聊自动回复。"), ("shadow", "观察", "收到消息后运行判断，但不向群里发送消息。"), ("active", "启用", "收到消息后，允许在目标群自动回复。")) %}
+            <label class="mode-option {% if snapshot.effective.group_ambient_mode == value %}is-selected{% endif %}"><input type="radio" name="mode" value="{{ value }}" {% if snapshot.effective.group_ambient_mode == value %}checked{% endif %}><span class="mode-option-copy"><strong>{{ title }}</strong><small>{{ desc }}</small></span></label>
             {% endfor %}
         </div>
     </section>
 
     <section class="settings-card">
-        <div class="settings-card-heading"><div><span class="section-kicker">02</span><h3>目标群聊</h3><p>从已观察到的群聊中搜索并勾选目标，群 ID 仍由服务端校验。</p></div><span class="selection-count" data-selection-count>0 个已选</span></div>
+        <div class="settings-card-heading"><div><span class="section-kicker">02</span><h3>自动回复群聊</h3><p>从已观察到的群聊中搜索并勾选目标，群 ID 仍由服务端校验。</p></div><span class="selection-count" data-selection-count>0 个已选</span></div>
         <div class="target-picker">
             <div class="target-picker-toolbar"><label class="search-field"><span>⌕</span><input type="search" data-group-search placeholder="搜索群 ID 或状态" autocomplete="off"></label><span class="target-catalog-count">{{ group_catalog|length }} 个可选群聊</span></div>
             <div class="target-options" data-group-options>
@@ -51,33 +51,39 @@
     </section>
 
     <section class="settings-card">
-        <div class="settings-card-heading"><div><span class="section-kicker">03</span><h3>调度策略</h3><p>决定主动参与检查的频率与允许时段。</p></div></div>
-        <div class="settings-fields settings-fields-schedule">
-            <label>检查间隔<span class="input-with-suffix"><input type="number" name="interval_seconds" min="60" max="86400" value="{{ snapshot.effective.group_proactive_interval_seconds }}"><em>秒</em></span></label>
-            <label>随机抖动<span class="input-with-suffix"><input type="number" name="jitter_seconds" min="0" max="3600" value="{{ snapshot.effective.group_proactive_jitter_seconds }}"><em>秒</em></span></label>
-            <label>活动开始<input type="time" name="active_hours_start" value="{{ snapshot.effective.group_proactive_active_hours_start }}"></label>
-            <label>活动结束<input type="time" name="active_hours_end" value="{{ snapshot.effective.group_proactive_active_hours_end }}"></label>
-            <label class="field-wide">时区<input name="timezone" value="{{ snapshot.effective.group_proactive_timezone }}"></label>
+        <div class="settings-card-heading"><div><span class="section-kicker">03</span><h3>消息合批</h3><p>收到消息后等待一小段时间，让连续消息合并后再判断。</p></div></div>
+        <div class="settings-fields">
+            <label>静默等待<span class="input-with-suffix"><input type="number" name="idle_ms" min="0" max="120000" value="{{ snapshot.effective.group_ambient_idle_ms }}"><em>毫秒</em></span></label>
+            <label>最少消息数<input type="number" name="min_messages" min="1" max="100" value="{{ snapshot.effective.group_ambient_min_messages }}"></label>
+            <label>消息最大保留<span class="input-with-suffix"><input type="number" name="max_age_seconds" min="1" max="604800" step="0.1" value="{{ snapshot.effective.group_ambient_max_age_seconds }}"><em>秒</em></span></label>
         </div>
     </section>
 
     <section class="settings-card">
-        <div class="settings-card-heading"><div><span class="section-kicker">04</span><h3>频率控制</h3><p>避免在短时间内重复打扰同一个群聊。</p></div></div>
+        <div class="settings-card-heading"><div><span class="section-kicker">04</span><h3>回复频率</h3><p>避免短时间内重复回复同一个群聊。</p></div></div>
         <div class="settings-fields">
-            <label>正常冷却<span class="input-with-suffix"><input type="number" name="cooldown_seconds" min="0" max="604800" step="0.1" value="{{ snapshot.effective.group_proactive_cooldown_seconds }}"><em>秒</em></span></label>
-            <label>静默冷却<span class="input-with-suffix"><input type="number" name="quiet_cooldown_seconds" min="0" max="604800" step="0.1" value="{{ snapshot.effective.group_proactive_quiet_cooldown_seconds }}"><em>秒</em></span></label>
-            <label>统计窗口<span class="input-with-suffix"><input type="number" name="window_seconds" min="1" max="604800" step="0.1" value="{{ snapshot.effective.group_proactive_window_seconds }}"><em>秒</em></span></label>
-            <label>窗口最大轮次<input type="number" name="max_turns_per_window" min="1" max="1000" value="{{ snapshot.effective.group_proactive_max_turns_per_window }}"></label>
+            <label>正常冷却<span class="input-with-suffix"><input type="number" name="cooldown_seconds" min="0" max="86400" step="0.1" value="{{ snapshot.effective.group_ambient_cooldown_seconds }}"><em>秒</em></span></label>
+            <label>静默冷却<span class="input-with-suffix"><input type="number" name="quiet_cooldown_seconds" min="0" max="86400" step="0.1" value="{{ snapshot.effective.group_ambient_quiet_cooldown_seconds }}"><em>秒</em></span></label>
+            <label>统计窗口<span class="input-with-suffix"><input type="number" name="window_seconds" min="1" max="604800" step="0.1" value="{{ snapshot.effective.group_ambient_window_seconds }}"><em>秒</em></span></label>
+            <label>窗口最大轮次<input type="number" name="max_turns_per_window" min="1" max="1000" value="{{ snapshot.effective.group_ambient_max_turns_per_window }}"></label>
         </div>
     </section>
 
-    <details class="settings-card advanced-settings protection-settings"><summary><span><span class="section-kicker">05</span><strong>高级：执行保护</strong><small>控制一次主动轮次最多占用的预留时间。</small></span></summary><div class="settings-fields"><label>预留秒数<span class="input-with-suffix"><input type="number" name="reservation_seconds" min="1" max="3600" step="0.1" value="{{ snapshot.effective.group_proactive_reservation_seconds }}"><em>秒</em></span></label></div></details>
+    <section class="settings-card">
+        <div class="settings-card-heading"><div><span class="section-kicker">05</span><h3>单条消息例外</h3><p>控制只有一条消息时，哪些内容可以直接进入回复判断。</p></div></div>
+        <div class="settings-fields settings-checkboxes">
+            <label><input type="checkbox" name="allow_single_question" value="true" {% if snapshot.effective.group_ambient_allow_single_question %}checked{% endif %}>允许单条问题</label>
+            <label><input type="checkbox" name="allow_single_media" value="true" {% if snapshot.effective.group_ambient_allow_single_media %}checked{% endif %}>允许单条图片/媒体</label>
+            <label><input type="checkbox" name="quote" value="true" {% if snapshot.effective.group_ambient_quote %}checked{% endif %}>允许引用相关消息</label>
+            <label>引用有效期<span class="input-with-suffix"><input type="number" name="stale_quote_seconds" min="0" max="604800" step="0.1" value="{{ snapshot.effective.group_ambient_stale_quote_seconds }}"><em>秒</em></span></label>
+        </div>
+    </section>
 
-    <div class="settings-form-actions"><p>保存后会立即创建新版本；主动模式仅允许已验证目标。</p><button class="btn btn-primary" type="submit">保存运行时设置</button></div>
+    <div class="settings-form-actions"><p>保存后会立即创建新版本；启用模式仅允许已验证目标。</p><button class="btn btn-primary" type="submit">保存自动回复设置</button></div>
 </form>
 <form id="manual-target-form" method="post" action="/settings/engagement/targets/add">{{ csrf_input(request) }}<input type="hidden" name="revision" value="{{ snapshot.revision }}"></form>
 <div class="card target-status-card">
-    <div class="settings-card-heading"><div><span class="section-kicker">STATUS</span><h3>目标验证状态</h3><p>验证状态决定目标是否可以进入主动模式。</p></div></div>
+    <div class="settings-card-heading"><div><span class="section-kicker">STATUS</span><h3>目标验证状态</h3><p>验证状态决定目标是否可以进入自动回复。</p></div></div>
     <div class="table-wrap"><table><thead><tr><th>群 ID</th><th>状态</th><th>最近观察</th><th>操作</th></tr></thead><tbody>
     {% for target in targets %}<tr><td><code>{{ target.chat_id }}</code></td><td><span class="target-status status-{{ target.verification_status }}">{{ {"verified":"已验证", "unverified":"待验证", "removed":"已移出"}.get(target.verification_status, target.verification_status) }}</span></td><td>{{ target.last_observed_at|format_timestamp if target.last_observed_at else '—' }}</td><td><div class="target-actions"><form method="post" action="/settings/engagement/targets/{{ target.chat_id }}/verify">{{ csrf_input(request) }}<button class="btn btn-sm" type="submit">验证</button></form><form method="post" action="/settings/engagement/targets/{{ target.chat_id }}/remove">{{ csrf_input(request) }}<input type="hidden" name="revision" value="{{ snapshot.revision }}"><button class="btn btn-sm btn-danger" type="submit">移出</button></form></div></td></tr>{% else %}<tr><td colspan="4">暂无目标</td></tr>{% endfor %}
     </tbody></table></div>

@@ -12,7 +12,6 @@ class DeliveryPromptContract:
     intent: InboundIntent
     delivery_mode: str
     reply_target: str
-    proactive: bool = False
 
     @staticmethod
     def _delivery_tool_names(tools: list[dict] | None) -> list[str]:
@@ -30,7 +29,6 @@ class DeliveryPromptContract:
             "intent": str(self.intent),
             "delivery_mode": self.delivery_mode,
             "delivery_tools": self._delivery_tool_names(tools),
-            "proactive": self.proactive,
         }
 
     def render(self, tools: list[dict] | None) -> str:

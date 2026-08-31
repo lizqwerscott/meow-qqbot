@@ -94,26 +94,6 @@ async def test_stale_prepared_can_be_limited_to_delivery_key_prefix(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_proactive_ambient_preparation_persists_payload(tmp_path):
-    controller = DeliveryController(
-        DeliveryLedger(str(tmp_path / "delivery.sqlite3"))
-    )
-
-    decision, record = await controller.prepare_ambient(
-        chat_id="chat",
-        turn_id="turn",
-        content="proactive answer",
-        delivery_mode="automatic",
-        key_prefix="proactive",
-    )
-
-    assert decision.should_deliver is True
-    assert record is not None
-    assert record.content == "proactive answer"
-    await controller.ledger.close()
-
-
-@pytest.mark.asyncio
 async def test_accepted_delivery_is_projected_to_timeline_only_once(tmp_path):
     from core.engine.conversation_timeline import ConversationTimeline
 

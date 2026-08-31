@@ -692,13 +692,6 @@ class ToolLoop:
                                 tool_call_id=tc.id,
                                 content=str(kwargs.get("content", "")),
                                 reply_anchor_id=reply_to,
-                                key_prefix=(
-                                    "proactive"
-                                    if capabilities is not None
-                                    and capabilities.capability_profile
-                                    == "group_proactive"
-                                    else "tool"
-                                ),
                             )
                             if not await turn_is_active():
                                 receipt = DeliveryReceipt(

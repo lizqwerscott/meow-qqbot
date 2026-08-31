@@ -1,4 +1,4 @@
-"""Deterministic reply admission for group ambient/proactive turns.
+"""Deterministic reply admission for group ambient turns.
 
 The gate is deliberately independent from mode routing: it only decides whether
 an already-admitted ambient batch deserves one Chat planner opportunity.
@@ -92,9 +92,7 @@ class ReplyNecessityGate:
         now = request.now or self._clock()
         if request.source not in {
             "ambient",
-            "proactive",
             "group_ambient",
-            "group_proactive",
         }:
             return ReplyNecessityDecision(
                 ReplyAdmission.SKIP, None, self.threshold, "not_ambient"

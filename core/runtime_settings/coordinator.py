@@ -110,7 +110,7 @@ class RuntimeSettingsCoordinator:
             except Exception:
                 _log.exception("runtime settings fail-closed installation failed")
             raise RuntimeSettingsDegraded(
-                "runtime settings rollback failed; proactive execution is degraded"
+                "runtime settings rollback failed; engagement execution is degraded"
             ) from exc
 
     async def update(

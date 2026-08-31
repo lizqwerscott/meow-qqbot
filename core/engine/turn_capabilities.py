@@ -28,7 +28,6 @@ class TurnCapabilities:
     _AMBIENT_TOOL_NAMES = frozenset(
         {"send_message", "send_emoji", "image", "pdf", "read_file"}
     )
-    _PROACTIVE_TOOL_NAMES = frozenset({"send_message", "send_emoji"})
     _CHAT_TOOL_NAMES = frozenset(
         {
             "send_emoji",
@@ -114,7 +113,6 @@ class TurnCapabilities:
                 cls._LIMITED_PLANNER_ACTIONS,
             ),
             "group_ambient": (cls._AMBIENT_TOOL_NAMES, cls._LIMITED_PLANNER_ACTIONS),
-            "group_proactive": (cls._PROACTIVE_TOOL_NAMES, cls._LIMITED_PLANNER_ACTIONS),
         }
         try:
             allowed_tools, planner_actions = chat_profiles[capability_profile]
@@ -122,7 +120,7 @@ class TurnCapabilities:
             raise ValueError(
                 f"unknown Chat capability profile: {capability_profile}"
             ) from exc
-        is_ambient = capability_profile in {"group_ambient", "group_proactive"}
+        is_ambient = capability_profile == "group_ambient"
         return cls(
             intent=intent,
             mode=mode,

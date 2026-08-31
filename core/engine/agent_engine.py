@@ -38,7 +38,6 @@ from core.engine.delivery_ledger import (
 )
 from core.engine.delivery_prompt_contract import DeliveryPromptContract
 from core.engine.group_engagement import GroupEngagementManager
-from core.engine.group_proactive import GroupProactiveScheduler
 from core.engine.mode_router import (
     ActiveWorkPlanHint,
     ModeRouteInput,
@@ -50,7 +49,6 @@ from core.engine.model_context_transcript import (
     ModelContextScope,
     ModelContextTranscript,
 )
-from core.engine.proactive_state import ProactiveStateStore
 from core.engine.prompt_builder import PromptBuilder, PromptBuildResult
 from core.engine.prompt_snapshot import PromptMode
 from core.engine.reply_necessity import ReplyNecessityGate, ReplyNecessityInput
@@ -249,11 +247,7 @@ class AgentEngine:
             ),
             task_state_store=ctx.mgmt.task_state_store,
         )
-        self.proactive_state_store = ProactiveStateStore()
-        self.group_engagement = GroupEngagementManager(
-            engagement_config,
-            state_store=self.proactive_state_store,
-        )
+        self.group_engagement = GroupEngagementManager(engagement_config)
         self.reply_necessity_gate = ReplyNecessityGate(
             threshold=engagement_config.group_reply_necessity_threshold,
             frequency_factor=engagement_config.group_reply_frequency,
@@ -1027,68 +1021,6 @@ class AgentEngine:
                 )
             return result
 
-    async def _recover_proactive_deliveries(
-        self, chat_id: str, *, allow_transport_retry: bool = True
-    ) -> DeliveryRecoveryResult:
-        """Recover proactive rows only for configured proactive groups."""
-        config = getattr(self, "engagement_config", None)
-        if config is None:
-            config = self._get_group_engagement().config
-        if chat_id not in config.group_proactive_active_chats:
-            return DeliveryRecoveryResult()
-        locks = getattr(self, "_delivery_recovery_locks", None)
-        if locks is None:
-            locks = {}
-            self._delivery_recovery_locks = locks
-        lock = locks.setdefault(f"proactive:{chat_id}", asyncio.Lock())
-        async with lock:
-
-            async def _resolve_content(record: DeliveryRecord) -> Optional[str]:
-                if record.content:
-                    return record.content
-                history = await self.timeline.history(chat_id)
-                expected = record.logical_delivery_id or record.key
-                for item in reversed(history):
-                    if item.get("event_id") != f"delivery:{expected}":
-                        continue
-                    content = item.get("content")
-                    return content if isinstance(content, str) and content else None
-                return None
-
-            async def _transport(record: DeliveryRecord, content: str) -> object:
-                if not self._reply_callback:
-                    raise RuntimeError("proactive reply callback unavailable")
-                return await self._reply_callback(
-                    chat_id=record.chat_id,
-                    content=content,
-                    message_id="",
-                    is_group=True,
-                    delivery_id=record.logical_delivery_id or record.key,
-                )
-
-            config = getattr(self, "engagement_config", None)
-            if config is None:
-                from core.engine.engagement_config import EngagementConfig
-
-                config = EngagementConfig()
-            result = await self._get_delivery_controller().recover_prepared(
-                chat_id=chat_id,
-                key_prefix="proactive:",
-                older_than=time.time() - config.delivery_recovery_after_seconds,
-                content_resolver=_resolve_content,
-                transport=_transport,
-                allow_transport_retry=allow_transport_retry,
-            )
-            if result.scanned:
-                _log.info(
-                    "proactive delivery recovery [%s..]: sent=%d unknown=%d failed=%d",
-                    chat_id[:12],
-                    result.sent,
-                    result.unknown,
-                    result.failed,
-                )
-            return result
-
     async def _delivery_recovery_worker(self) -> None:
         config = getattr(self, "engagement_config", None)
         interval = max(
@@ -1103,10 +1035,6 @@ class AgentEngine:
                     if not self._get_group_engagement().is_active_chat(chat_id):
                         continue
                     await self._recover_ambient_deliveries(chat_id, callbacks[0])
-                proactive_config = self._get_group_engagement().config
-                if proactive_config.group_proactive_mode == "active":
-                    for chat_id in proactive_config.group_proactive_active_chats:
-                        await self._recover_proactive_deliveries(chat_id)
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 raise
@@ -1115,10 +1043,7 @@ class AgentEngine:
                 await asyncio.sleep(interval)
 
     async def _ensure_delivery_recovery_worker(self) -> None:
-        if (
-            self._get_group_engagement().config.group_ambient_mode != "active"
-            and self._get_group_engagement().config.group_proactive_mode != "active"
-        ):
+        if self._get_group_engagement().config.group_ambient_mode != "active":
             return
         task = getattr(self, "_delivery_recovery_task", None)
         if task is None or task.done():
@@ -1135,34 +1060,20 @@ class AgentEngine:
             delivery = await controller.ledger.status_counts()
         routing_metrics = getattr(self, "routing_metrics", None)
         engagement_config = self._get_group_engagement().config
-        proactive = {
-            "mode": engagement_config.group_proactive_mode,
-            "active_chats": len(engagement_config.group_proactive_active_chats),
-            "interval_seconds": engagement_config.group_proactive_interval_seconds,
-            "running": False,
-            "next_due": {},
+        ambient = {
+            "mode": engagement_config.group_ambient_mode,
+            "active_chats": len(engagement_config.group_ambient_active_chats),
+            "idle_ms": engagement_config.group_ambient_idle_ms,
+            "cooldown_seconds": engagement_config.group_ambient_cooldown_seconds,
+            "quiet_cooldown_seconds": engagement_config.group_ambient_quiet_cooldown_seconds,
+            "window_seconds": engagement_config.group_ambient_window_seconds,
+            "max_turns_per_window": engagement_config.group_ambient_max_turns_per_window,
         }
-        scheduler = getattr(self, "group_proactive_scheduler", None)
-        if scheduler is not None:
-            proactive.update(scheduler.snapshot_metrics())
-            proactive["running"] = scheduler.running
-            proactive["next_due"] = scheduler.next_due()
-        proactive_state_store = getattr(self, "proactive_state_store", None)
-        if proactive_state_store is not None:
-            since = time.time() - 24 * 60 * 60
-            proactive["metrics_24h"] = {
-                "engagement": await proactive_state_store.metric_totals(
-                    "engagement", since=since
-                ),
-                "scheduler": await proactive_state_store.metric_totals(
-                    "scheduler", since=since
-                ),
-            }
         return {
             "engagement": metrics,
             "delivery": delivery,
             "routing": routing_metrics.snapshot() if routing_metrics else {},
-            "proactive": proactive,
+            "ambient": ambient,
         }
 
     # ── 懒注入 ──
@@ -1408,189 +1319,6 @@ class AgentEngine:
             self._consumer_tasks.add(task)
             task.add_done_callback(self._consumer_tasks.discard)
             _log.debug("已启动会话 %s.. 的消费者", chat_id[:12])
-
-    async def dispatch_proactive(
-        self,
-        chat_id: str,
-        content: str,
-        reply_callback: Callable,
-        get_user_nickname: Callable[[str], str],
-    ) -> None:
-        """Enqueue a runtime-owned group proactive Chat turn.
-
-        Proactive work shares the ambient queue and admission path, but keeps a
-        distinct route profile so it cannot inherit user/direct-task tools.
-        """
-        if not chat_id or not content.strip():
-            raise ValueError("chat_id and content are required")
-        message = InputMessage(
-            id=f"proactive_{chat_id}_{time.time_ns()}",
-            sender_id="system",
-            chat_id=chat_id,
-            content=content,
-            is_group=True,
-            is_at_mention=False,
-        )
-        await self.dispatch(
-            message,
-            reply_callback,
-            get_user_nickname,
-            _source=ModeRouteSource.PROACTIVE,
-            _intent=InboundIntent.GROUP_AMBIENT,
-        )
-
-    async def run_proactive_group_turn(
-        self, decision, provider_start_callback=None
-    ) -> _TurnResult:
-        """Run one fixed-target proactive Chat turn without user admission."""
-        if not getattr(self, "_reply_callback", None):
-            raise RuntimeError("proactive turn has no reply callback")
-        chat_id = decision.chat_id
-        config = self._get_group_engagement().config
-        if (
-            config.group_proactive_mode != "active"
-            or chat_id not in config.group_proactive_active_chats
-        ):
-            raise RuntimeError("proactive target is no longer active")
-        if self.mode_router is None:
-            raise RuntimeError("proactive mode routing capability is unavailable")
-        turn_id = f"proactive_{chat_id}_{uuid4().hex}"
-        input_message = InputMessage(
-            id=turn_id,
-            sender_id="system",
-            chat_id=chat_id,
-            content="检查当前群聊上下文，判断是否有必要主动参与。",
-            is_group=True,
-        )
-        routing = self.mode_router.route(
-            ModeRouteInput(
-                message=input_message,
-                source=ModeRouteSource.PROACTIVE,
-                intent=InboundIntent.GROUP_AMBIENT,
-                scheduler_revision=self._get_scheduler().revision(chat_id),
-            )
-        ).to_metadata()
-        capabilities = self._turn_capabilities(
-            InboundIntent.GROUP_AMBIENT,
-            chat_id=chat_id,
-            sender_id="system",
-            reply_to="",
-            mode_routing=routing,
-        )
-        timeline_snapshot = await self.timeline.snapshot(chat_id)
-        controller = self._get_delivery_controller()
-        delivered = False
-        tool_delivered = False
-
-        async def _final_deliver(**kwargs):
-            nonlocal delivered
-            if kwargs.get("chat_id") != chat_id:
-                raise RuntimeError("proactive delivery target mismatch")
-            content = str(kwargs.get("content") or "").strip()
-            if not content:
-                return DeliveryReceipt(status="failed", error_code="empty_content")
-            delivery, record = await controller.prepare_ambient(
-                chat_id=chat_id,
-                turn_id=turn_id,
-                content=content,
-                delivery_mode="message_tool_only",
-                tool_delivered=tool_delivered,
-                reply_anchor_id="",
-                key_prefix="proactive",
-            )
-            if not delivery.should_deliver or record is None:
-                return DeliveryReceipt(
-                    status="accepted",
-                    logical_delivery_id=record.logical_delivery_id if record else "",
-                )
-            receipt = await self._reply_callback(
-                chat_id=chat_id,
-                content=content,
-                message_id="",
-                is_group=True,
-                delivery_id=record.logical_delivery_id or record.key,
-            )
-            if not isinstance(receipt, DeliveryReceipt):
-                receipt = DeliveryReceipt(
-                    status="accepted", logical_delivery_id=record.key
-                )
-            await controller.settle_receipt(
-                record, receipt, content=content, delivery_kind="proactive"
-            )
-            if receipt.status == "accepted":
-                delivered = True
-            return receipt
-
-        async def _tool_deliver(**kwargs):
-            nonlocal tool_delivered
-            if kwargs.get("chat_id") != chat_id:
-                raise RuntimeError("proactive delivery target mismatch")
-            receipt = await self._reply_callback(
-                chat_id=chat_id,
-                content=str(kwargs.get("content") or ""),
-                message_id="",
-                is_group=True,
-                media_file_info=kwargs.get("media_file_info"),
-                delivery_id=kwargs.get("delivery_id") or f"proactive:{turn_id}:tool",
-            )
-            if isinstance(receipt, DeliveryReceipt) and receipt.status == "accepted":
-                tool_delivered = True
-            return receipt
-
-        async def _build_prompt(
-            provider_identity: str | None = None,
-            *,
-            provider_service: Any = None,
-            admit: bool = True,
-            force_model_context_compaction: bool = False,
-        ) -> PromptBuildResult:
-            return await self.prompt_builder.build(
-                chat_id=chat_id,
-                is_group=True,
-                user_nickname="",
-                sender_id="system",
-                input_message=input_message,
-                cost_tracker=self.cost_tracker,
-                timeline_snapshot=timeline_snapshot,
-                protocol_snapshot=await self.protocol_history.snapshot(turn_id),
-                delivery_contract=DeliveryPromptContract(
-                    intent=InboundIntent.GROUP_AMBIENT,
-                    delivery_mode="message_tool_only",
-                    reply_target="",
-                    proactive=True,
-                ),
-                mode=PromptMode.CHAT,
-                capability_profile="group_proactive",
-                policy_version=routing.policy_version,
-                capabilities=capabilities,
-            )
-
-        turn = await self._run_turn(
-            _TurnRequest(
-                chat_id=chat_id,
-                sender_id="system",
-                is_group=True,
-                reply_to="",
-                route_text=input_message.content,
-                prompt_factory=_build_prompt,
-                reply_callback=_final_deliver,
-                tool_reply_callback=_tool_deliver,
-                tool_reply_names=frozenset({"send_message", "send_emoji"}),
-                get_user_nickname=lambda _sender: "",
-                capabilities=capabilities,
-                intent=InboundIntent.GROUP_AMBIENT,
-                turn_id=turn_id,
-                internal_control=True,
-                steering_enabled=False,
-                track_tool_delivery=True,
-                provider_start_callback=provider_start_callback,
-            )
-        )
-        return replace(
-            turn,
-            tool_text_delivered=turn.tool_text_delivered or tool_delivered,
-            text_committed=turn.text_committed or delivered,
-        )
 
     async def _prepare_pending_inbound(
         self,
@@ -3912,8 +3640,4 @@ class AgentEngine:
         routing_audit = getattr(self, "routing_audit_store", None)
         if routing_audit is not None:
             await routing_audit.close()
-        proactive_state_store = getattr(self, "proactive_state_store", None)
-        if proactive_state_store is not None:
-            await proactive_state_store.close()
-
         _log.info("AgentEngine 已停止")

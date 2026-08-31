@@ -18,7 +18,6 @@ from core.engine.delivery_ledger import (
     DeliveryController,
     DeliveryLedger,
     DeliveryReceipt,
-    DeliveryRecoveryResult,
 )
 from core.engine.engagement_config import EngagementConfig
 from core.engine.group_engagement import GroupEngagementManager
@@ -424,16 +423,12 @@ async def test_heartbeat_session_activity_is_isolated_from_user_activity():
     assert engine.is_session_active("heartbeat:events") is False
 
     pending = PendingInbound(
-        InputMessage(
-            "heartbeat-message", "system", "heartbeat:events", "wake", False
-        ),
+        InputMessage("heartbeat-message", "system", "heartbeat:events", "wake", False),
         "wake",
         InboundIntent.PRIVATE_CONVERSATION,
         AdmissionOrigin.USER_MESSAGE,
     )
-    await engine.session_manager.enqueue_and_claim_consumer(
-        "heartbeat:events", pending
-    )
+    await engine.session_manager.enqueue_and_claim_consumer("heartbeat:events", pending)
     try:
         assert engine.is_session_active("heartbeat:events") is True
     finally:
@@ -3034,104 +3029,6 @@ async def test_engine_recovery_preserves_failed_transport_receipt(tmp_path):
     await ledger.close()
 
 
-@pytest.mark.asyncio
-async def test_proactive_recovery_ignores_non_allowlisted_group(tmp_path):
-    engine = make_engine(FakeToolLoop())
-    ledger = DeliveryLedger(str(tmp_path / "delivery.sqlite3"))
-    engine.delivery_controller = DeliveryController(ledger)
-    engine.engagement_config = EngagementConfig(
-        group_proactive_active_chats=("other-chat",)
-    )
-
-    result = await engine._recover_proactive_deliveries("chat")
-
-    assert result == DeliveryRecoveryResult()
-    await ledger.close()
-
-
-    engine = make_engine(FakeToolLoop())
-    ledger = DeliveryLedger(str(tmp_path / "delivery.sqlite3"))
-    engine.delivery_controller = DeliveryController(ledger)
-    engine.engagement_config = EngagementConfig(
-        delivery_recovery_after_seconds=1,
-        group_proactive_active_chats=("chat",),
-    )
-    from core.engine.conversation_timeline import ConversationTimeline
-
-    engine.timeline = ConversationTimeline(str(tmp_path / "timeline.sqlite3"))
-    delivered = []
-
-    async def reply_callback(**kwargs):
-        delivered.append(kwargs)
-        return DeliveryReceipt(status="accepted", platform_message_id="qq-1")
-
-    engine._reply_callback = reply_callback
-    prepared = await ledger.prepare(
-        key="proactive:chat:turn",
-        chat_id="chat",
-        turn_id="turn",
-        reason="final_reply",
-        reply_anchor_id="",
-        content_hash=ledger.content_hash("proactive answer"),
-        content="proactive answer",
-    )
-    conn = await ledger._ensure_open()
-    conn.execute(
-        "UPDATE delivery_ledger SET updated_at = 0 WHERE delivery_key = ?",
-        (prepared.key,),
-    )
-    conn.commit()
-
-    result = await engine._recover_proactive_deliveries("chat")
-
-    assert result.scanned == 1
-    assert result.sent == 1
-    assert delivered[0]["content"] == "proactive answer"
-    assert delivered[0]["delivery_id"] == prepared.logical_delivery_id
-    recovered = await ledger.get(prepared.key)
-    assert recovered is not None
-    assert recovered.status == "sent"
-    await engine.timeline.close()
-    await ledger.close()
-
-
-@pytest.mark.asyncio
-async def test_proactive_recovery_fails_without_payload_or_timeline(tmp_path):
-    engine = make_engine(FakeToolLoop())
-    ledger = DeliveryLedger(str(tmp_path / "delivery.sqlite3"))
-    engine.delivery_controller = DeliveryController(ledger)
-    engine.engagement_config = EngagementConfig(
-        delivery_recovery_after_seconds=1,
-        group_proactive_active_chats=("chat",),
-    )
-    engine.timeline = SimpleNamespace(history=AsyncMock(return_value=[]))
-    engine._reply_callback = AsyncMock()
-    prepared = await ledger.prepare(
-        key="proactive:chat:missing",
-        chat_id="chat",
-        turn_id="missing",
-        reason="final_reply",
-        reply_anchor_id="",
-        content_hash=ledger.content_hash("missing"),
-    )
-    conn = await ledger._ensure_open()
-    conn.execute(
-        "UPDATE delivery_ledger SET updated_at = 0 WHERE delivery_key = ?",
-        (prepared.key,),
-    )
-    conn.commit()
-
-    result = await engine._recover_proactive_deliveries("chat")
-
-    assert result.failed == 1
-    assert engine._reply_callback.await_count == 0
-    recovered = await ledger.get(prepared.key)
-    assert recovered is not None
-    assert recovered.status == "failed"
-    assert recovered.reason == "recovery_content_unavailable"
-    await ledger.close()
-
-
 async def _history_with_ambient_answer():
     return [
         {"role": "user", "content": "question", "message_id": "anchor"},
@@ -3221,7 +3118,9 @@ async def test_consumer_replans_waiting_ambient_turn_with_new_ambient_message():
         calls.append(request.turn_id)
         if len(calls) == 1:
             await request.planner_control_callback(
-                PlannerControl(PlannerAction.WAIT, reason="need more context", wait_seconds=1)
+                PlannerControl(
+                    PlannerAction.WAIT, reason="need more context", wait_seconds=1
+                )
             )
             await engine._get_scheduler().enqueue("chat", second)
         return _TurnResult(final_reply_silent=True)

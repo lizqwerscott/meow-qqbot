@@ -419,7 +419,6 @@ class DeliveryController:
         delivery_mode: str,
         tool_delivered: bool = False,
         reply_anchor_id: str = "",
-        key_prefix: str = "ambient",
     ) -> tuple[AmbientDeliveryDecision, Optional[DeliveryRecord]]:
         decision = decide_ambient_delivery(
             content,
@@ -427,7 +426,7 @@ class DeliveryController:
             tool_delivered=tool_delivered,
             reply_anchor_id=reply_anchor_id,
         )
-        key = f"{key_prefix}:{chat_id}:{turn_id}"
+        key = f"ambient:{chat_id}:{turn_id}"
         record = await self.ledger.prepare(
             key=key,
             chat_id=chat_id,
@@ -437,7 +436,7 @@ class DeliveryController:
             content_hash=self.ledger.content_hash(content),
             status="prepared" if decision.should_deliver else "suppressed",
             logical_delivery_id=key,
-            content=(content if key_prefix == "proactive" else None),
+            content=None,
         )
         await self._audit(record, record.status)
         if record.status != "prepared" and decision.should_deliver:
@@ -744,9 +743,8 @@ class DeliveryController:
         tool_call_id: str,
         content: str,
         reply_anchor_id: str = "",
-        key_prefix: str = "tool",
     ) -> DeliveryRecord:
-        key = f"{key_prefix}:{chat_id}:{turn_id}:{tool_name}:{tool_call_id}"
+        key = f"tool:{chat_id}:{turn_id}:{tool_name}:{tool_call_id}"
         record = await self.ledger.prepare(
             key=key,
             chat_id=chat_id,
@@ -755,7 +753,7 @@ class DeliveryController:
             reply_anchor_id=reply_anchor_id,
             content_hash=self.ledger.content_hash(content),
             logical_delivery_id=key,
-            content=(content if key_prefix == "proactive" else None),
+            content=None,
         )
         await self._audit(record, record.status)
         return record
