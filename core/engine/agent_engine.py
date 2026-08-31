@@ -622,6 +622,23 @@ class AgentEngine:
             reply_target=reply_target,
         )
 
+    async def _update_ambient_audit(
+        self,
+        items: tuple[PendingInbound, ...],
+        **values: Any,
+    ) -> None:
+        store = getattr(self, "routing_audit_store", None)
+        if store is None or not items:
+            return
+        try:
+            await store.update_ambient(
+                chat_id=items[0].message.chat_id,
+                message_ids=tuple(item.message.id for item in items),
+                **values,
+            )
+        except Exception as exc:
+            _log.warning("ambient audit update failed: %s", exc)
+
     def _get_timeline(self) -> ConversationTimeline:
         timeline = getattr(self, "timeline", None)
         if timeline is None:
@@ -1878,6 +1895,7 @@ class AgentEngine:
                                 continue
                             break
                     else:
+                        necessity = None
                         if (
                             turn_state.phase is not TurnPhase.ACTIVE
                             or work.passive_admission_only
@@ -1894,7 +1912,7 @@ class AgentEngine:
                                 gate = getattr(self, "reply_necessity_gate", None)
                                 if gate is None:
                                     gate = ReplyNecessityGate()
-                                gate = gate.evaluate(
+                                necessity = gate.evaluate(
                                     ReplyNecessityInput(
                                         source="ambient",
                                         chat_id=chat_id,
@@ -1905,18 +1923,45 @@ class AgentEngine:
                                         window_budget_remaining=1,
                                     )
                                 )
-                                if not gate.admitted:
+                                if not necessity.admitted:
                                     _log.info(
                                         "ambient reply necessity skipped [%s..] reason=%s score=%s",
                                         chat_id[:12],
-                                        gate.reason,
-                                        gate.score,
+                                        necessity.reason,
+                                        necessity.score,
                                     )
                                     decision = replace(
                                         decision,
                                         allowed=False,
-                                        reason=f"necessity:{gate.reason}",
+                                        reason=f"necessity:{necessity.reason}",
                                     )
+                            await self._update_ambient_audit(
+                                work.items,
+                                ambient_admission=(
+                                    "candidate"
+                                    if decision is not None and decision.allowed
+                                    else "skipped"
+                                ),
+                                ambient_reason=(
+                                    decision.reason
+                                    if decision is not None
+                                    else "not_evaluated"
+                                ),
+                                necessity_score=(
+                                    necessity.score if necessity is not None else None
+                                ),
+                                necessity_threshold=(
+                                    necessity.threshold
+                                    if necessity is not None
+                                    else None
+                                ),
+                                necessity_reason=(
+                                    necessity.reason if necessity is not None else None
+                                ),
+                                ai_triggered=False,
+                                ai_result="not_triggered",
+                                delivery_status="not_attempted",
+                            )
                             self._get_group_engagement().observe(decision)
                         if decision is not None and decision.shadow:
                             _log.info(
@@ -2439,6 +2484,7 @@ class AgentEngine:
             max_waits=max(1, int(planner_config.planner_max_consecutive_waits)),
         )
         planner_result: PlannerResult | None = None
+        delivery_status = "not_attempted"
 
         async def _handle_planner_control(control) -> None:
             nonlocal planner_result
@@ -2494,7 +2540,7 @@ class AgentEngine:
             return await reply_callback(**kwargs)
 
         async def _final_reply_callback(**kwargs) -> None:
-            nonlocal final_delivered
+            nonlocal delivery_status, final_delivered
             content = kwargs.get("content", "")
             delivery, record = await controller.prepare_ambient(
                 chat_id=chat_id,
@@ -2508,6 +2554,7 @@ class AgentEngine:
                 return
             receipt = await reply_callback(**kwargs)
             if isinstance(receipt, DeliveryReceipt):
+                delivery_status = receipt.status
                 settled = await controller.settle_receipt(
                     record, receipt, content=content
                 )
@@ -2516,14 +2563,25 @@ class AgentEngine:
                 )
             else:
                 # Keep test/dry-run callbacks compatible until all transports return receipts.
+                delivery_status = "accepted"
                 settled = await controller.mark_sent(record)
                 final_delivered = settled is not None
 
         if not await self.group_engagement.start(decision):
+            await self._update_ambient_audit(
+                (current_pending, *current_batch),
+                ai_triggered=False,
+                ai_result="expired",
+            )
             _log.warning(
                 "ambient decision expired before provider start [%s..]", chat_id[:12]
             )
             return
+        await self._update_ambient_audit(
+            (current_pending, *current_batch),
+            ai_triggered=True,
+            ai_result="judging",
+        )
         turn = None
         wait_revision = self._get_scheduler().revision(chat_id)
         steered_lease = None
@@ -2626,19 +2684,37 @@ class AgentEngine:
                     steered_lease = None
 
             if turn is not None:
+                delivered = bool(
+                    turn.sent_emoji or turn.tool_text_delivered or final_delivered
+                )
                 await self.group_engagement.complete(
                     decision,
-                    delivered=turn.sent_emoji
-                    or turn.tool_text_delivered
-                    or final_delivered,
-                    silent=turn.final_reply_silent
-                    or not (
-                        turn.sent_emoji or turn.tool_text_delivered or final_delivered
+                    delivered=delivered,
+                    silent=turn.final_reply_silent or not delivered,
+                )
+                await self._update_ambient_audit(
+                    (current_pending, *current_batch),
+                    ai_result="replied" if delivered else "no_reply",
+                    delivery_status=(
+                        "accepted"
+                        if turn.sent_emoji or turn.tool_text_delivered
+                        else delivery_status
                     ),
                 )
         except _AdmissionAlreadyCommitted:
+            await self._update_ambient_audit(
+                (current_pending, *current_batch),
+                ai_triggered=False,
+                ai_result="not_triggered",
+            )
             await self.group_engagement.complete(decision, delivered=False, silent=True)
         except Exception:
+            await self._update_ambient_audit(
+                (current_pending, *current_batch),
+                ai_triggered=True,
+                ai_result="error",
+                delivery_status=delivery_status,
+            )
             await self.group_engagement.complete(decision, delivered=False, silent=True)
             raise
 

@@ -23,13 +23,67 @@ async def test_routing_audit_persists_content_free_records(tmp_path):
         scheduler_revision=2,
         work_plan_hint=None,
         trace=("source:user", "selected_rule:default_chat"),
+        ambient_admission="candidate",
+        ambient_reason="batch_threshold",
+        necessity_score=35,
+        necessity_threshold=80,
+        necessity_reason="below_threshold",
+        ai_triggered=False,
+        ai_result="not_triggered",
+        delivery_status="not_attempted",
     )
 
     records = await store.list_records(mode="chat", chat_prefix="private-")
 
     assert records == [record]
     assert records[0].trace == ("source:user", "selected_rule:default_chat")
+    assert records[0].necessity_score == 35
+    assert records[0].ai_triggered is False
     assert await store.get(record.id) == record
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_routing_audit_updates_ambient_stages_without_losing_score(tmp_path):
+    store = RoutingAuditStore(str(tmp_path / "orchestration.sqlite"))
+    record = await store.append(
+        chat_id="group-1",
+        message_id="message-1",
+        source="ambient",
+        intent="group_ambient",
+        mode="chat",
+        reason_code="ambient_chat",
+        reason="ambient turns always use the low-risk Chat profile",
+        capability_profile="group_ambient",
+        policy_version="mode-router/v1",
+        scheduler_revision=1,
+        work_plan_hint=None,
+        trace=("source:ambient",),
+    )
+
+    await store.update_ambient(
+        chat_id="group-1",
+        message_ids=("message-1",),
+        ambient_admission="candidate",
+        necessity_score=15,
+        necessity_threshold=80,
+        necessity_reason="below_threshold",
+        ai_triggered=False,
+        ai_result="not_triggered",
+    )
+    await store.update_ambient(
+        chat_id="group-1",
+        message_ids=("message-1",),
+        ai_triggered=True,
+        ai_result="judging",
+    )
+
+    updated = await store.get(record.id)
+    assert updated is not None
+    assert updated.necessity_score == 15
+    assert updated.necessity_threshold == 80
+    assert updated.ai_triggered is True
+    assert updated.ai_result == "judging"
     await store.close()
 
 
@@ -68,6 +122,9 @@ async def test_routing_webui_lists_and_shows_audit_detail(tmp_path):
         scheduler_revision=1,
         work_plan_hint=None,
         trace=("source:user", "selected_rule:explicit_work"),
+        ai_triggered=True,
+        ai_result="replied",
+        delivery_status="accepted",
     )
     app = create_app(
         {"agent_engine": type("Engine", (), {"routing_audit_store": store})()}, {}
@@ -81,6 +138,9 @@ async def test_routing_webui_lists_and_shows_audit_detail(tmp_path):
     assert listing.status_code == 200
     assert "explicit_work" in listing.text
     assert "agent_full" in listing.text
+    assert "已触发" in listing.text
+    assert "replied" in listing.text
     assert detail.status_code == 200
     assert "selected_rule:explicit_work" in detail.text
+    assert "是否触发 AI" in detail.text
     await store.close()

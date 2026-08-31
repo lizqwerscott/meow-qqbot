@@ -19,6 +19,11 @@
         <dt>Chat ID</dt><dd><code>{{ record.chat_id }}</code></dd>
         <dt>消息 ID</dt><dd><code>{{ record.message_id }}</code></dd>
         <dt>WorkPlan</dt><dd>{% if record.work_plan_hint %}<code>{{ record.work_plan_hint }}</code>{% else %}—{% endif %}</dd>
+        <dt>群聊候选</dt><dd>{{ record.ambient_admission or '—' }}{% if record.ambient_reason %} · {{ record.ambient_reason }}{% endif %}</dd>
+        <dt>必要性评分</dt><dd>{% if record.necessity_score is not none %}{{ "%.1f"|format(record.necessity_score) }} / 阈值 {{ "%.1f"|format(record.necessity_threshold) }} · {{ record.necessity_reason }}{% else %}—{% endif %}</dd>
+        <dt>是否触发 AI</dt><dd>{% if record.ai_triggered is sameas true %}是{% elif record.ai_triggered is sameas false %}否{% else %}—{% endif %}</dd>
+        <dt>AI 判断结果</dt><dd>{{ record.ai_result or '—' }}</dd>
+        <dt>投递状态</dt><dd>{{ record.delivery_status or '—' }}</dd>
     </dl>
 </section>
 

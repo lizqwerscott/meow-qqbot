@@ -34,6 +34,8 @@
                     <th>Chat / 消息</th>
                     <th>结果</th>
                     <th>原因</th>
+                    <th>AI 判断</th>
+                    <th>回复结果</th>
                     <th>能力</th>
                     <th>来源</th>
                     <th></th>
@@ -46,6 +48,13 @@
                     <td><code>{{ record.chat_id[:16] }}{% if record.chat_id|length > 16 %}..{% endif %}</code><br><code>{{ record.message_id[:16] }}{% if record.message_id|length > 16 %}..{% endif %}</code></td>
                     <td><strong>{{ record.mode }}</strong><br><code>{{ record.reason_code }}</code></td>
                     <td>{{ record.reason }}</td>
+                    <td>
+                        {% if record.ai_triggered is sameas true %}<strong>已触发</strong>
+                        {% elif record.ai_triggered is sameas false %}未触发
+                        {% else %}—{% endif %}
+                        {% if record.necessity_score is not none %}<br><small>评分 {{ "%.1f"|format(record.necessity_score) }} / 阈值 {{ "%.1f"|format(record.necessity_threshold) }}</small>{% endif %}
+                    </td>
+                    <td>{{ record.ai_result or '—' }}{% if record.delivery_status %}<br><small>投递 {{ record.delivery_status }}</small>{% endif %}</td>
                     <td><code>{{ record.capability_profile }}</code></td>
                     <td><code>{{ record.source }}</code></td>
                     <td><a class="btn btn-sm" href="/routing/{{ record.id }}">详情</a></td>

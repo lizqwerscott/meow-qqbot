@@ -28,6 +28,14 @@ class RoutingAuditRecord:
     scheduler_revision: int
     work_plan_hint: str | None
     trace: tuple[str, ...]
+    ambient_admission: str | None = None
+    ambient_reason: str | None = None
+    necessity_score: float | None = None
+    necessity_threshold: float | None = None
+    necessity_reason: str | None = None
+    ai_triggered: bool | None = None
+    ai_result: str | None = None
+    delivery_status: str | None = None
 
 
 class RoutingAuditStore:
@@ -81,6 +89,23 @@ class RoutingAuditStore:
                 CREATE INDEX IF NOT EXISTS idx_routing_audit_chat
                     ON routing_audit(chat_id, created_at DESC);
                 """)
+            columns = {
+                row[1] for row in self._conn.execute("PRAGMA table_info(routing_audit)")
+            }
+            for column, definition in (
+                ("ambient_admission", "TEXT"),
+                ("ambient_reason", "TEXT"),
+                ("necessity_score", "REAL"),
+                ("necessity_threshold", "REAL"),
+                ("necessity_reason", "TEXT"),
+                ("ai_triggered", "INTEGER"),
+                ("ai_result", "TEXT"),
+                ("delivery_status", "TEXT"),
+            ):
+                if column not in columns:
+                    self._conn.execute(
+                        f"ALTER TABLE routing_audit ADD COLUMN {column} {definition}"
+                    )
             self._conn.commit()
         return self._conn
 
@@ -107,6 +132,32 @@ class RoutingAuditStore:
                 str(row["work_plan_hint"]) if row["work_plan_hint"] else None
             ),
             trace=trace,
+            ambient_admission=(
+                str(row["ambient_admission"]) if row["ambient_admission"] else None
+            ),
+            ambient_reason=(
+                str(row["ambient_reason"]) if row["ambient_reason"] else None
+            ),
+            necessity_score=(
+                float(row["necessity_score"])
+                if row["necessity_score"] is not None
+                else None
+            ),
+            necessity_threshold=(
+                float(row["necessity_threshold"])
+                if row["necessity_threshold"] is not None
+                else None
+            ),
+            necessity_reason=(
+                str(row["necessity_reason"]) if row["necessity_reason"] else None
+            ),
+            ai_triggered=(
+                bool(row["ai_triggered"]) if row["ai_triggered"] is not None else None
+            ),
+            ai_result=str(row["ai_result"]) if row["ai_result"] else None,
+            delivery_status=(
+                str(row["delivery_status"]) if row["delivery_status"] else None
+            ),
         )
 
     async def append(
@@ -124,6 +175,14 @@ class RoutingAuditStore:
         scheduler_revision: int,
         work_plan_hint: str | None,
         trace: tuple[str, ...],
+        ambient_admission: str | None = None,
+        ambient_reason: str | None = None,
+        necessity_score: float | None = None,
+        necessity_threshold: float | None = None,
+        necessity_reason: str | None = None,
+        ai_triggered: bool | None = None,
+        ai_result: str | None = None,
+        delivery_status: str | None = None,
     ) -> RoutingAuditRecord:
         if not chat_id or not message_id:
             raise ValueError("chat_id and message_id are required")
@@ -142,6 +201,14 @@ class RoutingAuditStore:
             scheduler_revision=max(0, int(scheduler_revision)),
             work_plan_hint=work_plan_hint or None,
             trace=tuple(trace),
+            ambient_admission=ambient_admission,
+            ambient_reason=ambient_reason,
+            necessity_score=necessity_score,
+            necessity_threshold=necessity_threshold,
+            necessity_reason=necessity_reason,
+            ai_triggered=ai_triggered,
+            ai_result=ai_result,
+            delivery_status=delivery_status,
         )
         conn = await self._open()
         async with self._lock:
@@ -150,8 +217,10 @@ class RoutingAuditStore:
                 INSERT INTO routing_audit (
                     id, created_at, chat_id, message_id, source, intent, mode,
                     reason_code, reason, capability_profile, policy_version,
-                    scheduler_revision, work_plan_hint, trace_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    scheduler_revision, work_plan_hint, trace_json,
+                    ambient_admission, ambient_reason, necessity_score, necessity_threshold,
+                    necessity_reason, ai_triggered, ai_result, delivery_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -168,6 +237,18 @@ class RoutingAuditStore:
                     record.scheduler_revision,
                     record.work_plan_hint,
                     json.dumps(record.trace, ensure_ascii=True),
+                    record.ambient_admission,
+                    record.ambient_reason,
+                    record.necessity_score,
+                    record.necessity_threshold,
+                    record.necessity_reason,
+                    (
+                        int(record.ai_triggered)
+                        if record.ai_triggered is not None
+                        else None
+                    ),
+                    record.ai_result,
+                    record.delivery_status,
                 ),
             )
             self._prune(conn, record.created_at)
@@ -223,6 +304,50 @@ class RoutingAuditStore:
                 params,
             ).fetchall()
         return [self._record(row) for row in rows]
+
+    async def update_ambient(
+        self,
+        *,
+        chat_id: str,
+        message_ids: tuple[str, ...],
+        ambient_admission: str | None = None,
+        ambient_reason: str | None = None,
+        necessity_score: float | None = None,
+        necessity_threshold: float | None = None,
+        necessity_reason: str | None = None,
+        ai_triggered: bool | None = None,
+        ai_result: str | None = None,
+        delivery_status: str | None = None,
+    ) -> int:
+        if not chat_id or not message_ids:
+            return 0
+        values = {
+            "ambient_admission": ambient_admission,
+            "ambient_reason": ambient_reason,
+            "necessity_score": necessity_score,
+            "necessity_threshold": necessity_threshold,
+            "necessity_reason": necessity_reason,
+            "ai_triggered": (int(ai_triggered) if ai_triggered is not None else None),
+            "ai_result": ai_result,
+            "delivery_status": delivery_status,
+        }
+        values = {
+            column: value for column, value in values.items() if value is not None
+        }
+        if not values:
+            return 0
+        assignments = ", ".join(f"{column} = ?" for column in values)
+        params = list(values.values()) + [chat_id, *message_ids]
+        placeholders = ", ".join("?" for _ in message_ids)
+        conn = await self._open()
+        async with self._lock:
+            cursor = conn.execute(
+                f"UPDATE routing_audit SET {assignments} "
+                f"WHERE chat_id = ? AND message_id IN ({placeholders})",
+                params,
+            )
+            conn.commit()
+        return cursor.rowcount
 
     async def get(self, record_id: str) -> RoutingAuditRecord | None:
         conn = await self._open()
