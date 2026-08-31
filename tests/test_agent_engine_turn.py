@@ -21,8 +21,10 @@ from core.engine.delivery_ledger import (
 )
 from core.engine.engagement_config import EngagementConfig
 from core.engine.group_engagement import GroupEngagementManager
+from core.engine.mode_router import ModeRouter
 from core.engine.planner_control import PlannerAction, PlannerControl
 from core.engine.prompt_builder import PromptBuildResult
+from core.engine.routing_audit import RoutingAuditStore
 from core.engine.system_events import SystemEventQueue
 from core.engine.turn_capabilities import TurnCapabilities
 from core.engine.turn_planner import PlannerResult, PlannerResultKind, TurnPlanner
@@ -2736,6 +2738,48 @@ async def test_consumer_collects_private_same_intent_messages_into_one_turn():
         "first",
         "second",
     ]
+
+
+@pytest.mark.asyncio
+async def test_consumer_records_necessity_score_for_below_threshold_ambient_turn(
+    tmp_path,
+):
+    engine = make_engine(FakeToolLoop())
+    engine.scheduler = ConversationScheduler(engine.session_manager)
+    engine.group_engagement = GroupEngagementManager(
+        EngagementConfig(
+            group_ambient_mode="active",
+            group_ambient_active_chats=("chat",),
+            group_ambient_min_messages=2,
+            group_ambient_cooldown_seconds=0,
+            group_ambient_quiet_cooldown_seconds=0,
+        )
+    )
+    engine.mode_routing_enabled = True
+    engine.mode_router = ModeRouter()
+    engine._permission_manager = None
+    engine.routing_audit_store = RoutingAuditStore(str(tmp_path / "routing.sqlite3"))
+    engine._admit_pending_message = AsyncMock(return_value=None)
+    engine._run_hooks = AsyncMock()
+
+    pending = PendingInbound(
+        InputMessage("ambient-1", "user", "chat", "hello", True),
+        "hello",
+        InboundIntent.GROUP_AMBIENT,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+    enqueued = await engine.scheduler.enqueue("chat", pending)
+
+    await engine._consumer(
+        "chat", lambda **kwargs: _none(), lambda _: "user", enqueued.consumer_token
+    )
+
+    records = await engine.routing_audit_store.list_records()
+    assert len(records) == 1
+    assert records[0].necessity_score == 0
+    assert records[0].necessity_threshold == 80
+    assert records[0].necessity_reason == "below_threshold"
+    await engine.routing_audit_store.close()
 
 
 async def _empty_prompt():

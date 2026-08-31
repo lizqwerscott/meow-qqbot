@@ -1905,9 +1905,10 @@ class AgentEngine:
                             decision = await self._get_group_engagement().evaluate(
                                 chat_id, batch=work.items
                             )
-                            if (
-                                getattr(self, "mode_routing_enabled", False)
-                                and decision.allowed
+                            if getattr(self, "mode_routing_enabled", False) and (
+                                decision.allowed
+                                or decision.shadow
+                                or decision.reason == "below_threshold"
                             ):
                                 gate = getattr(self, "reply_necessity_gate", None)
                                 if gate is None:
