@@ -39,6 +39,7 @@ from core.ai.protocol import (
 _log = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
+MISSING_REASONING_CONTENT = "The previous assistant response has no reasoning content."
 
 
 @dataclass
@@ -56,12 +57,15 @@ class _DeepSeekStreamContext:
 
 def _messages_to_input(
     messages: list[dict[str, Any]],
+    *,
+    thinking_mode: bool = False,
 ) -> tuple[str | None, list[dict[str, Any]]]:
     """chat-completions messages → (instructions, Responses input items)。
 
     转换规则（对齐 DeepSeek 兼容性明细）：
     - 第一条 system → instructions（"作为第一条 system 消息"）；后续 system → message item。
     - assistant 的 reasoning_content → 明文 reasoning item（服务端归并到相邻 assistant）。
+    - thinking 模式下，缺失 reasoning_content 的历史 assistant 使用兼容占位 reasoning。
     - assistant 无 content 时只发 function_call items（服务端自动归并），
       避免空 content 的 message item 触发 400。
     - tool → function_call_output（output 必须是字符串）。
@@ -93,6 +97,9 @@ def _messages_to_input(
             )
         elif role == "assistant":
             reasoning = msg.get("reasoning_content")
+            tool_calls = msg.get("tool_calls") or []
+            if thinking_mode and (content or tool_calls) and not reasoning:
+                reasoning = MISSING_REASONING_CONTENT
             if reasoning:
                 items.append(
                     {
@@ -108,7 +115,7 @@ def _messages_to_input(
                         "content": [{"type": "output_text", "text": content}],
                     }
                 )
-            for tc in msg.get("tool_calls") or []:
+            for tc in tool_calls:
                 fn = tc.get("function", {})
                 items.append(
                     {
@@ -305,7 +312,9 @@ class DeepSeekResponsesService:
         response_format: dict[str, Any] | None = None,
         stream: bool = False,
     ) -> dict[str, Any]:
-        instructions, items = _messages_to_input(messages)
+        instructions, items = _messages_to_input(
+            messages, thinking_mode=bool(self.reasoning_effort)
+        )
         kwargs: dict[str, Any] = {"model": model, "stream": stream}
         if items:
             kwargs["input"] = items

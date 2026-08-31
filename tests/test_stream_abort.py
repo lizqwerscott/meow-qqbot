@@ -297,6 +297,35 @@ class TestDeepSeekStreamAbort:
         assert items[2]["call_id"] == "call-1"
         assert items[2]["arguments"] == '{"city":"上海"}'
 
+    def test_thinking_mode_backfills_missing_reasoning_for_history(self):
+        """thinking 模式不得发送缺少 reasoning 的历史 assistant。"""
+        svc = DeepSeekResponsesService(api_key="test", reasoning_effort="high")
+
+        kwargs = svc._build_kwargs(
+            [
+                {"role": "user", "content": "上一问"},
+                {"role": "assistant", "content": "上一问的回答"},
+                {"role": "user", "content": "继续"},
+            ],
+            None,
+            "deepseek-v4-flash",
+            None,
+            None,
+        )
+
+        assert [item["type"] for item in kwargs["input"]] == [
+            "message",
+            "reasoning",
+            "message",
+            "message",
+        ]
+        assert kwargs["input"][1]["content"] == [
+            {
+                "type": "reasoning_text",
+                "text": "The previous assistant response has no reasoning content.",
+            }
+        ]
+
     def test_failed_event_raises(self):
         """response.failed 事件 → StreamAbortedError（API 侧失败不算正常完成）。"""
 
