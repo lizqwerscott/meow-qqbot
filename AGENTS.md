@@ -69,6 +69,7 @@ uv run black <file>   # format code
 - **Prompt structure**: Static prompt (role + character card + skill intro + memory desc + tool coop + emoji guide) rendered once from Jinja2 templates (`prompts/`). Dynamic block (skill entries + memory context + learning context + time + emoji tags + users list + workspace info) appended as a separate system message each turn.
 - **Multi-model routing** (optional): `RuleRouter` scores messages on 16 dimensions (code, complexity, reasoning, etc.) and assigns SIMPLE / MEDIUM / COMPLEX / REASONING tiers. Each tier has a fallback chain of models from `[models]` config. Routing disabled by default (`[routing].enabled = false`).
 - **Keyword flush**: Certain keywords (`"我喜欢"`, `"记住"`, etc.) trigger an immediate Hindsight `flush` for the current session.
+- **Archive**: 自动归档由跨天消息触发，按 `archive.timezone` 的来源日期生成不可变 batch；timeline 事件通过 `ArchiveLedger` 去重，未完成操作由 manifest 在启动时恢复。`猫猫归档 执行日切` 执行日切，`猫猫归档 快照` 只读保存 active history；`archive_hour` 和 `replay_count` 仅作弃用兼容配置。
 
 ## Bot Commands
 

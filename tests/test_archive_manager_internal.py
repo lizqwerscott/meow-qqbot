@@ -2,9 +2,11 @@
 consume_summary、archive_if_stale 跨天触发与同日守卫。"""
 
 import asyncio
+import hashlib
+import json
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -12,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core.command_handlers.archive import ArchiveCommand
+from core.managers.archive_ledger import ArchiveLedger
 from core.managers.archive_manager import (
     ArchiveManager,
     ArchiveResult,
@@ -19,6 +22,7 @@ from core.managers.archive_manager import (
     _date_str,
     _get_memory_dir,
 )
+from core.managers.archive_manifest import ArchiveManifestStore
 from core.managers.chat_context import ChatContext
 from core.managers.chat_message import ChatMessage
 from core.managers.context_store import JSONLContextStore
@@ -115,6 +119,168 @@ def test_tool_message_serialization_preserves_archive_metadata():
     assert restored.tool_name == "read_file"
 
 
+def test_event_identity_is_storage_metadata_not_llm_wire_data():
+    message = ChatMessage(
+        role="assistant",
+        content="answer",
+        timestamp=123.0,
+        event_id="delivery:d1",
+    )
+
+    assert "event_id" not in message.to_dict()
+    assert message.to_storage_dict()["event_id"] == "delivery:d1"
+    assert ChatMessage.from_dict(message.to_storage_dict()).event_id == "delivery:d1"
+
+
+def test_storage_record_gets_stable_record_id_without_wire_metadata():
+    message = ChatMessage(role="user", content="hello", timestamp=123.0)
+
+    first = message.to_storage_dict()
+    second = message.to_storage_dict()
+
+    assert first["record_id"] == second["record_id"]
+    assert "record_id" not in message.to_dict()
+
+
+def test_storage_record_gets_stable_event_id_with_record_id():
+    message = ChatMessage(role="user", content="hello", timestamp=123.0)
+
+    first = message.to_storage_dict()
+    second = message.to_storage_dict()
+
+    assert first["event_id"]
+    assert first["event_id"] == second["event_id"]
+
+
+@pytest.mark.asyncio
+async def test_archive_snapshot_does_not_mutate_active_record_metadata(tmp_path):
+    message = ChatMessage(role="user", content="snapshot", timestamp=123.0)
+    ctx = _MutableCtx([message])
+    store = JSONLContextStore(str(tmp_path / "sessions"))
+    manager = ArchiveManager(
+        context_manager=_FakeCM(ctx, store), memory_dir=str(tmp_path / "mem")
+    )
+
+    result = await manager.archive_snapshot("chat", is_group=False)
+
+    assert result.archive_path is not None
+    assert message.record_id is None
+    assert ctx.history == [message]
+    assert store.read_archive(result.archive_path)[0]["record_id"]
+
+
+def test_archive_units_mark_incomplete_tool_transactions(mgr):
+    messages = [
+        ChatMessage(
+            role="assistant",
+            content="",
+            timestamp=1.0,
+            tool_calls=[{"id": "call-1"}, {"id": "call-2"}],
+        ),
+        ChatMessage(role="tool", content="ok", timestamp=2.0, tool_call_id="call-1"),
+    ]
+
+    units = mgr._build_archive_units(messages)
+
+    assert len(units) == 1
+    assert units[0].incomplete is True
+
+
+def test_archive_operation_id_is_stable_for_the_same_batch_set(mgr):
+    first = mgr._operation_id("chat", "daily", ["batch-a", "batch-b"])
+    second = mgr._operation_id("chat", "daily", ["batch-a", "batch-b"])
+
+    assert first == second
+
+
+def test_archive_identity_prefers_persisted_record_id_for_legacy_messages(mgr):
+    message = ChatMessage(
+        role="assistant", content="legacy", timestamp=123.0, record_id="record-1"
+    )
+
+    assert mgr._archive_identity(message) == "legacy:record:record-1"
+
+
+def test_daily_state_preserves_legacy_replay_keys(mgr, tmp_path):
+    mgr._daily_state_path = tmp_path / "daily_archive_state.json"
+    mgr._last_daily_archive["chat"] = "2025-01-02"
+    mgr._replayed_prefix_keys["chat"] = ["legacy-key"]
+    mgr._replayed_prefix_known.add("chat")
+
+    mgr._save_daily_state()
+
+    state = json.loads(mgr._daily_state_path.read_text(encoding="utf-8"))
+    assert state["chat"]["replayed_prefix_keys"] == ["legacy-key"]
+
+
+def test_archive_manifest_rejects_invalid_state_transition(tmp_path):
+    store = ArchiveManifestStore(str(tmp_path))
+    manifest = {
+        "version": 1,
+        "operation_id": "op-1",
+        "chat_id": "chat",
+        "state": "prepared",
+        "batches": [],
+    }
+
+    store.write(manifest)
+    for state in (
+        "archive_written",
+        "active_written",
+        "summary_written",
+        "committed",
+    ):
+        manifest["state"] = state
+        store.write(manifest)
+    manifest["state"] = "archive_written"
+
+    with pytest.raises(RuntimeError, match="state transition"):
+        store.write(manifest)
+
+
+@pytest.mark.asyncio
+async def test_archive_manifest_records_incomplete_tool_units(tmp_path, monkeypatch):
+    day1 = datetime(2025, 1, 1, 10, 0, 0).timestamp()
+    day2 = datetime(2025, 1, 2, 10, 0, 0).timestamp()
+    chat_id = "chat_001"
+    store = JSONLContextStore(str(tmp_path / "sessions"))
+    ctx = _MutableCtx(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                timestamp=day1,
+                tool_calls=[{"id": "call-1"}, {"id": "call-2"}],
+            ),
+            ChatMessage(
+                role="tool",
+                content="ok",
+                timestamp=day1 + 1,
+                tool_call_id="call-1",
+            ),
+            ChatMessage(role="user", content="normal", timestamp=day1 + 2),
+        ]
+    )
+    manager = ArchiveManager(
+        context_manager=_FakeCM(ctx, store), memory_dir=str(tmp_path / "mem")
+    )
+    monkeypatch.setattr("core.managers.archive_manager.time.time", lambda: day2)
+
+    result = await manager.archive_if_stale(chat_id, is_group=False)
+
+    assert result is not None
+    manifest_path = next((tmp_path / "manifests").glob("*.json"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["incomplete_units"]
+
+
+def test_archive_date_uses_configured_timezone():
+    timestamp = datetime(2025, 1, 1, 16, 30, tzinfo=timezone.utc).timestamp()
+
+    assert _date_str(timestamp, "UTC") == "2025-01-01"
+    assert _date_str(timestamp, "Asia/Shanghai") == "2025-01-02"
+
+
 @pytest.mark.asyncio
 async def test_archive_projection_prefers_timeline_visible_text_but_keeps_protocol():
     manager = ArchiveManager(context_manager=MagicMock())
@@ -190,6 +356,115 @@ async def test_archive_materializes_timeline_only_visible_events():
         "accepted answer",
     ]
     assert merged[1].tool_calls == [{"id": "call-1"}]
+    assert merged[0].event_id == "user:u1"
+    assert merged[2].event_id == "delivery:d1"
+
+
+@pytest.mark.asyncio
+async def test_archive_merge_skips_committed_timeline_events(tmp_path):
+    ledger = ArchiveLedger(str(tmp_path / "archive-ledger.sqlite3"))
+    ledger.commit_membership("batch-1", "chat", ["timeline:user:u1"])
+    manager = ArchiveManager(context_manager=MagicMock(), archive_ledger=ledger)
+    manager.set_timeline(
+        SimpleNamespace(
+            snapshot=AsyncMock(
+                return_value=(
+                    SimpleNamespace(
+                        event_id="user:u1",
+                        role="user",
+                        message_id="u1",
+                        content="already archived",
+                        timestamp=1,
+                    ),
+                    SimpleNamespace(
+                        event_id="user:u2",
+                        role="user",
+                        message_id="u2",
+                        content="new event",
+                        timestamp=2,
+                    ),
+                )
+            )
+        )
+    )
+
+    merged = await manager._merge_timeline_messages("chat", [])
+
+    assert [message.content for message in merged] == ["new event"]
+    assert merged[0].event_id == "user:u2"
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_archive_merge_seeds_legacy_archive_membership(tmp_path):
+    store = JSONLContextStore(str(tmp_path / "sessions"))
+    archive_path = store.archive_messages(
+        "chat",
+        "2026-08-30T10-00-00",
+        [
+            {
+                "role": "user",
+                "content": "[u 在 2026-08-30 10:00:00]: old",
+                "raw_content": "old",
+                "message_id": "u1",
+                "timestamp": 1788084000.0,
+            }
+        ],
+    )
+    duplicate_path = store.archive_messages(
+        "chat",
+        "2026-08-30T10-00-00",
+        [
+            {
+                "role": "user",
+                "content": "[u 在 2026-08-30 10:00:00]: old",
+                "raw_content": "old",
+                "message_id": "u1",
+                "timestamp": 1788084000.0,
+            }
+        ],
+    )
+    ledger = ArchiveLedger(str(tmp_path / "archive-ledger.sqlite3"))
+    manager = ArchiveManager(
+        context_manager=SimpleNamespace(store=store),
+        memory_dir=str(tmp_path / "mem"),
+        archive_ledger=ledger,
+    )
+    manager.set_timeline(
+        SimpleNamespace(
+            snapshot=AsyncMock(
+                return_value=(
+                    SimpleNamespace(
+                        event_id="user:u1",
+                        role="user",
+                        message_id="u1",
+                        content="old",
+                        timestamp=1788084000.0,
+                    ),
+                    SimpleNamespace(
+                        event_id="user:u2",
+                        role="user",
+                        message_id="u2",
+                        content="late old",
+                        timestamp=1788170400.0,
+                    ),
+                )
+            )
+        )
+    )
+
+    merged = await manager._merge_timeline_messages("chat", [])
+
+    assert [message.content for message in merged] == ["late old"]
+    assert ledger.is_archived("chat", "timeline:user:u1")
+    assert not ledger.is_archived("chat", "timeline:user:u2")
+    assert archive_path is not None
+    assert duplicate_path is not None
+    audit = json.loads(
+        (tmp_path / "archive_audit" / "chat.json").read_text(encoding="utf-8")
+    )
+    assert audit["duplicate_archive_count"] == 1
+    ledger.close()
 
 
 @pytest.mark.asyncio
@@ -309,6 +584,30 @@ def test_archive_messages_same_timestamp_does_not_overwrite(tmp_path):
     assert [item["content"] for item in store.read_archive(second)] == ["second"]
 
 
+def test_archive_batch_reuses_matching_batch_and_rejects_hash_conflict(tmp_path):
+    store = JSONLContextStore(str(tmp_path / "sessions"))
+    records = [{"content": "one"}]
+    records_hash = ArchiveManager._records_hash(records)
+
+    first = store.archive_batch(
+        "chat_001", "batch-1", "2025-01-01", records, records_hash
+    )
+    second = store.archive_batch(
+        "chat_001", "batch-1", "2025-01-01", records, records_hash
+    )
+
+    assert first == second
+    with pytest.raises(RuntimeError, match="archive batch hash mismatch"):
+        changed_records = [{"content": "two"}]
+        store.archive_batch(
+            "chat_001",
+            "batch-1",
+            "2025-01-01",
+            changed_records,
+            ArchiveManager._records_hash(changed_records),
+        )
+
+
 @pytest.mark.asyncio
 async def test_archive_waits_for_pending_context_save(tmp_path, monkeypatch):
     """旧快照保存未完成时，归档不得让它在最终写入后复活旧 history。"""
@@ -424,6 +723,96 @@ async def test_archive_if_stale_archives_late_old_message_after_daily_guard(
         for item in store.list_archives(chat_id)
     ]
     assert sorted(archive_contents) == [["late-old"], ["on-time-old"]]
+
+
+@pytest.mark.asyncio
+async def test_archive_does_not_rearchive_full_timeline_projection(
+    tmp_path, monkeypatch
+):
+    """Committed timeline history must not be materialized into each same-day batch."""
+    day1 = datetime(2025, 1, 1, 10, 0, 0).timestamp()
+    day2 = datetime(2025, 1, 2, 10, 0, 0).timestamp()
+    chat_id = "chat_001"
+    store = JSONLContextStore(str(tmp_path / "sessions"))
+    ledger = ArchiveLedger(str(tmp_path / "archive-ledger.sqlite3"))
+    current = [
+        SimpleNamespace(
+            event_id=f"today:{index}",
+            role="user",
+            message_id=f"today-{index}",
+            content=f"today-{index}",
+            sender_id="u1",
+            timestamp=day2 + index,
+        )
+        for index in range(37)
+    ]
+    old = [
+        SimpleNamespace(
+            event_id=f"old:{index}",
+            role="user",
+            message_id=f"old-{index}",
+            content=f"old-{index}",
+            sender_id="u1",
+            timestamp=day1 + index,
+        )
+        for index in range(553)
+    ]
+    timeline = SimpleNamespace(snapshot=AsyncMock(return_value=tuple(old + current)))
+    ctx = _MutableCtx(
+        [
+            ChatMessage(
+                role="user",
+                content=event.content,
+                timestamp=event.timestamp,
+                message_id=event.message_id,
+                sender_id=event.sender_id,
+            )
+            for event in current
+        ]
+    )
+    manager = ArchiveManager(
+        context_manager=_FakeCM(ctx, store),
+        memory_dir=str(tmp_path / "mem"),
+        archive_ledger=ledger,
+    )
+    manager.set_timeline(timeline)
+    monkeypatch.setattr("core.managers.archive_manager.time.time", lambda: day2)
+
+    first = await manager.archive_if_stale(chat_id, is_group=False)
+    assert first is not None
+    assert [
+        len(store.read_archive(item["path"], 0))
+        for item in store.list_archives(chat_id)
+    ] == [553]
+
+    late_event = SimpleNamespace(
+        event_id="late:1",
+        role="user",
+        message_id="late-1",
+        content="late-old",
+        sender_id="u1",
+        timestamp=day1 + 600,
+    )
+    timeline.snapshot.return_value = tuple(old + [late_event] + current)
+    ctx.history.append(
+        ChatMessage(
+            role="user",
+            content="late-old",
+            timestamp=late_event.timestamp,
+            message_id="late-1",
+            sender_id="u1",
+        )
+    )
+
+    second = await manager.archive_if_stale(chat_id, is_group=False)
+    assert second is not None
+    archive_sizes = sorted(
+        len(store.read_archive(item["path"], 0))
+        for item in store.list_archives(chat_id)
+    )
+    assert archive_sizes == [1, 553]
+    assert ledger.committed_batch_count(chat_id) == 2
+    ledger.close()
 
 
 @pytest.mark.asyncio
@@ -624,6 +1013,11 @@ async def test_archive_does_not_archive_replayed_messages_twice(tmp_path, monkey
 
     monkeypatch.setattr("core.managers.archive_manager.time.time", lambda: day2)
     assert await mgr.archive_if_stale(chat_id, is_group=False) is not None
+    assert all(
+        message.replayed_from_batch_id
+        for message in ctx.history
+        if message.timestamp < day2
+    )
     ctx.history.append(
         ChatMessage(
             role="user",
@@ -913,6 +1307,432 @@ async def test_archive_replays_only_previous_calendar_day(tmp_path, monkeypatch)
 
     kept = ctx.set_messages.call_args[0][0]
     assert [message.content for message in kept] == ["day3"]
+
+
+@pytest.mark.asyncio
+async def test_archive_delayed_trigger_partitions_every_source_date(
+    tmp_path, monkeypatch
+):
+    day1 = datetime(2025, 1, 1, 10, 0, 0).timestamp()
+    day2 = datetime(2025, 1, 2, 10, 0, 0).timestamp()
+    day3 = datetime(2025, 1, 3, 10, 0, 0).timestamp()
+    day4 = datetime(2025, 1, 4, 10, 0, 0).timestamp()
+    chat_id = "chat_001"
+    store = JSONLContextStore(str(tmp_path / "sessions"))
+    ctx = _MutableCtx(
+        [
+            ChatMessage(role="user", content="day1", timestamp=day1),
+            ChatMessage(role="user", content="day2", timestamp=day2),
+            ChatMessage(role="user", content="day3", timestamp=day3),
+            ChatMessage(role="user", content="day4", timestamp=day4),
+        ]
+    )
+    manager = ArchiveManager(
+        context_manager=_FakeCM(ctx, store), memory_dir=str(tmp_path / "mem")
+    )
+
+    monkeypatch.setattr("core.managers.archive_manager.time.time", lambda: day4)
+    result = await manager.archive_if_stale(chat_id, is_group=False)
+
+    assert result is not None
+    assert len(result.batches) == 3
+    assert [batch.partition_date for batch in result.batches] == [
+        "2025-01-01",
+        "2025-01-02",
+        "2025-01-03",
+    ]
+    assert [
+        [record["raw_content"] for record in store.read_archive(batch.archive_path)]
+        for batch in result.batches
+    ] == [["day1"], ["day2"], ["day3"]]
+
+
+@pytest.mark.asyncio
+async def test_archive_manifest_recovers_after_summary_failure(tmp_path, monkeypatch):
+    day1 = datetime(2025, 1, 1, 10, 0, 0).timestamp()
+    day2 = datetime(2025, 1, 2, 10, 0, 0).timestamp()
+    chat_id = "chat_001"
+    store = JSONLContextStore(str(tmp_path / "sessions"))
+    ledger = ArchiveLedger(str(tmp_path / "archive-ledger.sqlite3"))
+    old_message = ChatMessage(role="user", content="old", timestamp=day1)
+    ctx = _MutableCtx(
+        [
+            old_message,
+            ChatMessage(role="user", content="today", timestamp=day2),
+        ]
+    )
+    manager = ArchiveManager(
+        context_manager=_FakeCM(ctx, store),
+        memory_dir=str(tmp_path / "mem"),
+        archive_ledger=ledger,
+    )
+    monkeypatch.setattr("core.managers.archive_manager.time.time", lambda: day2)
+
+    async def fail_summary(*args, **kwargs):
+        raise OSError("summary unavailable")
+
+    monkeypatch.setattr(manager, "_write_memory_file", fail_summary)
+    with pytest.raises(OSError, match="summary unavailable"):
+        await manager.archive_if_stale(chat_id, is_group=False)
+
+    recovered = ArchiveManager(
+        context_manager=_FakeCM(ctx, store),
+        memory_dir=str(tmp_path / "mem"),
+        archive_ledger=ledger,
+    )
+
+    assert recovered.recover_incomplete_archives() == 0
+    assert len(store.list_archives(chat_id)) == 1
+    assert [item["raw_content"] for item in store.load(chat_id)] == ["today"]
+    assert ledger.is_archived(chat_id, recovered._archive_identity(old_message))
+
+
+@pytest.mark.asyncio
+async def test_archive_retry_reuses_pending_operation_after_active_shrink(
+    tmp_path, monkeypatch
+):
+    day1 = datetime(2025, 1, 1, 10, 0, 0).timestamp()
+    day2 = datetime(2025, 1, 2, 10, 0, 0).timestamp()
+    chat_id = "chat_001"
+    store = JSONLContextStore(str(tmp_path / "sessions"))
+    ctx = _MutableCtx(
+        [
+            ChatMessage(role="user", content="old", timestamp=day1),
+            ChatMessage(role="user", content="today", timestamp=day2),
+        ]
+    )
+    manager = ArchiveManager(
+        context_manager=_FakeCM(ctx, store), memory_dir=str(tmp_path / "mem")
+    )
+    original_write = manager._write_memory_file
+    monkeypatch.setattr("core.managers.archive_manager.time.time", lambda: day2)
+
+    async def fail_summary(*args, **kwargs):
+        raise OSError("summary unavailable")
+
+    monkeypatch.setattr(manager, "_write_memory_file", fail_summary)
+    with pytest.raises(OSError, match="summary unavailable"):
+        await manager.archive_if_stale(chat_id, is_group=False)
+    pending_operation_id = manager._manifest_store.load_pending()[0]["operation_id"]
+
+    monkeypatch.setattr(manager, "_write_memory_file", original_write)
+    result = await manager.archive_if_stale(chat_id, is_group=False)
+
+    assert result.operation_id == pending_operation_id
+    assert len(store.list_archives(chat_id)) == 1
+    assert manager.get_archive_operation_status(chat_id)["pending_operations"] == 0
+
+
+def test_archive_manifest_recreates_missing_summary_path(tmp_path):
+    day1 = datetime(2025, 1, 1, 10, 0, 0).timestamp()
+    day2 = datetime(2025, 1, 2, 10, 0, 0).timestamp()
+    chat_id = "chat_001"
+    store = JSONLContextStore(str(tmp_path / "sessions"))
+    manager = ArchiveManager(
+        context_manager=SimpleNamespace(store=store),
+        memory_dir=str(tmp_path / "mem"),
+    )
+    old = ChatMessage(role="user", content="old", timestamp=day1)
+    today = ChatMessage(role="user", content="today", timestamp=day2)
+    records = [old.to_storage_dict()]
+    batch_id = "archive-v1:batch-1"
+    archive_path = store.archive_batch(
+        chat_id, batch_id, "2025-01-01", records, manager._records_hash(records)
+    )
+    keep_records = [today.to_storage_dict()]
+    store.replace(chat_id, keep_records)
+    summary_text = "# Session: 2025-01-01\n"
+    summary_path = tmp_path / "mem" / chat_id / f"2025-01-01.{batch_id}.md"
+    manifest = {
+        "version": 1,
+        "operation_id": "archive-op:recovery",
+        "chat_id": chat_id,
+        "state": "active_written",
+        "active_before_messages": records + keep_records,
+        "active_before_hash": manager._records_hash(records + keep_records),
+        "keep_messages": keep_records,
+        "keep_messages_hash": manager._records_hash(keep_records),
+        "keep_identities": [manager._archive_identity(today)],
+        "batches": [
+            {
+                "batch_id": batch_id,
+                "partition_date": "2025-01-01",
+                "records": records,
+                "records_hash": manager._records_hash(records),
+                "identities": [manager._archive_identity(old)],
+                "archive_path": archive_path,
+                "summary_text": summary_text,
+                "summary_hash": hashlib.sha256(
+                    summary_text.encode("utf-8")
+                ).hexdigest(),
+                "summary_path": str(summary_path),
+                "state": "active_written",
+            }
+        ],
+    }
+    manager._manifest_store.write(manifest)
+
+    assert manager.recover_incomplete_archives() == 1
+    assert summary_path.read_text(encoding="utf-8") == summary_text
+
+
+@pytest.mark.asyncio
+async def test_archive_manifest_recovers_after_archive_failure(tmp_path, monkeypatch):
+    day1 = datetime(2025, 1, 1, 10, 0, 0).timestamp()
+    day2 = datetime(2025, 1, 2, 10, 0, 0).timestamp()
+    chat_id = "chat_001"
+
+    class FailingArchiveStore(JSONLContextStore):
+        fail = True
+
+        def archive_batch(self, *args, **kwargs):
+            if self.fail:
+                raise OSError("archive unavailable")
+            return super().archive_batch(*args, **kwargs)
+
+    store = FailingArchiveStore(str(tmp_path / "sessions"))
+    ctx = _MutableCtx(
+        [
+            ChatMessage(role="user", content="old", timestamp=day1),
+            ChatMessage(role="user", content="today", timestamp=day2),
+        ]
+    )
+    manager = ArchiveManager(
+        context_manager=_FakeCM(ctx, store), memory_dir=str(tmp_path / "mem")
+    )
+    monkeypatch.setattr("core.managers.archive_manager.time.time", lambda: day2)
+
+    with pytest.raises(OSError, match="archive unavailable"):
+        await manager.archive_if_stale(chat_id, is_group=False)
+
+    store.fail = False
+    recovered = ArchiveManager(
+        context_manager=_FakeCM(ctx, store), memory_dir=str(tmp_path / "mem")
+    )
+
+    assert recovered.recover_incomplete_archives() == 0
+    assert len(store.list_archives(chat_id)) == 1
+    assert [item["raw_content"] for item in store.load(chat_id)] == ["today"]
+
+
+@pytest.mark.asyncio
+async def test_archive_manifest_recovers_after_active_failure(tmp_path, monkeypatch):
+    day1 = datetime(2025, 1, 1, 10, 0, 0).timestamp()
+    day2 = datetime(2025, 1, 2, 10, 0, 0).timestamp()
+    chat_id = "chat_001"
+
+    class FailingReplaceStore(JSONLContextStore):
+        fail = True
+
+        def replace(self, *args, **kwargs):
+            if self.fail:
+                self.fail = False
+                raise OSError("active unavailable")
+            return super().replace(*args, **kwargs)
+
+    store = FailingReplaceStore(str(tmp_path / "sessions"))
+    ctx = _MutableCtx(
+        [
+            ChatMessage(role="user", content="old", timestamp=day1),
+            ChatMessage(role="user", content="today", timestamp=day2),
+        ]
+    )
+    manager = ArchiveManager(
+        context_manager=_FakeCM(ctx, store), memory_dir=str(tmp_path / "mem")
+    )
+    monkeypatch.setattr("core.managers.archive_manager.time.time", lambda: day2)
+
+    with pytest.raises(OSError, match="active unavailable"):
+        await manager.archive_if_stale(chat_id, is_group=False)
+
+    recovered = ArchiveManager(
+        context_manager=_FakeCM(ctx, store), memory_dir=str(tmp_path / "mem")
+    )
+
+    assert len(store.list_archives(chat_id)) == 1
+    assert [item["raw_content"] for item in store.load(chat_id)] == ["today"]
+
+
+@pytest.mark.asyncio
+async def test_archive_manifest_recovers_after_manifest_write_failure(
+    tmp_path, monkeypatch
+):
+    day1 = datetime(2025, 1, 1, 10, 0, 0).timestamp()
+    day2 = datetime(2025, 1, 2, 10, 0, 0).timestamp()
+    chat_id = "chat_001"
+    store = JSONLContextStore(str(tmp_path / "sessions"))
+    ledger = ArchiveLedger(str(tmp_path / "archive-ledger.sqlite3"))
+    ctx = _MutableCtx(
+        [
+            ChatMessage(role="user", content="old", timestamp=day1),
+            ChatMessage(role="user", content="today", timestamp=day2),
+        ]
+    )
+    manager = ArchiveManager(
+        context_manager=_FakeCM(ctx, store),
+        memory_dir=str(tmp_path / "mem"),
+        archive_ledger=ledger,
+    )
+    original_write = manager._manifest_store.write
+
+    def fail_after_active_write(manifest):
+        if manifest.get("state") == "active_written":
+            raise OSError("manifest unavailable")
+        return original_write(manifest)
+
+    monkeypatch.setattr(manager._manifest_store, "write", fail_after_active_write)
+    monkeypatch.setattr("core.managers.archive_manager.time.time", lambda: day2)
+
+    with pytest.raises(OSError, match="manifest unavailable"):
+        await manager.archive_if_stale(chat_id, is_group=False)
+
+    recovered = ArchiveManager(
+        context_manager=_FakeCM(ctx, store),
+        memory_dir=str(tmp_path / "mem"),
+        archive_ledger=ledger,
+    )
+
+    assert recovered.recover_incomplete_archives() == 0
+    assert len(store.list_archives(chat_id)) == 1
+    assert [item["raw_content"] for item in store.load(chat_id)] == ["today"]
+    assert recovered.get_archive_operation_status(chat_id)["committed_batches"] == 1
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_archive_recovery_preserves_new_active_messages(tmp_path, monkeypatch):
+    day1 = datetime(2025, 1, 1, 10, 0, 0).timestamp()
+    day2 = datetime(2025, 1, 2, 10, 0, 0).timestamp()
+    chat_id = "chat_001"
+
+    class FailingReplaceStore(JSONLContextStore):
+        fail = True
+
+        def replace(self, *args, **kwargs):
+            if self.fail:
+                self.fail = False
+                raise OSError("active unavailable")
+            return super().replace(*args, **kwargs)
+
+    store = FailingReplaceStore(str(tmp_path / "sessions"))
+    ctx = _MutableCtx(
+        [
+            ChatMessage(role="user", content="old", timestamp=day1),
+            ChatMessage(role="user", content="today", timestamp=day2),
+        ]
+    )
+    manager = ArchiveManager(
+        context_manager=_FakeCM(ctx, store),
+        memory_dir=str(tmp_path / "mem"),
+    )
+    monkeypatch.setattr("core.managers.archive_manager.time.time", lambda: day2)
+
+    with pytest.raises(OSError, match="active unavailable"):
+        await manager.archive_if_stale(chat_id, is_group=False)
+
+    new_message = ChatMessage(role="user", content="arrived", timestamp=day2 + 1)
+    ctx.history.append(new_message)
+    store.replace(chat_id, [message.to_storage_dict() for message in ctx.history])
+    recovered = ArchiveManager(
+        context_manager=_FakeCM(ctx, store),
+        memory_dir=str(tmp_path / "mem"),
+    )
+
+    assert [item["raw_content"] for item in store.load(chat_id)] == [
+        "today",
+        "arrived",
+    ]
+    assert recovered.get_archive_operation_status(chat_id)["pending_operations"] == 0
+
+
+@pytest.mark.asyncio
+async def test_archive_manifest_recovers_after_ledger_failure(tmp_path, monkeypatch):
+    day1 = datetime(2025, 1, 1, 10, 0, 0).timestamp()
+    day2 = datetime(2025, 1, 2, 10, 0, 0).timestamp()
+    chat_id = "chat_001"
+    store = JSONLContextStore(str(tmp_path / "sessions"))
+    ledger = ArchiveLedger(str(tmp_path / "archive-ledger.sqlite3"))
+    original_commit = ledger.commit_membership
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("ledger unavailable")
+        return original_commit(*args, **kwargs)
+
+    monkeypatch.setattr(ledger, "commit_membership", fail_once)
+    ctx = _MutableCtx(
+        [
+            ChatMessage(role="user", content="old", timestamp=day1),
+            ChatMessage(role="user", content="today", timestamp=day2),
+        ]
+    )
+    manager = ArchiveManager(
+        context_manager=_FakeCM(ctx, store),
+        memory_dir=str(tmp_path / "mem"),
+        archive_ledger=ledger,
+    )
+    monkeypatch.setattr("core.managers.archive_manager.time.time", lambda: day2)
+
+    with pytest.raises(OSError, match="ledger unavailable"):
+        await manager.archive_if_stale(chat_id, is_group=False)
+
+    recovered = ArchiveManager(
+        context_manager=_FakeCM(ctx, store),
+        memory_dir=str(tmp_path / "mem"),
+        archive_ledger=ledger,
+    )
+
+    assert len(store.list_archives(chat_id)) == 1
+    assert recovered.get_archive_operation_status(chat_id)["committed_batches"] == 1
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_archive_manifest_recovers_after_daily_state_failure(
+    tmp_path, monkeypatch
+):
+    day1 = datetime(2025, 1, 1, 10, 0, 0).timestamp()
+    day2 = datetime(2025, 1, 2, 10, 0, 0).timestamp()
+    chat_id = "chat_001"
+    store = JSONLContextStore(str(tmp_path / "sessions"))
+    ledger = ArchiveLedger(str(tmp_path / "archive-ledger.sqlite3"))
+    ctx = _MutableCtx(
+        [
+            ChatMessage(role="user", content="old", timestamp=day1),
+            ChatMessage(role="user", content="today", timestamp=day2),
+        ]
+    )
+    manager = ArchiveManager(
+        context_manager=_FakeCM(ctx, store),
+        memory_dir=str(tmp_path / "mem"),
+        archive_ledger=ledger,
+    )
+    monkeypatch.setattr("core.managers.archive_manager.time.time", lambda: day2)
+
+    def fail_daily_state():
+        raise OSError("daily state unavailable")
+
+    monkeypatch.setattr(manager, "_write_daily_state", fail_daily_state)
+    with pytest.raises(OSError, match="daily state unavailable"):
+        await manager.archive_if_stale(chat_id, is_group=False)
+
+    recovered = ArchiveManager(
+        context_manager=_FakeCM(ctx, store),
+        memory_dir=str(tmp_path / "mem"),
+        archive_ledger=ledger,
+    )
+
+    assert recovered.get_archive_operation_status(chat_id)["pending_operations"] == 0
+    assert (
+        json.loads((tmp_path / "daily_archive_state.json").read_text(encoding="utf-8"))[
+            chat_id
+        ]["archived_on"]
+        == "2025-01-02"
+    )
+    ledger.close()
 
 
 @pytest.mark.asyncio

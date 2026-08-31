@@ -33,6 +33,7 @@ from core.engine.router import Router
 from core.engine.system_events import SystemEventQueue
 from core.engine.wake_dispatcher import WakeDispatcher
 from core.learners.orchestrator import LearningOrchestrator
+from core.managers.archive_ledger import ArchiveLedger
 from core.managers.archive_manager import ArchiveManager
 from core.managers.context_compactor import ContextCompactor
 from core.managers.context_manager import ChatContextManager
@@ -307,9 +308,17 @@ class ServiceGraph:
         archive_config = self.cfg.archive
         self.archive_manager = None
         if archive_config.get("enabled", True):
+            if "archive_hour" in archive_config or "replay_count" in archive_config:
+                _log.warning(
+                    "archive.archive_hour 和 archive.replay_count 已弃用，"
+                    "归档现在由跨天消息触发并使用 replay_gap_seconds"
+                )
+            archive_memory_dir = archive_config.get(
+                "memory_dir", "data/archives/memory/"
+            )
             self.archive_manager = ArchiveManager(
                 context_manager=self.context_manager,
-                memory_dir=archive_config.get("memory_dir", "data/archives/memory/"),
+                memory_dir=archive_memory_dir,
                 archive_hour=archive_config.get("archive_hour", 4),
                 replay_count=archive_config.get("replay_count"),
                 replay_gap_seconds=archive_config.get("replay_gap_seconds", 600),
@@ -317,6 +326,10 @@ class ServiceGraph:
                 summary_days=archive_config.get("summary_days", 2),
                 retention_days=archive_config.get("retention_days", 30),
                 merge_window_seconds=_merge_ws,
+                timezone_name=archive_config.get("timezone", "Asia/Shanghai"),
+                archive_ledger=ArchiveLedger(
+                    str(Path(archive_memory_dir).parent / "archive_ledger.sqlite3")
+                ),
             )
             _log.info(
                 "归档系统已启用 (跨天消息触发, 摘要 %d 条, 回放连续段间隔 %d 秒)",

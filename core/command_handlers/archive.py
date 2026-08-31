@@ -31,7 +31,12 @@ class ArchiveCommand:
             return await self._show_status(input_message)
         if subcmd in ("查看", "list", "ls"):
             return await self._list_archives(input_message, subargs)
+        if subcmd in ("执行日切", "daily"):
+            return await self._run_archive(input_message, subargs)
+        if subcmd in ("快照", "snapshot"):
+            return await self._run_snapshot(input_message, subargs)
         if subcmd in ("执行", "run", "do"):
+            _log.warning("归档命令“执行”已弃用，请使用“执行日切”")
             return await self._run_archive(input_message, subargs)
         if subcmd in ("摘要", "summary"):
             return await self._show_summary(input_message, subargs)
@@ -39,7 +44,7 @@ class ArchiveCommand:
             return await self._clean_archives(input_message)
         return make_reply(
             input_message,
-            "未知子命令。可用: 当前, 查看, 执行, 摘要, 清理",
+            "未知子命令。可用: 当前, 查看, 执行日切, 快照, 摘要, 清理",
         )
 
     async def _show_status(self, input_message: InputMessage) -> List[Dict[str, Any]]:
@@ -51,6 +56,9 @@ class ArchiveCommand:
             if status["last_activity"]
             else "无"
         )
+        operation_status = getattr(
+            self.archive_manager, "get_archive_operation_status", lambda _: {}
+        )(chat_id)
         return make_reply(
             input_message,
             f"会话: {chat_id[:24]}…\n"
@@ -59,7 +67,10 @@ class ArchiveCommand:
             f"归档摘要: {status['archive_count']} 个\n"
             f"归档触发: 跨天首条消息（按消息时间戳）\n"
             f"回放: 昨天最后一个连续片段（间隔 {self.archive_manager.replay_gap_seconds} 秒）\n"
-            f"摘要: {self.archive_manager.summary_count} 条",
+            f"摘要: {self.archive_manager.summary_count} 条\n"
+            f"已提交 batch: {operation_status.get('committed_batches', 0)} 个\n"
+            f"最近 batch: {operation_status.get('latest_committed_batch') or '无'}\n"
+            f"待恢复事务: {operation_status.get('pending_operations', 0)} 个",
         )
 
     async def _list_archives(
@@ -102,15 +113,39 @@ class ArchiveCommand:
                 input_message.is_group if target == input_message.chat_id else None
             )
             result = await self.archive_manager.archive_manual(target, target_is_group)
+            status_line = (
+                f"会话 {target[:24]}… 日切完成。\n"
+                if result.archive_paths
+                else f"会话 {target[:24]}… 没有待日切消息。\n"
+            )
             return make_reply(
                 input_message,
-                f"会话 {target[:24]}… 归档完成。\n"
-                f"保留: {result.replay_count} 条（含今天全部）\n"
+                status_line + f"保留: {result.replay_count} 条（含今天全部）\n"
                 f"摘要: {'已生成' if result.summary_path else '无'}\n"
                 f"归档: {'已写入' if result.archive_path else '无文件'}",
             )
         except Exception as e:
             return make_reply(input_message, f"归档失败: {e}")
+
+    async def _run_snapshot(
+        self, input_message: InputMessage, chat_id: str
+    ) -> List[Dict[str, Any]]:
+        target = chat_id or input_message.chat_id
+        try:
+            target_is_group = (
+                input_message.is_group if target == input_message.chat_id else None
+            )
+            result = await self.archive_manager.archive_snapshot(
+                target, target_is_group
+            )
+            return make_reply(
+                input_message,
+                f"会话 {target[:24]}… 快照完成。\n"
+                f"快照: {'已写入' if result.archive_path else '无活动消息'}\n"
+                "当前 active history 未改变。",
+            )
+        except Exception as e:
+            return make_reply(input_message, f"快照失败: {e}")
 
     async def _clean_archives(
         self, input_message: InputMessage

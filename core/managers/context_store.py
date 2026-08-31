@@ -45,6 +45,13 @@ def _message_identity(message: Any) -> Optional[tuple[str, str]]:
     return None
 
 
+def _records_hash(messages: List[dict]) -> str:
+    payload = "".join(
+        json.dumps(message, ensure_ascii=False) + "\n" for message in messages
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 class ContextStore(ABC):
 
     @abstractmethod
@@ -65,6 +72,12 @@ class ContextStore(ABC):
     def delete(self, chat_id: str) -> None:
         """删除 chat_id 的所有持久化数据。"""
 
+    def replace(self, chat_id: str, messages: List[dict]) -> None:
+        """Atomically replace active history where the adapter supports it."""
+        self.delete(chat_id)
+        if messages:
+            self.flush(chat_id, messages)
+
     @abstractmethod
     def archive(self, chat_id: str, archive_ts: str) -> Optional[str]:
         """归档当前数据。返回归档标识符（如文件路径），无可归档数据则返回 None。"""
@@ -74,6 +87,26 @@ class ContextStore(ABC):
         self, chat_id: str, archive_ts: str, messages: List[dict]
     ) -> Optional[str]:
         """仅归档指定消息，活跃数据由调用方另行刷新。"""
+
+    def archive_batch(
+        self,
+        chat_id: str,
+        batch_id: str,
+        partition_date: str,
+        messages: List[dict],
+        records_hash: Optional[str] = None,
+    ) -> Optional[str]:
+        """Write or idempotently reuse one source-date archive batch."""
+        for archive in self.list_archives(chat_id):
+            path = archive.get("path") if isinstance(archive, dict) else None
+            if not path or batch_id not in Path(path).name:
+                continue
+            if records_hash is not None:
+                existing_hash = _records_hash(self.read_archive(path, 0))
+                if existing_hash != records_hash:
+                    raise RuntimeError(f"archive batch hash mismatch: {batch_id}")
+            return str(path)
+        return self.archive_messages(chat_id, f"{partition_date}.{batch_id}", messages)
 
     # ── 聊天类型元数据 ──
 
@@ -292,6 +325,17 @@ class JSONLContextStore(ContextStore):
             if path:
                 path.unlink(missing_ok=True)
 
+    def replace(self, chat_id: str, messages: List[dict]) -> None:
+        with self._acquire_file_lock(chat_id):
+            path = self._get_path(chat_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if messages:
+                self._write_full(path, messages)
+            else:
+                path.unlink(missing_ok=True)
+            with self._lock:
+                self._flushed[chat_id] = len(messages)
+
     def archive(self, chat_id: str, archive_ts: str) -> Optional[str]:
         with self._acquire_file_lock(chat_id):
             path = self._get_path(chat_id)
@@ -323,6 +367,42 @@ class JSONLContextStore(ContextStore):
                 chat_id[:12],
                 archive_path.name,
             )
+            return str(archive_path)
+
+    def archive_batch(
+        self,
+        chat_id: str,
+        batch_id: str,
+        partition_date: str,
+        messages: List[dict],
+        records_hash: Optional[str] = None,
+    ) -> Optional[str]:
+        if not messages:
+            return None
+        with self._acquire_file_lock(chat_id):
+            existing = (
+                [
+                    path
+                    for path in self._base_dir.iterdir()
+                    if path.name.startswith(f"{chat_id}.jsonl.archived.")
+                    and batch_id in path.name
+                ]
+                if self._base_dir.is_dir()
+                else []
+            )
+            if existing:
+                archive_path = sorted(existing)[0]
+                existing_records = self._load_jsonl(archive_path)
+                if (
+                    records_hash is not None
+                    and _records_hash(existing_records) != records_hash
+                ):
+                    raise RuntimeError(f"archive batch hash mismatch: {batch_id}")
+                return str(archive_path)
+
+            archive_path = self._archive_path(chat_id, f"{partition_date}.{batch_id}")
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            self._write_full(archive_path, messages)
             return str(archive_path)
 
     # ── 聊天类型 ──
@@ -573,6 +653,30 @@ class SQLiteContextStore(ContextStore):
             )
         self._archive_store.delete(chat_id)
 
+    def replace(self, chat_id: str, messages: List[dict]) -> None:
+        messages = deduplicate_history(messages)
+        rows = [
+            (
+                chat_id,
+                index,
+                self._storage_key(message, index),
+                json.dumps(message, ensure_ascii=False, sort_keys=True),
+            )
+            for index, message in enumerate(messages)
+        ]
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM context_messages WHERE chat_id = ?", (chat_id,)
+            )
+            if rows:
+                self._conn.executemany(
+                    """
+                    INSERT INTO context_messages (chat_id, seq, message_key, payload)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+
     def archive(self, chat_id: str, archive_ts: str) -> Optional[str]:
         messages = self.load(chat_id)
         if not messages:
@@ -586,6 +690,22 @@ class SQLiteContextStore(ContextStore):
     ) -> Optional[str]:
         return self._archive_store.archive_messages(
             chat_id, archive_ts, deduplicate_history(messages)
+        )
+
+    def archive_batch(
+        self,
+        chat_id: str,
+        batch_id: str,
+        partition_date: str,
+        messages: List[dict],
+        records_hash: Optional[str] = None,
+    ) -> Optional[str]:
+        return self._archive_store.archive_batch(
+            chat_id,
+            batch_id,
+            partition_date,
+            deduplicate_history(messages),
+            records_hash,
         )
 
     def list_archives(self, chat_id: str) -> List[dict]:
@@ -656,6 +776,12 @@ class MemoryContextStore(ContextStore):
 
     def delete(self, chat_id: str) -> None:
         self._data.pop(chat_id, None)
+
+    def replace(self, chat_id: str, messages: List[dict]) -> None:
+        if messages:
+            self._data[chat_id] = list(messages)
+        else:
+            self._data.pop(chat_id, None)
 
     def archive(self, chat_id: str, archive_ts: str) -> Optional[str]:
         self._data.pop(chat_id, None)

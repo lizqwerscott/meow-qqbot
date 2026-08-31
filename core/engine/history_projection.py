@@ -25,9 +25,19 @@ def visible_legacy_history(messages: Sequence[dict[str, Any]]) -> List[dict[str,
 
 
 def merge_timeline_visible_events(
-    messages: List[Any], events: Iterable[Any]
+    messages: List[Any],
+    events: Iterable[Any],
+    skip_event_ids: set[str] | None = None,
 ) -> List[Any]:
     """Materialize timeline-only visible events into legacy ChatMessage history."""
+    events = tuple(events)
+    event_by_key = {
+        (event.role, event.message_id): event
+        for event in events
+        if event.role in {"user", "assistant"}
+        and event.message_id
+        and getattr(event, "event_id", None)
+    }
     existing = {
         (message.role, message.message_id)
         for message in messages
@@ -35,10 +45,32 @@ def merge_timeline_visible_events(
         and not (message.role == "assistant" and message.tool_calls)
     }
     additions: list[ChatMessage] = []
+    enriched: list[Any] = []
+    for message in messages:
+        event = event_by_key.get((message.role, message.message_id))
+        if event is not None and not getattr(message, "event_id", None):
+            message = ChatMessage(
+                role=message.role,
+                content=message.content,
+                timestamp=message.timestamp,
+                message_id=message.message_id,
+                sender_id=message.sender_id,
+                name=message.name,
+                tool_call_id=message.tool_call_id,
+                tool_name=message.tool_name,
+                tool_calls=message.tool_calls,
+                reasoning_content=message.reasoning_content,
+                event_id=event.event_id,
+            )
+        enriched.append(message)
     for event in events:
         if event.role not in {"user", "assistant"} or not event.content:
             continue
+        if getattr(event, "event_id", None) in (skip_event_ids or set()):
+            continue
         message_id = event.message_id or event.event_id
+        if not message_id:
+            continue
         key = (event.role, message_id)
         if key in existing:
             continue
@@ -50,18 +82,19 @@ def merge_timeline_visible_events(
                 message_id=message_id,
                 sender_id=getattr(event, "sender_id", "") or None,
                 name="系统" if event.role == "assistant" else None,
+                event_id=event.event_id,
             )
         )
         existing.add(key)
     if not additions:
-        return messages
+        return enriched
 
-    original_positions = {id(message): index for index, message in enumerate(messages)}
-    merged = [*messages, *additions]
+    original_positions = {id(message): index for index, message in enumerate(enriched)}
+    merged = [*enriched, *additions]
     merged.sort(
         key=lambda message: (
             message.timestamp,
-            original_positions.get(id(message), len(messages)),
+            original_positions.get(id(message), len(enriched)),
         )
     )
     return merged

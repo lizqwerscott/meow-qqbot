@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -45,6 +46,10 @@ class ChatMessage:
     tool_name: Optional[str] = None
     tool_calls: Optional[List[Dict]] = None
     reasoning_content: Optional[str] = None
+    event_id: Optional[str] = None
+    record_id: Optional[str] = None
+    source_batch_id: Optional[str] = None
+    replayed_from_batch_id: Optional[str] = None
 
     def to_dict(self) -> Dict:
         if self.role == "tool":
@@ -83,6 +88,23 @@ class ChatMessage:
     def to_storage_dict(self) -> Dict:
         """生成 JSONL/archive 持久化记录，不改变发送给 LLM 的 wire 格式。"""
         data = self.to_dict()
+        if self.record_id is None:
+            self.record_id = f"record-v1:{uuid.uuid4().hex}"
+        if self.event_id is None:
+            if self.role == "user" and self.message_id:
+                self.event_id = f"user:{self.message_id}"
+            elif self.role == "tool" and self.tool_call_id:
+                self.event_id = f"tool:{self.tool_call_id}"
+            elif self.message_id:
+                self.event_id = f"{self.role}:{self.message_id}"
+            else:
+                self.event_id = f"active:{self.record_id}"
+        data["record_id"] = self.record_id
+        data["event_id"] = self.event_id
+        if self.source_batch_id:
+            data["source_batch_id"] = self.source_batch_id
+        if self.replayed_from_batch_id:
+            data["replayed_from_batch_id"] = self.replayed_from_batch_id
         if self.role == "tool":
             data["timestamp"] = self.timestamp
             data["tool_name"] = self.tool_name
@@ -107,6 +129,10 @@ class ChatMessage:
             tool_name=data.get("tool_name"),
             tool_calls=data.get("tool_calls"),
             reasoning_content=data.get("reasoning_content"),
+            event_id=data.get("event_id"),
+            record_id=data.get("record_id"),
+            source_batch_id=data.get("source_batch_id"),
+            replayed_from_batch_id=data.get("replayed_from_batch_id"),
         )
 
 
