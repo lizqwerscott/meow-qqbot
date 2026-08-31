@@ -31,6 +31,23 @@ ENGAGEMENT_RUNTIME_FIELDS = (
     "group_ambient_stale_quote_seconds",
 )
 
+_REMOVED_RUNTIME_FIELDS = frozenset(
+    {
+        "group_proactive_mode",
+        "group_proactive_active_chats",
+        "group_proactive_interval_seconds",
+        "group_proactive_jitter_seconds",
+        "group_proactive_active_hours_start",
+        "group_proactive_active_hours_end",
+        "group_proactive_timezone",
+        "group_proactive_cooldown_seconds",
+        "group_proactive_quiet_cooldown_seconds",
+        "group_proactive_window_seconds",
+        "group_proactive_max_turns_per_window",
+        "group_proactive_reservation_seconds",
+    }
+)
+
 _CHAT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
@@ -157,13 +174,19 @@ def validate_engagement_patch(
     unknown = set(patch) - set(ENGAGEMENT_RUNTIME_FIELDS)
     if unknown:
         raise _error("settings", f"unknown fields: {', '.join(sorted(unknown))}")
-    persisted_unknown = set(current_override) - set(ENGAGEMENT_RUNTIME_FIELDS)
+    persisted_unknown = (
+        set(current_override) - set(ENGAGEMENT_RUNTIME_FIELDS) - _REMOVED_RUNTIME_FIELDS
+    )
     if persisted_unknown:
         raise _error(
             "settings",
             f"unknown persisted fields: {', '.join(sorted(persisted_unknown))}",
         )
-    merged_override = dict(current_override)
+    merged_override = {
+        key: value
+        for key, value in current_override.items()
+        if key not in _REMOVED_RUNTIME_FIELDS
+    }
     merged_override.update(patch)
     merged = dict(base)
     merged.update(merged_override)

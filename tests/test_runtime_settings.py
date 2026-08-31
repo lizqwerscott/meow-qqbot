@@ -162,6 +162,36 @@ async def test_runtime_settings_target_remove_preserves_metadata(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_runtime_settings_drops_removed_proactive_overrides_on_initialize(
+    tmp_path,
+):
+    store = RuntimeSettingsStore(str(tmp_path / "runtime.sqlite3"))
+    await store.commit(
+        "engagement",
+        expected_revision=0,
+        overrides={
+            "group_proactive_mode": "active",
+            "group_proactive_active_chats": ["old-group"],
+        },
+        source="legacy",
+        change={"action": "legacy"},
+    )
+    adapter = EngagementSettingsAdapter(
+        _base_config(),
+        store,
+        capability_enabled=True,
+        verifier=InMemoryGroupTargetVerifier(),
+    )
+    coordinator = RuntimeSettingsCoordinator(store, adapter)
+
+    snapshot = await coordinator.initialize()
+
+    assert snapshot.config.group_ambient_mode == "off"
+    assert snapshot.overrides == {}
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
 async def test_runtime_settings_migrates_v1_audit_schema(tmp_path):
     path = tmp_path / "runtime.sqlite3"
     connection = sqlite3.connect(path)
