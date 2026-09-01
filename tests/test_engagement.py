@@ -5,6 +5,8 @@ import pytest
 from core.engine.ambient_delivery import decide_ambient_delivery
 from core.engine.engagement_config import (
     EngagementConfig,
+    GroupReplySettings,
+    get_group_reply_settings,
     normalize_engagement_config,
 )
 from core.engine.group_engagement import (
@@ -52,6 +54,36 @@ def test_normalize_active_chat_allowlist():
     assert media_config.media_batch_max_download_bytes == 2 * 1024 * 1024
     assert media_config.media_batch_capability_timeout_seconds == 45.0
 
+
+def test_group_reply_defaults_and_overrides():
+    config = normalize_engagement_config(
+        {
+            "group_reply_chat_overrides": {
+                "chat-1": {"trigger_mode": "reply_necessity", "frequency": 0.8}
+            }
+        }
+    )
+
+    assert config.group_reply_trigger_mode == "frequency"
+    assert config.group_reply_frequency == 0.25
+    assert get_group_reply_settings(config, "chat-1").trigger_mode == "reply_necessity"
+    assert get_group_reply_settings(config, "chat-1").frequency == 0.8
+    assert get_group_reply_settings(config, "chat-2").frequency == 0.25
+
+
+def test_group_reply_frequency_rejects_unsupported_positive_values():
+    config = normalize_engagement_config(
+        {
+            "group_reply_frequency": 0.1,
+            "group_reply_chat_overrides": {
+                "chat-1": {"trigger_mode": "frequency", "frequency": 0.1}
+            },
+        }
+    )
+
+    assert config.group_reply_frequency == 0.25
+    assert get_group_reply_settings(config, "chat-1").frequency == 0.25
+
     tool = decide_ambient_delivery(
         "answer", delivery_mode="automatic", tool_delivered=True, reply_anchor_id="m1"
     )
@@ -95,6 +127,7 @@ def active_config(**overrides) -> EngagementConfig:
         "group_ambient_window_seconds": 300.0,
         "group_ambient_max_age_seconds": 600.0,
         "group_ambient_min_messages": 2,
+        "group_reply_frequency": 0.5,
     }
     values.update(overrides)
     return EngagementConfig(**values)
@@ -119,6 +152,94 @@ async def test_active_engagement_reserves_and_applies_cooldown():
     now[0] += 31
     allowed_again = await manager.evaluate("chat", batch=batch)
     assert allowed_again.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_frequency_override_controls_batch_threshold():
+    now = [100.0]
+    manager = GroupEngagementManager(
+        active_config(
+            group_ambient_cooldown_seconds=0,
+            group_reply_chat_overrides=(
+                ("chat", GroupReplySettings(trigger_mode="frequency", frequency=0.25)),
+            ),
+        ),
+        clock=lambda: now[0],
+    )
+
+    below = await manager.evaluate(
+        "chat",
+        batch=[
+            pending("one", "hello", now[0]),
+            pending("two", "hello", now[0]),
+            pending("three", "hello", now[0]),
+        ],
+    )
+    assert below.reason == "below_threshold"
+
+    allowed = await manager.evaluate(
+        "chat",
+        batch=[
+            pending("one", "hello", now[0]),
+            pending("two", "hello", now[0]),
+            pending("three", "hello", now[0]),
+            pending("four", "hello", now[0]),
+        ],
+    )
+    assert allowed.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_reply_necessity_bypasses_batch_threshold_and_can_cancel():
+    now = [100.0]
+    manager = GroupEngagementManager(
+        active_config(
+            group_reply_trigger_mode="reply_necessity",
+            group_ambient_cooldown_seconds=0,
+        ),
+        clock=lambda: now[0],
+    )
+
+    decision = await manager.evaluate("chat", batch=[pending("one", "hello", now[0])])
+
+    assert decision.allowed is True
+    assert decision.reason == "necessity_candidate"
+    assert manager.phase("chat") is EngagementPhase.RESERVED
+    assert manager.cancel(decision) is True
+    assert manager.phase("chat") is EngagementPhase.IDLE
+    assert (
+        await manager.evaluate("chat", batch=[pending("two", "hello", now[0])])
+    ).allowed
+
+
+@pytest.mark.asyncio
+async def test_zero_frequency_disables_even_single_questions():
+    manager = GroupEngagementManager(
+        active_config(group_reply_frequency=0), clock=lambda: 100.0
+    )
+
+    decision = await manager.evaluate(
+        "chat", batch=[pending("question", "你好吗？", 100.0)]
+    )
+
+    assert decision.allowed is False
+    assert decision.shadow is False
+    assert decision.reason == "frequency_disabled"
+
+
+@pytest.mark.asyncio
+async def test_expired_reservation_is_released_when_start_fails():
+    now = [100.0]
+    manager = GroupEngagementManager(
+        active_config(group_ambient_max_age_seconds=10), clock=lambda: now[0]
+    )
+    decision = await manager.evaluate(
+        "chat", batch=[pending("message", "hello", now[0])]
+    )
+
+    now[0] = 111.0
+    assert await manager.start(decision) is False
+    assert manager.phase("chat") is EngagementPhase.IDLE
 
 
 @pytest.mark.asyncio
@@ -149,7 +270,8 @@ async def test_single_question_and_budget_rules():
 async def test_shadow_and_generation_isolation():
     now = [100.0]
     shadow = GroupEngagementManager(
-        EngagementConfig(group_ambient_mode="shadow"), clock=lambda: now[0]
+        EngagementConfig(group_ambient_mode="shadow", group_reply_frequency=0.5),
+        clock=lambda: now[0],
     )
     decision = await shadow.evaluate(
         "chat", batch=[pending("one", "a", now[0]), pending("two", "b", now[0])]

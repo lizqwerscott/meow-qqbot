@@ -4,13 +4,14 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
+from math import ceil
 from typing import Callable, Optional, Sequence
 
 from core.engine.ambient_delivery import (
     AmbientDeliveryDecision,
     decide_ambient_delivery,
 )
-from core.engine.engagement_config import EngagementConfig
+from core.engine.engagement_config import EngagementConfig, get_group_reply_settings
 
 
 class EngagementPhase(StrEnum):
@@ -101,10 +102,21 @@ class GroupEngagementManager:
         ]
         return cls._message_id((questions or text_items or list(batch))[-1])
 
-    def _candidate_reason(self, batch: Sequence) -> str:
+    def _candidate_reason(self, chat_id: str, batch: Sequence) -> str:
         if not batch:
             return "empty_batch"
-        if len(batch) >= self.config.group_ambient_min_messages:
+        reply_settings = get_group_reply_settings(self.config, chat_id)
+        if reply_settings.trigger_mode == "frequency" and reply_settings.frequency <= 0:
+            return "frequency_disabled"
+        if reply_settings.trigger_mode == "reply_necessity":
+            return "necessity_candidate"
+        required_messages = self.config.group_ambient_min_messages
+        if reply_settings.trigger_mode == "frequency":
+            required_messages = max(
+                required_messages,
+                int(ceil(1.0 / reply_settings.frequency)),
+            )
+        if len(batch) >= required_messages:
             return "batch_threshold"
         if self.config.group_ambient_allow_single_question and any(
             "?" in self._content(item) or "？" in self._content(item) for item in batch
@@ -138,12 +150,12 @@ class GroupEngagementManager:
                 chat_id, generation, False, False, "disabled", anchor, expires_at
             )
         if self.config.group_ambient_mode == "shadow":
-            reason = self._candidate_reason(batch)
+            reason = self._candidate_reason(chat_id, batch)
             return GroupEngagementDecision(
                 chat_id,
                 generation,
                 False,
-                reason != "below_threshold",
+                reason not in {"below_threshold", "frequency_disabled"},
                 reason,
                 anchor,
                 expires_at,
@@ -172,8 +184,8 @@ class GroupEngagementManager:
             return GroupEngagementDecision(
                 chat_id, generation, False, False, "cooldown", anchor, expires_at
             )
-        reason = self._candidate_reason(batch)
-        if reason == "below_threshold":
+        reason = self._candidate_reason(chat_id, batch)
+        if reason in {"below_threshold", "frequency_disabled"}:
             return GroupEngagementDecision(
                 chat_id, generation, False, False, reason, anchor, expires_at
             )
@@ -200,13 +212,26 @@ class GroupEngagementManager:
         """Consume one budget turn exactly when the provider request starts."""
         state = self._sessions.get(decision.chat_id)
         now = self._clock()
-        if state is None or state.reservation != decision or now >= decision.expires_at:
+        if state is None or state.reservation != decision:
+            return False
+        if now >= decision.expires_at:
+            self.cancel(decision)
             return False
         if state.provider_started:
             return True
         state.provider_started = True
         state.turns_in_window += 1
         state.phase = EngagementPhase.THINKING
+        return True
+
+    def cancel(self, decision: GroupEngagementDecision) -> bool:
+        """Release a reservation that never reached the provider."""
+        state = self._sessions.get(decision.chat_id)
+        if state is None or state.reservation != decision:
+            return False
+        state.reservation = None
+        state.provider_started = False
+        state.phase = EngagementPhase.IDLE
         return True
 
     async def complete(

@@ -6,9 +6,14 @@ import inspect
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from math import isfinite
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
-from core.engine.engagement_config import EngagementConfig, normalize_engagement_config
+from core.engine.engagement_config import (
+    GROUP_REPLY_FREQUENCY_MIN,
+    EngagementConfig,
+    normalize_engagement_config,
+)
 from core.runtime_settings.store import (
     EngagementTarget,
     RuntimeSettingsRecord,
@@ -29,6 +34,10 @@ ENGAGEMENT_RUNTIME_FIELDS = (
     "group_ambient_allow_single_media",
     "group_ambient_quote",
     "group_ambient_stale_quote_seconds",
+    "group_reply_trigger_mode",
+    "group_reply_necessity_threshold",
+    "group_reply_frequency",
+    "group_reply_chat_overrides",
 )
 
 _REMOVED_RUNTIME_FIELDS = frozenset(
@@ -103,6 +112,13 @@ class EngagementSnapshot:
         values["group_ambient_active_chats"] = list(
             values["group_ambient_active_chats"]
         )
+        values["group_reply_chat_overrides"] = {
+            chat_id: {
+                "trigger_mode": settings.trigger_mode,
+                "frequency": settings.frequency,
+            }
+            for chat_id, settings in values["group_reply_chat_overrides"]
+        }
         return {
             "revision": self.revision,
             "overrides": dict(self.overrides),
@@ -163,6 +179,58 @@ def _validate_bool(field: str, value: Any) -> bool:
     return value
 
 
+def _validate_reply_frequency(field: str, value: Any) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not isfinite(value)
+        or not 0 <= value <= 1
+        or 0 < value < GROUP_REPLY_FREQUENCY_MIN
+    ):
+        raise _error(
+            field,
+            "must be 0 or between " f"{GROUP_REPLY_FREQUENCY_MIN} and 1",
+        )
+    return float(value)
+
+
+def _validate_group_reply_overrides(value: Any) -> dict[str, dict[str, Any]]:
+    if value in (None, {}):
+        return {}
+    if not isinstance(value, Mapping):
+        raise _error("group_reply_chat_overrides", "must be an object")
+    if len(value) > 100:
+        raise _error("group_reply_chat_overrides", "at most 100 groups are allowed")
+
+    result: dict[str, dict[str, Any]] = {}
+    for chat_id, settings in value.items():
+        if not isinstance(chat_id, str) or not _CHAT_ID_RE.fullmatch(chat_id):
+            raise _error("group_reply_chat_overrides", "contains an invalid group ID")
+        if not isinstance(settings, Mapping):
+            raise _error(f"group_reply_chat_overrides[{chat_id}]", "must be an object")
+        unknown = set(settings) - {"trigger_mode", "frequency"}
+        if unknown:
+            raise _error(
+                f"group_reply_chat_overrides[{chat_id}]",
+                f"unknown fields: {', '.join(sorted(unknown))}",
+            )
+        trigger_mode = settings.get("trigger_mode", "frequency")
+        if trigger_mode not in {"frequency", "reply_necessity"}:
+            raise _error(
+                f"group_reply_chat_overrides[{chat_id}].trigger_mode",
+                "must be frequency or reply_necessity",
+            )
+        frequency = _validate_reply_frequency(
+            f"group_reply_chat_overrides[{chat_id}].frequency",
+            settings.get("frequency", 0.25),
+        )
+        result[chat_id] = {
+            "trigger_mode": trigger_mode,
+            "frequency": frequency,
+        }
+    return result
+
+
 def validate_engagement_patch(
     base: Mapping[str, Any],
     current_override: Mapping[str, Any],
@@ -191,6 +259,24 @@ def validate_engagement_patch(
     merged = dict(base)
     merged.update(merged_override)
     clean: dict[str, Any] = {}
+    reply_trigger_mode = merged.get("group_reply_trigger_mode", "frequency")
+    if reply_trigger_mode not in {"frequency", "reply_necessity"}:
+        raise _error("group_reply_trigger_mode", "must be frequency or reply_necessity")
+    clean["group_reply_trigger_mode"] = reply_trigger_mode
+    clean["group_reply_necessity_threshold"] = _validate_number(
+        "group_reply_necessity_threshold",
+        merged.get("group_reply_necessity_threshold", 80),
+        minimum=0,
+        maximum=100,
+        integer=True,
+    )
+    clean["group_reply_frequency"] = _validate_reply_frequency(
+        "group_reply_frequency",
+        merged.get("group_reply_frequency", 0.25),
+    )
+    clean["group_reply_chat_overrides"] = _validate_group_reply_overrides(
+        merged.get("group_reply_chat_overrides", {})
+    )
     ambient_mode = merged.get("group_ambient_mode", "off")
     if ambient_mode not in {"off", "shadow", "active"}:
         raise _error("group_ambient_mode", "must be off, shadow, or active")

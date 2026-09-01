@@ -37,6 +37,7 @@ from core.engine.delivery_ledger import (
     DeliveryRecoveryResult,
 )
 from core.engine.delivery_prompt_contract import DeliveryPromptContract
+from core.engine.engagement_config import get_group_reply_settings
 from core.engine.group_engagement import GroupEngagementManager
 from core.engine.mode_router import (
     ActiveWorkPlanHint,
@@ -250,7 +251,7 @@ class AgentEngine:
         self.group_engagement = GroupEngagementManager(engagement_config)
         self.reply_necessity_gate = ReplyNecessityGate(
             threshold=engagement_config.group_reply_necessity_threshold,
-            frequency_factor=engagement_config.group_reply_frequency,
+            frequency_factor=1.0,
         )
         self.routing_metrics = RoutingMetrics()
         self.routing_audit_store = RoutingAuditStore()
@@ -435,9 +436,7 @@ class AgentEngine:
                 self.reply_necessity_gate.threshold = float(
                     config.group_reply_necessity_threshold
                 )
-                self.reply_necessity_gate.frequency_factor = max(
-                    0.0, min(1.0, float(config.group_reply_frequency))
-                )
+                self.reply_necessity_gate.frequency_factor = 1.0
             self.mode_routing_enabled = config.mode_routing_enabled
 
     def set_group_target_observer(self, observer) -> None:
@@ -1080,6 +1079,9 @@ class AgentEngine:
         ambient = {
             "mode": engagement_config.group_ambient_mode,
             "active_chats": len(engagement_config.group_ambient_active_chats),
+            "reply_trigger_mode": engagement_config.group_reply_trigger_mode,
+            "reply_frequency": engagement_config.group_reply_frequency,
+            "reply_chat_overrides": len(engagement_config.group_reply_chat_overrides),
             "idle_ms": engagement_config.group_ambient_idle_ms,
             "cooldown_seconds": engagement_config.group_ambient_cooldown_seconds,
             "quiet_cooldown_seconds": engagement_config.group_ambient_quiet_cooldown_seconds,
@@ -1905,7 +1907,13 @@ class AgentEngine:
                             decision = await self._get_group_engagement().evaluate(
                                 chat_id, batch=work.items
                             )
-                            if getattr(self, "mode_routing_enabled", False) and (
+                            reply_settings = get_group_reply_settings(
+                                self._get_group_engagement().config, chat_id
+                            )
+                            if (
+                                reply_settings.trigger_mode == "reply_necessity"
+                                or getattr(self, "mode_routing_enabled", False)
+                            ) and (
                                 decision.allowed
                                 or decision.shadow
                                 or decision.reason == "below_threshold"
@@ -1922,15 +1930,21 @@ class AgentEngine:
                                         active_chat=True,
                                         mode="active",
                                         window_budget_remaining=1,
+                                        frequency_factor=1.0,
                                     )
                                 )
-                                if not necessity.admitted:
+                                if (
+                                    reply_settings.trigger_mode == "reply_necessity"
+                                    and not necessity.admitted
+                                ):
                                     _log.info(
                                         "ambient reply necessity skipped [%s..] reason=%s score=%s",
                                         chat_id[:12],
                                         necessity.reason,
                                         necessity.score,
                                     )
+                                    if decision.allowed:
+                                        self._get_group_engagement().cancel(decision)
                                     decision = replace(
                                         decision,
                                         allowed=False,

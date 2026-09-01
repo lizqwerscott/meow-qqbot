@@ -20,7 +20,7 @@ from core.engine.delivery_ledger import (
     DeliveryReceipt,
 )
 from core.engine.engagement_config import EngagementConfig
-from core.engine.group_engagement import GroupEngagementManager
+from core.engine.group_engagement import EngagementPhase, GroupEngagementManager
 from core.engine.mode_router import ModeRouter
 from core.engine.planner_control import PlannerAction, PlannerControl
 from core.engine.prompt_builder import PromptBuildResult
@@ -2741,7 +2741,7 @@ async def test_consumer_collects_private_same_intent_messages_into_one_turn():
 
 
 @pytest.mark.asyncio
-async def test_consumer_records_necessity_score_for_below_threshold_ambient_turn(
+async def test_consumer_releases_necessity_reservation_when_score_is_below_threshold(
     tmp_path,
 ):
     engine = make_engine(FakeToolLoop())
@@ -2751,6 +2751,7 @@ async def test_consumer_records_necessity_score_for_below_threshold_ambient_turn
             group_ambient_mode="active",
             group_ambient_active_chats=("chat",),
             group_ambient_min_messages=2,
+            group_reply_trigger_mode="reply_necessity",
             group_ambient_cooldown_seconds=0,
             group_ambient_quiet_cooldown_seconds=0,
         )
@@ -2779,6 +2780,7 @@ async def test_consumer_records_necessity_score_for_below_threshold_ambient_turn
     assert records[0].necessity_score == 0
     assert records[0].necessity_threshold == 80
     assert records[0].necessity_reason == "below_threshold"
+    assert engine.group_engagement.phase("chat") is EngagementPhase.IDLE
     await engine.routing_audit_store.close()
 
 

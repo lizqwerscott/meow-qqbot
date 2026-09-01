@@ -826,12 +826,20 @@ tr:hover td {
 .selected-targets [data-selected-list] { display: flex; flex-wrap: wrap; gap: 6px; }
 .selected-targets-empty { color: #aab2c0; font-size: 12px; }
 .target-chip { background: #eef3ff; border: 1px solid #dce5ff; border-radius: 6px; color: var(--accent); font-size: 11px; max-width: 100%; overflow-wrap: anywhere; padding: 5px 8px; }
+.group-policy-options { display: grid; gap: 8px; }
+.group-policy-option { align-items: center; background: #f8faff; border: 1px solid #e2e7f0; border-radius: 10px; display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr) 170px 110px auto; padding: 10px 12px; }
+.group-policy-name { display: grid; gap: 3px; min-width: 0; }
+.group-policy-name strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
+.group-policy-name code { color: var(--text-secondary); overflow-wrap: anywhere; }
+.group-policy-option label { color: var(--text-secondary); display: grid; font-size: 11px; gap: 4px; }
+.group-policy-option select, .group-policy-option input { background: #fff; border: 1px solid #dfe5ef; border-radius: 7px; color: var(--text); font: inherit; min-width: 0; padding: 7px 8px; width: 100%; }
+.policy-override-badge { background: #e7f7f2; border-radius: 999px; color: #197768; font-size: 10px; padding: 4px 7px; white-space: nowrap; }
 
 .settings-fields { display: grid; gap: 16px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .settings-fields-schedule { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .settings-fields .field-wide { grid-column: span 2; }
 .settings-fields label { color: var(--text-secondary); display: grid; font-size: 12px; gap: 6px; }
-.settings-fields input { background: #fff; border: 1px solid #dfe5ef; border-radius: 7px; color: var(--text); font: inherit; min-width: 0; padding: 9px 10px; width: 100%; }
+.settings-fields input, .settings-fields select { background: #fff; border: 1px solid #dfe5ef; border-radius: 7px; color: var(--text); font: inherit; min-width: 0; padding: 9px 10px; width: 100%; }
 .settings-fields input:focus, .search-field:focus-within, .advanced-inline input:focus { border-color: var(--accent-light); box-shadow: 0 0 0 3px rgba(67, 97, 238, .11); outline: 0; }
 .input-with-suffix { align-items: center; display: flex; position: relative; }
 .input-with-suffix input { padding-right: 34px; }
@@ -900,6 +908,8 @@ tr:hover td {
     .target-option-meta { align-items: flex-end; }
     .settings-fields, .settings-fields-schedule { grid-template-columns: 1fr; }
     .settings-fields .field-wide { grid-column: auto; }
+    .group-policy-option { align-items: stretch; grid-template-columns: 1fr 1fr; }
+    .group-policy-name, .policy-override-badge { grid-column: span 2; }
     .settings-form-actions { align-items: stretch; flex-direction: column; }
     .settings-form-actions .btn { width: 100%; }
     .advanced-inline { align-items: stretch; flex-direction: column; }

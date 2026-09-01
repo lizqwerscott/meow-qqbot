@@ -51,7 +51,31 @@
     </section>
 
     <section class="settings-card">
-        <div class="settings-card-heading"><div><span class="section-kicker">03</span><h3>消息合批</h3><p>收到消息后等待一小段时间，让连续消息合并后再判断。</p></div></div>
+        <div class="settings-card-heading"><div><span class="section-kicker">03</span><h3>触发策略默认值</h3><p>没有单独配置的群聊使用这里的默认值。频率越低，频率模式越少进入 Planner；必要性模式按评分阈值判断。</p></div></div>
+        <div class="settings-fields">
+            <label>默认触发模式<select name="group_reply_trigger_mode"><option value="frequency" {% if snapshot.effective.group_reply_trigger_mode == "frequency" %}selected{% endif %}>频率触发</option><option value="reply_necessity" {% if snapshot.effective.group_reply_trigger_mode == "reply_necessity" %}selected{% endif %}>必要性触发</option></select></label>
+            <label>默认回复频率<span class="input-with-suffix"><input type="number" name="group_reply_frequency" min="0" max="1" step="0.025" value="{{ snapshot.effective.group_reply_frequency }}"><em>0=关闭，≥0.125</em></span></label>
+            <label>必要性评分阈值<input type="number" name="group_reply_necessity_threshold" min="0" max="100" value="{{ snapshot.effective.group_reply_necessity_threshold }}"></label>
+        </div>
+    </section>
+
+    <section class="settings-card">
+        <div class="settings-card-heading"><div><span class="section-kicker">04</span><h3>按群聊覆盖触发策略</h3><p>列表中的群聊都可以单独配置；未覆盖的群聊使用上面的默认值。必要性模式中的频率字段不参与评分。</p></div></div>
+        <div class="group-policy-options">
+            {% for group in group_catalog %}
+            <div class="group-policy-option" data-group-policy>
+                <div class="group-policy-name"><strong>{{ group.display_name }}</strong><code>{{ group.chat_id }}</code></div>
+                <input type="hidden" name="group_reply_chat_ids" value="{{ group.chat_id }}">
+                <label>模式<select name="group_reply_chat_modes"><option value="frequency" {% if group.reply_trigger_mode == "frequency" %}selected{% endif %}>频率触发</option><option value="reply_necessity" {% if group.reply_trigger_mode == "reply_necessity" %}selected{% endif %}>必要性触发</option></select></label>
+                <label>频率<input type="number" name="group_reply_chat_frequencies" min="0" max="1" step="0.025" value="{{ group.reply_frequency }}"></label>
+                {% if group.reply_settings_overridden %}<span class="policy-override-badge">已覆盖</span>{% endif %}
+            </div>
+            {% else %}<div class="empty-state">还没有可配置的群聊。收到群消息后会出现在这里。</div>{% endfor %}
+        </div>
+    </section>
+
+    <section class="settings-card">
+        <div class="settings-card-heading"><div><span class="section-kicker">05</span><h3>消息合批</h3><p>收到消息后等待一小段时间，让连续消息合并后再判断。</p></div></div>
         <div class="settings-fields">
             <label>静默等待<span class="input-with-suffix"><input type="number" name="idle_ms" min="0" max="120000" value="{{ snapshot.effective.group_ambient_idle_ms }}"><em>毫秒</em></span></label>
             <label>最少消息数<input type="number" name="min_messages" min="1" max="100" value="{{ snapshot.effective.group_ambient_min_messages }}"></label>
@@ -60,7 +84,7 @@
     </section>
 
     <section class="settings-card">
-        <div class="settings-card-heading"><div><span class="section-kicker">04</span><h3>回复频率</h3><p>避免短时间内重复回复同一个群聊。</p></div></div>
+        <div class="settings-card-heading"><div><span class="section-kicker">06</span><h3>回复频率</h3><p>避免短时间内重复回复同一个群聊。</p></div></div>
         <div class="settings-fields">
             <label>正常冷却<span class="input-with-suffix"><input type="number" name="cooldown_seconds" min="0" max="86400" step="0.1" value="{{ snapshot.effective.group_ambient_cooldown_seconds }}"><em>秒</em></span></label>
             <label>静默冷却<span class="input-with-suffix"><input type="number" name="quiet_cooldown_seconds" min="0" max="86400" step="0.1" value="{{ snapshot.effective.group_ambient_quiet_cooldown_seconds }}"><em>秒</em></span></label>
@@ -70,7 +94,7 @@
     </section>
 
     <section class="settings-card">
-        <div class="settings-card-heading"><div><span class="section-kicker">05</span><h3>单条消息例外</h3><p>控制只有一条消息时，哪些内容可以直接进入回复判断。</p></div></div>
+        <div class="settings-card-heading"><div><span class="section-kicker">07</span><h3>单条消息例外</h3><p>控制只有一条消息时，哪些内容可以直接进入回复判断。</p></div></div>
         <div class="settings-fields settings-checkboxes">
             <label><input type="checkbox" name="allow_single_question" value="true" {% if snapshot.effective.group_ambient_allow_single_question %}checked{% endif %}>允许单条问题</label>
             <label><input type="checkbox" name="allow_single_media" value="true" {% if snapshot.effective.group_ambient_allow_single_media %}checked{% endif %}>允许单条图片/媒体</label>

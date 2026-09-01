@@ -101,6 +101,28 @@ async def test_runtime_settings_cas_and_rollback(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"group_reply_frequency": 0.1},
+        {
+            "group_reply_chat_overrides": {
+                "g1": {"trigger_mode": "frequency", "frequency": 0.1}
+            }
+        },
+    ],
+)
+async def test_runtime_settings_rejects_unsupported_reply_frequency(tmp_path, patch):
+    coordinator = await _coordinator(tmp_path)
+
+    with pytest.raises(ValueError, match="must be 0 or between 0.125 and 1"):
+        await coordinator.update(expected_revision=0, patch=patch)
+
+    assert coordinator.snapshot().revision == 0
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
 async def test_runtime_settings_persist_failure_restores_old_snapshot(tmp_path):
     coordinator = await _coordinator(tmp_path)
     store = coordinator._store
@@ -305,6 +327,12 @@ async def test_settings_webui_updates_with_token_and_csrf(tmp_path):
                 "max_turns_per_window": "4",
                 "max_age_seconds": "600",
                 "min_messages": "2",
+                "group_reply_trigger_mode": "frequency",
+                "group_reply_frequency": "0.5",
+                "group_reply_necessity_threshold": "80",
+                "group_reply_chat_ids": ["g1", "g2"],
+                "group_reply_chat_modes": ["reply_necessity", "frequency"],
+                "group_reply_chat_frequencies": ["0.8", "0.3"],
                 "allow_single_question": "true",
                 "stale_quote_seconds": "120",
             },
@@ -312,6 +340,16 @@ async def test_settings_webui_updates_with_token_and_csrf(tmp_path):
     assert response.status_code == 303
     assert coordinator.snapshot().config.group_ambient_mode == "shadow"
     assert coordinator.snapshot().config.group_ambient_active_chats == ("g1", "g2")
+    assert (
+        dict(coordinator.snapshot().config.group_reply_chat_overrides)[
+            "g1"
+        ].trigger_mode
+        == "reply_necessity"
+    )
+    assert (
+        dict(coordinator.snapshot().config.group_reply_chat_overrides)["g2"].frequency
+        == 0.3
+    )
     await coordinator.close()
 
 

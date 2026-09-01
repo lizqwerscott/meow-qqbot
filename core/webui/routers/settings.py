@@ -11,6 +11,7 @@ import time
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from core.engine.engagement_config import get_group_reply_settings
 from core.runtime_settings import RuntimeSettingsConflict, RuntimeSettingsDegraded
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -160,8 +161,10 @@ async def _group_catalog(request: Request, targets, snapshot) -> list[dict]:
         target.chat_id for target in targets if target.verification_status != "removed"
     )
     catalog = []
+    configured_reply_settings = dict(snapshot.config.group_reply_chat_overrides)
     for chat_id in sorted(group_ids):
         target = target_by_id.get(chat_id)
+        reply_settings = get_group_reply_settings(snapshot.config, chat_id)
         catalog.append(
             {
                 "chat_id": chat_id,
@@ -177,6 +180,9 @@ async def _group_catalog(request: Request, targets, snapshot) -> list[dict]:
                     target.last_observed_at if target is not None else None
                 ),
                 "selected": chat_id in snapshot.config.group_ambient_active_chats,
+                "reply_trigger_mode": reply_settings.trigger_mode,
+                "reply_frequency": reply_settings.frequency,
+                "reply_settings_overridden": chat_id in configured_reply_settings,
             }
         )
     return catalog
@@ -208,6 +214,12 @@ async def engagement_update(
     max_turns_per_window: int = Form(...),
     max_age_seconds: float = Form(...),
     min_messages: int = Form(...),
+    group_reply_trigger_mode: str = Form("frequency"),
+    group_reply_frequency: float = Form(0.25),
+    group_reply_necessity_threshold: int = Form(80),
+    group_reply_chat_ids: list[str] = Form([]),
+    group_reply_chat_modes: list[str] = Form([]),
+    group_reply_chat_frequencies: list[float] = Form([]),
     allow_single_question: bool = Form(False),
     allow_single_media: bool = Form(False),
     quote: bool = Form(False),
@@ -217,6 +229,25 @@ async def engagement_update(
     coordinator = _coordinator(request)
     targets = await coordinator.targets()
     active_chat_ids = _chat_ids(active_chats)
+    if not (
+        len(group_reply_chat_ids)
+        == len(group_reply_chat_modes)
+        == len(group_reply_chat_frequencies)
+    ):
+        raise HTTPException(
+            status_code=422, detail="group reply settings are malformed"
+        )
+    reply_overrides = {
+        chat_id: {
+            "trigger_mode": trigger_mode,
+            "frequency": frequency,
+        }
+        for chat_id, trigger_mode, frequency in zip(
+            group_reply_chat_ids,
+            group_reply_chat_modes,
+            group_reply_chat_frequencies,
+        )
+    }
     patch = {
         "group_ambient_mode": mode,
         "group_ambient_active_chats": active_chat_ids,
@@ -231,6 +262,10 @@ async def engagement_update(
         "group_ambient_allow_single_media": allow_single_media,
         "group_ambient_quote": quote,
         "group_ambient_stale_quote_seconds": stale_quote_seconds,
+        "group_reply_trigger_mode": group_reply_trigger_mode,
+        "group_reply_frequency": group_reply_frequency,
+        "group_reply_necessity_threshold": group_reply_necessity_threshold,
+        "group_reply_chat_overrides": reply_overrides,
     }
     if mode == "active" and not _consume_nonce(
         request, active_nonce, revision, targets

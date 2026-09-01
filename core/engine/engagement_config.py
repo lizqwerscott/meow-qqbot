@@ -2,7 +2,10 @@
 
 import logging
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Mapping
+
+GROUP_REPLY_FREQUENCY_MIN = 0.125
 
 
 @dataclass(frozen=True)
@@ -19,8 +22,10 @@ class EngagementConfig:
     chat_search_enabled: bool = True
     planner_wait_max_seconds: int = 300
     planner_max_consecutive_waits: int = 2
+    group_reply_trigger_mode: str = "frequency"
     group_reply_necessity_threshold: int = 80
-    group_reply_frequency: float = 1.0
+    group_reply_frequency: float = 0.25
+    group_reply_chat_overrides: tuple[tuple[str, "GroupReplySettings"], ...] = ()
     group_ambient_mode: str = "off"
     group_ambient_active_chats: tuple[str, ...] = ()
     group_ambient_idle_ms: int = 1000
@@ -43,7 +48,80 @@ class EngagementConfig:
     media_batch_capability_timeout_seconds: float = 120.0
 
 
+@dataclass(frozen=True)
+class GroupReplySettings:
+    trigger_mode: str = "frequency"
+    frequency: float = 0.25
+
+
 _DEFAULTS = EngagementConfig()
+
+
+def get_group_reply_settings(
+    config: EngagementConfig, chat_id: str
+) -> GroupReplySettings:
+    """Return the per-group reply policy, falling back to global defaults."""
+    for configured_chat_id, settings in config.group_reply_chat_overrides:
+        if configured_chat_id == chat_id:
+            return settings
+    return GroupReplySettings(
+        trigger_mode=config.group_reply_trigger_mode,
+        frequency=config.group_reply_frequency,
+    )
+
+
+def _valid_reply_frequency(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and isfinite(value)
+        and 0 <= value <= 1
+        and (value == 0 or value >= GROUP_REPLY_FREQUENCY_MIN)
+    )
+
+
+def _group_reply_overrides(
+    raw: Mapping[str, Any],
+    logger: logging.Logger,
+) -> tuple[tuple[str, GroupReplySettings], ...]:
+    value = raw.get("group_reply_chat_overrides", {})
+    if value in (None, {}):
+        return ()
+    if not isinstance(value, Mapping):
+        logger.warning("[ai].group_reply_chat_overrides 无效，使用空的群聊覆盖配置")
+        return ()
+
+    result: list[tuple[str, GroupReplySettings]] = []
+    for chat_id, settings in value.items():
+        if (
+            not isinstance(chat_id, str)
+            or not chat_id.strip()
+            or not isinstance(settings, Mapping)
+        ):
+            logger.warning("[ai].group_reply_chat_overrides 包含无效项，跳过该群聊配置")
+            continue
+        trigger_mode = settings.get("trigger_mode", _DEFAULTS.group_reply_trigger_mode)
+        if trigger_mode not in {"frequency", "reply_necessity"}:
+            logger.warning(
+                "[ai].group_reply_chat_overrides[%s].trigger_mode 无效，使用 frequency",
+                chat_id,
+            )
+            trigger_mode = "frequency"
+        frequency = settings.get("frequency", _DEFAULTS.group_reply_frequency)
+        if not _valid_reply_frequency(frequency):
+            logger.warning(
+                "[ai].group_reply_chat_overrides[%s].frequency 无效，使用 %.2f",
+                chat_id,
+                _DEFAULTS.group_reply_frequency,
+            )
+            frequency = _DEFAULTS.group_reply_frequency
+        result.append(
+            (
+                chat_id.strip(),
+                GroupReplySettings(trigger_mode, float(frequency)),
+            )
+        )
+    return tuple(result)
 
 
 def _number(
@@ -67,6 +145,19 @@ def _number(
         logger.warning("[ai].%s 必须为整数，使用默认值 %s", key, default)
         return default
     return int(value) if integer else float(value)
+
+
+def _reply_frequency(
+    raw: Mapping[str, Any],
+    key: str,
+    default: float,
+    logger: logging.Logger,
+) -> float:
+    value = raw.get(key, default)
+    if not _valid_reply_frequency(value):
+        logger.warning("[ai].%s 无效，使用默认值 %s", key, default)
+        return default
+    return float(value)
 
 
 def _enum(
@@ -212,6 +303,13 @@ def normalize_engagement_config(
                 integer=True,
             )
         ),
+        group_reply_trigger_mode=_enum(
+            raw,
+            "group_reply_trigger_mode",
+            _DEFAULTS.group_reply_trigger_mode,
+            {"frequency", "reply_necessity"},
+            logger,
+        ),
         group_reply_necessity_threshold=int(
             _number(
                 raw,
@@ -223,14 +321,13 @@ def normalize_engagement_config(
                 integer=True,
             )
         ),
-        group_reply_frequency=_number(
+        group_reply_frequency=_reply_frequency(
             raw,
             "group_reply_frequency",
             _DEFAULTS.group_reply_frequency,
-            minimum=0,
-            maximum=1,
-            logger=logger,
+            logger,
         ),
+        group_reply_chat_overrides=_group_reply_overrides(raw, logger),
         group_ambient_mode=_enum(
             raw, "group_ambient_mode", "off", {"off", "shadow", "active"}, logger
         ),
