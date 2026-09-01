@@ -551,11 +551,32 @@ class PromptBuilder:
     @staticmethod
     def _mode_policy(mode: PromptMode, capability_profile: str) -> str:
         if mode is PromptMode.CHAT:
+            if capability_profile in {"private_chat", "group_explicit"}:
+                agent_guidance = (
+                    "If the request requires 文件、命令、代码修改或多步骤执行, "
+                    "enter Agent mode by making exactly one planner_control call "
+                    "with action=request_agent, task_summary, and reason; do not "
+                    "include visible text in that call. "
+                )
+            else:
+                agent_guidance = (
+                    "This Chat profile 不能请求 Agent; answer with the available "
+                    "Chat tools or ask the user to explicitly wake the bot for work. "
+                )
+            control_guidance = (
+                "For silence, waiting, or Agent handoff emit exactly one "
+                "planner_control call with no visible text; never emit "
+                "NO_REPLY text in Chat mode. "
+                if capability_profile in {"private_chat", "group_explicit"}
+                else "For silence or waiting emit exactly one planner_control "
+                "call with no visible text; never emit NO_REPLY text in Chat mode. "
+            )
             return (
                 "You are in Chat mode for one admitted conversation decision. "
                 "Use only supplied low-risk tools. Do not claim unprovided permissions. "
-                "For silence, waiting, or Agent handoff use planner_control; never emit NO_REPLY text. "
-                f"Source capability profile: {capability_profile}."
+                + agent_guidance
+                + control_guidance
+                + f"Source capability profile: {capability_profile}."
             )
         return (
             "You are in Agent mode and must complete the user's requested work. "

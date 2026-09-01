@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,8 @@ from core.engine.planner_control import (
     parse_planner_control,
     planner_control_tool,
 )
+from core.engine.prompt_builder import PromptBuilder
+from core.engine.prompt_snapshot import PromptMode
 
 
 def test_schema_is_a_strict_discriminated_union():
@@ -136,3 +139,44 @@ def test_response_classifier_leaves_normal_tool_calls_for_the_tool_loop():
     )
 
     assert classify_planner_control_response(message) is None
+
+
+def test_response_classifier_accepts_legacy_no_reply_text_with_no_reply_control():
+    control = classify_planner_control_response(
+        AssistantMessage(
+            content="NO_REPLY",
+            tool_calls=[
+                AssistantToolCall("call-1", "planner_control", '{"action":"no_reply"}')
+            ],
+        )
+    )
+
+    assert control.action is PlannerAction.NO_REPLY
+
+
+@pytest.mark.parametrize("template_name", ["group_chat.j2", "private_chat.j2"])
+def test_silence_prompt_distinguishes_chat_control_from_legacy_text(template_name):
+    template = (Path(__file__).parents[1] / "prompts" / template_name).read_text(
+        encoding="utf-8"
+    )
+
+    assert "Chat 模式下" in template
+    assert "必须调用 planner_control" in template
+    assert "不得输出 NO_REPLY 文本" in template
+    assert "Agent/兼容模式下" in template
+
+
+def test_chat_mode_policy_explains_when_and_how_to_enter_agent_mode():
+    policy = PromptBuilder._mode_policy(PromptMode.CHAT, "private_chat")
+
+    assert "request_agent" in policy
+    assert "task_summary" in policy
+    assert "reason" in policy
+    assert "文件、命令、代码修改或多步骤执行" in policy
+
+
+def test_restricted_chat_mode_policy_does_not_offer_agent_handoff():
+    policy = PromptBuilder._mode_policy(PromptMode.CHAT, "group_reply")
+
+    assert "不能请求 Agent" in policy
+    assert "Agent handoff" not in policy
