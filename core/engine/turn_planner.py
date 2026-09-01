@@ -169,17 +169,25 @@ class TurnPlanner:
         ]
         if not control_calls:
             return None
-        if (
-            len(control_calls) != 1
-            or len(calls or ()) != 1
-            or str(content or "").strip()
-        ):
-            raise PlannerControlError(
-                "planner_control must be the only call without visible text"
-            )
         call = control_calls[0]
         arguments = getattr(call, "arguments", None) or call.get("arguments", "")
         allowed = {PlannerAction.WAIT, PlannerAction.NO_REPLY}
         if request.source in {"private", "explicit", "user"}:
             allowed.add(PlannerAction.REQUEST_AGENT)
-        return parse_planner_control(arguments, allowed_actions=allowed)
+        control = parse_planner_control(arguments, allowed_actions=allowed)
+        visible_text = str(content or "").strip()
+        if (
+            len(control_calls) != 1
+            or len(calls or ()) != 1
+            or (
+                visible_text
+                and not (
+                    visible_text == "NO_REPLY"
+                    and control.action is PlannerAction.NO_REPLY
+                )
+            )
+        ):
+            raise PlannerControlError(
+                "planner_control must be the only call without visible text"
+            )
+        return control

@@ -176,7 +176,8 @@ def classify_planner_control_response(
     ``None`` means the response is not a planner-control response. A regular
     tool call remains for the normal tool loop. Any response that combines a
     planner control call with text or another tool call is a terminal protocol
-    error, never a recoverable tool result.
+    error, except for the legacy exact ``NO_REPLY`` text paired with the
+    equivalent ``no_reply`` action.
     """
     calls = tuple(message.tool_calls or ())
     control_calls = tuple(call for call in calls if call.name == "planner_control")
@@ -184,13 +185,17 @@ def classify_planner_control_response(
         return None
     if len(control_calls) != 1 or len(calls) != 1:
         raise PlannerControlError("planner_control must be the only tool call")
-    if (message.content or "").strip():
+    control = parse_planner_control(
+        control_calls[0].arguments, allowed_actions=allowed_actions
+    )
+    visible_text = (message.content or "").strip()
+    if visible_text and not (
+        visible_text == "NO_REPLY" and control.action is PlannerAction.NO_REPLY
+    ):
         raise PlannerControlError(
             "planner_control cannot include visible assistant text"
         )
-    return parse_planner_control(
-        control_calls[0].arguments, allowed_actions=allowed_actions
-    )
+    return control
 
 
 def _normalize_actions(
