@@ -75,6 +75,75 @@ async def test_transcript_is_idempotent_and_scope_isolated(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_archive_rotation_removes_hidden_source_turn_atomically(tmp_path):
+    transcript = ModelContextTranscript(str(tmp_path / "model-context.sqlite3"))
+    scope = _scope()
+    user_event = SimpleNamespace(
+        role="user",
+        event_id="user:1",
+        content="old",
+        sender_id="user-1",
+        timestamp=10,
+    )
+    await transcript.append_turn(
+        scope,
+        turn_id="turn-1",
+        user_events=(user_event,),
+        protocol_events=_protocol("turn-1", "old answer"),
+    )
+    current = await transcript.rotate_for_hidden_sources(
+        scope,
+        ["user:1"],
+        summary_texts=("old turn summary",),
+        operation_id="archive-op:scope",
+    )
+
+    assert current.scope.generation == 2
+    assert [event.role for event in current.events] == ["assistant"]
+    assert current.events[0].content == "old turn summary"
+    assert "old answer" not in str(current.to_wire())
+    await transcript.close()
+
+
+@pytest.mark.asyncio
+async def test_archive_rotation_replay_does_not_advance_generation_again(tmp_path):
+    transcript = ModelContextTranscript(str(tmp_path / "model-context.sqlite3"))
+    scope = _scope()
+    user_event = SimpleNamespace(
+        role="user",
+        event_id="user:1",
+        content="old",
+        sender_id="user-1",
+        timestamp=10,
+    )
+    await transcript.append_turn(
+        scope,
+        turn_id="turn-1",
+        user_events=(user_event,),
+        protocol_events=_protocol("turn-1", "old answer"),
+    )
+
+    first = await transcript.rotate_for_hidden_sources(
+        scope,
+        ["user:1"],
+        summary_texts=("old turn summary",),
+        summary_source_event_ids=(("user:1",),),
+        operation_id="archive-op:scope",
+    )
+    second = await transcript.rotate_for_hidden_sources(
+        scope,
+        ["user:1"],
+        summary_texts=("old turn summary",),
+        summary_source_event_ids=(("user:1",),),
+        operation_id="archive-op:scope",
+    )
+
+    assert first.scope.generation == second.scope.generation == 2
+    assert [event.content for event in second.events] == ["old turn summary"]
+    await transcript.close()
+
+
+@pytest.mark.asyncio
 async def test_transcript_rejects_incomplete_tool_protocol(tmp_path):
     transcript = ModelContextTranscript(str(tmp_path / "model-context.sqlite3"))
     assistant = ProtocolEvent(

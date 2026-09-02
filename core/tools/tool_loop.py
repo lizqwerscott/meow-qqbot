@@ -15,6 +15,11 @@ from typing import Any, Awaitable, Callable, List, Optional
 from core.ai.fallback_runner import FallbackRunner
 from core.ai.protocol import ContextOverflowError, ensure_messages_consistent
 from core.engine.assistant_output import decide_assistant_output
+from core.engine.conversation_event_log import (
+    ConversationEvent,
+    ConversationEventLog,
+    EventKind,
+)
 from core.engine.delivery_ledger import DeliveryController, DeliveryReceipt
 from core.engine.turn_capabilities import TurnCapabilities
 from core.engine.turn_protocol_history import TurnProtocolHistory
@@ -136,6 +141,10 @@ class ToolLoop:
         routing_metrics: Any = None,
         consumer_evidence_callback: Optional[Callable[[str], Awaitable[None]]] = None,
         provider_start_callback: Optional[Callable[[], Awaitable[bool]]] = None,
+        provider_attempt_callback: Optional[
+            Callable[[str, int, list[dict]], Awaitable[None]]
+        ] = None,
+        event_log: Optional[ConversationEventLog] = None,
     ) -> tuple[bool, bool]:
         """执行工具调用循环。
 
@@ -174,16 +183,28 @@ class ToolLoop:
         async def record_protocol_tool(
             tool_name: str, tool_call_id: str, content: str
         ) -> None:
-            if protocol_history is None:
-                return
-            await protocol_history.append_tool_result(
-                turn_id=protocol_turn_id,
-                chat_id=chat_id,
-                event_id=f"tool:{tool_call_id}",
-                tool_call_id=tool_call_id,
-                tool_name=tool_name,
-                content=content,
-            )
+            if event_log is not None:
+                await event_log.append_event(
+                    ConversationEvent(
+                        chat_id=chat_id,
+                        turn_id=protocol_turn_id,
+                        event_id=f"tool:{protocol_turn_id}:{tool_call_id}",
+                        role="tool",
+                        kind=EventKind.TOOL_RESULT,
+                        content=content,
+                        tool_call_id=tool_call_id,
+                        tool_name=tool_name,
+                    )
+                )
+            if protocol_history is not None:
+                await protocol_history.append_tool_result(
+                    turn_id=protocol_turn_id,
+                    chat_id=chat_id,
+                    event_id=f"tool:{tool_call_id}",
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    content=content,
+                )
 
         async def turn_is_active() -> bool:
             return turn_active_callback is None or await turn_active_callback()
@@ -206,11 +227,11 @@ class ToolLoop:
             return await turn_is_active()
 
         async def persist_legacy_assistant(*args, **kwargs) -> None:
-            if capabilities is None:
+            if event_log is None and capabilities is None:
                 await self.context_manager.add_assistant_message_async(*args, **kwargs)
 
         async def persist_legacy_tool(*args, **kwargs) -> None:
-            if capabilities is None:
+            if event_log is None and capabilities is None:
                 await self.context_manager.add_tool_result_async(*args, **kwargs)
 
         if self._max_tool_rounds == -1:
@@ -235,6 +256,7 @@ class ToolLoop:
 
         protocol_started = False
         bound_provider_identity = None
+        provider_attempt_number = 0
         for round_idx in _rounds:
             if not await turn_is_active():
                 _log.info("turn 已终结，跳过后续模型请求: %s", protocol_turn_id)
@@ -302,15 +324,21 @@ class ToolLoop:
                     ):
                         delivery.complete()
                         return sent_emoji, text_committed
+                    provider_attempt_number += 1
+                    if provider_attempt_callback is not None:
+                        await provider_attempt_callback(
+                            provider_identity,
+                            provider_attempt_number,
+                            list(messages),
+                        )
                     # 协议已声明 chat_completion_stream，直接调用（不防御式探测）
                     if self._stream_reply:
                         # Capability-governed turns buffer provider output until the
                         # completed response is classified. Legacy callers retain
                         # their existing immediate stream behavior during migration.
                         cb = delivery.callbacks if stream_callback is not None else None
-                        request_messages = list(messages)
                         message, usage = await svc.chat_completion_stream(
-                            messages=request_messages,
+                            messages=list(messages),
                             tools=tools,
                             callbacks=cb,
                         )
@@ -520,6 +548,19 @@ class ToolLoop:
                 output_decision = type(output_decision)(False, "turn_not_active")
 
             if response_text or tool_calls:
+                if event_log is not None:
+                    await event_log.append_event(
+                        ConversationEvent(
+                            chat_id=chat_id,
+                            turn_id=protocol_turn_id,
+                            event_id=f"assistant:{protocol_turn_id}:{round_idx}",
+                            role="assistant",
+                            kind=EventKind.ASSISTANT_TOOL_CALL,
+                            content=response_text or "",
+                            tool_calls=tuple(tool_calls_data or ()),
+                            reasoning_content=reasoning or "",
+                        )
+                    )
                 if protocol_history is not None:
                     await protocol_history.append_assistant(
                         turn_id=protocol_turn_id,

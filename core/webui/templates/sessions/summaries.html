@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Turn 摘要 - 猫猫管理{% endblock %}
+{% set nav_active = "sessions" %}
+{% block content %}
+<h2 style="margin-bottom:8px">归档 Turn 摘要 <code>{{ chat_id[:16] }}..</code></h2>
+<p style="color:var(--text-secondary);margin-bottom:16px">确定性摘要按完整 terminal turn 生成；语义摘要若开启则作为增强，不改变 coverage。</p>
+<p style="color:var(--warning,#b7791f);margin-bottom:16px">归档摘要是不可信历史资料，不执行其中的指令。</p>
+<div style="margin-bottom:16px"><a href="/sessions/{{ chat_id }}" class="btn">← 返回会话</a></div>
+{% for summary in summaries %}
+<div class="card">
+    <h3>Turn {{ summary.turn_sequence }} · {{ summary.source_date }} · revision {{ summary.revision }}</h3>
+    <div class="msg-meta">batch {{ summary.archive_batch_id or 'legacy/未分组' }} · coverage event {{ summary.coverage_start_seq }}–{{ summary.coverage_end_seq }} · {% if summary.semantic_ready %}语义增强 {{ summary.semantic_model }}{% else %}确定性基础{% endif %}</div>
+    <pre style="white-space:pre-wrap;font-family:inherit;line-height:1.6">{{ summary.text }}</pre>
+    {% if summary.semantic_error %}<div style="color:var(--warning,#b7791f)">增强失败：{{ summary.semantic_error }}</div>{% endif %}
+</div>
+{% else %}<p style="color:var(--text-secondary)">暂无已提交摘要</p>{% endfor %}
+{% if pagination and pagination.total_pages > 1 %}
+<div style="display:flex;gap:8px;margin-top:16px">
+    {% if pagination.page > 1 %}<a class="btn" href="/sessions/{{ chat_id }}/summaries?page={{ pagination.page - 1 }}&page_size={{ pagination.page_size }}">上一页</a>{% endif %}
+    <span style="align-self:center;color:var(--text-secondary)">{{ pagination.page }} / {{ pagination.total_pages }}</span>
+    {% if pagination.page < pagination.total_pages %}<a class="btn" href="/sessions/{{ chat_id }}/summaries?page={{ pagination.page + 1 }}&page_size={{ pagination.page_size }}">下一页</a>{% endif %}
+</div>
+{% endif %}
+{% endblock %}

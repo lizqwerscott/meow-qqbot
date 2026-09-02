@@ -5,6 +5,8 @@ must prepare a unique turn before sending, then settle it as sent or suppressed.
 """
 
 import hashlib
+import json
+import logging
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -15,6 +17,14 @@ from core.engine.ambient_delivery import (
     AmbientDeliveryDecision,
     decide_ambient_delivery,
 )
+from core.engine.conversation_event_log import (
+    ConversationEvent,
+    ConversationEventLog,
+    EventKind,
+    EventLogInvariantError,
+)
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -396,10 +406,12 @@ class DeliveryController:
         retry_base_seconds: float = 30.0,
         max_attempts: int = 5,
         timeline=None,
+        event_log: Optional[ConversationEventLog] = None,
         audit_delivery: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
     ):
         self.ledger = ledger
         self.timeline = timeline
+        self.event_log = event_log
         self.retry_base_seconds = max(1.0, retry_base_seconds)
         self.max_attempts = max(1, max_attempts)
         self._audit_delivery = audit_delivery
@@ -775,6 +787,13 @@ class DeliveryController:
             )
             if settled is not None:
                 await self._audit(settled, settled.status)
+                await self._append_delivery_receipt(
+                    record,
+                    DeliveryReceipt(
+                        status="accepted",
+                        logical_delivery_id=record.logical_delivery_id,
+                    ),
+                )
             if settled is not None and content is not None:
                 await self._append_accepted_timeline(
                     record, content=content, delivery_kind="response"
@@ -785,15 +804,97 @@ class DeliveryController:
     async def _append_accepted_timeline(
         self, record: DeliveryRecord, *, content: str, delivery_kind: str
     ) -> None:
-        if self.timeline is None:
+        if self.event_log is not None:
+            try:
+                await self.event_log.append_accepted_delivery(
+                    chat_id=record.chat_id,
+                    turn_id=record.turn_id,
+                    delivery_id=record.logical_delivery_id or record.key,
+                    content=content,
+                    message_id=record.reply_anchor_id,
+                    timestamp=record.updated_at,
+                )
+            except EventLogInvariantError as exc:
+                try:
+                    await self.event_log.append_late_delivery_event(
+                        chat_id=record.chat_id,
+                        original_turn_id=record.turn_id,
+                        delivery_id=record.logical_delivery_id or record.key,
+                        content=content,
+                        message_id=record.reply_anchor_id,
+                        delivery_kind=delivery_kind,
+                        timestamp=record.updated_at,
+                    )
+                except Exception:
+                    _log.warning(
+                        "failed to record late accepted delivery lineage "
+                        "chat=%s turn=%s delivery=%s",
+                        record.chat_id[:12],
+                        record.turn_id,
+                        record.logical_delivery_id or record.key,
+                        exc_info=True,
+                    )
+                _log.warning(
+                    "accepted delivery arrived after terminal turn; recorded orphan event "
+                    "chat=%s turn=%s delivery=%s: %s",
+                    record.chat_id[:12],
+                    record.turn_id,
+                    record.logical_delivery_id or record.key,
+                    exc,
+                )
+                return
+        if self.timeline is not None:
+            await self.timeline.append_accepted_delivery(
+                chat_id=record.chat_id,
+                delivery_id=record.logical_delivery_id or record.key,
+                content=content,
+                delivery_kind=delivery_kind,
+                message_id=record.reply_anchor_id,
+            )
+
+    async def _append_delivery_receipt(
+        self, record: DeliveryRecord, receipt: DeliveryReceipt
+    ) -> None:
+        if self.event_log is None or not record.turn_id:
             return
-        await self.timeline.append_accepted_delivery(
-            chat_id=record.chat_id,
-            delivery_id=record.logical_delivery_id or record.key,
-            content=content,
-            delivery_kind=delivery_kind,
-            message_id=record.reply_anchor_id,
+        receipt_key = (
+            receipt.transport_id
+            or receipt.platform_message_id
+            or receipt.error_code
+            or receipt.status
         )
+        try:
+            await self.event_log.append_event(
+                ConversationEvent(
+                    chat_id=record.chat_id,
+                    turn_id=record.turn_id,
+                    event_id=f"receipt:{record.key}:{receipt.status}:{receipt_key}",
+                    role="system",
+                    kind=EventKind.DELIVERY_RECEIPT,
+                    content=json.dumps(
+                        {
+                            "status": receipt.status,
+                            "logical_delivery_id": receipt.logical_delivery_id
+                            or record.logical_delivery_id,
+                            "transport_id": receipt.transport_id,
+                            "platform_message_id": receipt.platform_message_id,
+                            "error_code": receipt.error_code,
+                            "retryable": receipt.retryable,
+                            "chunk_index": receipt.chunk_index,
+                            "chunk_count": receipt.chunk_count,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    timestamp=record.updated_at,
+                )
+            )
+        except Exception:
+            _log.warning(
+                "delivery receipt event append failed [%s..]",
+                record.chat_id[:12],
+                exc_info=True,
+            )
 
     async def settle_receipt(
         self,
@@ -833,6 +934,7 @@ class DeliveryController:
         )
         if settled is not None:
             await self._audit(settled, settled.status)
+            await self._append_delivery_receipt(record, receipt)
         if (
             settled is not None
             and receipt.status == "accepted"
@@ -859,8 +961,17 @@ class DeliveryController:
             logical_delivery_id=f"ambient:{record.chat_id}:{record.turn_id}",
             transport_id=transport_id,
         )
-        if settled is not None and content is not None:
-            await self._append_accepted_timeline(
-                record, content=content, delivery_kind="response"
+        if settled is not None:
+            await self._append_delivery_receipt(
+                record,
+                DeliveryReceipt(
+                    status="accepted",
+                    logical_delivery_id=record.logical_delivery_id,
+                    transport_id=transport_id,
+                ),
             )
+            if content is not None:
+                await self._append_accepted_timeline(
+                    record, content=content, delivery_kind="response"
+                )
         return settled

@@ -62,6 +62,7 @@ class DynamicContextBuilder:
         input_message: InputMessage,
         has_emojis: bool,
         has_users: bool,
+        covered_event_ids=(),
     ) -> Optional[str]:
         parts: List[str] = []
 
@@ -76,6 +77,7 @@ class DynamicContextBuilder:
             sender_id=sender_id,
             input_message=input_message,
             max_archive_chars=3000,
+            covered_event_ids=covered_event_ids,
         )
         if txt:
             parts.append(txt)

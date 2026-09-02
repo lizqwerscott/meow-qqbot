@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}{{ view_title }} - 猫猫管理{% endblock %}
+{% set nav_active = "sessions" %}
+
+{% block content %}
+<h2 style="margin-bottom:8px">{{ view_title }} <code>{{ chat_id[:16] }}..</code></h2>
+<p style="color:var(--text-secondary);margin-bottom:16px">{{ view_description }}</p>
+<p style="color:var(--warning,#b7791f);font-size:13px">按完整 Turn 浏览；当前页之外的历史不会混入本页显示。</p>
+<div style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
+    <a href="/sessions/{{ chat_id }}" class="btn">会话总览</a>
+    <a href="/sessions/{{ chat_id }}/active" class="btn">Active</a>
+    <a href="/sessions/{{ chat_id }}/prompt" class="btn">Prompt</a>
+    <a href="/sessions/{{ chat_id }}/timeline" class="btn">完整 Timeline</a>
+    <a href="/sessions/{{ chat_id }}/archive-history" class="btn">归档历史</a>
+    <a href="/sessions/{{ chat_id }}/summaries" class="btn">归档摘要</a>
+    <a href="/sessions/{{ chat_id }}/model-context" class="btn">模型上下文</a>
+</div>
+<div class="card"><strong>事件数：</strong>{{ stats.event_count }}{% if stats.turn_count is defined %} · <strong>Turn 数：</strong>{{ stats.turn_count }}{% endif %}{% if degraded_reason %} · <span style="color:var(--warning,#b7791f)">降级：{{ degraded_reason }}</span>{% endif %}</div>
+{% if archive_batches is defined and archive_batches %}
+<div class="card"><strong>归档批次：</strong>
+    {% for batch in archive_batches %}
+    <span style="margin-right:12px">{{ batch.partition_date }} · <code>{{ batch.batch_id[:24] }}</code> · {{ batch.state }} · {{ batch.turn_count }} turns</span>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if event_view %}
+    {% for turn in turns %}
+    <div class="card">
+        <h3>Turn {{ turn.turn_sequence }} · {{ turn.source_date }} · {{ turn.status }} <code>{{ turn.turn_id[:16] }}..</code></h3>
+        {% for msg in turn.events %}
+        <div class="chat-message {{ msg.role }}">
+            <div class="msg-meta">{{ msg.kind }} · {{ msg.timestamp | format_timestamp }} · seq {{ msg.event_seq }} · {{ msg.source_date }}</div>
+            <div class="msg-content">{{ msg.content or '(空)' }}</div>
+            {% if msg.tool_calls %}<div class="tool-details">工具调用：{{ msg.tool_calls|length }} 个</div>{% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}<p style="color:var(--text-secondary)">暂无数据</p>{% endfor %}
+{% else %}
+    {% for msg in events %}
+    <div class="chat-message {{ msg.role }}">
+        <div class="msg-meta">{{ msg.get("role", "") }}{% if msg.get("timestamp") %} · {{ msg.timestamp | format_timestamp }}{% endif %}</div>
+        <div class="msg-content">{{ msg.get("content") or '(空)' }}</div>
+    </div>
+    {% else %}<p style="color:var(--text-secondary)">暂无数据</p>{% endfor %}
+{% endif %}
+
+{% if pagination and pagination.total_pages > 1 %}
+<div style="display:flex;gap:8px;margin-top:16px">
+    {% if pagination.page > 1 %}<a class="btn" href="{{ request.url.path }}?page={{ pagination.page - 1 }}&page_size={{ pagination.page_size }}">上一页</a>{% endif %}
+    <span style="align-self:center;color:var(--text-secondary)">{{ pagination.page }} / {{ pagination.total_pages }}</span>
+    {% if pagination.page < pagination.total_pages %}<a class="btn" href="{{ request.url.path }}?page={{ pagination.page + 1 }}&page_size={{ pagination.page_size }}">下一页</a>{% endif %}
+</div>
+{% endif %}
+{% endblock %}

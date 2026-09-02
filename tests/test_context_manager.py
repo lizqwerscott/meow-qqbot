@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from core.engine.conversation_event_log import ConversationEventLog
 from core.managers.context_compactor import CompactionResult
 from core.managers.context_manager import ChatContextManager
 from core.managers.context_store import MemoryContextStore
@@ -51,6 +52,26 @@ async def test_first_history_access_reuses_existing(mgr):
     await mgr.get_chat_history_async("chat_001")
     await mgr.get_chat_history_async("chat_001")
     assert await mgr.get_context_count_async() == 1
+
+
+@pytest.mark.asyncio
+async def test_event_log_session_enumeration_does_not_scan_legacy_store(tmp_path):
+    class LegacyStore(MemoryContextStore):
+        def get_all_disk_ids(self):
+            raise AssertionError("event-log mode must not scan legacy sessions")
+
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await event_log.append_user_message(
+        chat_id="ledger-chat",
+        turn_id="turn-1",
+        message_id="message-1",
+        content="账本会话",
+    )
+    manager = ChatContextManager(store=LegacyStore())
+    manager.set_event_log(event_log)
+
+    assert await manager.get_all_disk_chat_ids_async() == ["ledger-chat"]
+    await event_log.close()
 
 
 @pytest.mark.asyncio

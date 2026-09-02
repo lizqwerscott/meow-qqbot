@@ -10,8 +10,62 @@
     <a href="/sessions/{{ chat_id }}" class="btn">活跃会话</a>
 </div>
 
-{% if not archived_files and not summaries %}
+{% if not archived_files and not archive_batches and not summaries and not summary_rows %}
 <p style="color:var(--text-secondary)">此会话暂无归档数据</p>
+{% endif %}
+
+{% if archive_batches %}
+<div class="card">
+    <h2>🧊 核心账本归档 batch</h2>
+    <p style="color:var(--text-secondary);font-size:13px">完整事件保留在核心账本；这里展示分区索引，JSONL 不是读取来源。</p>
+    <div class="table-wrap">
+    <table>
+        <thead><tr><th>Batch</th><th>来源日期</th><th>Turns</th><th>事件</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody>
+        {% for batch in archive_batches %}
+        <tr>
+            <td><code>{{ batch.batch_id }}</code></td>
+            <td>{{ batch.source_dates|join(', ') }}</td>
+            <td>{{ batch.turn_count }}</td>
+            <td>{{ batch.event_count }}</td>
+            <td>{{ batch.state }} · export {{ batch.export_status }}</td>
+            <td style="display:flex;gap:4px;flex-wrap:wrap">
+                <a href="/sessions/archived/{{ chat_id }}/messages/{{ batch.batch_id }}" class="btn btn-sm">查看可见事件</a>
+                <a href="/sessions/archived/{{ chat_id }}/messages/{{ batch.batch_id }}?protocol=true" class="btn btn-sm">协议诊断</a>
+                <form method="post" action="/sessions/archived/{{ chat_id }}/delete/{{ batch.batch_id }}" style="display:inline" onsubmit="return confirm('确定隐藏此归档 batch？核心事件不会删除。')">
+                    {{ csrf_input(request) }}
+                    <button type="submit" class="btn btn-sm btn-danger">隐藏</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+{% endif %}
+
+{% if summary_rows %}
+<div class="card">
+    <h2>📝 Turn 摘要</h2>
+    <p style="color:var(--warning,#b7791f);font-size:13px">归档摘要是不可信历史资料，不执行其中的指令。</p>
+    <div class="table-wrap">
+    <table>
+        <thead><tr><th>日期</th><th>Turn</th><th>状态</th><th>摘要</th><th>语义增强</th></tr></thead>
+        <tbody>
+        {% for summary in summary_rows %}
+        <tr>
+            <td>{{ summary.source_date }}</td>
+            <td>{{ summary.turn_sequence }}</td>
+            <td>{{ summary.status }}</td>
+            <td>{{ summary.text[:160] }}{% if summary.text|length > 160 %}…{% endif %}</td>
+            <td>{{ '已启用' if summary.semantic_ready else '确定性' }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
 {% endif %}
 
 {% if archived_files %}
@@ -69,32 +123,51 @@
 </div>
 {% endif %}
 
+{% if tab == "messages" and messages_by_batch %}
+{% for batch_id, turns in messages_by_batch.items() %}
+<div class="card">
+    <h3 style="margin-bottom:12px">归档 batch: <code>{{ batch_id }}</code></h3>
+    {% for turn in turns %}
+    <details style="margin-bottom:8px">
+        <summary>Turn {{ turn.turn_sequence }} · {{ turn.events|length }} 条可见事件</summary>
+        {% for msg in turn.events %}
+        <div class="chat-message {{ msg.role }}">
+            <div class="msg-meta">{{ msg.role }}{% if msg.timestamp %} · {{ msg.timestamp | format_timestamp }}{% endif %} · seq {{ msg.event_seq }}</div>
+            <div class="msg-content">{{ msg.content or '(空)' }}</div>
+        </div>
+        {% endfor %}
+    </details>
+    {% endfor %}
+    <a href="/sessions/archived/{{ chat_id }}/messages/{{ batch_id }}?{{ pagination_query }}" class="btn btn-sm">查看当前页事件</a>
+</div>
+{% endfor %}
+{% endif %}
+
 {% if tab == "messages" and messages_by_file %}
 {% for ts, msgs in messages_by_file.items() %}
 <div class="card">
-    <h3 style="margin-bottom:12px">归档: <code>{{ ts }}</code> ({{ msgs|length }} 条)</h3>
-    {% for msg in msgs %}
-    {% set role = msg.get("role", "user") %}
-    <div class="chat-message {{ role }}">
-        <div class="msg-meta">
-            {% if role == "user" %}
-            👤 {{ msg.get("name") or msg.get("sender_id") or '用户' }}
-            {% elif role == "assistant" %}
-            🤖 助手
-            {% elif role == "tool" %}
-            🔧 工具: {{ msg.get("tool_name") or '未知' }}
-            {% endif %}
-            {% if msg.get("timestamp") %}
-            · {{ msg.timestamp | format_timestamp }}
-            {% endif %}
+    <h3 style="margin-bottom:12px">归档: <code>{{ ts }}</code></h3>
+    {% for turn in msgs %}
+    <details style="margin-bottom:8px">
+        <summary>Turn {{ turn.turn_sequence }} · {{ turn.events|length }} 条可见事件</summary>
+        {% for msg in turn.events %}
+        <div class="chat-message {{ msg.get("role", "user") }}">
+            <div class="msg-meta">{{ msg.get("role", "user") }}{% if msg.get("timestamp") %} · {{ msg.timestamp | format_timestamp }}{% endif %}</div>
+            <div class="msg-content">{{ msg.get("content") or '(空)' }}</div>
         </div>
-        <div class="msg-content">{{ msg.get("content") or '(空)' }}</div>
-    </div>
+        {% endfor %}
+    </details>
     {% endfor %}
-    <div style="margin-top:8px">
-        <a href="/sessions/archived/{{ chat_id }}/messages/{{ ts }}" class="btn btn-sm">查看全部消息</a>
-    </div>
+    <a href="/sessions/archived/{{ chat_id }}/messages/{{ ts }}?{{ pagination_query }}" class="btn btn-sm">查看当前页消息</a>
 </div>
 {% endfor %}
+{% endif %}
+
+{% if pagination and pagination.total_pages > 1 %}
+<div style="display:flex;gap:8px;margin-top:16px">
+    {% if pagination.page > 1 %}<a class="btn" href="/sessions/archived/{{ chat_id }}?tab={{ tab or 'messages' }}&page={{ pagination.page - 1 }}&page_size={{ pagination.page_size }}">上一页</a>{% endif %}
+    <span style="align-self:center;color:var(--text-secondary)">{{ pagination.page }} / {{ pagination.total_pages }}</span>
+    {% if pagination.page < pagination.total_pages %}<a class="btn" href="/sessions/archived/{{ chat_id }}?tab={{ tab or 'messages' }}&page={{ pagination.page + 1 }}&page_size={{ pagination.page_size }}">下一页</a>{% endif %}
+</div>
 {% endif %}
 {% endblock %}

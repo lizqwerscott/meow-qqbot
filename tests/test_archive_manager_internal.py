@@ -14,6 +14,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core.command_handlers.archive import ArchiveCommand
+from core.engine.archive_index import ArchiveIndex
+from core.engine.conversation_event_log import (
+    ConversationEvent,
+    ConversationEventLog,
+    EventKind,
+)
+from core.engine.prompt_history_projection import PromptHistoryProjection
 from core.managers.archive_ledger import ArchiveLedger
 from core.managers.archive_manager import (
     ArchiveManager,
@@ -81,6 +88,28 @@ def _make_ctx(msgs):
     ctx.is_empty.return_value = False
     ctx.get_history.return_value = msgs
     return ctx
+
+
+async def _append_completed_turn(event_log, chat_id, turn_id, timestamp, content="x"):
+    await event_log.append_user_message(
+        chat_id=chat_id,
+        turn_id=turn_id,
+        message_id=f"message-{turn_id}",
+        content=content,
+        timestamp=timestamp,
+    )
+    await event_log.append_accepted_delivery(
+        chat_id=chat_id,
+        turn_id=turn_id,
+        delivery_id=f"delivery-{turn_id}",
+        content=f"answer-{turn_id}",
+        timestamp=timestamp + 1,
+    )
+    await event_log.append_turn_terminal(
+        chat_id=chat_id,
+        turn_id=turn_id,
+        timestamp=timestamp + 2,
+    )
 
 
 @pytest.fixture
@@ -167,6 +196,220 @@ async def test_archive_snapshot_does_not_mutate_active_record_metadata(tmp_path)
     assert message.record_id is None
     assert ctx.history == [message]
     assert store.read_archive(result.archive_path)[0]["record_id"]
+
+
+@pytest.mark.asyncio
+async def test_event_archive_waits_for_dynamic_retention_threshold(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    projection = PromptHistoryProjection(
+        event_log, metadata_path=str(tmp_path / "projection.sqlite3")
+    )
+    index = ArchiveIndex(str(tmp_path / "archive-index.sqlite3"))
+    manager = ArchiveManager(
+        context_manager=MagicMock(),
+        archive_index=index,
+        memory_dir=str(tmp_path / "memory"),
+        hot_max_tokens=1000,
+        hot_max_turns=10,
+        hot_max_bytes=100000,
+        hot_max_age_seconds=86400,
+    )
+    manager.set_event_log(event_log, projection)
+    await _append_completed_turn(event_log, "chat", "turn-1", time.time())
+
+    assert await manager.archive_if_stale("chat", False) is None
+    assert await index.list_for_webui("chat") == []
+    await event_log.close()
+    await projection.close()
+    await index.close()
+
+
+@pytest.mark.asyncio
+async def test_event_log_status_does_not_fallback_to_legacy_history(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    index = ArchiveIndex(str(tmp_path / "archive-index.sqlite3"))
+    context_manager = MagicMock()
+    context_manager.get_chat_history_async = AsyncMock(
+        side_effect=AssertionError("event-log status must not read legacy history")
+    )
+    manager = ArchiveManager(
+        context_manager=context_manager,
+        archive_index=index,
+        memory_dir=str(tmp_path / "memory"),
+    )
+    manager.set_event_log(event_log)
+
+    assert await manager.get_session_status_async("empty-ledger-chat") == {
+        "message_count": 0,
+        "last_activity": 0.0,
+        "archive_count": 0,
+    }
+    context_manager.get_chat_history_async.assert_not_awaited()
+    await event_log.close()
+    await index.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_archive_import_creates_ledger_batch_without_read_dependency(
+    tmp_path,
+):
+    store = JSONLContextStore(str(tmp_path / "sessions"))
+    chat_id = "legacy-chat"
+    records = [
+        make_msg("user", "old question", "legacy-user", timestamp=1).to_storage_dict(),
+        make_msg(
+            "assistant", "old answer", "legacy-answer", timestamp=2
+        ).to_storage_dict(),
+    ]
+    store.archive_messages(chat_id, "2025-01-01", records)
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    projection = PromptHistoryProjection(
+        event_log, metadata_path=str(tmp_path / "projection.sqlite3")
+    )
+    index = ArchiveIndex(str(tmp_path / "index.sqlite3"))
+    manager = ArchiveManager(
+        context_manager=_FakeCM(_MutableCtx([]), store),
+        archive_index=index,
+        memory_dir=str(tmp_path / "memory"),
+    )
+    manager.set_event_log(event_log, projection)
+
+    report = await manager.import_legacy_archives_async(chat_id)
+
+    assert report["status"] == "ok"
+    assert report["imported_batch_count"] == 1
+    assert len(await index.list_for_webui(chat_id)) == 1
+    assert (await projection.snapshot_for_prompt(chat_id)).events == ()
+    assert await projection.hidden_event_ids(chat_id)
+    await event_log.close()
+    await projection.close()
+    await index.close()
+
+
+@pytest.mark.asyncio
+async def test_event_archive_selects_complete_turns_and_is_idempotent(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    projection = PromptHistoryProjection(
+        event_log, metadata_path=str(tmp_path / "projection.sqlite3")
+    )
+    index = ArchiveIndex(str(tmp_path / "archive-index.sqlite3"))
+    manager = ArchiveManager(
+        context_manager=MagicMock(),
+        archive_index=index,
+        memory_dir=str(tmp_path / "memory"),
+        hot_max_tokens=1,
+        hot_max_turns=10,
+        hot_max_bytes=100000,
+        hot_max_age_seconds=86400,
+    )
+    manager.set_event_log(event_log, projection)
+    await _append_completed_turn(event_log, "chat", "turn-1", time.time())
+    await event_log.append_user_message(
+        chat_id="chat",
+        turn_id="turn-open",
+        message_id="message-open",
+        content="open",
+        timestamp=time.time(),
+    )
+
+    result = await manager.archive_if_stale("chat", False)
+    assert result is not None
+    batches = await index.list_for_webui("chat")
+    assert len(batches) == 1
+    assert await index.event_ids(batches[0]["batch_id"]) == {
+        "user:message-turn-1",
+        "delivery:delivery-turn-1",
+        "terminal:turn-1",
+    }
+    assert await projection.hidden_event_ids("chat") == {
+        "user:message-turn-1",
+        "delivery:delivery-turn-1",
+        "terminal:turn-1",
+    }
+    assert await manager.archive_if_stale("chat", False) is None
+    assert len(await index.list_for_webui("chat")) == 1
+    await event_log.close()
+    await projection.close()
+    await index.close()
+
+
+@pytest.mark.asyncio
+async def test_event_archive_rejects_unpaired_tool_turn(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    projection = PromptHistoryProjection(
+        event_log, metadata_path=str(tmp_path / "projection.sqlite3")
+    )
+    index = ArchiveIndex(str(tmp_path / "archive-index.sqlite3"))
+    manager = ArchiveManager(
+        context_manager=MagicMock(),
+        archive_index=index,
+        memory_dir=str(tmp_path / "memory"),
+        hot_max_tokens=1,
+        hot_max_turns=10,
+        hot_max_bytes=100000,
+        hot_max_age_seconds=86400,
+    )
+    manager.set_event_log(event_log, projection)
+    await event_log.append_user_message(
+        chat_id="chat",
+        turn_id="turn-tool",
+        message_id="message-tool",
+        content="tool",
+        timestamp=time.time(),
+    )
+    await event_log.append_event(
+        ConversationEvent(
+            chat_id="chat",
+            turn_id="turn-tool",
+            event_id="call:turn-tool",
+            role="assistant",
+            kind=EventKind.ASSISTANT_TOOL_CALL,
+            tool_calls=({"id": "call-1", "function": {"name": "x"}},),
+        )
+    )
+    await event_log.append_turn_terminal(
+        chat_id="chat", turn_id="turn-tool", status="completed"
+    )
+
+    assert await manager.archive_if_stale("chat", False) is None
+    assert await index.list_for_webui("chat") == []
+    await event_log.close()
+    await projection.close()
+    await index.close()
+
+
+@pytest.mark.asyncio
+async def test_archive_export_failure_does_not_rollback_core_batch(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    projection = PromptHistoryProjection(
+        event_log, metadata_path=str(tmp_path / "projection.sqlite3")
+    )
+    index = ArchiveIndex(str(tmp_path / "archive-index.sqlite3"))
+    manager = ArchiveManager(
+        context_manager=MagicMock(),
+        archive_index=index,
+        memory_dir=str(tmp_path / "memory"),
+        hot_max_tokens=1,
+        hot_max_turns=10,
+        hot_max_bytes=100000,
+        hot_max_age_seconds=86400,
+    )
+    manager.set_event_log(event_log, projection)
+    export_adapter = MagicMock()
+    export_adapter.export_batch = AsyncMock(side_effect=RuntimeError("disk full"))
+    manager.set_export_adapter(export_adapter)
+    await _append_completed_turn(event_log, "chat", "turn-1", time.time())
+
+    result = await manager.archive_if_stale("chat", False)
+
+    assert result is not None
+    batch = (await index.list_for_webui("chat"))[0]
+    assert batch["state"] == "committed"
+    assert batch["export_status"] == "failed"
+    assert "disk full" in batch["export_error"]
+    await event_log.close()
+    await projection.close()
+    await index.close()
 
 
 def test_archive_units_mark_incomplete_tool_transactions(mgr):

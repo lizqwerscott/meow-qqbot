@@ -26,7 +26,7 @@
             <th>会话 ID</th>
             <th>归档次数</th>
             <th>最新归档</th>
-            <th>总大小</th>
+            <th>事件数</th>
             <th>操作</th>
         </tr>
     </thead>
@@ -36,7 +36,10 @@
             <td><code>{{ s.chat_id[:12] }}..</code></td>
             <td>{{ s.archive_count }}</td>
             <td>{{ s.latest_archive }}</td>
-            <td>{{ "{:.1f}".format(s.total_size / 1024) }} KB</td>
+            <td>
+                {% if s.ledger_archive %}{{ s.total_size }}
+                {% else %}{{ "{:.1f}".format(s.total_size / 1024) }} KB{% endif %}
+            </td>
             <td>
                 <a href="/sessions/archived/{{ s.chat_id }}" class="btn btn-sm">查看</a>
                 <a href="/sessions/{{ s.chat_id }}" class="btn btn-sm">活跃会话</a>

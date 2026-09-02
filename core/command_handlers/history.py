@@ -18,13 +18,32 @@ _log = logging.getLogger(__name__)
 )
 class HistoryCommand:
     def __init__(
-        self, context_manager: ChatContextManager, timeline=None, protocol_history=None
+        self,
+        context_manager: ChatContextManager,
+        timeline=None,
+        protocol_history=None,
+        agent_engine=None,
+        event_log=None,
+        model_context_transcript=None,
+        prompt_history_projection=None,
+        turn_summary_store=None,
+        prompt_context_reports=None,
+        archive_index=None,
     ):
         self.context_manager = context_manager
         self.timeline = timeline
         self.protocol_history = protocol_history
+        self.agent_engine = agent_engine
+        self.event_log = event_log
+        self.model_context_transcript = model_context_transcript
+        self.prompt_history_projection = prompt_history_projection
+        self.turn_summary_store = turn_summary_store
+        self.prompt_context_reports = prompt_context_reports
+        self.archive_index = archive_index
 
     async def _get_visible_history(self, chat_id: str) -> List[Dict[str, Any]]:
+        if self.event_log is not None:
+            return await self.event_log.history(chat_id)
         if self.timeline is not None:
             projected = await self.timeline.history(chat_id)
             legacy = await self.context_manager.get_chat_history_async(chat_id)
@@ -126,18 +145,36 @@ class HistoryCommand:
     ) -> List[Dict[str, Any]]:
         try:
             target = chat_id or input_message.chat_id
-            old_count = len(await self.context_manager.get_chat_history_async(target))
-            compacted, _, new_count = (
-                await self.context_manager.compact_history_if_needed(target, force=True)
-            )
-            if compacted:
+            if self.model_context_transcript is not None:
+                scopes = await self.model_context_transcript.scopes_for_chat(target)
+                changed = 0
+                for scope in scopes:
+                    result = await self.model_context_transcript.compact_if_needed(
+                        scope, force=True
+                    )
+                    changed += int(result.changed)
+                if not scopes:
+                    return make_reply(
+                        input_message,
+                        f"会话 {target[:24]}… 使用 bounded Prompt projection，无独立模型上下文可压缩。",
+                    )
                 return make_reply(
                     input_message,
-                    f"会话 {target[:24]}… 压缩完成: {old_count} → {new_count} 条",
+                    f"会话 {target[:24]}… 已执行增量模型上下文压缩：{changed} 个 scope，按完整 turn/checkpoint 处理。",
                 )
+            if self.event_log is None:
+                compact = getattr(
+                    self.context_manager, "compact_history_if_needed", None
+                )
+                if callable(compact):
+                    changed, _usage, count = await compact(target, force=True)
+                    return make_reply(
+                        input_message,
+                        f"会话 {target[:24]}… {'压缩完成' if changed else '无需压缩'}（{count} 条）。",
+                    )
             return make_reply(
                 input_message,
-                f"会话 {target[:24]}… 无需压缩 ({old_count} 条, 阈值 {self.context_manager.compaction_threshold_tokens} tokens)",
+                f"会话 {target[:24]}… 没有可压缩的模型上下文 scope；当前使用 bounded Prompt projection。",
             )
         except Exception as e:
             return make_reply(input_message, f"压缩失败: {e}")
@@ -147,7 +184,23 @@ class HistoryCommand:
     ) -> List[Dict[str, Any]]:
         target = chat_id or input_message.chat_id
         try:
+            clear_session = getattr(self.agent_engine, "clear_session_async", None)
+            if callable(clear_session):
+                await clear_session(target)
+                return make_reply(input_message, f"会话 {target[:24]}… 历史已清空。")
             await self.context_manager.clear_chat_history_async(target)
+            if self.event_log is not None:
+                await self.event_log.clear_chat(target)
+            if self.prompt_history_projection is not None:
+                await self.prompt_history_projection.clear_chat(target)
+            if self.turn_summary_store is not None:
+                await self.turn_summary_store.clear_chat(target)
+            if self.prompt_context_reports is not None:
+                await self.prompt_context_reports.clear_chat(target)
+            if self.model_context_transcript is not None:
+                await self.model_context_transcript.clear_chat(target)
+            if self.archive_index is not None:
+                await self.archive_index.clear_chat(target)
             if self.timeline is not None:
                 await self.timeline.clear_chat(target)
             if self.protocol_history is not None:
@@ -157,8 +210,18 @@ class HistoryCommand:
             return make_reply(input_message, f"清空失败: {e}")
 
     async def _list_sessions(self, input_message: InputMessage) -> List[Dict[str, Any]]:
-        all_ids = await self.context_manager.get_all_chat_ids_async()
-        if self.timeline is not None:
+        if self.event_log is not None:
+            try:
+                all_ids = await self.event_log.chat_ids()
+                if self.archive_index is not None:
+                    all_ids = list(
+                        dict.fromkeys(all_ids + await self.archive_index.chat_ids())
+                    )
+            except Exception:
+                all_ids = []
+        else:
+            all_ids = await self.context_manager.get_all_chat_ids_async()
+        if self.event_log is None and self.timeline is not None:
             try:
                 all_ids = list(dict.fromkeys(all_ids + await self.timeline.chat_ids()))
             except Exception:
@@ -168,7 +231,14 @@ class HistoryCommand:
         lines = []
         for cid in all_ids:
             summary = None
-            if self.timeline is not None:
+            if self.event_log is not None:
+                try:
+                    candidate = await self.event_log.session_summary(cid)
+                    if candidate.get("event_count", 0):
+                        summary = candidate
+                except Exception:
+                    summary = None
+            if self.event_log is None and summary is None and self.timeline is not None:
                 try:
                     candidate = await self.timeline.session_summary(cid)
                     if not candidate.get("message_count", 0):
@@ -183,7 +253,7 @@ class HistoryCommand:
                 last_act = time.strftime(
                     "%H:%M", time.localtime(summary["last_activity"])
                 )
-            else:
+            elif self.event_log is None:
                 history = await self.context_manager.get_chat_history_async(cid)
                 visible_history = visible_legacy_history(history)
                 count = len(visible_history)
@@ -197,6 +267,9 @@ class HistoryCommand:
                     if visible_history
                     else "无"
                 )
+            else:
+                count = 0
+                last_act = "无"
             short = cid[:16] + "…" if len(cid) > 16 else cid
             lines.append(f"{short} ({count} 条, {last_act})")
         reply = f"活跃会话 ({len(all_ids)}):\n" + "\n".join(lines)

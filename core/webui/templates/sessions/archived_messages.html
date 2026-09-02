@@ -3,52 +3,52 @@
 {% set nav_active = "sessions" %}
 
 {% block content %}
-<h2 style="margin-bottom:20px">📄 归档消息 <code>{{ chat_id[:16] }}..</code></h2>
+<h2 style="margin-bottom:20px">📄 归档事件 <code>{{ chat_id[:16] }}..</code></h2>
+<p style="color:var(--text-secondary);margin-bottom:16px">默认仅显示可见消息；工具协议、参数和推理仅在明确的协议视图中显示，且已脱敏。</p>
 
 <div style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
     <a href="/sessions/archived/{{ chat_id }}" class="btn">← 返回归档详情</a>
     <code style="align-self:center;font-size:12px;color:var(--text-secondary)">{{ timestamp }}</code>
+    {% if ledger_archive %}<span style="align-self:center;color:var(--text-secondary);font-size:12px">核心账本 batch（只读）</span>{% endif %}
+    {% if protocol %}<span style="align-self:center;color:var(--warning,#b7791f);font-size:12px">协议诊断视图</span>{% endif %}
 </div>
 
-{% if not messages %}
-<p style="color:var(--text-secondary)">此归档文件无消息</p>
-{% endif %}
-
-{% for msg in messages %}
-{% set role = msg.get("role", "user") %}
-<div class="chat-message {{ role }}">
-    <div class="msg-meta">
-        {% if role == "user" %}
-        👤 {{ msg.get("name") or msg.get("sender_id") or '用户' }}
-        {% elif role == "assistant" %}
-        🤖 助手
-        {% elif role == "tool" %}
-        🔧 工具: {{ msg.get("tool_name") or '未知' }}
-        {% endif %}
-        {% if msg.get("timestamp") %}
-        · {{ msg.timestamp | format_timestamp }}
-        {% endif %}
-        {% if msg.get("message_id") %}
-        · <code>{{ msg.message_id[:12] }}..</code>
-        {% endif %}
-    </div>
-    <div class="msg-content">{{ msg.get("content") or '(空)' }}</div>
-    {% if msg.get("tool_calls") %}
-    <div class="tool-details">
-        <strong>工具调用:</strong>
-        {% for tc in msg.tool_calls %}
-        <div style="margin-top:4px">
-            <strong>{{ tc.function.name }}</strong>({{ tc.function.arguments[:200] }}{% if tc.function.arguments|length > 200 %}…{% endif %})
+{% for turn in turns %}
+<div class="card">
+    <h3>Turn {{ turn.turn_sequence }} <code>{{ turn.turn_id[:16] }}..</code></h3>
+    {% for msg in turn.events %}
+    {% set role = msg.get("role", "user") %}
+    <div class="chat-message {{ role }}">
+        <div class="msg-meta">
+            {% if role == "user" %}👤 {{ msg.get("name") or msg.get("sender_id") or '用户' }}
+            {% elif role == "assistant" %}🤖 助手
+            {% elif role == "tool" %}🔧 工具: {{ msg.get("tool_name") or '未知' }}
+            {% endif %}
+            {% if msg.get("timestamp") %} · {{ msg.timestamp | format_timestamp }}{% endif %}
+            {% if msg.get("event_seq") %} · seq {{ msg.event_seq }}{% endif %}
         </div>
-        {% endfor %}
+        <div class="msg-content">{{ msg.get("content") or '(空)' }}</div>
+        {% if msg.get("tool_calls") %}
+        <div class="tool-details"><strong>工具调用:</strong>
+            {% for tc in msg.tool_calls %}
+            {% set function = tc.function or {} %}
+            <div style="margin-top:4px"><strong>{{ function.name or '未知' }}</strong>({{ function.arguments or '' }})</div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% if msg.get("reasoning_content") %}<div class="tool-details"><strong>推理过程:</strong><pre style="white-space:pre-wrap;font-size:12px;margin-top:4px">{{ msg.reasoning_content }}</pre></div>{% endif %}
     </div>
-    {% endif %}
-    {% if msg.get("reasoning_content") %}
-    <div class="tool-details">
-        <strong>推理过程:</strong>
-        <pre style="white-space:pre-wrap;font-size:12px;margin-top:4px">{{ msg.reasoning_content[:300] }}{% if msg.reasoning_content|length > 300 %}…{% endif %}</pre>
-    </div>
-    {% endif %}
+    {% endfor %}
 </div>
+{% else %}
+<p style="color:var(--text-secondary)">此归档文件无消息</p>
 {% endfor %}
+
+{% if pagination and pagination.total_pages > 1 %}
+<div style="display:flex;gap:8px;margin-top:16px">
+    {% if pagination.page > 1 %}<a class="btn" href="/sessions/archived/{{ chat_id }}/messages/{{ timestamp }}?{{ pagination_query }}{% if protocol %}&protocol=true{% endif %}">上一页</a>{% endif %}
+    <span style="align-self:center;color:var(--text-secondary)">{{ pagination.page }} / {{ pagination.total_pages }}</span>
+    {% if pagination.page < pagination.total_pages %}<a class="btn" href="/sessions/archived/{{ chat_id }}/messages/{{ timestamp }}?page={{ pagination.page + 1 }}&page_size={{ pagination.page_size }}{% if protocol %}&protocol=true{% endif %}">下一页</a>{% endif %}
+</div>
+{% endif %}
 {% endblock %}

@@ -7,6 +7,12 @@
 
 <div style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
     <a href="/sessions" class="btn">← 返回列表</a>
+    <a href="/sessions/{{ chat_id }}/active" class="btn">Active</a>
+    <a href="/sessions/{{ chat_id }}/prompt" class="btn">Prompt</a>
+    <a href="/sessions/{{ chat_id }}/timeline" class="btn">完整 Timeline</a>
+    <a href="/sessions/{{ chat_id }}/archive-history" class="btn">归档历史</a>
+    <a href="/sessions/{{ chat_id }}/summaries" class="btn">Turn 摘要</a>
+    <a href="/sessions/{{ chat_id }}/model-context" class="btn">模型上下文</a>
     {% if protocol_count > 0 %}
     <a href="/sessions/{{ chat_id }}/protocol" class="btn">🧪 协议历史 ({{ protocol_count }})</a>
     {% endif %}

@@ -17,6 +17,16 @@ _STATES = (
     "committed",
 )
 _STATE_ORDER = {state: index for index, state in enumerate(_STATES)}
+_PHASES = (
+    "prepared",
+    "event_partition_written",
+    "active_projection_written",
+    "summary_projection_written",
+    "prompt_visibility_written",
+    "model_context_rotated",
+    "ledger_committed",
+)
+_PHASE_ORDER = {phase: index for index, phase in enumerate(_PHASES)}
 
 
 class ArchiveManifestStore:
@@ -42,6 +52,15 @@ class ArchiveManifestStore:
                     "invalid archive manifest state transition: "
                     f"{previous_state} -> {next_state}"
                 )
+            previous_phase = str(existing.get("phase", "prepared"))
+            next_phase = str(manifest.get("phase", previous_phase))
+            if next_phase not in _PHASE_ORDER:
+                raise RuntimeError(f"unknown archive manifest phase: {next_phase}")
+            if _PHASE_ORDER[next_phase] < _PHASE_ORDER[previous_phase]:
+                raise RuntimeError(
+                    "invalid archive manifest phase transition: "
+                    f"{previous_phase} -> {next_phase}"
+                )
         temporary_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -62,7 +81,7 @@ class ArchiveManifestStore:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
 
-    def load_pending(self) -> List[Dict[str, Any]]:
+    def load_pending(self, *, kind: str | None = None) -> List[Dict[str, Any]]:
         manifests: List[Dict[str, Any]] = []
         if not self._root.is_dir():
             return manifests
@@ -78,6 +97,10 @@ class ArchiveManifestStore:
                 _log.error("归档 manifest 格式无效 %s: %s", path, exc)
                 continue
             if manifest.get("state") != "committed":
+                if kind is None and manifest.get("kind") == "event_log":
+                    continue
+                if kind is not None and manifest.get("kind") != kind:
+                    continue
                 manifests.append(manifest)
         return manifests
 
@@ -107,6 +130,9 @@ class ArchiveManifestStore:
         state = manifest["state"]
         if state not in _STATE_ORDER:
             raise ValueError(f"unknown archive manifest state: {state}")
+        phase = manifest.get("phase", "prepared")
+        if phase not in _PHASE_ORDER:
+            raise ValueError(f"unknown archive manifest phase: {phase}")
         if not isinstance(manifest["batches"], list):
             raise ValueError("archive manifest batches must be a list")
         for batch in manifest["batches"]:

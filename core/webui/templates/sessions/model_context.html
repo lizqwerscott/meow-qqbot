@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}模型上下文 - 猫猫管理{% endblock %}
+{% set nav_active = "sessions" %}
+{% block content %}
+<h2 style="margin-bottom:8px">模型上下文诊断 <code>{{ chat_id[:16] }}..</code></h2>
+<p style="color:var(--text-secondary);margin-bottom:16px">这里只展示 scope、generation、事件数量和来源覆盖，不直接展示完整 system prompt 或工具参数。</p>
+<div style="margin-bottom:16px"><a href="/sessions/{{ chat_id }}" class="btn">← 返回会话</a></div>
+{% for row in scopes %}
+<div class="card">
+    <h3>generation {{ row.scope.generation }} · {{ row.scope.kind }}</h3>
+    <div>principal: <code>{{ row.scope.principal_id }}</code></div>
+    <div>事件：{{ row.event_count }} · 估算 tokens：{{ row.estimated_tokens }} · source coverage：{{ row.source_event_count }}</div>
+    <div>wire roles：{{ row.roles|join(' → ') }}</div>
+    {% if row.error %}<div style="color:var(--warning,#b7791f)">读取受限：{{ row.error }}</div>{% endif %}
+</div>
+{% else %}<p style="color:var(--text-secondary)">此会话没有合法的模型上下文 scope，当前使用 bounded Prompt projection。</p>{% endfor %}
+
+<div class="card" style="margin-top:16px">
+    <h3>最近实际 Prompt 报告</h3>
+    <p style="color:var(--text-secondary)">报告只记录本次请求实际采用的来源和数量，不保存完整 Prompt 正文。</p>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>Turn</th>
+                    <th>来源</th>
+                    <th>generation</th>
+                    <th>历史</th>
+                    <th>协议</th>
+                    <th>总消息</th>
+                    <th>估算 tokens</th>
+                    <th>Attempt / projection</th>
+                    <th>摘要</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for report in reports %}
+                <tr>
+                    <td>{{ report.recorded_at|format_timestamp }}</td>
+                    <td><code>{{ report.turn_id[:16] }}..</code></td>
+                    <td>{{ report.source }}</td>
+                    <td>{{ report.generation }}</td>
+                    <td>{{ report.history_count }}</td>
+                    <td>{{ report.protocol_count }}</td>
+                    <td>{{ report.total_message_count }}</td>
+                    <td>{{ report.estimated_tokens }}</td>
+                    <td><code>{{ report.attempt_id }}</code> · v{{ report.projection_version }}</td>
+                    <td>{{ report.summary_count }}{% if report.summary_dates %} · {{ report.summary_dates|join(', ') }}{% endif %}</td>
+                </tr>
+                {% if report.fallback_reason %}
+                <tr><td colspan="10" style="color:var(--warning,#b7791f)">fallback：{{ report.fallback_reason }}</td></tr>
+                {% endif %}
+                {% if report.degraded_reason %}
+                <tr><td colspan="10" style="color:var(--warning,#b7791f)">degraded：{{ report.degraded_reason }}</td></tr>
+                {% endif %}
+            {% else %}
+                <tr><td colspan="10" style="color:var(--text-secondary)">暂无 Prompt 报告</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

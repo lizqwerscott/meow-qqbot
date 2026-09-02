@@ -16,6 +16,8 @@ from core.ai.tts_service import TtsService
 from core.command_handlers import register_all_commands
 from core.config_loader import ConfigLoader
 from core.engine.agent_engine import AgentEngine
+from core.engine.archive_export import ArchiveJSONLExportAdapter
+from core.engine.archive_index import ArchiveIndex
 from core.engine.client import BotEngine
 from core.engine.context import (
     AIContext,
@@ -31,11 +33,11 @@ from core.engine.engagement_config import normalize_engagement_config
 from core.engine.hindsight_memory import HindsightMemory
 from core.engine.router import Router
 from core.engine.system_events import SystemEventQueue
+from core.engine.turn_summary import TurnSummaryStore
 from core.engine.wake_dispatcher import WakeDispatcher
 from core.learners.orchestrator import LearningOrchestrator
 from core.managers.archive_ledger import ArchiveLedger
 from core.managers.archive_manager import ArchiveManager
-from core.managers.context_compactor import ContextCompactor
 from core.managers.context_manager import ChatContextManager
 from core.managers.context_store import MemoryContextStore, SQLiteContextStore
 from core.managers.cost_tracker import CostTracker
@@ -139,10 +141,38 @@ class ServiceGraph:
         await self._build_services()
         self._build_bot_engine()
         self._wire_callbacks()
+        await self._migrate_legacy_history()
         await self._deliver_pending_task_recovery()
         self._setup_extras()
         await self.agent_engine.start()
         return self
+
+    async def _migrate_legacy_history(self) -> None:
+        """Import legacy active/archive records before exposing new read paths."""
+        get_ids = getattr(self.context_manager, "get_legacy_chat_ids_async", None)
+        if get_ids is None:
+            return
+        for chat_id in await get_ids():
+            try:
+                await self.agent_engine.migrate_legacy_history_async(chat_id)
+                result = {}
+                if self.archive_manager is not None:
+                    result = await self.archive_manager.import_legacy_archives_async(
+                        chat_id
+                    )
+                if result.get("imported_event_count") or result.get(
+                    "imported_batch_count"
+                ):
+                    _log.info(
+                        "旧历史迁移完成 [%s..]: events=%d batches=%d",
+                        chat_id[:12],
+                        result.get("imported_event_count", 0),
+                        result.get("imported_batch_count", 0),
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log.warning("旧历史迁移失败 [%s..]: %s", chat_id[:12], exc)
 
     # ── 阶段 1: 构造所有服务 ───────────────────────────────────────
 
@@ -289,11 +319,7 @@ class ServiceGraph:
             if _cache_dir
             else MemoryContextStore()
         )
-        self.context_compactor = ContextCompactor(
-            ai_service=self.ai_service,
-            compact_threshold_tokens=ctx_mgmt.get("compact_threshold_tokens", 950000),
-            keep_recent_tokens=ctx_mgmt.get("keep_recent_tokens", 50000),
-        )
+        self.context_compactor = None
         self.context_manager = ChatContextManager(
             store=_store,
             compactor=self.context_compactor,
@@ -327,6 +353,13 @@ class ServiceGraph:
                 retention_days=archive_config.get("retention_days", 30),
                 merge_window_seconds=_merge_ws,
                 timezone_name=archive_config.get("timezone", "Asia/Shanghai"),
+                hot_max_tokens=archive_config.get("hot_max_tokens", 12000),
+                hot_max_turns=archive_config.get("hot_max_turns", 32),
+                hot_max_bytes=archive_config.get("hot_max_bytes", 4_000_000),
+                hot_max_age_seconds=archive_config.get(
+                    "hot_max_age_seconds", 7 * 86400
+                ),
+                hot_low_water_ratio=archive_config.get("hot_low_water_ratio", 0.75),
                 archive_ledger=ArchiveLedger(
                     str(Path(archive_memory_dir).parent / "archive_ledger.sqlite3")
                 ),
@@ -566,6 +599,7 @@ class ServiceGraph:
                 system_events=self.system_events,
                 task_state_store=self.task_state_store,
                 model_context_config=self.cfg.model_context_projection,
+                archive_timezone=str(archive_config.get("timezone", "Asia/Shanghai")),
             ),
             bg=BgContext(
                 task_manager=self.task_manager,
@@ -614,10 +648,68 @@ class ServiceGraph:
             work_plan_cfg.get("max_running_background_per_chat", 4)
         )
         self.agent_engine.set_media_service(self.media_service)
+        self.context_manager.set_event_log(self.agent_engine.event_log)
+        self.context_manager.set_prompt_projection(
+            self.agent_engine.prompt_history_projection
+        )
         self.context_manager.set_timeline(self.agent_engine.timeline)
         self.context_manager.set_protocol_history(self.agent_engine.protocol_history)
         if self.archive_manager is not None:
             self.archive_manager.set_timeline(self.agent_engine.timeline)
+            self.archive_manager.set_event_log(
+                self.agent_engine.event_log,
+                self.agent_engine.prompt_history_projection,
+            )
+            self.archive_manager.set_archive_index(
+                ArchiveIndex(
+                    str(Path(archive_memory_dir).parent / "archive_index.sqlite3")
+                )
+            )
+            self.archive_manager.set_session_lock_provider(
+                self.agent_engine.session_manager.get_lock
+            )
+            summary_config = archive_config.get("summary", {})
+            summary_config = (
+                summary_config if isinstance(summary_config, Mapping) else {}
+            )
+            self.agent_engine.turn_summary_store = TurnSummaryStore(
+                self.agent_engine.event_log,
+                path=str(summary_config.get("path", "data/turn_summaries.sqlite3")),
+                max_prompt_tokens=int(
+                    summary_config.get(
+                        "max_summary_tokens",
+                        summary_config.get("max_prompt_tokens", 1800),
+                    )
+                ),
+                max_prompt_summaries=int(
+                    summary_config.get("max_prompt_summaries", 12)
+                ),
+                max_summary_batches=int(summary_config.get("max_summary_batches", 12)),
+                merge_strategy=str(summary_config.get("merge_strategy", "rollup")),
+                semantic_enabled=bool(summary_config.get("semantic_enabled", False)),
+                semantic_group=str(summary_config.get("model_group", "summary")),
+                model_registry=self.model_registry,
+                semantic_max_tokens=int(summary_config.get("max_tokens", 500)),
+            )
+            self.archive_manager.set_summary_store(self.agent_engine.turn_summary_store)
+            self.archive_manager.set_model_context_transcript(
+                self.agent_engine.model_context
+            )
+            export_config = archive_config.get("jsonl_export", {})
+            export_config = export_config if isinstance(export_config, Mapping) else {}
+            if bool(export_config.get("enabled", False)):
+                self.archive_manager.set_export_adapter(
+                    ArchiveJSONLExportAdapter(
+                        self.agent_engine.event_log,
+                        self.archive_manager._archive_index,
+                        str(
+                            export_config.get(
+                                "path", str(Path(archive_memory_dir).parent / "export")
+                            )
+                        ),
+                        enabled=True,
+                    )
+                )
 
         # ── 注入 TTS ──
         if self.tts_service:
@@ -975,6 +1067,12 @@ class ServiceGraph:
             background_task_runner=self.background_task_runner,
             heartbeat_manager=self.heartbeat_manager,
             archive_manager=self.archive_manager,
+            event_log=self.agent_engine.event_log,
+            archive_index=getattr(self.archive_manager, "_archive_index", None),
+            model_context_transcript=self.agent_engine.model_context,
+            prompt_history_projection=self.agent_engine.prompt_history_projection,
+            turn_summary_store=self.agent_engine.turn_summary_store,
+            prompt_context_reports=self.agent_engine.prompt_context_reports,
             tts_service=self.tts_service,
             delivery_controller=self.agent_engine._get_delivery_controller(),
             approval_manager=self.approval_manager,
@@ -1002,6 +1100,14 @@ class ServiceGraph:
                     "nickname_manager": self.nickname_manager,
                     "context_manager": self.context_manager,
                     "conversation_timeline": self.agent_engine.timeline,
+                    "conversation_event_log": self.agent_engine.event_log,
+                    "archive_index": getattr(
+                        self.archive_manager, "_archive_index", None
+                    ),
+                    "prompt_history_projection": self.agent_engine.prompt_history_projection,
+                    "turn_summary_store": self.agent_engine.turn_summary_store,
+                    "prompt_context_reports": self.agent_engine.prompt_context_reports,
+                    "model_context_transcript": self.agent_engine.model_context,
                     "protocol_history": self.agent_engine.protocol_history,
                     "cost_tracker": self.cost_tracker,
                     "agent_engine": self.agent_engine,

@@ -12,6 +12,7 @@
 
 {% if content %}
 <div class="card">
+    {% if ledger_summary %}<p style="color:var(--text-secondary);font-size:13px">来源：核心账本的 TurnSummary 投影。</p>{% endif %}
     <pre style="white-space:pre-wrap;font-size:13px;line-height:1.6;font-family:inherit">{{ content }}</pre>
 </div>
 {% else %}

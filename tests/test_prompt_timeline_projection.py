@@ -1,7 +1,12 @@
 import pytest
 
+from core.engine.conversation_event_log import ConversationEvent, EventKind
 from core.engine.conversation_timeline import TimelineEvent
-from core.engine.model_context_transcript import ModelContextScope, ModelContextSnapshot
+from core.engine.model_context_transcript import (
+    ModelContextEvent,
+    ModelContextScope,
+    ModelContextSnapshot,
+)
 from core.engine.prompt_builder import PromptBuilder
 from core.message import InputMessage
 
@@ -93,6 +98,54 @@ def test_empty_model_context_snapshot_preserves_existing_timeline_assistant_mess
     history = PromptBuilder._model_context_history(snapshot, timeline)
 
     assert [message["role"] for message in history] == ["user", "assistant"]
+
+
+def test_model_context_history_only_adds_events_from_current_turn():
+    timeline = (
+        ConversationEvent(
+            chat_id="chat",
+            turn_id="old-turn",
+            event_id="user:old",
+            role="user",
+            kind=EventKind.USER_MESSAGE,
+            content="old question",
+            sender_id="alice",
+            timestamp=1_700_000_000,
+        ),
+        ConversationEvent(
+            chat_id="chat",
+            turn_id="new-turn",
+            event_id="user:new",
+            role="user",
+            kind=EventKind.USER_MESSAGE,
+            content="new question",
+            sender_id="alice",
+            timestamp=1_700_000_001,
+        ),
+    )
+    snapshot = ModelContextSnapshot(
+        scope=ModelContextScope(chat_id="chat", principal_id="alice"),
+        events=(
+            ModelContextEvent(
+                scope=ModelContextScope(chat_id="chat", principal_id="alice"),
+                seq=1,
+                event_id="model:old",
+                role="user",
+                content="old question",
+                source_turn_id="old-turn",
+                source_event_ids=("user:old",),
+                timestamp=1_700_000_000,
+            ),
+        ),
+    )
+
+    history = PromptBuilder._model_context_history(
+        snapshot, timeline, current_turn_id="new-turn"
+    )
+
+    assert len(history) == 2
+    assert "old question" in history[0]["content"]
+    assert "new question" in history[1]["content"]
 
 
 def test_protocol_snapshot_is_limited_to_the_requested_turn():

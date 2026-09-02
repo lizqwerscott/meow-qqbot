@@ -56,9 +56,15 @@ class ArchiveCommand:
             if status["last_activity"]
             else "无"
         )
-        operation_status = getattr(
-            self.archive_manager, "get_archive_operation_status", lambda _: {}
-        )(chat_id)
+        async_status = getattr(
+            self.archive_manager, "get_archive_operation_status_async", None
+        )
+        if callable(async_status):
+            operation_status = await async_status(chat_id)
+        else:
+            operation_status = getattr(
+                self.archive_manager, "get_archive_operation_status", lambda _: {}
+            )(chat_id)
         return make_reply(
             input_message,
             f"会话: {chat_id[:24]}…\n"
@@ -77,6 +83,24 @@ class ArchiveCommand:
         self, input_message: InputMessage, chat_id: str
     ) -> List[Dict[str, Any]]:
         target = chat_id or input_message.chat_id
+        list_batches = getattr(self.archive_manager, "list_archive_batches_async", None)
+        if callable(list_batches):
+            batches = await list_batches(target)
+            committed = [
+                batch for batch in batches if batch.get("state") == "committed"
+            ]
+            if not committed:
+                return make_reply(input_message, f"会话 {target[:24]}… 没有归档记录。")
+            lines = [
+                f"{batch['batch_id']} ({batch['event_count']} 事件, "
+                f"{batch['turn_count']} turns, "
+                f"{', '.join(batch.get('source_dates', ())) or '无日期'})"
+                for batch in committed[:20]
+            ]
+            reply = f"归档 batch ({len(committed)} 个):\n" + "\n".join(lines)
+            if len(committed) > 20:
+                reply += f"\n... (还有 {len(committed) - 20} 个)"
+            return make_reply(input_message, reply)
         files = await self.archive_manager.list_archives_async(target)
         if not files:
             return make_reply(input_message, f"会话 {target[:24]}… 没有归档记录。")
@@ -113,16 +137,25 @@ class ArchiveCommand:
                 input_message.is_group if target == input_message.chat_id else None
             )
             result = await self.archive_manager.archive_manual(target, target_is_group)
+            has_archived = bool(
+                result.archive_paths
+                or any(batch.event_count > 0 for batch in result.batches)
+            )
+            has_summary = bool(
+                result.summary_path
+                or any(batch.summary_path for batch in result.batches)
+                or has_archived
+            )
             status_line = (
                 f"会话 {target[:24]}… 日切完成。\n"
-                if result.archive_paths
+                if has_archived
                 else f"会话 {target[:24]}… 没有待日切消息。\n"
             )
             return make_reply(
                 input_message,
                 status_line + f"保留: {result.replay_count} 条（含今天全部）\n"
-                f"摘要: {'已生成' if result.summary_path else '无'}\n"
-                f"归档: {'已写入' if result.archive_path else '无文件'}",
+                f"摘要: {'已生成' if has_summary else '无'}\n"
+                f"归档: {'已写入核心账本' if has_archived else '无'}",
             )
         except Exception as e:
             return make_reply(input_message, f"归档失败: {e}")
@@ -141,8 +174,8 @@ class ArchiveCommand:
             return make_reply(
                 input_message,
                 f"会话 {target[:24]}… 快照完成。\n"
-                f"快照: {'已写入' if result.archive_path else '无活动消息'}\n"
-                "当前 active history 未改变。",
+                f"活动事件: {result.replay_count} 条\n"
+                "核心账本与当前 active history 未改变。",
             )
         except Exception as e:
             return make_reply(input_message, f"快照失败: {e}")

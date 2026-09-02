@@ -10,6 +10,7 @@
 """
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -27,6 +28,7 @@ from core.engine.batch_media_context import (
     BatchMediaLimits,
 )
 from core.engine.context import EngineContext
+from core.engine.conversation_event_log import ConversationEventLog
 from core.engine.conversation_scheduler import ConversationScheduler
 from core.engine.conversation_timeline import ConversationTimeline
 from core.engine.delivery_ledger import (
@@ -51,7 +53,10 @@ from core.engine.model_context_transcript import (
     ModelContextTranscript,
 )
 from core.engine.prompt_builder import PromptBuilder, PromptBuildResult
+from core.engine.prompt_context_report import PromptContextReportStore
+from core.engine.prompt_history_projection import PromptHistoryProjection
 from core.engine.prompt_snapshot import PromptMode
+from core.engine.protocol_projection import ProtocolProjection
 from core.engine.reply_necessity import ReplyNecessityGate, ReplyNecessityInput
 from core.engine.routing_audit import RoutingAuditStore
 from core.engine.routing_metrics import RoutingMetrics
@@ -64,6 +69,7 @@ from core.engine.turn_planner import (
 )
 from core.engine.turn_protocol_history import TurnProtocolHistory
 from core.engine.turn_state import TurnPhase, TurnState, TurnStateError
+from core.engine.turn_summary import TurnSummaryStore
 from core.learners.base import sanitize_for_learners
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager
@@ -276,6 +282,16 @@ class AgentEngine:
         self._engagement_admission_lock = asyncio.Lock()
         self._group_target_observer = None
         self.timeline = ConversationTimeline()
+        self.event_log = ConversationEventLog(
+            timezone_name=str(
+                getattr(ctx.mgmt, "archive_timezone", "Asia/Shanghai")
+                or "Asia/Shanghai"
+            )
+        )
+        self.prompt_history_projection = PromptHistoryProjection(self.event_log)
+        self.turn_summary_store = TurnSummaryStore(self.event_log)
+        self.prompt_context_reports = PromptContextReportStore()
+        self.protocol_projection = ProtocolProjection(self.event_log)
         self.protocol_history = TurnProtocolHistory()
         model_context_config = getattr(ctx.mgmt, "model_context_config", {}) or {}
         projection_enabled = bool(model_context_config.get("enabled", False))
@@ -335,11 +351,14 @@ class AgentEngine:
         )
         self.prompt_builder = PromptBuilder(ctx)
         self.prompt_builder.timeline = self.timeline
+        self.prompt_builder.event_log = self.event_log
+        self.prompt_builder.prompt_history_projection = self.prompt_history_projection
         self.prompt_builder.model_context_transcript = self.model_context
         self.prompt_builder.model_context_read_enabled = self.model_context_read_enabled
         self.prompt_builder.model_context_write_enabled = (
             self.model_context_write_enabled
         )
+        self.prompt_builder.prompt_report_store = self.prompt_context_reports
         self.tool_loop = ToolLoop(
             ctx,
             prompt_builder=self.prompt_builder,
@@ -645,11 +664,117 @@ class AgentEngine:
             self.timeline = timeline
         return timeline
 
-    async def _record_timeline_user_message(self, pending: PendingInbound) -> None:
-        """Write the admission projection without making it a protocol message."""
+    def _get_event_log(self) -> ConversationEventLog:
+        event_log = getattr(self, "event_log", None)
+        if event_log is None:
+            event_log = ConversationEventLog()
+            self.event_log = event_log
+        return event_log
+
+    def _get_prompt_history_projection(self) -> PromptHistoryProjection:
+        projection = getattr(self, "prompt_history_projection", None)
+        if projection is None:
+            projection = PromptHistoryProjection(self._get_event_log())
+            self.prompt_history_projection = projection
+        return projection
+
+    def _get_protocol_projection(self) -> ProtocolProjection:
+        projection = getattr(self, "protocol_projection", None)
+        if projection is None:
+            projection = ProtocolProjection(self._get_event_log())
+            self.protocol_projection = projection
+        return projection
+
+    async def _get_protocol_snapshot(self, turn_id: str) -> tuple:
+        if not turn_id:
+            return ()
+        if getattr(self, "event_log", None) is None:
+            return ()
+        return await self._get_protocol_projection().snapshot(turn_id)
+
+    async def _get_prompt_timeline_snapshot(
+        self, chat_id: str, *, current_turn_id: str = ""
+    ) -> tuple:
+        if getattr(self, "event_log", None) is None:
+            timeline = getattr(self, "timeline", None)
+            snapshot = getattr(timeline, "snapshot", None)
+            if callable(snapshot):
+                return await snapshot(chat_id)
+            return ()
+        projection = self._get_prompt_history_projection()
+        projected = await projection.snapshot_for_prompt(
+            chat_id,
+            current_turn_id=current_turn_id,
+        )
+        ledger_snapshot = await self._get_event_log().snapshot_events(
+            chat_id, include_internal=True
+        )
+        if projected.events or ledger_snapshot.events:
+            return projected
+        return ()
+
+    async def _record_event_log_terminal(
+        self, chat_id: str, turn_id: str, status: str
+    ) -> None:
+        event_log = getattr(self, "event_log", None)
+        if event_log is None or not chat_id or not turn_id:
+            return
+        try:
+            await event_log.append_turn_terminal(
+                chat_id=chat_id,
+                turn_id=turn_id,
+                status=status,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.warning(
+                "核心会话 turn 终态写入失败 [%s..] turn=%s: %s",
+                chat_id[:12],
+                turn_id[:12],
+                exc,
+            )
+
+    async def clear_session_async(self, chat_id: str) -> None:
+        """Clear all runtime and derived session projections together."""
+        await self.context_manager.clear_chat_history_async(chat_id)
+        event_log = getattr(self, "event_log", None)
+        if event_log is None:
+            return
+        await event_log.clear_chat(chat_id)
+        await self._get_prompt_history_projection().clear_chat(chat_id)
+        turn_summary_store = getattr(self, "turn_summary_store", None)
+        if turn_summary_store is not None:
+            await turn_summary_store.clear_chat(chat_id)
+        prompt_reports = getattr(self, "prompt_context_reports", None)
+        if prompt_reports is not None:
+            await prompt_reports.clear_chat(chat_id)
+        model_context = getattr(self, "model_context", None)
+        if model_context is not None:
+            await model_context.clear_chat(chat_id)
+        archive_manager = getattr(self, "_archive_manager", None)
+        archive_index = getattr(archive_manager, "_archive_index", None)
+        if archive_index is not None:
+            await archive_index.clear_chat(chat_id)
+
+    async def _record_timeline_user_message(
+        self, pending: PendingInbound, *, turn_id: str = ""
+    ) -> None:
+        """Append the authoritative event, then best-effort legacy projection."""
         if pending.origin is not AdmissionOrigin.USER_MESSAGE:
             return
         message = pending.message
+        event_log = getattr(self, "event_log", None)
+        if event_log is not None:
+            await event_log.append_user_message(
+                chat_id=message.chat_id,
+                turn_id=turn_id or message.id,
+                message_id=message.id,
+                content=pending.prepared_content,
+                sender_id=message.sender_id,
+                timestamp=message.timestamp,
+                session_kind="group" if message.is_group else "private",
+            )
         try:
             await self._get_timeline().append_user_message(
                 chat_id=message.chat_id,
@@ -662,17 +787,19 @@ class AgentEngine:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            # ChatContext remains the compatibility source until projection
-            # migration is complete; a projection failure must be observable.
             _log.warning(
-                "会话 timeline 写入失败 [%s..] message=%s: %s",
+                "legacy timeline 写入失败 [%s..] message=%s: %s",
                 message.chat_id[:12],
                 message.id,
                 exc,
             )
 
     async def _repair_timeline_from_legacy_history(self, chat_id: str) -> None:
-        get_history = getattr(self.context_manager, "get_chat_history_async", None)
+        get_history = getattr(
+            self.context_manager, "get_legacy_chat_history_async", None
+        )
+        if get_history is None:
+            get_history = getattr(self.context_manager, "get_chat_history_async", None)
         if get_history is None:
             return
         timeline = self._get_timeline()
@@ -681,7 +808,14 @@ class AgentEngine:
             return
         try:
             history = await get_history(chat_id)
+            event_log = self._get_event_log()
+            existing = await event_log.snapshot_events(chat_id, include_internal=True)
+            if existing.events:
+                return
             migrated = await repair(chat_id, history)
+            event_log_repair = getattr(event_log, "repair_from_legacy_history", None)
+            if event_log_repair is not None:
+                await event_log_repair(chat_id, history)
             if migrated:
                 _log.info(
                     "已从旧 ChatContext 回填 timeline [%s..]: %d 条",
@@ -693,9 +827,33 @@ class AgentEngine:
         except Exception as exc:
             _log.warning("旧历史回填 timeline 失败 [%s..]: %s", chat_id[:12], exc)
 
+    async def migrate_legacy_history_async(self, chat_id: str) -> int:
+        """Import one legacy active history into the authoritative event log once."""
+        get_history = getattr(
+            self.context_manager, "get_legacy_chat_history_async", None
+        )
+        if get_history is None:
+            return 0
+        history = await get_history(chat_id)
+        if not history:
+            return 0
+        event_log = self._get_event_log()
+        existing = await event_log.snapshot_events(chat_id, include_internal=True)
+        if existing.events:
+            return 0
+        repair = getattr(event_log, "repair_from_legacy_history", None)
+        if repair is None:
+            return 0
+        return await repair(chat_id, history, source_id="legacy-active")
+
     async def get_history_migration_status(self, chat_id: str) -> dict:
         """Return non-content readiness for retiring legacy prompt history."""
-        legacy = await self.context_manager.get_chat_history_async(chat_id)
+        get_legacy = getattr(
+            self.context_manager, "get_legacy_chat_history_async", None
+        )
+        legacy = await (get_legacy or self.context_manager.get_chat_history_async)(
+            chat_id
+        )
         return (await self._get_timeline().migration_report(chat_id, legacy)).to_dict()
 
     async def get_history_migration_summary(self) -> dict:
@@ -727,7 +885,12 @@ class AgentEngine:
         scan_errors = 0
         for chat_id in sorted(chat_ids):
             try:
-                legacy = await self.context_manager.get_chat_history_async(chat_id)
+                get_legacy = getattr(
+                    self.context_manager, "get_legacy_chat_history_async", None
+                )
+                legacy = await (
+                    get_legacy or self.context_manager.get_chat_history_async
+                )(chat_id)
                 reports.append(await timeline.migration_report(chat_id, legacy))
             except asyncio.CancelledError:
                 raise
@@ -870,13 +1033,15 @@ class AgentEngine:
         if scope is None or not getattr(self, "model_context_write_enabled", False):
             return
         scope = await self._get_model_context().current_scope(scope)
-        timeline_events = await self._get_timeline().snapshot(scope.chat_id)
+        event_snapshot = await self._get_event_log().snapshot_events(
+            scope.chat_id, include_internal=False
+        )
         user_events = tuple(
             event
-            for event in timeline_events
+            for event in event_snapshot.events
             if event.role == "user" and event.message_id in message_ids
         )
-        protocol_events = await self._get_protocol_history().snapshot(turn_id)
+        protocol_events = await self._get_protocol_snapshot(turn_id)
         if not protocol_events:
             raise ModelContextInvariantError(
                 f"turn has no protocol to materialize: {turn_id}"
@@ -960,6 +1125,7 @@ class AgentEngine:
                 retry_base_seconds=config.delivery_retry_base_seconds,
                 max_attempts=config.delivery_retry_max_attempts,
                 timeline=self._get_timeline(),
+                event_log=getattr(self, "event_log", None),
                 audit_delivery=(
                     task_state_store.record_delivery
                     if (task_state_store := getattr(self, "_task_state_store", None))
@@ -986,10 +1152,15 @@ class AgentEngine:
         async with lock:
 
             async def _resolve_content(record: DeliveryRecord) -> Optional[str]:
-                timeline = getattr(self, "timeline", None)
-                history_reader = getattr(timeline, "history", None)
-                history = await history_reader(chat_id) if history_reader else []
-                if not history:
+                event_log = getattr(self, "event_log", None)
+                history = (
+                    await event_log.history(chat_id) if event_log is not None else []
+                )
+                if event_log is None:
+                    timeline = getattr(self, "timeline", None)
+                    history_reader = getattr(timeline, "history", None)
+                    history = await history_reader(chat_id) if history_reader else []
+                if event_log is None and not history:
                     history = await self.context_manager.get_chat_history_async(chat_id)
                 for item in reversed(history):
                     if (
@@ -1377,6 +1548,8 @@ class AgentEngine:
         *,
         source: Literal["initial", "steer", "passive"],
         get_user_nickname: Callable[[str], str],
+        turn_id: str = "",
+        session_lock_held: bool = False,
     ) -> Optional[AdmittedMessage]:
         """Commit one leased inbound message to local history exactly once."""
         message = pending.message
@@ -1419,8 +1592,6 @@ class AgentEngine:
                     )
                 nickname = get_user_nickname(message.sender_id) or message.sender_id
                 await self.context_manager.record_chat_type(chat_id, message.is_group)
-                if pending.origin is AdmissionOrigin.USER_MESSAGE:
-                    await self._repair_timeline_from_legacy_history(chat_id)
                 committed = (
                     await self.context_manager.add_user_message_async(
                         chat_id,
@@ -1445,12 +1616,18 @@ class AgentEngine:
                     )
                     return None
                 if pending.origin is AdmissionOrigin.USER_MESSAGE:
-                    await self._record_timeline_user_message(pending)
+                    await self._record_timeline_user_message(pending, turn_id=turn_id)
                 if getattr(self, "_archive_manager", None):
                     try:
-                        await self._archive_manager.archive_if_stale(
-                            chat_id, message.is_group
-                        )
+                        archive_if_stale = self._archive_manager.archive_if_stale
+                        if session_lock_held:
+                            await archive_if_stale(
+                                chat_id,
+                                message.is_group,
+                                session_lock_held=True,
+                            )
+                        else:
+                            await archive_if_stale(chat_id, message.is_group)
                     except Exception as exc:
                         _log.warning("归档失败 [%s..]: %s", chat_id[:12], exc)
                 admitted_ids[admission_key] = True
@@ -1531,6 +1708,13 @@ class AgentEngine:
     ) -> Optional[bool]:
         if (chat_id, message_id) in self._admission_in_progress:
             return None
+        event_log = getattr(self, "event_log", None)
+        if event_log is not None:
+            snapshot = await event_log.snapshot_events(chat_id, include_internal=False)
+            return any(
+                event.role == "user" and event.message_id == message_id
+                for event in snapshot.events
+            )
         timeline = getattr(self, "timeline", None)
         history_reader = getattr(timeline, "history", None)
         if callable(history_reader):
@@ -2011,6 +2195,8 @@ class AgentEngine:
                                         item,
                                         source="passive",
                                         get_user_nickname=get_user_nickname,
+                                        turn_id=scheduler_turn_id,
+                                        session_lock_held=True,
                                     )
                                     if item.message.msg_type != MessageType.EMOJI:
                                         await self._run_hooks(
@@ -2043,10 +2229,16 @@ class AgentEngine:
                             expected_revision=finalizing.revision,
                             phase=TurnPhase.COMPLETED,
                         )
+                        await self._record_event_log_terminal(
+                            chat_id, completed.turn_id, "completed"
+                        )
                         await self._close_model_context_scope(pending)
                         await self._get_scheduler().drop_turn(completed.turn_id)
                 except asyncio.CancelledError:
                     await self._cancel_scheduler_turn(scheduler_turn_id)
+                    await self._record_event_log_terminal(
+                        chat_id, scheduler_turn_id, "aborted"
+                    )
                     await self._close_model_context_scope(pending)
                     for item in work.items:
                         state = self.session_manager.get_message_state(
@@ -2063,6 +2255,9 @@ class AgentEngine:
                     raise
                 except Exception as exc:
                     await self._cancel_scheduler_turn(scheduler_turn_id)
+                    await self._record_event_log_terminal(
+                        chat_id, scheduler_turn_id, "failed"
+                    )
                     await self._close_model_context_scope(pending)
                     first_uncommitted = True
                     for item in work.items:
@@ -2160,6 +2355,7 @@ class AgentEngine:
                 await request.planner_control_callback(control)
 
         prompt_built = False
+        latest_prompt_result = None
 
         async def _steering_admission_callback(
             pending: PendingInbound,
@@ -2167,8 +2363,13 @@ class AgentEngine:
             return await request.steering_admission_callback(pending)
 
         async def _execute() -> _TurnResult:
-            nonlocal prompt_built
+            nonlocal prompt_built, latest_prompt_result
             prompt_result = await request.prompt_factory()
+            latest_prompt_result = (
+                prompt_result
+                if isinstance(prompt_result, PromptBuildResult)
+                else PromptBuildResult(*prompt_result)
+            )
             messages, tools = prompt_result
             model_context_scope = getattr(prompt_result, "model_context_scope", None)
             prompt_snapshot = getattr(prompt_result, "snapshot", None)
@@ -2232,17 +2433,109 @@ class AgentEngine:
                 )
 
             async def _model_context_provider(service, can_rebuild: bool):
-                nonlocal model_context_scope
+                nonlocal model_context_scope, latest_prompt_result
                 if request.model_context_provider_callback is None:
                     return None
                 result = await request.model_context_provider_callback(
                     service, can_rebuild
                 )
                 if result is not None:
+                    if (
+                        getattr(result, "messages", None)
+                        or getattr(result, "snapshot", None) is not None
+                    ):
+                        latest_prompt_result = (
+                            result
+                            if isinstance(result, PromptBuildResult)
+                            else PromptBuildResult(*result)
+                        )
                     model_context_scope = getattr(
                         result, "model_context_scope", model_context_scope
                     )
                 return result
+
+            async def _record_provider_attempt(
+                provider_identity: str,
+                attempt_number: int,
+                attempt_messages: list[dict],
+            ) -> None:
+                report_store = getattr(self, "prompt_context_reports", None)
+                if report_store is None:
+                    return
+                result = latest_prompt_result
+                if result is None:
+                    return
+                snapshot = result.snapshot
+                prompt_hash = (
+                    snapshot.prompt_hash
+                    if snapshot is not None
+                    else hashlib.sha256(
+                        json.dumps(
+                            attempt_messages,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            default=str,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                )
+                protocol_count = sum(
+                    1
+                    for message in attempt_messages
+                    if message.get("role") == "tool" or bool(message.get("tool_calls"))
+                )
+                try:
+                    await report_store.record(
+                        chat_id=request.chat_id,
+                        turn_id=request.turn_id or request.reply_to,
+                        source=result.history_source
+                        or (
+                            "model_context"
+                            if model_context_scope
+                            else "bounded_fallback"
+                        ),
+                        generation=(
+                            model_context_scope.generation
+                            if model_context_scope is not None
+                            else 0
+                        ),
+                        history_count=sum(
+                            1
+                            for message in attempt_messages
+                            if message.get("role") != "system"
+                        ),
+                        protocol_count=protocol_count,
+                        total_message_count=len(attempt_messages),
+                        estimated_tokens=sum(
+                            max(1, len(str(message.get("content") or "")) // 4)
+                            for message in attempt_messages
+                        ),
+                        fallback_reason=(
+                            "provider_fallback" if attempt_number > 1 else ""
+                        ),
+                        attempt_id=f"{request.turn_id or request.reply_to}:{attempt_number}",
+                        projection_version=result.projection_version,
+                        prompt_hash=prompt_hash,
+                        summary_dates=result.summary_dates,
+                        summary_count=result.summary_count,
+                        degraded_reason=result.degraded_reason,
+                        scope_key=(
+                            json.dumps(
+                                model_context_scope.key,
+                                ensure_ascii=False,
+                            )
+                            if model_context_scope is not None
+                            else ""
+                        ),
+                        truncated_event_ids=result.truncated_event_ids,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    _log.warning(
+                        "prompt provider attempt report 写入失败 [%s..]: %s",
+                        request.chat_id[:12],
+                        exc,
+                    )
 
             async def _model_context_usage(usage, service, model_name, _elapsed_ms):
                 if request.model_context_usage_callback is None:
@@ -2315,7 +2608,7 @@ class AgentEngine:
                     else None
                 ),
                 turn_id=request.turn_id or request.reply_to,
-                protocol_history=self._get_protocol_history(),
+                protocol_history=None,
                 transition_turn=_transition_turn if turn_state is not None else None,
                 turn_active_callback=_turn_is_active,
                 turn_delivery_callback=_turn_can_deliver,
@@ -2371,6 +2664,8 @@ class AgentEngine:
                 routing_metrics=getattr(self, "routing_metrics", None),
                 consumer_evidence_callback=request.consumer_evidence_callback,
                 provider_start_callback=request.provider_start_callback,
+                provider_attempt_callback=_record_provider_attempt,
+                event_log=getattr(self, "event_log", None),
             )
             if request.timeout is not None:
                 sent_emoji, text_committed = await asyncio.wait_for(
@@ -2392,6 +2687,7 @@ class AgentEngine:
                 return await _execute()
             except asyncio.CancelledError:
                 raise
+
             except _AdmissionAlreadyCommitted:
                 raise
             except Exception:
@@ -2427,6 +2723,26 @@ class AgentEngine:
                         )
                 raise
 
+        async def _execute_with_terminal() -> _TurnResult:
+            try:
+                result = await _execute_with_rollback()
+            except asyncio.CancelledError:
+                await self._record_event_log_terminal(
+                    request.chat_id, request.turn_id, "aborted"
+                )
+                raise
+            except _AdmissionAlreadyCommitted:
+                raise
+            except Exception:
+                await self._record_event_log_terminal(
+                    request.chat_id, request.turn_id, "failed"
+                )
+                raise
+            await self._record_event_log_terminal(
+                request.chat_id, request.turn_id, "completed"
+            )
+            return result
+
         async def _release_turn_planner_leases() -> None:
             if request.planner_lease_id or not request.turn_id:
                 return
@@ -2442,14 +2758,14 @@ class AgentEngine:
 
         if not request.serialize_session:
             try:
-                return await _execute_with_rollback()
+                return await _execute_with_terminal()
             finally:
                 await _release_turn_planner_leases()
 
         session_lock = await self.session_manager.get_lock(request.chat_id)
         async with session_lock:
             try:
-                return await _execute_with_rollback()
+                return await _execute_with_terminal()
             finally:
                 await _release_turn_planner_leases()
 
@@ -2515,6 +2831,7 @@ class AgentEngine:
                     item,
                     source="ambient",
                     get_user_nickname=get_user_nickname,
+                    turn_id=turn_id,
                 )
                 if admitted is not None:
                     admitted_any = True
@@ -2530,9 +2847,12 @@ class AgentEngine:
                 user_nickname=get_user_nickname(input_message.sender_id),
                 sender_id=input_message.sender_id,
                 input_message=input_message,
+                turn_id=turn_id,
                 cost_tracker=self.cost_tracker,
-                timeline_snapshot=await self._get_timeline().snapshot(chat_id),
-                protocol_snapshot=await self._get_protocol_history().snapshot(turn_id),
+                timeline_snapshot=await self._get_prompt_timeline_snapshot(
+                    chat_id, current_turn_id=turn_id
+                ),
+                protocol_snapshot=await self._get_protocol_snapshot(turn_id),
                 delivery_contract=self._delivery_contract(
                     current_pending.intent, decision.reply_anchor_id or input_message.id
                 ),
@@ -2750,6 +3070,7 @@ class AgentEngine:
         input_message = (batch[-1] if batch else pending).message
         chat_id = input_message.chat_id
         is_group = input_message.is_group
+        active_turn_id = scheduler_turn_id or input_message.id
         user_nickname = get_user_nickname(input_message.sender_id)
         system_event_snapshot = []
         planner_result: PlannerResult | None = None
@@ -2809,6 +3130,8 @@ class AgentEngine:
                         item,
                         source="initial",
                         get_user_nickname=get_user_nickname,
+                        turn_id=active_turn_id,
+                        session_lock_held=True,
                     )
                     if admitted is not None:
                         admitted_messages.append(admitted)
@@ -2827,11 +3150,12 @@ class AgentEngine:
                 user_nickname=user_nickname,
                 sender_id=input_message.sender_id,
                 input_message=input_message,
+                turn_id=active_turn_id,
                 cost_tracker=self.cost_tracker,
-                timeline_snapshot=await self._get_timeline().snapshot(chat_id),
-                protocol_snapshot=await self._get_protocol_history().snapshot(
-                    input_message.id
+                timeline_snapshot=await self._get_prompt_timeline_snapshot(
+                    chat_id, current_turn_id=active_turn_id
                 ),
+                protocol_snapshot=await self._get_protocol_snapshot(active_turn_id),
                 model_context_snapshot=await self._model_context_snapshot(
                     prompt_state["scope"]
                 ),
@@ -2841,7 +3165,7 @@ class AgentEngine:
                 model_context_provider_service=provider_service,
                 force_model_context_compaction=force_model_context_compaction,
                 delivery_contract=self._delivery_contract(
-                    pending.intent, input_message.id
+                    pending.intent, active_turn_id
                 ),
                 media_context=media_context,
                 mode=(capabilities.mode if pending.mode_routing is not None else None),
@@ -2935,7 +3259,7 @@ class AgentEngine:
                 usage,
                 service,
                 model_name,
-                turn_id=input_message.id,
+                turn_id=active_turn_id,
             )
 
         async def _admit_steering(
@@ -2945,6 +3269,8 @@ class AgentEngine:
                 steering,
                 source="steer",
                 get_user_nickname=get_user_nickname,
+                turn_id=active_turn_id,
+                session_lock_held=True,
             )
             message_ids.add(steering.message.id)
             if admitted is None:
@@ -2985,7 +3311,7 @@ class AgentEngine:
             controller = self._get_delivery_controller()
             record = await controller.prepare_reply_delivery(
                 chat_id=chat_id,
-                turn_id=input_message.id,
+                turn_id=active_turn_id,
                 sequence=delivery_sequence,
                 content=content,
                 reply_anchor_id=input_message.id,
@@ -3526,8 +3852,11 @@ class AgentEngine:
                     user_nickname="系统",
                     sender_id=planner_sender_id,
                     input_message=msg,
+                    turn_id=msg.id,
                     cost_tracker=self.cost_tracker,
-                    timeline_snapshot=await self._get_timeline().snapshot(session_key),
+                    timeline_snapshot=await self._get_prompt_timeline_snapshot(
+                        session_key, current_turn_id=msg.id
+                    ),
                     protocol_snapshot=(),
                 )
 
@@ -3725,6 +4054,22 @@ class AgentEngine:
         model_context = getattr(self, "model_context", None)
         if model_context is not None:
             await model_context.close()
+        event_log = getattr(self, "event_log", None)
+        if event_log is not None:
+            await event_log.close()
+        prompt_projection = getattr(self, "prompt_history_projection", None)
+        if prompt_projection is not None:
+            await prompt_projection.close()
+        turn_summary_store = getattr(self, "turn_summary_store", None)
+        if turn_summary_store is not None:
+            await turn_summary_store.close()
+        prompt_reports = getattr(self, "prompt_context_reports", None)
+        if prompt_reports is not None:
+            await prompt_reports.close()
+        archive_manager = getattr(self, "_archive_manager", None)
+        archive_index = getattr(archive_manager, "_archive_index", None)
+        if archive_index is not None:
+            await archive_index.close()
 
         if self.hindsight:
             await self.hindsight.close()

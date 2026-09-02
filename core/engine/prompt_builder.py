@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple
 
 if TYPE_CHECKING:
     from core.engine.conversation_timeline import TimelineEvent
-    from core.engine.turn_protocol_history import ProtocolEvent
+    from core.engine.conversation_event_log import ConversationEvent
 
 from core.engine.batch_media_context import BatchMediaContext
 from core.engine.delivery_prompt_contract import DeliveryPromptContract
@@ -31,7 +31,6 @@ from core.engine.prompt_snapshot import (
     PromptSnapshot,
     UntrustedPromptData,
 )
-from core.engine.turn_protocol_history import TurnProtocolHistory
 from core.message import InputMessage
 from core.tools.policy import ChatContext, build_tools, format_task_tool_descriptions
 
@@ -47,6 +46,12 @@ class PromptBuildResult:
     model_context_scope: Optional[ModelContextScope] = None
     model_context_fingerprint: Optional[str] = None
     snapshot: Optional[PromptSnapshot] = None
+    history_source: str = "prompt_projection"
+    projection_version: int = 0
+    truncated_event_ids: tuple[str, ...] = ()
+    degraded_reason: str = ""
+    summary_dates: tuple[str, ...] = ()
+    summary_count: int = 0
 
     def __iter__(self):
         yield self.messages
@@ -155,9 +160,11 @@ class PromptBuilder:
             )
         )
         self.timeline = None
+        self.event_log = None
         self.model_context_transcript = None
         self.model_context_read_enabled = True
         self.model_context_write_enabled = True
+        self.prompt_report_store = None
         self.media_service = None
         self._dynamic_ctx_builder = DynamicContextBuilder(
             hindsight=self.hindsight,
@@ -181,9 +188,10 @@ class PromptBuilder:
         user_nickname: str,
         sender_id: str,
         input_message: InputMessage,
+        turn_id: Optional[str] = None,
         cost_tracker: Any = None,
         timeline_snapshot: Optional[Sequence["TimelineEvent"]] = None,
-        protocol_snapshot: Optional[Sequence["ProtocolEvent"]] = None,
+        protocol_snapshot: Optional[Sequence["ConversationEvent"]] = None,
         model_context_snapshot: Optional[ModelContextSnapshot] = None,
         model_context_scope: Optional[ModelContextScope] = None,
         model_context_identity: Optional[Sequence[str]] = None,
@@ -206,23 +214,20 @@ class PromptBuilder:
         """
         if timeline_snapshot is None:
             raise ValueError("timeline_snapshot is required for prompt assembly")
+        history_snapshot = (
+            timeline_snapshot
+            if hasattr(timeline_snapshot, "events")
+            and hasattr(timeline_snapshot, "projection_version")
+            else None
+        )
+        timeline_events = (
+            history_snapshot.events
+            if history_snapshot is not None
+            else timeline_snapshot
+        )
+        model_context_fallback_reason = ""
 
-        # ── 1. Token 阈值触发 compaction ──
-        try:
-            _, compact_usage, _ = await self.context_manager.compact_history_if_needed(
-                chat_id
-            )
-            if compact_usage and cost_tracker:
-                cost_tracker.record_turn(
-                    chat_id,
-                    self.ai_service.model,
-                    compact_usage,
-                    metadata={"usage_kind": "compaction"},
-                )
-        except Exception as e:
-            _log.warning("历史压缩失败 [%s..]: %s", chat_id[:12], e)
-
-        # ── 1b. 防御：清理 context 历史中孤立的 tool_calls ──
+        # ── 1. 防御：清理 legacy context 中孤立的 tool_calls ──
         cleaned = await self.context_manager.remove_orphaned_tool_calls_async(chat_id)
         if cleaned:
             _log.info(f"清理了 {cleaned} 条孤立 tool_calls 消息 [{chat_id[:12]}..]")
@@ -429,16 +434,29 @@ class PromptBuilder:
                 _log.warning("模型上下文 generation/compaction 检查失败: %s", exc)
                 model_context_scope = None
                 model_context_snapshot = None
+                model_context_fallback_reason = "model_context_projection_failed"
+
+        if (
+            model_context_scope is not None
+            and self.model_context_read_enabled
+            and model_context_snapshot is None
+        ):
+            model_context_fallback_reason = "model_context_projection_unavailable"
 
         # ── 4. 完整历史 ──
+        bounded_history_event_ids = {
+            event.event_id for event in timeline_events if event.event_id
+        }
+        if model_context_snapshot is not None:
+            bounded_history_event_ids.update(model_context_snapshot.source_event_ids)
         if model_context_snapshot is not None:
             history = self._model_context_history(
-                model_context_snapshot, timeline_snapshot
+                model_context_snapshot, timeline_events, current_turn_id=turn_id or ""
             )
         else:
-            history = self._timeline_history(timeline_snapshot)
+            history = self._timeline_history(timeline_events)
         if protocol_snapshot:
-            history.extend(TurnProtocolHistory.to_wire_messages(protocol_snapshot))
+            history.extend(event.to_wire() for event in protocol_snapshot)
 
         messages: List[dict] = [{"role": "system", "content": static_prompt}]
         if delivery_contract is not None:
@@ -458,6 +476,7 @@ class PromptBuilder:
             input_message=input_message,
             has_emojis=has_emojis,
             has_users=has_users,
+            covered_event_ids=tuple(sorted(bounded_history_event_ids)),
         )
         if dynamic_text:
             messages.append(
@@ -466,6 +485,26 @@ class PromptBuilder:
                     "content": dynamic_text,
                 }
             )
+
+        summary_dates: tuple[str, ...] = ()
+        summary_count = 0
+        selection_reader = getattr(
+            self._archive_manager, "get_prompt_summary_selection_async", None
+        )
+        if callable(selection_reader):
+            try:
+                selection = await selection_reader(
+                    chat_id,
+                    covered_event_ids=tuple(sorted(bounded_history_event_ids)),
+                )
+                summary_dates = tuple(
+                    summary.source_date for summary in selection.summaries
+                )
+                summary_count = len(selection.summaries)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log.warning("读取摘要诊断信息失败 [%s..]: %s", chat_id[:12], exc)
 
         if self.media_service and self.media_service.tools_enabled:
             media_rules = []
@@ -546,6 +585,41 @@ class PromptBuilder:
                 else None
             ),
             snapshot=snapshot,
+            history_source=(
+                "model_context"
+                if model_context_snapshot is not None
+                else (
+                    "bounded_fallback"
+                    if model_context_fallback_reason
+                    else "prompt_projection"
+                )
+            ),
+            projection_version=(
+                history_snapshot.projection_version
+                if history_snapshot is not None
+                else 0
+            ),
+            truncated_event_ids=(
+                history_snapshot.truncated_event_ids
+                if history_snapshot is not None
+                else ()
+            ),
+            degraded_reason=(
+                ";".join(
+                    reason
+                    for reason in (
+                        (
+                            history_snapshot.degraded_reason
+                            if history_snapshot is not None
+                            else ""
+                        ),
+                        model_context_fallback_reason,
+                    )
+                    if reason
+                )
+            ),
+            summary_dates=summary_dates,
+            summary_count=summary_count,
         )
 
     @staticmethod
@@ -633,15 +707,26 @@ class PromptBuilder:
         cls,
         model_context_snapshot: ModelContextSnapshot,
         timeline_snapshot: Sequence["TimelineEvent"],
+        *,
+        current_turn_id: str = "",
     ) -> List[dict]:
         history = model_context_snapshot.to_wire()
         if model_context_snapshot.events:
             inherited_event_ids = model_context_snapshot.source_event_ids
-            current_events = tuple(
-                event
-                for event in timeline_snapshot
-                if event.role == "user" and event.event_id not in inherited_event_ids
-            )
+            if current_turn_id:
+                current_events = tuple(
+                    event
+                    for event in timeline_snapshot
+                    if getattr(event, "turn_id", "") == current_turn_id
+                    and event.event_id not in inherited_event_ids
+                )
+            else:
+                current_events = tuple(
+                    event
+                    for event in timeline_snapshot
+                    if event.role == "user"
+                    and event.event_id not in inherited_event_ids
+                )
         else:
             current_events = tuple(timeline_snapshot)
         history.extend(cls._timeline_history(current_events))
@@ -798,22 +883,40 @@ class PromptBuilder:
         # ── 聊天历史（作为独立消息对，仅 session=main） ──
         if session_mode == "main" and admin_chat_id:
             try:
-                recent = (
-                    await self.timeline.history(admin_chat_id, max_events=20)
-                    if self.timeline is not None
-                    else []
-                )
-                legacy_recent = await self.context_manager.get_chat_history_async(
-                    admin_chat_id,
-                    max_messages=20,
-                )
-                if self.timeline is not None:
-                    await self.timeline.repair_from_legacy_history(
-                        admin_chat_id, legacy_recent
+                timeline = getattr(self, "timeline", None)
+                prompt_projection = getattr(self, "prompt_history_projection", None)
+                if prompt_projection is not None:
+                    recent_snapshot = await prompt_projection.snapshot_for_prompt(
+                        admin_chat_id
                     )
-                    recent = await self.timeline.history(admin_chat_id, max_events=20)
-                if not recent:
-                    recent = legacy_recent
+                    recent = [
+                        event.to_history_dict() for event in recent_snapshot.events
+                    ]
+                else:
+                    get_pruned_history = getattr(
+                        self.context_manager, "get_pruned_history_async", None
+                    )
+                    if callable(get_pruned_history):
+                        recent = await get_pruned_history(admin_chat_id)
+                    else:
+                        recent = (
+                            await timeline.history(admin_chat_id, max_events=20)
+                            if timeline is not None
+                            else []
+                        )
+                        repair = getattr(timeline, "repair_from_legacy_history", None)
+                        get_history = getattr(
+                            self.context_manager, "get_legacy_chat_history_async", None
+                        ) or getattr(
+                            self.context_manager, "get_chat_history_async", None
+                        )
+                        if callable(repair) and callable(get_history):
+                            await repair(
+                                admin_chat_id, await get_history(admin_chat_id)
+                            )
+                            recent = await timeline.history(
+                                admin_chat_id, max_events=20
+                            )
                 inserted = 0
                 for msg in recent[-15:]:
                     role = msg.get("role")

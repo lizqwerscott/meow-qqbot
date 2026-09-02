@@ -793,6 +793,31 @@ class ModelContextTranscript:
         self._validate_history(events)
         return ModelContextSnapshot(current, tuple(events))
 
+    async def scopes_for_chat(self, chat_id: str) -> tuple[ModelContextScope, ...]:
+        """Return current scopes for archive-driven generation maintenance."""
+        if not chat_id:
+            return ()
+        conn = await self._ensure_open()
+        async with self._lock:
+            rows = conn.execute(
+                """
+                SELECT chat_id, principal_id, task_correlation_id, kind, generation
+                  FROM model_context_scopes
+                 WHERE chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchall()
+        return tuple(
+            ModelContextScope(
+                chat_id=row["chat_id"],
+                principal_id=row["principal_id"],
+                task_correlation_id=row["task_correlation_id"],
+                kind=ModelContextScopeKind(row["kind"]),
+                generation=int(row["generation"]),
+            )
+            for row in rows
+        )
+
     async def record_provider_usage(
         self,
         scope: ModelContextScope,
@@ -1154,14 +1179,6 @@ class ModelContextTranscript:
                         raise ModelContextConcurrentMutationError(
                             "model context changed during compaction"
                         )
-                conn.execute(
-                    """
-                    DELETE FROM model_context_events
-                     WHERE chat_id = ? AND principal_id = ?
-                       AND task_correlation_id = ? AND kind = ? AND generation = ?
-                    """,
-                    (*values, current.generation),
-                )
                 for event in normalized:
                     self._insert_event_locked(conn, event)
                 conn.execute(
@@ -1957,14 +1974,6 @@ class ModelContextTranscript:
             values = self._scope_values(current)
             conn.execute(
                 """
-                DELETE FROM model_context_events
-                 WHERE chat_id = ? AND principal_id = ?
-                   AND task_correlation_id = ? AND kind = ? AND generation = ?
-                """,
-                (*values, current.generation),
-            )
-            conn.execute(
-                """
                 UPDATE model_context_scopes
                    SET generation = ?, fingerprint = ?, updated_at = ?
                  WHERE chat_id = ? AND principal_id = ?
@@ -1974,6 +1983,86 @@ class ModelContextTranscript:
             )
             conn.commit()
         return replace(current, generation=current.generation + 1)
+
+    async def rotate_for_hidden_sources(
+        self,
+        scope: ModelContextScope,
+        hidden_event_ids: Sequence[str],
+        *,
+        summary_texts: Sequence[str] = (),
+        summary_source_event_ids: Sequence[Sequence[str]] = (),
+        operation_id: str = "",
+    ) -> ModelContextSnapshot:
+        """Rebuild a generation after archive hides source events."""
+        hidden = {str(item) for item in hidden_event_ids if item}
+        if operation_id:
+            conn = await self._ensure_open()
+            async with self._lock:
+                completed = conn.execute(
+                    """
+                    SELECT 1 FROM model_context_compactions
+                     WHERE operation_id = ? AND status = 'committed'
+                    """,
+                    (operation_id,),
+                ).fetchone()
+            if completed is not None:
+                current, events = await self._read_events(scope)
+                return ModelContextSnapshot(current, events)
+        current, events = await self._read_events(scope)
+        if not hidden:
+            return ModelContextSnapshot(current, events)
+        affected_turns = {
+            event.source_turn_id
+            for event in events
+            if hidden.intersection(event.source_event_ids)
+        }
+        if not affected_turns:
+            return ModelContextSnapshot(current, events)
+        retained = [
+            event
+            for event in events
+            if event.source_turn_id not in affected_turns
+            and not hidden.intersection(event.source_event_ids)
+        ]
+        for index, text in enumerate(summary_texts):
+            text = str(text or "").strip()
+            if not text:
+                continue
+            summary_id = f"archive-summary:{operation_id or time.time_ns()}:{index}"
+            retained.append(
+                ModelContextEvent(
+                    scope=current,
+                    seq=0,
+                    event_id=summary_id,
+                    role="assistant",
+                    content=text,
+                    source_turn_id=summary_id,
+                    source_event_ids=tuple(
+                        str(event_id)
+                        for event_id in (
+                            summary_source_event_ids[index]
+                            if index < len(summary_source_event_ids)
+                            else ()
+                        )
+                        if event_id
+                    ),
+                    compacted=True,
+                    timestamp=time.time(),
+                    operation="archive_summary",
+                )
+            )
+        retained.sort(key=lambda event: (event.timestamp, event.seq))
+        return await self._replace_generation(
+            current,
+            retained,
+            operation="archive_rotation",
+            reason="archive hidden source events",
+            before_tokens=self._snapshot_tokens(events),
+            operation_id=operation_id
+            or f"archive_rotation:{current.generation}:{time.time_ns()}",
+            source_event_ids=tuple(sorted(hidden)),
+            expected_event_ids=tuple(event.event_id for event in events),
+        )
 
     async def clear(self, scope: ModelContextScope) -> None:
         current = await self.current_scope(scope)
@@ -1988,6 +2077,25 @@ class ModelContextTranscript:
                 (*self._scope_values(current), current.generation),
             )
             conn.commit()
+
+    async def clear_chat(self, chat_id: str) -> None:
+        """Clear all generations for an explicit session reset."""
+        conn = await self._ensure_open()
+        async with self._lock:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for table in (
+                    "model_context_events",
+                    "model_context_compactions",
+                    "model_context_usage",
+                    "model_context_incidents",
+                    "model_context_scopes",
+                ):
+                    conn.execute(f"DELETE FROM {table} WHERE chat_id = ?", (chat_id,))
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
 
     async def close_scope(self, scope: ModelContextScope) -> None:
         """Delete a scope and all generations so it cannot be reused."""

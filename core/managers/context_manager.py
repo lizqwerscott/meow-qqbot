@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional
 
 from core.engine.history_projection import merge_timeline_visible_events
 from core.managers.chat_context import ChatContext
-from core.managers.context_compactor import ContextCompactor
 from core.managers.context_store import ContextStore
 
 _log = logging.getLogger(__name__)
@@ -17,7 +16,7 @@ class ChatContextManager:
     def __init__(
         self,
         store: ContextStore,
-        compactor: ContextCompactor,
+        compactor: Any = None,
         max_history_per_chat: int = 10000,
         cleanup_interval: int = 3600,
         max_tool_results: int = 5,
@@ -38,12 +37,21 @@ class ChatContextManager:
         self._chat_locks: Dict[str, asyncio.Lock] = {}
         self._timeline = None
         self._protocol_history = None
+        self._event_log = None
+        self._prompt_projection = None
 
     def set_timeline(self, timeline: Any) -> None:
         self._timeline = timeline
 
     def set_protocol_history(self, protocol_history: Any) -> None:
         self._protocol_history = protocol_history
+
+    def set_event_log(self, event_log: Any) -> None:
+        """Use the core ledger for all normal history reads."""
+        self._event_log = event_log
+
+    def set_prompt_projection(self, projection: Any) -> None:
+        self._prompt_projection = projection
 
     @property
     def store(self) -> ContextStore:
@@ -94,6 +102,14 @@ class ChatContextManager:
         name: Optional[str] = None,
         timestamp: Optional[float] = None,
     ) -> bool:
+        if self._event_log is not None:
+            snapshot = await self._event_log.snapshot_events(
+                chat_id, include_internal=False
+            )
+            return not any(
+                event.role == "user" and event.message_id == message_id
+                for event in snapshot.events
+            )
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
@@ -113,6 +129,8 @@ class ChatContextManager:
         tool_calls: Optional[List[Dict]] = None,
         reasoning_content: Optional[str] = None,
     ) -> None:
+        if self._event_log is not None:
+            return
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
@@ -130,6 +148,8 @@ class ChatContextManager:
         content: str,
         tool_call_id: str,
     ) -> None:
+        if self._event_log is not None:
+            return
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
@@ -140,6 +160,19 @@ class ChatContextManager:
     async def get_chat_history_async(
         self, chat_id: str, max_messages: Optional[int] = None
     ) -> List[Dict]:
+        if self._event_log is not None:
+            history = await self._event_log.history(chat_id)
+            return (
+                history[-max_messages:]
+                if max_messages and max_messages > 0
+                else ([] if max_messages == 0 else history)
+            )
+        return await self.get_legacy_chat_history_async(chat_id, max_messages)
+
+    async def get_legacy_chat_history_async(
+        self, chat_id: str, max_messages: Optional[int] = None
+    ) -> List[Dict]:
+        """Read the retired active store for explicit migration diagnostics only."""
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
@@ -159,6 +192,8 @@ class ChatContextManager:
 
     async def get_session_summary_async(self, chat_id: str) -> Dict[str, Any]:
         """获取完整会话摘要（用于详情页面）。"""
+        if self._event_log is not None:
+            return await self._event_log.session_summary(chat_id)
         if self._timeline is not None:
             try:
                 summary = await self._timeline.session_summary(chat_id)
@@ -187,6 +222,13 @@ class ChatContextManager:
 
         只读取最后一条消息，避免加载完整历史，大幅提升列表页加载速度。
         """
+        if self._event_log is not None:
+            summary = await self._event_log.session_summary(chat_id)
+            return {
+                "message_count": summary["message_count"],
+                "last_activity": summary["last_activity"],
+                "estimated_tokens": summary["estimated_tokens"],
+            }
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
@@ -296,6 +338,8 @@ class ChatContextManager:
                 self._token_cache_time.pop(next(iter(self._token_cache_time)), None)
 
     async def remove_orphaned_tool_calls_async(self, chat_id: str) -> int:
+        if self._event_log is not None:
+            return 0
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
@@ -304,6 +348,13 @@ class ChatContextManager:
     async def get_recent_user_contents_async(
         self, chat_id: str, count: int = 2
     ) -> List[str]:
+        if self._event_log is not None:
+            history = await self._event_log.history(chat_id)
+            return [
+                message.get("content", "")
+                for message in history
+                if message.get("role") == "user"
+            ][-count:]
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
@@ -316,6 +367,11 @@ class ChatContextManager:
         chat_id: str,
         max_messages: Optional[int] = None,
     ) -> List[Dict]:
+        if self._event_log is not None:
+            if self._prompt_projection is not None:
+                snapshot = await self._prompt_projection.snapshot_for_prompt(chat_id)
+                return [event.to_history_dict() for event in snapshot.events]
+            return await self._event_log.history(chat_id)
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             ctx = await self._get_or_restore_context_locked(chat_id)
@@ -330,6 +386,9 @@ class ChatContextManager:
     # ── 历史管理 ──
 
     async def clear_chat_history_async(self, chat_id: str) -> None:
+        if self._event_log is not None:
+            await self._invalidate_token_cache(chat_id)
+            return
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
@@ -344,6 +403,8 @@ class ChatContextManager:
     async def remove_message_if_async(
         self, chat_id: str, role: str, message_id: str
     ) -> bool:
+        if self._event_log is not None:
+            return False
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
@@ -367,11 +428,18 @@ class ChatContextManager:
 
     @property
     def compaction_threshold_tokens(self) -> int:
-        return self._compactor.compact_threshold_tokens
+        return (
+            self._compactor.compact_threshold_tokens
+            if self._compactor is not None
+            else 0
+        )
 
     async def compact_history_if_needed(
         self, chat_id: str, force: bool = False
     ) -> tuple[bool, Optional[Dict], int]:
+        if self._event_log is not None or self._compactor is None:
+            history = await self.get_chat_history_async(chat_id)
+            return False, None, len(history)
         lock = await self._get_chat_lock(chat_id)
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
@@ -440,10 +508,20 @@ class ChatContextManager:
     # ── 统计与查询 ──
 
     async def get_all_chat_ids_async(self) -> List[str]:
+        if self._event_log is not None:
+            return sorted(await self._event_log.chat_ids())
         async with self._ctx_lock:
             return list(self.contexts.keys())
 
     async def get_all_disk_chat_ids_async(self) -> List[str]:
+        if self._event_log is not None:
+            async with self._ctx_lock:
+                memory_ids = set(self.contexts)
+            try:
+                return sorted(set(await self._event_log.chat_ids()) | memory_ids)
+            except Exception:
+                return sorted(memory_ids)
+
         # 使用缓存，减少磁盘 I/O
         async with self._ctx_lock:
             memory_ids = set(self.contexts)
@@ -463,7 +541,24 @@ class ChatContextManager:
 
         return sorted(set(disk_ids) | memory_ids)
 
+    async def get_legacy_chat_ids_async(self) -> List[str]:
+        """Enumerate legacy store sessions after the event log is wired."""
+        async with self._ctx_lock:
+            memory_ids = set(self.contexts)
+        try:
+            disk_ids = await asyncio.to_thread(self._store.get_all_disk_ids)
+        except Exception:
+            disk_ids = []
+        return sorted(set(disk_ids) | memory_ids)
+
     async def get_total_messages_count_async(self) -> int:
+        if self._event_log is not None:
+            total = 0
+            for chat_id in await self._event_log.chat_ids():
+                total += (await self._event_log.session_summary(chat_id))[
+                    "message_count"
+                ]
+            return total
         async with self._ctx_lock:
             chat_ids = list(self.contexts)
         total = 0
