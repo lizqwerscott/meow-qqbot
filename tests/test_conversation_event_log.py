@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -343,3 +344,113 @@ async def test_legacy_repair_groups_tool_wire_events_into_turns_idempotently(tmp
         EventKind.TURN_TERMINAL,
         EventKind.USER_MESSAGE,
     ]
+
+
+@pytest.mark.asyncio
+async def test_legacy_repair_does_not_reclose_turn_from_second_source(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    active = [
+        {
+            "role": "user",
+            "content": "任务",
+            "message_id": "turn-1",
+            "timestamp": 1,
+        },
+        {"role": "assistant", "content": "完成", "timestamp": 2},
+    ]
+    archive = [
+        {
+            "role": "user",
+            "content": "任务",
+            "message_id": "turn-1",
+            "timestamp": 1,
+        },
+        {"role": "assistant", "content": "完成", "timestamp": 2},
+    ]
+
+    assert (
+        await log.repair_from_legacy_history("chat", active, source_id="legacy-active")
+        == 2
+    )
+    assert (
+        await log.repair_from_legacy_history(
+            "chat", archive, source_id="legacy-archive"
+        )
+        == 0
+    )
+
+    events = await log.snapshot_events("chat", include_internal=True)
+    assert [event.kind for event in events.events] == [
+        EventKind.USER_MESSAGE,
+        EventKind.ACCEPTED_DELIVERY,
+        EventKind.TURN_TERMINAL,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_legacy_repair_serializes_concurrent_retries(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    history = [
+        {"role": "user", "content": "并发任务", "message_id": "m1", "timestamp": 1},
+        {"role": "assistant", "content": "完成", "timestamp": 2},
+    ]
+
+    imported = await asyncio.gather(
+        log.repair_from_legacy_history("chat", history, source_id="legacy-active"),
+        log.repair_from_legacy_history("chat", history, source_id="legacy-active"),
+    )
+
+    assert sorted(imported) == [0, 2]
+    events = (await log.snapshot_events("chat", include_internal=True)).events
+    assert [event.kind for event in events] == [
+        EventKind.USER_MESSAGE,
+        EventKind.ACCEPTED_DELIVERY,
+        EventKind.TURN_TERMINAL,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_legacy_repair_handles_multiple_assistant_records_without_terminal_append_error(
+    tmp_path,
+):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+
+    imported = await log.repair_from_legacy_history(
+        "chat",
+        [
+            {"role": "user", "content": "问题", "message_id": "m1", "timestamp": 1},
+            {"role": "assistant", "content": "第一段", "timestamp": 2},
+            {"role": "assistant", "content": "第二段", "timestamp": 3},
+        ],
+        source_id="legacy-active",
+    )
+
+    assert imported == 3
+    turns = await log.snapshot_turns("chat", include_internal=True)
+    assert len(turns.turns) == 2
+    assert all(turn.is_terminal for turn in turns.turns)
+
+
+@pytest.mark.asyncio
+async def test_legacy_repair_strips_nested_display_prefixes(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+
+    await log.repair_from_legacy_history(
+        "chat",
+        [
+            {
+                "role": "user",
+                "content": (
+                    "[用户 在 2026-07-13 17:14:22]: "
+                    "[用户 在 2026-07-13 17:14:22]: 原始内容"
+                ),
+                "message_id": "m1",
+                "timestamp": 1,
+            }
+        ],
+        source_id="legacy-active",
+    )
+
+    event = (await log.snapshot_events("chat")).events[0]
+    assert event.content == "原始内容"
+    assert (await log.history("chat"))[0]["content"] == "原始内容"

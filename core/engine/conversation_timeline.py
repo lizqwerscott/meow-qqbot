@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from core.managers.chat_message import strip_content_prefix
+
 
 @dataclass(frozen=True)
 class TimelineEvent:
@@ -335,6 +337,8 @@ class ConversationTimeline:
         for index, message in enumerate(messages):
             role = message.get("role")
             content = message.get("raw_content", message.get("content", ""))
+            if role == "user" and "raw_content" not in message:
+                content = strip_content_prefix(str(content or ""))
             if role == "user":
                 event_id = message.get("message_id")
                 if event_id:

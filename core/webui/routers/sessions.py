@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.status import HTTP_303_SEE_OTHER, HTTP_400_BAD_REQUEST
 
 from core.engine.history_projection import visible_legacy_history
+from core.managers.chat_message import strip_content_prefix
 
 _log = logging.getLogger(__name__)
 
@@ -81,6 +82,8 @@ def _redact_message(message: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(safe, dict):
         return {}
     safe["content"] = _redact_text(safe.get("content"), limit=4000)
+    if safe.get("role") == "user":
+        safe["content"] = strip_content_prefix(safe["content"])
     if safe.get("reasoning_content"):
         safe["reasoning_content"] = _redact_text(safe["reasoning_content"], limit=1200)
     tool_calls = safe.get("tool_calls")

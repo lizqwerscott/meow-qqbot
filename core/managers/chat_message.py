@@ -24,6 +24,21 @@ def strip_content_prefix(content: str) -> str:
     return content
 
 
+def normalize_legacy_content(data: dict) -> str:
+    """Read user content from old display-formatted or storage-formatted records."""
+    role = data.get("role", "user")
+    content = str(data.get("raw_content", data.get("content", "")) or "")
+    if role != "user":
+        return content
+    if "raw_content" not in data:
+        return strip_content_prefix(content)
+    displayed = str(data.get("content", "") or "")
+    displayed_without_outer = _RE_PREFIX.sub("", displayed, count=1)
+    if _RE_PREFIX.match(content) and displayed_without_outer == content:
+        return strip_content_prefix(content)
+    return content
+
+
 def _estimate_tokens(text: Optional[str]) -> int:
     if not text:
         return 0
@@ -117,9 +132,10 @@ class ChatMessage:
                 "from_dict 收到 str 而非 dict (len=%d)，按 user 消息兜底", len(data)
             )
             return ChatMessage(role="user", content=data, timestamp=0.0)
-        content = data.get("raw_content", data.get("content", ""))
+        role = data.get("role", "user")
+        content = normalize_legacy_content(data)
         return ChatMessage(
-            role=data.get("role", "user"),
+            role=role,
             content=content,
             timestamp=data.get("timestamp", 0.0),
             message_id=data.get("message_id"),

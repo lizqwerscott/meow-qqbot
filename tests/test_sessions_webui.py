@@ -65,6 +65,20 @@ def test_webui_history_redaction_covers_nested_tool_arguments():
     assert "[已脱敏]" in str(safe)
 
 
+def test_webui_redaction_normalizes_legacy_user_display_prefix():
+    safe = _redact_message(
+        {
+            "role": "user",
+            "content": (
+                "[用户 在 2026-07-13 17:14:22]: "
+                "[用户 在 2026-07-13 17:14:22]: 原始内容"
+            ),
+        }
+    )
+
+    assert safe["content"] == "原始内容"
+
+
 @pytest.mark.asyncio
 async def test_sessions_protocol_view_and_kind_filter(tmp_path):
     protocol = TurnProtocolHistory(str(tmp_path / "protocol.sqlite3"))

@@ -838,9 +838,6 @@ class AgentEngine:
         if not history:
             return 0
         event_log = self._get_event_log()
-        existing = await event_log.snapshot_events(chat_id, include_internal=True)
-        if existing.events:
-            return 0
         repair = getattr(event_log, "repair_from_legacy_history", None)
         if repair is None:
             return 0

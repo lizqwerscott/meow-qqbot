@@ -31,6 +31,7 @@ from core.engine.prompt_snapshot import (
     PromptSnapshot,
     UntrustedPromptData,
 )
+from core.managers.chat_message import strip_content_prefix
 from core.message import InputMessage
 from core.tools.policy import ChatContext, build_tools, format_task_tool_descriptions
 
@@ -752,7 +753,9 @@ class PromptBuilder:
                 timestamp = time.strftime(
                     "%Y-%m-%d %H:%M:%S", time.localtime(event.timestamp)
                 )
-                content = f"[{name} 在 {timestamp}]: {event.content}"
+                content = (
+                    f"[{name} 在 {timestamp}]: {strip_content_prefix(event.content)}"
+                )
             else:
                 content = event.content
             history.append({"role": event.role, "content": content})

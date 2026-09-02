@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 from zoneinfo import ZoneInfo
 
+from core.managers.chat_message import normalize_legacy_content, strip_content_prefix
+
 
 class EventKind(StrEnum):
     USER_MESSAGE = "user_message"
@@ -109,6 +111,9 @@ class ConversationEvent:
         return self.kind not in _VISIBLE_KINDS
 
     def to_history_dict(self) -> dict[str, Any]:
+        content = (
+            strip_content_prefix(self.content) if self.role == "user" else self.content
+        )
         result = {
             "chat_id": self.chat_id,
             "turn_id": self.turn_id,
@@ -117,7 +122,7 @@ class ConversationEvent:
             "event_id": self.event_id,
             "role": self.role,
             "kind": str(self.kind),
-            "content": self.content,
+            "content": content,
             "timestamp": self.timestamp,
             "source_date": self.source_date,
             "message_id": self.message_id,
@@ -155,7 +160,7 @@ class ConversationEvent:
                 "content": self.content,
             }
         if self.role == "user":
-            return {"role": "user", "content": self.content}
+            return {"role": "user", "content": strip_content_prefix(self.content)}
         raise EventLogInvariantError(f"event cannot be compiled to wire: {self.role}")
 
 
@@ -219,6 +224,7 @@ class ConversationEventLog:
         self._timezone = ZoneInfo(timezone_name)
         self._conn: Optional[sqlite3.Connection] = None
         self._lock = asyncio.Lock()
+        self._legacy_repair_locks: dict[str, asyncio.Lock] = {}
 
     async def _ensure_open(self) -> sqlite3.Connection:
         if self._conn is not None:
@@ -399,7 +405,9 @@ class ConversationEventLog:
                 if existing_row is not None:
                     existing = self._event_from_row(existing_row)
                     comparison = normalized
-                    if not event.timestamp and not event.source_date:
+                    if (not event.timestamp and not event.source_date) or (
+                        normalized.kind is EventKind.TURN_TERMINAL
+                    ):
                         comparison = replace(
                             normalized,
                             timestamp=existing.timestamp,
@@ -682,49 +690,217 @@ class ConversationEventLog:
         session_kind: str = "chat",
         source_id: str = "",
     ) -> int:
+        repair_lock = self._legacy_repair_locks.setdefault(chat_id, asyncio.Lock())
+        async with repair_lock:
+            return await self._repair_from_legacy_history(
+                chat_id,
+                messages,
+                session_kind=session_kind,
+                source_id=source_id,
+            )
+
+    async def _repair_from_legacy_history(
+        self,
+        chat_id: str,
+        messages: Sequence[dict[str, Any]],
+        *,
+        session_kind: str = "chat",
+        source_id: str = "",
+    ) -> int:
         """Import legacy messages while preserving recognizable turn order."""
         if not chat_id or not messages:
             return 0
         existing = await self.snapshot_events(chat_id, include_internal=True)
-        existing_ids = {event.event_id for event in existing.events}
+        existing_by_id = {event.event_id: event for event in existing.events}
+        turns = await self.snapshot_turns(chat_id, include_internal=True)
+        turns_by_id = {turn.turn_id: turn for turn in turns.turns}
+        matched_event_ids: set[str] = set()
         current_turn_id = ""
         current_terminal = False
         imported = 0
+
+        def normalized_content(role: str, value: Any, *, legacy_display: bool) -> str:
+            content = str(value or "")
+            if role == "user" and legacy_display:
+                return strip_content_prefix(content)
+            return content
+
+        def legacy_event_id(
+            message: dict[str, Any], role: str, index: int, fallback: str
+        ) -> str:
+            explicit_id = str(message.get("event_id") or "")
+            if explicit_id:
+                return explicit_id
+            record_id = str(message.get("record_id") or "")
+            if record_id:
+                return f"legacy:record:{record_id}:{role}"
+            message_id = str(message.get("message_id") or "")
+            if message_id:
+                return f"{role}:{message_id}"
+            tool_call_id = str(message.get("tool_call_id") or "")
+            if role == "tool" and tool_call_id:
+                return f"tool:{tool_call_id}"
+            return fallback
+
+        def matches(
+            event: ConversationEvent,
+            *,
+            event_id: str,
+            role: str,
+            kind: EventKind,
+            content: str,
+            message: dict[str, Any],
+            tool_calls: Sequence[dict[str, Any]] = (),
+            tool_call_id: str = "",
+        ) -> bool:
+            if event.event_id in matched_event_ids or event.event_id != event_id:
+                return False
+            if event.role != role or event.kind is not kind:
+                return False
+            if (
+                normalized_content(event.role, event.content, legacy_display=True)
+                != content
+            ):
+                return False
+            message_id = str(message.get("message_id") or "")
+            if role == "user" and message_id and event.message_id != message_id:
+                return False
+            if role != "user" and message_id and event.message_id:
+                if event.message_id != message_id:
+                    return False
+            if tool_call_id and event.tool_call_id != tool_call_id:
+                return False
+            if tool_calls and tuple(event.tool_calls) != tuple(tool_calls):
+                return False
+            timestamp = message.get("timestamp")
+            if timestamp not in (None, "", 0, 0.0) and event.timestamp:
+                try:
+                    if abs(float(event.timestamp) - float(timestamp)) > 1.0:
+                        return False
+                except (TypeError, ValueError):
+                    return False
+            return True
+
+        def find_match(**kwargs: Any) -> Optional[ConversationEvent]:
+            return next(
+                (
+                    event
+                    for event in existing_by_id.values()
+                    if matches(event, **kwargs)
+                ),
+                None,
+            )
+
+        def collision_safe_event_id(candidate: str, **kwargs: Any) -> str:
+            existing = existing_by_id.get(candidate)
+            if existing is None or matches(existing, event_id=candidate, **kwargs):
+                return candidate
+            digest = hashlib.sha256(
+                json.dumps(
+                    {
+                        "role": kwargs["role"],
+                        "kind": str(kwargs["kind"]),
+                        "content": kwargs["content"],
+                        "message": kwargs["message"],
+                        "tool_calls": kwargs.get("tool_calls", ()),
+                        "tool_call_id": kwargs.get("tool_call_id", ""),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()[:12]
+            return f"{candidate}:legacy-conflict:{digest}"
+
+        def mark_match(event: ConversationEvent) -> None:
+            nonlocal current_turn_id, current_terminal
+            matched_event_ids.add(event.event_id)
+            current_turn_id = event.turn_id
+            turn = turns_by_id.get(event.turn_id)
+            current_terminal = bool(turn and turn.is_terminal)
+
+        async def append_legacy_event(event: ConversationEvent) -> ConversationEvent:
+            nonlocal imported
+            appended = await self.append_event(event)
+            existing_by_id[appended.event_id] = appended
+            matched_event_ids.add(appended.event_id)
+            turn_snapshot = await self.snapshot_turns(chat_id, include_internal=True)
+            turns_by_id.update({turn.turn_id: turn for turn in turn_snapshot.turns})
+            imported += 1
+            return appended
+
+        async def start_continuation(index: int, content: str) -> None:
+            nonlocal current_turn_id, current_terminal
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+            base = f"legacy-repair:{chat_id}:{index}:{digest}"
+            candidate = base
+            suffix = 1
+            while candidate in turns_by_id:
+                candidate = f"{base}:{suffix}"
+                suffix += 1
+            current_turn_id = candidate
+            current_terminal = False
 
         async def close_previous_turn(timestamp: float) -> None:
             nonlocal current_terminal
             if not current_turn_id or current_terminal:
                 return
+            turn = turns_by_id.get(current_turn_id)
+            if turn is not None and turn.is_terminal:
+                current_terminal = True
+                return
             report = await self.validate_turn(current_turn_id)
             status = TurnStatus.COMPLETED if report.valid else TurnStatus.INCOMPLETE
-            await self.append_turn_terminal(
+            terminal = await self.append_turn_terminal(
                 chat_id=chat_id,
                 turn_id=current_turn_id,
                 status=status,
                 timestamp=timestamp,
             )
+            existing_by_id[terminal.event_id] = terminal
+            matched_event_ids.add(terminal.event_id)
             current_terminal = True
+            turn_snapshot = await self.snapshot_turns(chat_id, include_internal=True)
+            turns_by_id.update({item.turn_id: item for item in turn_snapshot.turns})
 
         for index, message in enumerate(messages):
             role = str(message.get("role") or "")
-            content = str(message.get("raw_content", message.get("content", "")) or "")
+            content = normalize_legacy_content(message)
             timestamp = self._legacy_timestamp(message)
             if role == "user":
                 await close_previous_turn(timestamp)
                 message_id = str(message.get("message_id") or "")
                 current_turn_id = message_id or f"legacy-turn:{chat_id}:{index}"
                 current_terminal = False
-                event_id = (
-                    f"user:{message_id}"
-                    if message_id
-                    else (
-                        f"legacy:{source_id}:user:{index}"
-                        if source_id
-                        else f"legacy:user:{index}"
-                    )
+                event_id = legacy_event_id(
+                    message,
+                    role,
+                    index,
+                    (f"legacy:semantic:{chat_id}:{current_turn_id}:user:{index}"),
                 )
-                if event_id not in existing_ids:
-                    await self.append_event(
+                match_kwargs = {
+                    "role": "user",
+                    "kind": EventKind.USER_MESSAGE,
+                    "content": content,
+                    "message": message,
+                }
+                event_id = collision_safe_event_id(event_id, **match_kwargs)
+                match = find_match(
+                    event_id=event_id,
+                    role="user",
+                    kind=EventKind.USER_MESSAGE,
+                    content=content,
+                    message=message,
+                )
+                if match is not None:
+                    mark_match(match)
+                else:
+                    if (
+                        current_turn_id in turns_by_id
+                        and turns_by_id[current_turn_id].is_terminal
+                    ):
+                        await start_continuation(index, content)
+                    await append_legacy_event(
                         ConversationEvent(
                             chat_id=chat_id,
                             turn_id=current_turn_id,
@@ -738,8 +914,6 @@ class ConversationEventLog:
                             session_kind=session_kind,
                         )
                     )
-                    existing_ids.add(event_id)
-                    imported += 1
                 continue
 
             if role == "assistant":
@@ -753,13 +927,34 @@ class ConversationEventLog:
                 else:
                     tool_calls = ()
                 if tool_calls:
-                    event_id = str(message.get("event_id") or "") or (
-                        f"legacy:{source_id}:assistant:{index}"
-                        if source_id
-                        else f"legacy:assistant:{index}"
+                    event_id = legacy_event_id(
+                        message,
+                        role,
+                        index,
+                        f"legacy:semantic:{chat_id}:{current_turn_id}:assistant:{index}",
                     )
-                    if event_id not in existing_ids:
-                        await self.append_event(
+                    match_kwargs = {
+                        "role": "assistant",
+                        "kind": EventKind.ASSISTANT_TOOL_CALL,
+                        "content": content,
+                        "message": message,
+                        "tool_calls": tool_calls,
+                    }
+                    event_id = collision_safe_event_id(event_id, **match_kwargs)
+                    match = find_match(
+                        event_id=event_id,
+                        role="assistant",
+                        kind=EventKind.ASSISTANT_TOOL_CALL,
+                        content=content,
+                        message=message,
+                        tool_calls=tool_calls,
+                    )
+                    if match is not None:
+                        mark_match(match)
+                    else:
+                        if current_terminal:
+                            await start_continuation(index, content)
+                        await append_legacy_event(
                             ConversationEvent(
                                 chat_id=chat_id,
                                 turn_id=current_turn_id,
@@ -775,16 +970,33 @@ class ConversationEventLog:
                                 session_kind=session_kind,
                             )
                         )
-                        existing_ids.add(event_id)
-                        imported += 1
                 elif content:
-                    event_id = str(message.get("event_id") or "") or (
-                        f"legacy:{source_id}:delivery:{index}"
-                        if source_id
-                        else f"legacy:delivery:{index}"
+                    event_id = legacy_event_id(
+                        message,
+                        role,
+                        index,
+                        f"legacy:semantic:{chat_id}:{current_turn_id}:delivery:{index}",
                     )
-                    if event_id not in existing_ids:
-                        await self.append_event(
+                    match_kwargs = {
+                        "role": "assistant",
+                        "kind": EventKind.ACCEPTED_DELIVERY,
+                        "content": content,
+                        "message": message,
+                    }
+                    event_id = collision_safe_event_id(event_id, **match_kwargs)
+                    match = find_match(
+                        event_id=event_id,
+                        role="assistant",
+                        kind=EventKind.ACCEPTED_DELIVERY,
+                        content=content,
+                        message=message,
+                    )
+                    if match is not None:
+                        mark_match(match)
+                    else:
+                        if current_terminal:
+                            await start_continuation(index, content)
+                        await append_legacy_event(
                             ConversationEvent(
                                 chat_id=chat_id,
                                 turn_id=current_turn_id,
@@ -796,8 +1008,6 @@ class ConversationEventLog:
                                 session_kind=session_kind,
                             )
                         )
-                        existing_ids.add(event_id)
-                        imported += 1
                     await close_previous_turn(timestamp)
                 continue
 
@@ -807,13 +1017,34 @@ class ConversationEventLog:
                 tool_call_id = str(message.get("tool_call_id") or "")
                 if not tool_call_id:
                     continue
-                event_id = str(message.get("event_id") or "") or (
-                    f"legacy:{source_id}:tool:{index}:{tool_call_id}"
-                    if source_id
-                    else f"legacy:tool:{index}:{tool_call_id}"
+                event_id = legacy_event_id(
+                    message,
+                    role,
+                    index,
+                    f"legacy:semantic:{chat_id}:{current_turn_id}:tool:{index}:{tool_call_id}",
                 )
-                if event_id not in existing_ids:
-                    await self.append_event(
+                match_kwargs = {
+                    "role": "tool",
+                    "kind": EventKind.TOOL_RESULT,
+                    "content": content,
+                    "message": message,
+                    "tool_call_id": tool_call_id,
+                }
+                event_id = collision_safe_event_id(event_id, **match_kwargs)
+                match = find_match(
+                    event_id=event_id,
+                    role="tool",
+                    kind=EventKind.TOOL_RESULT,
+                    content=content,
+                    message=message,
+                    tool_call_id=tool_call_id,
+                )
+                if match is not None:
+                    mark_match(match)
+                else:
+                    if current_terminal:
+                        await start_continuation(index, content)
+                    await append_legacy_event(
                         ConversationEvent(
                             chat_id=chat_id,
                             turn_id=current_turn_id,
@@ -827,8 +1058,6 @@ class ConversationEventLog:
                             session_kind=session_kind,
                         )
                     )
-                    existing_ids.add(event_id)
-                    imported += 1
         return imported
 
     @staticmethod

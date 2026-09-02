@@ -181,3 +181,24 @@ def test_protocol_snapshot_is_limited_to_the_requested_turn():
         },
         {"role": "tool", "tool_call_id": "call-1", "content": "tool result"},
     ]
+
+
+def test_timeline_history_removes_legacy_nested_display_prefixes():
+    snapshot = [
+        TimelineEvent(
+            chat_id="chat",
+            seq=1,
+            event_id="user:m1",
+            role="user",
+            content=(
+                "[用户 在 2026-07-13 17:14:22]: "
+                "[用户 在 2026-07-13 17:14:22]: 原始内容"
+            ),
+            sender_id="用户",
+            timestamp=1,
+        )
+    ]
+
+    assert PromptBuilder._timeline_history(snapshot) == [
+        {"role": "user", "content": "[用户 在 1970-01-01 08:00:01]: 原始内容"}
+    ]

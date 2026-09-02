@@ -181,6 +181,37 @@ def test_storage_record_gets_stable_event_id_with_record_id():
     assert first["event_id"] == second["event_id"]
 
 
+def test_from_dict_normalizes_legacy_user_display_prefix():
+    message = ChatMessage.from_dict(
+        {
+            "role": "user",
+            "content": "[用户 在 2026-07-13 17:14:22]: 原始内容",
+            "sender_id": "用户",
+            "timestamp": 1,
+        }
+    )
+
+    assert message.content == "原始内容"
+    assert message.to_dict()["content"] == "[用户 在 1970-01-01 08:00:01]: 原始内容"
+
+
+def test_from_dict_normalizes_contaminated_legacy_raw_content():
+    message = ChatMessage.from_dict(
+        {
+            "role": "user",
+            "content": (
+                "[用户 在 2026-07-13 17:14:22]: "
+                "[用户 在 2026-07-13 17:14:22]: 原始内容"
+            ),
+            "raw_content": "[用户 在 2026-07-13 17:14:22]: 原始内容",
+            "sender_id": "用户",
+            "timestamp": 1,
+        }
+    )
+
+    assert message.content == "原始内容"
+
+
 @pytest.mark.asyncio
 async def test_archive_snapshot_does_not_mutate_active_record_metadata(tmp_path):
     message = ChatMessage(role="user", content="snapshot", timestamp=123.0)
@@ -281,6 +312,54 @@ async def test_legacy_archive_import_creates_ledger_batch_without_read_dependenc
     assert len(await index.list_for_webui(chat_id)) == 1
     assert (await projection.snapshot_for_prompt(chat_id)).events == ()
     assert await projection.hidden_event_ids(chat_id)
+    await event_log.close()
+    await projection.close()
+    await index.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_archive_import_deduplicates_same_history_from_multiple_files(
+    tmp_path,
+):
+    store = JSONLContextStore(str(tmp_path / "sessions"))
+    chat_id = "legacy-duplicate-chat"
+    records = [
+        {
+            "role": "user",
+            "content": "[用户 在 2026-07-13 17:14:22]: 原始问题",
+            "message_id": "legacy-user",
+            "sender_id": "user-1",
+            "timestamp": 1,
+        },
+        {"role": "assistant", "content": "原始回答", "timestamp": 2},
+    ]
+    store.archive_messages(chat_id, "2025-01-01", records)
+    store.archive_messages(chat_id, "2025-01-02", records)
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    projection = PromptHistoryProjection(
+        event_log, metadata_path=str(tmp_path / "projection.sqlite3")
+    )
+    index = ArchiveIndex(str(tmp_path / "index.sqlite3"))
+    manager = ArchiveManager(
+        context_manager=_FakeCM(_MutableCtx([]), store),
+        archive_index=index,
+        memory_dir=str(tmp_path / "memory"),
+    )
+    manager.set_event_log(event_log, projection)
+
+    report = await manager.import_legacy_archives_async(chat_id)
+
+    assert report == {
+        "chat_id": chat_id,
+        "archive_count": 2,
+        "imported_event_count": 3,
+        "imported_batch_count": 1,
+        "error_count": 0,
+        "status": "ok",
+    }
+    events = (await event_log.snapshot_events(chat_id, include_internal=True)).events
+    assert [event.content for event in events if event.role == "user"] == ["原始问题"]
+    assert len(await index.list_for_webui(chat_id)) == 1
     await event_log.close()
     await projection.close()
     await index.close()
