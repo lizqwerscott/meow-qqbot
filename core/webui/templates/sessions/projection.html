@@ -5,7 +5,7 @@
 {% block content %}
 <h2 style="margin-bottom:8px">{{ view_title }} <code>{{ chat_id[:16] }}..</code></h2>
 <p style="color:var(--text-secondary);margin-bottom:16px">{{ view_description }}</p>
-<p style="color:var(--warning,#b7791f);font-size:13px">按完整 Turn 浏览；当前页之外的历史不会混入本页显示。</p>
+<p style="color:var(--warning,#b7791f);font-size:13px">按完整 Turn 浏览；当前页之外的历史不会混入本页显示。Timeline 包含工具调用与结果，Prompt 页面才表示模型实际使用的历史。</p>
 <div style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
     <a href="/sessions/{{ chat_id }}" class="btn">会话总览</a>
     <a href="/sessions/{{ chat_id }}/active" class="btn">Active</a>
@@ -26,16 +26,45 @@
 
 {% if event_view %}
     {% for turn in turns %}
-    <div class="card">
-        <h3>Turn {{ turn.turn_sequence }} · {{ turn.source_date }} · {{ turn.status }} <code>{{ turn.turn_id[:16] }}..</code></h3>
-        {% for msg in turn.events %}
-        <div class="chat-message {{ msg.role }}">
-            <div class="msg-meta">{{ msg.kind }} · {{ msg.timestamp | format_timestamp }} · seq {{ msg.event_seq }} · {{ msg.source_date }}</div>
-            <div class="msg-content">{{ msg.content or '(空)' }}</div>
-            {% if msg.tool_calls %}<div class="tool-details">工具调用：{{ msg.tool_calls|length }} 个</div>{% endif %}
+    {% if loop.first or turn.source_date != turns[loop.index0 - 1].source_date %}
+    <div class="conversation-date-divider"><span>{{ turn.source_date }}</span></div>
+    {% endif %}
+    <article class="conversation-turn{% if turn.has_tools %} conversation-turn-tools{% else %} conversation-turn-simple{% endif %}">
+        <div class="conversation-turn-meta">
+            <span>Turn {{ turn.turn_sequence }}</span>
+            <span class="turn-kind turn-kind-{{ turn.turn_kind }}">{{ turn.turn_kind_label }}</span>
+            <span>{{ turn.source_date }}</span>
+            {% if turn.status != 'completed' and turn.status != 'unknown' %}<span class="turn-status">{{ turn.status }}</span>{% endif %}
+            {% if turn.has_tools %}<span class="turn-tools-count">{{ turn.tool_count }} 个工具调用</span>{% endif %}
+            <code>{{ turn.turn_id[:12] }}..</code>
         </div>
+        <div class="conversation-messages">
+        {% for msg in turn.events if msg.kind in ['user_message', 'accepted_delivery'] %}
+            <div class="conversation-bubble {{ msg.role }}">
+                <div class="conversation-bubble-meta">{% if msg.role == 'user' %}👤 {{ msg.sender_id or '用户' }}{% else %}🤖 助手{% endif %} · {{ msg.timestamp | format_timestamp }}</div>
+                <div class="conversation-bubble-content">{{ msg.content or '（无文本消息）' }}</div>
+            </div>
         {% endfor %}
-    </div>
+        </div>
+        {% if turn.has_tools %}
+        <details class="conversation-tool-chain">
+            <summary>查看工具链（{{ turn.tool_count }} 个调用）</summary>
+            {% for msg in turn.events if msg.kind in ['assistant_tool_call', 'tool_result'] %}
+            <div class="conversation-tool-event {{ msg.role }}">
+                <div class="msg-meta">{{ msg.kind }} · {{ msg.timestamp | format_timestamp }} · seq {{ msg.event_seq }}</div>
+                {% if msg.tool_calls %}
+                    {% for tc in msg.tool_calls %}
+                    {% set function = tc.function or {} %}
+                    <div class="tool-details"><strong>{{ function.name or '未知' }}</strong>({{ function.arguments or '{}' }})</div>
+                    {% endfor %}
+                {% else %}
+                    <div class="tool-details">{{ msg.content or '（空结果）' }}</div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </details>
+        {% endif %}
+    </article>
     {% else %}<p style="color:var(--text-secondary)">暂无数据</p>{% endfor %}
 {% else %}
     {% for msg in events %}

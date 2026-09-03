@@ -31,3 +31,22 @@ async def test_prompt_context_report_records_attempt_diagnostics(tmp_path):
     assert reports[0].degraded_reason == "budget"
     assert reports[0].truncated_event_ids == ("event-1",)
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_prompt_context_report_webui_listing_supports_count_and_offset(tmp_path):
+    store = PromptContextReportStore(str(tmp_path / "reports.sqlite3"))
+    for index in range(3):
+        await store.record(
+            chat_id="chat",
+            turn_id=f"turn-{index}",
+            source="timeline",
+            generation=index,
+        )
+
+    reports = await store.list_for_webui("chat", limit=1, offset=1)
+
+    assert await store.count_for_webui("chat") == 3
+    assert len(reports) == 1
+    assert reports[0].turn_id == "turn-1"
+    await store.close()

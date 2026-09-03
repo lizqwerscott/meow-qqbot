@@ -159,6 +159,137 @@ async def test_user_admission_writes_conversation_timeline_projection():
 
 
 @pytest.mark.asyncio
+async def test_user_admission_does_not_write_legacy_timeline_when_ledger_is_enabled(
+    tmp_path,
+):
+    from core.engine.conversation_event_log import ConversationEventLog
+
+    engine = make_engine(FakeToolLoop())
+    engine.event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+
+    class Timeline:
+        def __init__(self):
+            self.calls = []
+
+        async def append_user_message(self, **kwargs):
+            self.calls.append(kwargs)
+
+    timeline = Timeline()
+    engine.timeline = timeline
+    pending = PendingInbound(
+        InputMessage("ledger-message", "user", "chat", "hello", False),
+        "hello",
+        InboundIntent.PRIVATE_CONVERSATION,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+
+    admitted = await engine._admit_pending_message(
+        pending,
+        source="initial",
+        get_user_nickname=lambda sender_id: sender_id,
+    )
+
+    assert admitted is not None
+    assert timeline.calls == []
+    assert await engine.event_log.history("chat")
+    await engine.event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_admission_retries_ledger_after_legacy_projection_was_written(tmp_path):
+    from core.engine.conversation_event_log import ConversationEventLog
+
+    engine = make_engine(FakeToolLoop())
+    engine.event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+
+    class LegacyContext:
+        def __init__(self):
+            self.recorded = False
+
+        async def record_chat_type(self, chat_id, is_group):
+            return None
+
+        async def add_user_message_async(self, *args, **kwargs):
+            if self.recorded:
+                return False
+            self.recorded = True
+            return True
+
+    engine.context_manager = LegacyContext()
+    pending = PendingInbound(
+        InputMessage("recoverable", "user", "chat", "hello", False),
+        "hello",
+        InboundIntent.PRIVATE_CONVERSATION,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+    original_record = engine._record_timeline_user_message
+    calls = 0
+
+    async def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("ledger unavailable")
+        return await original_record(*args, **kwargs)
+
+    engine._record_timeline_user_message = fail_once
+    with pytest.raises(RuntimeError, match="ledger unavailable"):
+        await engine._admit_pending_message(
+            pending,
+            source="initial",
+            get_user_nickname=lambda sender_id: sender_id,
+        )
+
+    admitted = await engine._admit_pending_message(
+        pending,
+        source="initial",
+        get_user_nickname=lambda sender_id: sender_id,
+    )
+
+    assert admitted is not None
+    assert await engine.event_log.has_user_message("chat", "recoverable")
+    await engine.event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_prompt_snapshot_does_not_probe_full_ledger_history(tmp_path):
+    from core.engine.conversation_event_log import ConversationEventLog
+    from core.engine.prompt_history_projection import PromptHistoryProjection
+
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await event_log.append_user_message(
+        chat_id="chat",
+        turn_id="turn-1",
+        message_id="message-1",
+        content="历史消息",
+    )
+    await event_log.append_turn_terminal(chat_id="chat", turn_id="turn-1")
+    projection = PromptHistoryProjection(
+        event_log, metadata_path=str(tmp_path / "projection.sqlite3")
+    )
+    original_snapshot_events = event_log.snapshot_events
+    calls = []
+
+    async def tracked_snapshot_events(*args, **kwargs):
+        calls.append(kwargs)
+        assert kwargs.get("include_internal") is not True
+        assert kwargs.get("turn_ids") is not None
+        return await original_snapshot_events(*args, **kwargs)
+
+    event_log.snapshot_events = tracked_snapshot_events
+    engine = make_engine(FakeToolLoop())
+    engine.event_log = event_log
+    engine.prompt_history_projection = projection
+
+    snapshot = await engine._get_prompt_timeline_snapshot("chat")
+
+    assert [event.content for event in snapshot.events] == ["历史消息"]
+    assert calls
+    await projection.close()
+    await event_log.close()
+
+
+@pytest.mark.asyncio
 async def test_admission_duplicate_check_prefers_timeline_projection():
     engine = make_engine(FakeToolLoop())
     engine.timeline = SimpleNamespace(
@@ -2741,6 +2872,69 @@ async def test_consumer_collects_private_same_intent_messages_into_one_turn():
 
 
 @pytest.mark.asyncio
+async def test_consumer_records_passive_group_chatter_as_completed_ambient_turn(
+    tmp_path,
+):
+    from core.engine.conversation_event_log import (
+        ConversationEventLog,
+        EventKind,
+        TurnKind,
+    )
+
+    engine = make_engine(FakeToolLoop())
+    engine.event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    engine._message_hooks = []
+    engine._run_hooks = AsyncMock()
+    engine._close_model_context_scope = AsyncMock()
+    engine.scheduler = ConversationScheduler(
+        engine.session_manager,
+        ambient_collect_idle_ms=10,
+        collect_max_messages=8,
+        collect_max_chars=6000,
+    )
+    first = PendingInbound(
+        InputMessage("ambient-1", "user-1", "chat", "第一句", True),
+        "第一句",
+        InboundIntent.GROUP_AMBIENT,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+    second = PendingInbound(
+        InputMessage("ambient-2", "user-2", "chat", "第二句", True),
+        "第二句",
+        InboundIntent.GROUP_AMBIENT,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+    enqueued = await engine.scheduler.enqueue("chat", first)
+    await engine.scheduler.enqueue("chat", second)
+
+    await engine._consumer(
+        "chat",
+        lambda **kwargs: _none(),
+        lambda sender_id: sender_id,
+        enqueued.consumer_token,
+    )
+
+    turns = await engine.event_log.snapshot_turns("chat", include_internal=True)
+    assert len(turns.turns) == 1
+    turn = turns.turns[0]
+    assert turn.turn_kind is TurnKind.AMBIENT
+    assert turn.is_terminal
+    assert [
+        event.kind
+        for event in (
+            await engine.event_log.snapshot_events("chat", include_internal=True)
+        ).events
+    ] == [
+        EventKind.USER_MESSAGE,
+        EventKind.USER_MESSAGE,
+        EventKind.TURN_TERMINAL,
+    ]
+    assert not engine.tool_loop.calls
+    engine._run_hooks.assert_awaited()
+    await engine.event_log.close()
+
+
+@pytest.mark.asyncio
 async def test_consumer_releases_necessity_reservation_when_score_is_below_threshold(
     tmp_path,
 ):
@@ -2994,6 +3188,39 @@ async def test_active_ambient_turn_uses_delivery_ledger(tmp_path):
     record = await engine.delivery_controller.ledger.get("ambient:chat:ambient-1")
     assert record is not None
     assert record.status == "sent"
+
+
+@pytest.mark.asyncio
+async def test_active_ambient_prompt_admission_reuses_session_lock():
+    engine = make_engine(FakeToolLoop())
+    engine.group_engagement = GroupEngagementManager(
+        EngagementConfig(
+            group_ambient_mode="active",
+            group_ambient_active_chats=("chat",),
+            group_ambient_delivery_mode="automatic",
+            group_ambient_cooldown_seconds=0,
+            group_ambient_quiet_cooldown_seconds=0,
+        )
+    )
+    pending = PendingInbound(
+        InputMessage("ambient-lock", "user", "chat", "hello?", True),
+        "hello?",
+        InboundIntent.GROUP_AMBIENT,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+    decision = await engine.group_engagement.evaluate("chat", batch=[pending])
+    engine._admit_pending_message = AsyncMock(return_value=None)
+
+    async def fake_run(request):
+        await request.prompt_factory()
+
+    engine._run_turn = fake_run
+    await engine._process_ambient_active(
+        pending, (), decision, AsyncMock(), lambda sender_id: sender_id
+    )
+
+    engine._admit_pending_message.assert_awaited_once()
+    assert engine._admit_pending_message.await_args.kwargs["session_lock_held"] is True
 
 
 @pytest.mark.asyncio

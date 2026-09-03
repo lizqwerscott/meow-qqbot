@@ -4,7 +4,11 @@ import httpx
 import pytest
 
 from core.engine.archive_index import ArchiveIndex, ArchiveTurnRecord
-from core.engine.conversation_event_log import ConversationEvent, ConversationEventLog
+from core.engine.conversation_event_log import (
+    ConversationEvent,
+    ConversationEventLog,
+    TurnKind,
+)
 from core.engine.prompt_history_projection import PromptHistoryProjection
 from core.engine.turn_protocol_history import TurnProtocolHistory
 from core.webui.app import create_app
@@ -128,6 +132,55 @@ async def test_sessions_protocol_view_and_kind_filter(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_session_list_paginates_sessions(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    for chat_id in ("chat-a", "chat-b"):
+        await event_log.append_user_message(
+            chat_id=chat_id,
+            turn_id=f"turn-{chat_id}",
+            message_id=f"message-{chat_id}",
+            content=chat_id,
+        )
+    app = create_app(
+        {"context_manager": _ContextManager(), "conversation_event_log": event_log},
+        {},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/sessions?page=1&page_size=1")
+
+    assert response.status_code == 200
+    assert "共 2 个会话" in response.text
+    assert ("chat-a" in response.text) != ("chat-b" in response.text)
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_session_list_uses_batched_ledger_summaries(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await event_log.append_user_message(
+        chat_id="batched-chat",
+        turn_id="turn-1",
+        message_id="message-1",
+        content="批量统计",
+    )
+    event_log.session_summary = AsyncMock(
+        side_effect=AssertionError("session list must use batched summaries")
+    )
+    app = create_app(
+        {"context_manager": _ContextManager(), "conversation_event_log": event_log},
+        {},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/sessions")
+
+    assert response.status_code == 200
+    assert "batched-chat" in response.text
+    await event_log.close()
+
+
+@pytest.mark.asyncio
 async def test_protocol_view_falls_back_to_legacy_context_history(tmp_path):
     protocol = TurnProtocolHistory(str(tmp_path / "protocol.sqlite3"))
     app = create_app(
@@ -215,6 +268,81 @@ async def test_session_detail_keeps_core_ledger_history_over_stale_timeline(tmp_
 
 
 @pytest.mark.asyncio
+async def test_session_detail_pages_complete_turns_and_keeps_tools_collapsed(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    for index in range(1, 4):
+        turn_id = f"turn-{index}"
+        await event_log.append_user_message(
+            chat_id="paged-chat",
+            turn_id=turn_id,
+            message_id=f"user-{index}",
+            content=f"问题 {index}",
+            timestamp=index * 10,
+            turn_kind=TurnKind.AI if index == 3 else TurnKind.AMBIENT,
+        )
+        if index == 3:
+            await event_log.append_event(
+                ConversationEvent(
+                    chat_id="paged-chat",
+                    turn_id=turn_id,
+                    event_id="assistant:call-3",
+                    role="assistant",
+                    kind="assistant_tool_call",
+                    tool_calls=({"id": "call-3", "function": {"name": "task"}},),
+                )
+            )
+            await event_log.append_event(
+                ConversationEvent(
+                    chat_id="paged-chat",
+                    turn_id=turn_id,
+                    event_id="tool:call-3",
+                    role="tool",
+                    kind="tool_result",
+                    tool_call_id="call-3",
+                    tool_name="task",
+                    content="完成",
+                )
+            )
+        await event_log.append_accepted_delivery(
+            chat_id="paged-chat",
+            turn_id=turn_id,
+            delivery_id=f"delivery-{index}",
+            content=f"回答 {index}",
+            timestamp=index * 10 + 1,
+        )
+        await event_log.append_turn_terminal(chat_id="paged-chat", turn_id=turn_id)
+
+    page = await event_log.snapshot_turn_page(
+        "paged-chat", page=1, page_size=2, include_internal=True
+    )
+    assert [turn.turn_id for turn in page.turns] == ["turn-3", "turn-2"]
+    assert page.total_turns == 3
+    assert page.total_pages == 2
+    assert {event.turn_id for event in page.events} == {"turn-3", "turn-2"}
+
+    app = create_app(
+        {
+            "context_manager": _ContextManager(),
+            "conversation_event_log": event_log,
+        },
+        {},
+    )
+    event_log.history = AsyncMock(side_effect=AssertionError("full history read"))
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/sessions/paged-chat?page=1&page_size=2")
+
+    assert response.status_code == 200
+    assert "问题 3" in response.text
+    assert "问题 1" not in response.text
+    assert "AI 对话" in response.text
+    assert "查看工具链" in response.text
+    assert '<details class="conversation-tool-chain">' in response.text
+    assert '<details class="conversation-tool-chain" open>' not in response.text
+    await event_log.close()
+
+
+@pytest.mark.asyncio
 async def test_archive_views_use_ledger_index_without_reading_jsonl(tmp_path):
     event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
     projection = PromptHistoryProjection(
@@ -278,6 +406,7 @@ async def test_archive_views_use_ledger_index_without_reading_jsonl(tmp_path):
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         list_response = await client.get("/sessions/archived")
         detail_response = await client.get("/sessions/archived/ledger-archive")
+        history_response = await client.get("/sessions/ledger-archive/archive-history")
         messages_response = await client.get(
             "/sessions/archived/ledger-archive/messages/batch:archive-op-1"
         )
@@ -286,6 +415,8 @@ async def test_archive_views_use_ledger_index_without_reading_jsonl(tmp_path):
     assert "ledger-archive" in list_response.text
     assert detail_response.status_code == 200
     assert "batch:archive-op-1" in detail_response.text
+    assert history_response.status_code == 200
+    assert "归档回答" in history_response.text
     assert messages_response.status_code == 200
     assert "归档回答" in messages_response.text
     await event_log.close()
@@ -345,10 +476,145 @@ async def test_timeline_view_includes_internal_wire_events(tmp_path):
         protocol_response = await client.get("/sessions/timeline-chat/protocol")
 
     assert response.status_code == 200
-    assert "工具调用：1 个" not in response.text
+    assert "查看工具链" in response.text
+    assert "task" in response.text
     assert "turn_terminal" not in response.text
     assert "已经完成" in response.text
     assert protocol_response.status_code == 200
     assert "工具调用:" in protocol_response.text
     assert "完成" in protocol_response.text
     await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_active_view_excludes_archived_turns_from_core_page(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    projection = PromptHistoryProjection(
+        event_log, metadata_path=str(tmp_path / "projection.sqlite3")
+    )
+    for index, content in enumerate(("旧问题", "新问题"), start=1):
+        turn_id = f"turn-{index}"
+        await event_log.append_user_message(
+            chat_id="active-chat",
+            turn_id=turn_id,
+            message_id=f"message-{index}",
+            content=content,
+        )
+        await event_log.append_accepted_delivery(
+            chat_id="active-chat",
+            turn_id=turn_id,
+            delivery_id=f"delivery-{index}",
+            content=f"{content}的回答",
+        )
+        await event_log.append_turn_terminal(chat_id="active-chat", turn_id=turn_id)
+    await projection.apply_archive_retention(
+        "active-chat",
+        operation_id="archive-old",
+        hidden_event_ids=(
+            "user:message-1",
+            "delivery:delivery-1",
+            "terminal:turn-1",
+        ),
+        captured_cutoff_seq=3,
+    )
+
+    app = create_app(
+        {
+            "context_manager": _ContextManager(),
+            "conversation_event_log": event_log,
+            "prompt_history_projection": projection,
+        },
+        {},
+    )
+    projection.snapshot_for_active = AsyncMock(
+        side_effect=AssertionError("active view must use paged ledger reads")
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/sessions/active-chat/active")
+
+    assert response.status_code == 200
+    assert "新问题" in response.text
+    assert "旧问题" not in response.text
+    await event_log.close()
+    await projection.close()
+
+
+@pytest.mark.asyncio
+async def test_timeline_view_uses_database_turn_page(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await event_log.append_user_message(
+        chat_id="paged-timeline",
+        turn_id="turn-1",
+        message_id="message-1",
+        content="分页时间线",
+    )
+    await event_log.append_accepted_delivery(
+        chat_id="paged-timeline",
+        turn_id="turn-1",
+        delivery_id="delivery-1",
+        content="已分页",
+    )
+    event_log.snapshot_turns = AsyncMock(
+        side_effect=AssertionError("timeline must not materialize all turns")
+    )
+    app = create_app(
+        {
+            "context_manager": _ContextManager(),
+            "conversation_event_log": event_log,
+        },
+        {},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/sessions/paged-timeline/timeline")
+
+    assert response.status_code == 200
+    assert "分页时间线" in response.text
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_prompt_view_pages_selected_turns_without_materializing_turn_index(
+    tmp_path,
+):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    projection = PromptHistoryProjection(
+        event_log, metadata_path=str(tmp_path / "projection.sqlite3")
+    )
+    for index in range(1, 4):
+        await event_log.append_user_message(
+            chat_id="paged-prompt",
+            turn_id=f"turn-{index}",
+            message_id=f"message-{index}",
+            content=f"Prompt 问题 {index}",
+        )
+        await event_log.append_accepted_delivery(
+            chat_id="paged-prompt",
+            turn_id=f"turn-{index}",
+            delivery_id=f"delivery-{index}",
+            content=f"Prompt 回答 {index}",
+        )
+        await event_log.append_turn_terminal(
+            chat_id="paged-prompt", turn_id=f"turn-{index}"
+        )
+    event_log.snapshot_turns = AsyncMock(
+        side_effect=AssertionError("prompt view must not materialize all turns")
+    )
+    app = create_app(
+        {
+            "context_manager": _ContextManager(),
+            "conversation_event_log": event_log,
+            "prompt_history_projection": projection,
+        },
+        {},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/sessions/paged-prompt/prompt?page=1&page_size=2")
+
+    assert response.status_code == 200
+    assert "Prompt 问题 3" in response.text
+    assert "Prompt 问题 1" not in response.text
+    await event_log.close()
+    await projection.close()

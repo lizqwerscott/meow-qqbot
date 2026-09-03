@@ -206,16 +206,16 @@ class PromptContextReportStore:
         return report
 
     async def list_for_webui(
-        self, chat_id: str, *, limit: int = 100
+        self, chat_id: str, *, limit: int = 100, offset: int = 0
     ) -> list[PromptContextReport]:
         conn = await self._ensure_open()
         async with self._lock:
             rows = conn.execute(
                 """
                 SELECT * FROM prompt_context_reports
-                 WHERE chat_id = ? ORDER BY recorded_at DESC LIMIT ?
+                 WHERE chat_id = ? ORDER BY recorded_at DESC LIMIT ? OFFSET ?
                 """,
-                (chat_id, max(1, int(limit))),
+                (chat_id, max(1, int(limit)), max(0, int(offset))),
             ).fetchall()
         return [
             PromptContextReport(
@@ -243,6 +243,16 @@ class PromptContextReportStore:
             )
             for row in rows
         ]
+
+    async def count_for_webui(self, chat_id: str) -> int:
+        conn = await self._ensure_open()
+        async with self._lock:
+            return int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM prompt_context_reports WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()[0]
+            )
 
     async def clear_chat(self, chat_id: str) -> None:
         conn = await self._ensure_open()

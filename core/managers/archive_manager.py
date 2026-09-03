@@ -33,6 +33,7 @@ from core.managers.archive_manifest import ArchiveManifestStore
 from core.managers.chat_message import (
     ChatMessage,
     group_user_messages,
+    normalize_legacy_content,
     strip_content_prefix,
 )
 from core.managers.context_store import ContextStore
@@ -51,6 +52,15 @@ _ARCHIVE_STATE_ORDER = {
     "summary_written": 3,
     "committed": 4,
 }
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 
 # ── 工具函数 ──
 
@@ -661,6 +671,7 @@ class ArchiveManager:
                 estimated_tokens=sum(
                     event.token_count for event in events_by_turn.get(turn.turn_id, ())
                 ),
+                turn_kind=turn.turn_kind.value,
             )
             for turn in selected_turns
         ]
@@ -1568,23 +1579,98 @@ class ArchiveManager:
                 "error_count": 0,
                 "status": "ledger_not_configured",
             }
+        await self._recover_event_log_archives(chat_id)
+        archives = sorted(
+            self._store.list_archives(chat_id),
+            key=lambda item: str(item.get("timestamp_str", "")),
+        )
         imported_events = 0
         imported_batches = 0
         error_count = 0
-        for archive in self._store.list_archives(chat_id):
+        seen_content_hashes: set[str] = set()
+        seen_file_hashes: set[str] = set()
+        seen_record_keys: set[str] = set()
+        legacy_records: list[dict[str, Any]] = []
+        source_paths: list[str] = []
+
+        def record_key(record: dict[str, Any]) -> str:
+            role = str(record.get("role") or "")
+            payload = {
+                "role": role,
+                "content": normalize_legacy_content(record),
+                "timestamp": record.get("timestamp"),
+                "tool_name": record.get("tool_name"),
+                "tool_calls": record.get("tool_calls"),
+                "reasoning_content": record.get("reasoning_content"),
+            }
+            content_hash = hashlib.sha256(
+                json.dumps(
+                    payload, ensure_ascii=False, sort_keys=True, default=str
+                ).encode("utf-8")
+            ).hexdigest()
+            event_id = str(record.get("event_id") or "")
+            if event_id:
+                return f"{role}:event:{event_id}:{content_hash}"
+            record_id = str(record.get("record_id") or "")
+            if record_id:
+                return f"{role}:record:{record_id}:{content_hash}"
+            message_id = str(record.get("message_id") or "")
+            if message_id:
+                return f"{role}:message:{message_id}:{content_hash}"
+            tool_call_id = str(record.get("tool_call_id") or "")
+            if tool_call_id:
+                return f"{role}:tool:{tool_call_id}:{content_hash}"
+            return content_hash
+
+        for archive in archives:
             path = archive.get("path") if isinstance(archive, dict) else None
             if not path:
                 continue
             try:
-                records = await asyncio.to_thread(self._store.read_archive, path, 0)
+                file_hash = _file_sha256(path)
+                if file_hash in seen_file_hashes:
+                    _log.info(
+                        "跳过重复旧归档 [%s..]: %s",
+                        chat_id[:12],
+                        Path(path).name,
+                    )
+                    continue
+                seen_file_hashes.add(file_hash)
+                records = self._store.read_archive(path, 0)
+                content_hash = self._records_hash(records)
+                if content_hash in seen_content_hashes:
+                    _log.info(
+                        "跳过重复旧归档 [%s..]: %s",
+                        chat_id[:12],
+                        Path(path).name,
+                    )
+                    continue
+                seen_content_hashes.add(content_hash)
+                for record in records:
+                    key = record_key(record)
+                    if key in seen_record_keys:
+                        continue
+                    seen_record_keys.add(key)
+                    legacy_records.append(record)
+                source_paths.append(Path(path).name)
+            except Exception as exc:
+                error_count += 1
+                _log.warning(
+                    "legacy archive import failed [%s..] %s: %s",
+                    chat_id[:12],
+                    Path(path).name,
+                    exc,
+                )
+        if legacy_records:
+            try:
                 before = await self._event_log.snapshot_events(
                     chat_id, include_internal=True
                 )
                 before_ids = {event.event_id for event in before.events}
                 await self._event_log.repair_from_legacy_history(
                     chat_id,
-                    records,
-                    source_id=Path(path).name,
+                    legacy_records,
+                    source_id="legacy-archives",
                 )
                 snapshot = await self._event_log.snapshot_events(
                     chat_id, include_internal=True
@@ -1594,61 +1680,52 @@ class ArchiveManager:
                     for event in snapshot.events
                     if event.event_id not in before_ids
                 }
-                if not new_ids:
-                    continue
                 new_turn_ids = {
                     event.turn_id
                     for event in snapshot.events
                     if event.event_id in new_ids
                 }
+                turns_snapshot = await self._event_log.snapshot_turns(
+                    chat_id, include_internal=True
+                )
+                turns_by_id = {turn.turn_id: turn for turn in turns_snapshot.turns}
+                terminalized_turn_ids: set[str] = set()
                 for turn_id in new_turn_ids:
-                    turn_report = await self._event_log.validate_turn(turn_id)
-                    turn = next(
-                        (
-                            item
-                            for item in (
-                                await self._event_log.snapshot_turns(
-                                    chat_id, include_internal=True
-                                )
-                            ).turns
-                            if item.turn_id == turn_id
-                        ),
-                        None,
-                    )
+                    turn = turns_by_id.get(turn_id)
                     if turn is not None and not turn.is_terminal:
+                        report = await self._event_log.validate_turn(turn_id)
                         await self._event_log.append_turn_terminal(
                             chat_id=chat_id,
                             turn_id=turn_id,
-                            status=("completed" if turn_report.valid else "incomplete"),
+                            status=("completed" if report.valid else "incomplete"),
                         )
+                        terminalized_turn_ids.add(turn_id)
                 snapshot = await self._event_log.snapshot_events(
                     chat_id, include_internal=True
                 )
+                committed = await self._archive_index.committed_event_ids(chat_id)
                 imported_event_ids = {
                     event.event_id
                     for event in snapshot.events
                     if event.event_id in new_ids or event.turn_id in new_turn_ids
-                }
-                committed = await self._archive_index.committed_event_ids(chat_id)
-                imported_event_ids -= set(committed)
+                } - set(committed)
                 turn_records = []
                 for turn_id in sorted(new_turn_ids):
-                    turn = next(
-                        item
-                        for item in (
-                            await self._event_log.snapshot_turns(
-                                chat_id, include_internal=True
-                            )
-                        ).turns
-                        if item.turn_id == turn_id
-                    )
+                    turn = turns_by_id.get(turn_id)
                     turn_events = tuple(
                         event
                         for event in snapshot.events
                         if event.turn_id == turn_id
                         and event.event_id in imported_event_ids
                     )
-                    if not turn_events or not turn.is_terminal:
+                    if (
+                        not turn_events
+                        or turn is None
+                        or (
+                            not turn.is_terminal
+                            and turn_id not in terminalized_turn_ids
+                        )
+                    ):
                         continue
                     report = await self._event_log.validate_turn(turn_id)
                     if not report.valid:
@@ -1662,45 +1739,48 @@ class ArchiveManager:
                             estimated_tokens=sum(
                                 event.token_count for event in turn_events
                             ),
+                            turn_kind=turn.turn_kind.value,
                         )
                     )
-                if not turn_records:
-                    continue
-                selected_turn_ids = {record.turn_id for record in turn_records}
-                selected_event_ids = [
-                    (event.event_id, event.turn_id)
-                    for event in snapshot.events
-                    if event.turn_id in selected_turn_ids
-                    and event.event_id in imported_event_ids
-                ]
-                operation_id = (
-                    "legacy-import:"
-                    + hashlib.sha256(
-                        f"{chat_id}:{Path(path).name}:{self._archive_index.membership_hash(item[0] for item in selected_event_ids)}".encode()
-                    ).hexdigest()[:32]
-                )
-                batch = await self._archive_index.prepare_batch(
-                    batch_id=f"batch:{operation_id}",
-                    operation_id=operation_id,
-                    chat_id=chat_id,
-                    captured_cutoff_seq=snapshot.cutoff_seq,
-                    turn_records=turn_records,
-                    event_ids=selected_event_ids,
-                )
-                await self._finish_event_archive_batch(batch)
-                imported_events += len(selected_event_ids)
-                imported_batches += 1
+                if turn_records:
+                    selected_turn_ids = {record.turn_id for record in turn_records}
+                    selected_event_ids = [
+                        (event.event_id, event.turn_id)
+                        for event in snapshot.events
+                        if event.turn_id in selected_turn_ids
+                        and event.event_id in imported_event_ids
+                    ]
+                    source_hash = self._archive_index.membership_hash(
+                        item[0] for item in selected_event_ids
+                    )
+                    operation_id = (
+                        "legacy-import:"
+                        + hashlib.sha256(
+                            f"{chat_id}:{source_hash}:{','.join(source_paths)}".encode()
+                        ).hexdigest()[:32]
+                    )
+                    batch = await self._archive_index.prepare_batch(
+                        batch_id=f"batch:{operation_id}",
+                        operation_id=operation_id,
+                        chat_id=chat_id,
+                        captured_cutoff_seq=snapshot.cutoff_seq,
+                        turn_records=turn_records,
+                        event_ids=selected_event_ids,
+                    )
+                    await self._finish_event_archive_batch(batch)
+                    imported_events = len(selected_event_ids)
+                    imported_batches = 1
             except Exception as exc:
                 error_count += 1
                 _log.warning(
-                    "legacy archive import failed [%s..] %s: %s",
+                    "legacy archive import failed [%s..] sources=%d: %s",
                     chat_id[:12],
-                    Path(path).name,
+                    len(source_paths),
                     exc,
                 )
         return {
             "chat_id": chat_id,
-            "archive_count": len(self._store.list_archives(chat_id)),
+            "archive_count": len(archives),
             "imported_event_count": imported_events,
             "imported_batch_count": imported_batches,
             "error_count": error_count,

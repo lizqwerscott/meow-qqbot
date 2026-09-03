@@ -39,6 +39,47 @@ async def test_prompt_projection_keeps_complete_recent_turns_with_budget(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_prompt_projection_selects_turns_before_loading_event_bodies(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    for index in range(40):
+        turn_id = f"turn-{index}"
+        await log.append_user_message(
+            chat_id="chat",
+            turn_id=turn_id,
+            message_id=f"message-{index}",
+            content=f"历史消息 {index}",
+            timestamp=index + 1,
+        )
+        await log.append_accepted_delivery(
+            chat_id="chat",
+            turn_id=turn_id,
+            delivery_id=f"delivery-{index}",
+            content=f"历史回答 {index}",
+            timestamp=index + 1.5,
+        )
+        await log.append_turn_terminal(
+            chat_id="chat", turn_id=turn_id, timestamp=index + 2
+        )
+
+    original_snapshot_events = log.snapshot_events
+    snapshot_calls = []
+
+    async def tracked_snapshot_events(*args, **kwargs):
+        snapshot_calls.append(kwargs)
+        return await original_snapshot_events(*args, **kwargs)
+
+    log.snapshot_events = tracked_snapshot_events
+    snapshot = await PromptHistoryProjection(
+        log, max_tokens=12, max_turns=2
+    ).snapshot_for_prompt("chat")
+
+    assert {event.turn_id for event in snapshot.events} == {"turn-39", "turn-38"}
+    assert snapshot_calls
+    assert all(call.get("turn_ids") for call in snapshot_calls)
+    await log.close()
+
+
+@pytest.mark.asyncio
 async def test_prompt_projection_protects_current_turn_from_recent_window_limit(
     tmp_path,
 ):
@@ -50,12 +91,38 @@ async def test_prompt_projection_protects_current_turn_from_recent_window_limit(
             message_id=message_id,
             content=turn_id,
         )
+    await log.append_turn_terminal(chat_id="chat", turn_id="turn-2")
 
     snapshot = await PromptHistoryProjection(
         log, max_tokens=100, max_turns=1
     ).snapshot_for_prompt("chat", current_turn_id="turn-1")
 
     assert {event.turn_id for event in snapshot.events} == {"turn-1", "turn-2"}
+
+
+@pytest.mark.asyncio
+async def test_prompt_projection_excludes_incomplete_historical_turn(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await log.append_user_message(
+        chat_id="chat",
+        turn_id="completed-turn",
+        message_id="completed-message",
+        content="completed",
+    )
+    await log.append_turn_terminal(chat_id="chat", turn_id="completed-turn")
+    await log.append_user_message(
+        chat_id="chat",
+        turn_id="incomplete-turn",
+        message_id="incomplete-message",
+        content="incomplete",
+    )
+
+    snapshot = await PromptHistoryProjection(
+        log, max_tokens=100, max_turns=10
+    ).snapshot_for_prompt("chat")
+
+    assert [event.turn_id for event in snapshot.events] == ["completed-turn"]
+    await log.close()
 
 
 @pytest.mark.asyncio
@@ -75,6 +142,8 @@ async def test_archive_retention_hides_events_idempotently_without_deleting_them
         message_id="m2",
         content="新消息内容",
     )
+    await log.append_turn_terminal(chat_id="chat", turn_id="turn-1")
+    await log.append_turn_terminal(chat_id="chat", turn_id="turn-2")
     projection = PromptHistoryProjection(
         log, max_tokens=100, metadata_path=str(tmp_path / "projection.sqlite3")
     )

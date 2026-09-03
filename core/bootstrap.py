@@ -5,6 +5,7 @@
 
 import asyncio
 import logging
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -152,7 +153,14 @@ class ServiceGraph:
         get_ids = getattr(self.context_manager, "get_legacy_chat_ids_async", None)
         if get_ids is None:
             return
-        for chat_id in await get_ids():
+        chat_ids = await get_ids()
+        if chat_ids:
+            _log.info("开始迁移旧历史: %d 个会话", len(chat_ids))
+        started = time.monotonic()
+        for index, chat_id in enumerate(chat_ids, start=1):
+            _log.info(
+                "迁移旧历史会话: %d/%d [%s..]", index, len(chat_ids), chat_id[:12]
+            )
             try:
                 await self.agent_engine.migrate_legacy_history_async(chat_id)
                 result = {}
@@ -168,6 +176,13 @@ class ServiceGraph:
                         chat_id[:12],
                         result.get("imported_event_count", 0),
                         result.get("imported_batch_count", 0),
+                    )
+                if index == 1 or index % 25 == 0 or index == len(chat_ids):
+                    _log.info(
+                        "旧历史迁移进度: %d/%d 个会话, elapsed=%.1fs",
+                        index,
+                        len(chat_ids),
+                        time.monotonic() - started,
                     )
             except asyncio.CancelledError:
                 raise

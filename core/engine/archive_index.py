@@ -17,6 +17,7 @@ class ArchiveTurnRecord:
     source_date: str
     event_count: int
     estimated_tokens: int
+    turn_kind: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -37,7 +38,7 @@ class ArchiveBatch:
 class ArchiveIndex:
     """Small metadata projection for logical cold partitions."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, path: str = "data/archive_index.sqlite3") -> None:
         self._path = path
@@ -79,6 +80,7 @@ class ArchiveIndex:
                     source_date TEXT NOT NULL,
                     event_count INTEGER NOT NULL,
                     estimated_tokens INTEGER NOT NULL,
+                    turn_kind TEXT NOT NULL DEFAULT 'unknown',
                     PRIMARY KEY (batch_id, turn_id),
                     FOREIGN KEY (batch_id) REFERENCES archive_batches(batch_id)
                         ON DELETE CASCADE
@@ -105,12 +107,28 @@ class ArchiveIndex:
                         ON DELETE CASCADE
                 );
                 """)
+            columns = {
+                str(row["name"])
+                for row in self._conn.execute(
+                    "PRAGMA table_info(archive_batch_turns)"
+                ).fetchall()
+            }
+            if "turn_kind" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE archive_batch_turns ADD COLUMN turn_kind "
+                    "TEXT NOT NULL DEFAULT 'unknown'"
+                )
             row = self._conn.execute(
                 "SELECT version FROM archive_index_schema LIMIT 1"
             ).fetchone()
             if row is None:
                 self._conn.execute(
                     "INSERT INTO archive_index_schema(version) VALUES (?)",
+                    (self.SCHEMA_VERSION,),
+                )
+            elif int(row["version"]) == 1:
+                self._conn.execute(
+                    "UPDATE archive_index_schema SET version = ?",
                     (self.SCHEMA_VERSION,),
                 )
             elif int(row["version"]) != self.SCHEMA_VERSION:
@@ -199,8 +217,8 @@ class ArchiveIndex:
                     """
                     INSERT INTO archive_batch_turns
                         (batch_id, turn_id, turn_sequence, source_date,
-                         event_count, estimated_tokens)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                         event_count, estimated_tokens, turn_kind)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -210,6 +228,7 @@ class ArchiveIndex:
                             record.source_date,
                             record.event_count,
                             record.estimated_tokens,
+                            record.turn_kind,
                         )
                         for record in turn_records
                     ],
@@ -287,12 +306,31 @@ class ArchiveIndex:
             ).fetchone()
         return self._from_row(row) if row is not None else None
 
-    async def list_for_webui(self, chat_id: str) -> list[dict[str, Any]]:
+    async def list_for_webui(
+        self,
+        chat_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        state: str | None = None,
+    ) -> list[dict[str, Any]]:
         conn = await self._ensure_open()
         async with self._lock:
+            params: tuple[Any, ...] = (chat_id,)
+            state_clause = ""
+            if state is not None:
+                state_clause = " AND state = ?"
+                params += (state,)
+            limit_clause = ""
+            if limit is not None:
+                limit_clause = " LIMIT ? OFFSET ?"
+                params += (max(1, int(limit)), max(0, int(offset)))
             rows = conn.execute(
-                "SELECT * FROM archive_batches WHERE chat_id = ? ORDER BY created_at DESC",
-                (chat_id,),
+                "SELECT * FROM archive_batches WHERE chat_id = ?"
+                + state_clause
+                + " ORDER BY created_at DESC"
+                + limit_clause,
+                params,
             ).fetchall()
             export_rows = {
                 str(row["batch_id"]): dict(row)
@@ -317,6 +355,79 @@ class ArchiveIndex:
             )
             result.append(item)
         return result
+
+    async def count_for_webui(self, chat_id: str, *, state: str | None = None) -> int:
+        conn = await self._ensure_open()
+        async with self._lock:
+            params: tuple[Any, ...] = (chat_id,)
+            state_clause = ""
+            if state is not None:
+                state_clause = " AND state = ?"
+                params += (state,)
+            return int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM archive_batches WHERE chat_id = ?"
+                    + state_clause,
+                    params,
+                ).fetchone()[0]
+            )
+
+    async def chat_summaries_for_webui(
+        self,
+        *,
+        query: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return committed archive session summaries without loading batches."""
+        conn = await self._ensure_open()
+        async with self._lock:
+            params: tuple[Any, ...] = ()
+            where = " WHERE state = 'committed'"
+            if query:
+                where += " AND chat_id LIKE ?"
+                params += (f"%{query}%",)
+            total = int(
+                conn.execute(
+                    "SELECT COUNT(DISTINCT chat_id) FROM archive_batches" + where,
+                    params,
+                ).fetchone()[0]
+            )
+            paging = ""
+            if limit is not None:
+                paging = " LIMIT ? OFFSET ?"
+                params += (max(1, int(limit)), max(0, int(offset)))
+            rows = conn.execute(
+                """
+                SELECT chat_id, COUNT(*) AS archive_count,
+                       MAX(committed_at) AS latest_archive,
+                       COALESCE(SUM(event_count), 0) AS total_size
+                  FROM archive_batches
+                """
+                + where
+                + " GROUP BY chat_id ORDER BY latest_archive DESC, chat_id"
+                + paging,
+                params,
+            ).fetchall()
+        return (
+            [
+                {
+                    "chat_id": str(row["chat_id"]),
+                    "archive_count": int(row["archive_count"]),
+                    "latest_archive": (
+                        time.strftime(
+                            "%Y-%m-%d %H:%M:%S", time.localtime(row["latest_archive"])
+                        )
+                        if row["latest_archive"]
+                        else "-"
+                    ),
+                    "total_size": int(row["total_size"]),
+                    "ledger_archive": True,
+                }
+                for row in rows
+            ],
+            total,
+        )
 
     async def record_export(
         self,
@@ -358,28 +469,59 @@ class ArchiveIndex:
             conn.commit()
 
     async def turns_for_batch(self, batch_id: str) -> list[ArchiveTurnRecord]:
+        records, _ = await self.turns_for_batch_page(batch_id)
+        return records
+
+    async def count_turns_for_batch(self, batch_id: str) -> int:
         conn = await self._ensure_open()
         async with self._lock:
+            return int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM archive_batch_turns WHERE batch_id = ?",
+                    (batch_id,),
+                ).fetchone()[0]
+            )
+
+    async def turns_for_batch_page(
+        self, batch_id: str, *, limit: int | None = None, offset: int = 0
+    ) -> tuple[list[ArchiveTurnRecord], int]:
+        conn = await self._ensure_open()
+        async with self._lock:
+            params: tuple[Any, ...] = (batch_id,)
+            paging = ""
+            if limit is not None:
+                paging = " LIMIT ? OFFSET ?"
+                params += (max(1, int(limit)), max(0, int(offset)))
+            total = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM archive_batch_turns WHERE batch_id = ?",
+                    (batch_id,),
+                ).fetchone()[0]
+            )
             rows = conn.execute(
                 """
                 SELECT turn_id, turn_sequence, source_date, event_count,
-                       estimated_tokens
+                       estimated_tokens, turn_kind
                   FROM archive_batch_turns
                  WHERE batch_id = ?
-                 ORDER BY turn_sequence
-                """,
-                (batch_id,),
+                 ORDER BY turn_sequence DESC
+                """ + paging,
+                params,
             ).fetchall()
-        return [
-            ArchiveTurnRecord(
-                turn_id=str(row["turn_id"]),
-                turn_sequence=int(row["turn_sequence"]),
-                source_date=str(row["source_date"]),
-                event_count=int(row["event_count"]),
-                estimated_tokens=int(row["estimated_tokens"]),
-            )
-            for row in rows
-        ]
+        return (
+            [
+                ArchiveTurnRecord(
+                    turn_id=str(row["turn_id"]),
+                    turn_sequence=int(row["turn_sequence"]),
+                    source_date=str(row["source_date"]),
+                    event_count=int(row["event_count"]),
+                    estimated_tokens=int(row["estimated_tokens"]),
+                    turn_kind=str(row["turn_kind"] or "unknown"),
+                )
+                for row in rows
+            ],
+            total,
+        )
 
     async def list_pending(self, chat_id: str | None = None) -> list[ArchiveBatch]:
         conn = await self._ensure_open()

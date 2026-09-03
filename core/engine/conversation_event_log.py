@@ -40,6 +40,24 @@ class TurnStatus(StrEnum):
     INCOMPLETE = "incomplete"
 
 
+class TurnKind(StrEnum):
+    """Describe whether a core turn involved the AI conversation path."""
+
+    AI = "ai"
+    AMBIENT = "ambient"
+    SYSTEM = "system"
+    UNKNOWN = "unknown"
+
+
+def _coerce_turn_kind(value: object) -> TurnKind:
+    if isinstance(value, TurnKind):
+        return value
+    try:
+        return TurnKind(str(value or TurnKind.UNKNOWN))
+    except ValueError:
+        return TurnKind.UNKNOWN
+
+
 _TERMINAL_STATUSES = frozenset(
     {
         TurnStatus.COMPLETED,
@@ -176,6 +194,7 @@ class ConversationTurn:
     source_date: str = ""
     event_count: int = 0
     updated_at: float = 0.0
+    turn_kind: TurnKind = TurnKind.UNKNOWN
 
     @property
     def is_terminal(self) -> bool:
@@ -197,6 +216,30 @@ class ConversationTurnSnapshot:
 
 
 @dataclass(frozen=True)
+class ConversationTurnBudget:
+    """Turn metadata used for bounded projection selection."""
+
+    turn: ConversationTurn
+    event_count: int
+    estimated_tokens: int
+
+
+@dataclass(frozen=True)
+class ConversationTurnPage:
+    chat_id: str
+    turns: tuple[ConversationTurn, ...]
+    events: tuple[ConversationEvent, ...]
+    cutoff_seq: int
+    page: int
+    page_size: int
+    total_turns: int
+
+    @property
+    def total_pages(self) -> int:
+        return max(1, (self.total_turns + self.page_size - 1) // self.page_size)
+
+
+@dataclass(frozen=True)
 class TurnIntegrityReport:
     turn_id: str
     valid: bool
@@ -212,7 +255,7 @@ class TurnIntegrityReport:
 class ConversationEventLog:
     """Deep module for immutable conversation events and turn validation."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(
         self,
@@ -266,6 +309,7 @@ class ConversationEventLog:
                     turn_sequence INTEGER NOT NULL,
                     status TEXT NOT NULL,
                     started_seq INTEGER NOT NULL,
+                    turn_kind TEXT NOT NULL DEFAULT 'unknown',
                     ended_seq INTEGER NOT NULL DEFAULT 0,
                     terminal_event_id TEXT NOT NULL DEFAULT '',
                     source_date TEXT NOT NULL,
@@ -280,12 +324,28 @@ class ConversationEventLog:
                     version INTEGER NOT NULL
                 );
                 """)
+            turn_columns = {
+                str(row["name"])
+                for row in self._conn.execute(
+                    "PRAGMA table_info(conversation_turns)"
+                ).fetchall()
+            }
+            if "turn_kind" not in turn_columns:
+                self._conn.execute(
+                    "ALTER TABLE conversation_turns ADD COLUMN turn_kind "
+                    "TEXT NOT NULL DEFAULT 'unknown'"
+                )
             row = self._conn.execute(
                 "SELECT version FROM conversation_event_log_schema LIMIT 1"
             ).fetchone()
             if row is None:
                 self._conn.execute(
                     "INSERT INTO conversation_event_log_schema(version) VALUES (?)",
+                    (self.SCHEMA_VERSION,),
+                )
+            elif int(row["version"]) == 1:
+                self._conn.execute(
+                    "UPDATE conversation_event_log_schema SET version = ?",
                     (self.SCHEMA_VERSION,),
                 )
             elif int(row["version"]) != self.SCHEMA_VERSION:
@@ -335,6 +395,7 @@ class ConversationEventLog:
             turn_sequence=int(row["turn_sequence"]),
             status=TurnStatus(row["status"]),
             started_seq=int(row["started_seq"]),
+            turn_kind=_coerce_turn_kind(row["turn_kind"]),
             ended_seq=int(row["ended_seq"]),
             terminal_event_id=row["terminal_event_id"],
             source_date=row["source_date"],
@@ -385,8 +446,17 @@ class ConversationEventLog:
             return TurnStatus.OPEN
         return current
 
-    async def append_event(self, event: ConversationEvent) -> ConversationEvent:
+    async def append_event(
+        self,
+        event: ConversationEvent,
+        *,
+        turn_kind: TurnKind | str = TurnKind.UNKNOWN,
+    ) -> ConversationEvent:
         """Append an immutable event, returning the existing event idempotently."""
+        try:
+            turn_kind = TurnKind(turn_kind)
+        except ValueError as exc:
+            raise EventLogInvariantError(f"invalid turn kind: {turn_kind}") from exc
         conn = await self._ensure_open()
         source_date = self._source_date(event)
         normalized = replace(
@@ -418,6 +488,33 @@ class ConversationEventLog:
                         raise EventLogInvariantError(
                             f"event identity collision: {normalized.event_id}"
                         )
+                    if turn_kind is not TurnKind.UNKNOWN:
+                        existing_turn = conn.execute(
+                            "SELECT turn_kind FROM conversation_turns "
+                            "WHERE chat_id = ? AND turn_id = ?",
+                            (normalized.chat_id, normalized.turn_id),
+                        ).fetchone()
+                        if existing_turn is not None:
+                            existing_kind = _coerce_turn_kind(
+                                existing_turn["turn_kind"]
+                            )
+                            if (
+                                existing_kind is not TurnKind.UNKNOWN
+                                and existing_kind is not turn_kind
+                            ):
+                                raise EventLogInvariantError(
+                                    f"turn kind mismatch: {normalized.turn_id}"
+                                )
+                            if existing_kind is TurnKind.UNKNOWN:
+                                conn.execute(
+                                    "UPDATE conversation_turns SET turn_kind = ? "
+                                    "WHERE chat_id = ? AND turn_id = ?",
+                                    (
+                                        turn_kind,
+                                        normalized.chat_id,
+                                        normalized.turn_id,
+                                    ),
+                                )
                     conn.commit()
                     return existing
 
@@ -440,8 +537,8 @@ class ConversationEventLog:
                         """
                         INSERT INTO conversation_turns
                             (chat_id, turn_id, turn_sequence, status, started_seq,
-                             source_date, event_count, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+                             turn_kind, source_date, event_count, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                         """,
                         (
                             normalized.chat_id,
@@ -449,6 +546,7 @@ class ConversationEventLog:
                             turn_sequence,
                             current_status,
                             0,
+                            turn_kind,
                             source_date,
                             normalized.timestamp,
                             normalized.timestamp,
@@ -463,6 +561,18 @@ class ConversationEventLog:
                         normalized, source_date=str(turn_row["source_date"])
                     )
                 turn = self._turn_from_row(turn_row)
+                if turn_kind is not TurnKind.UNKNOWN:
+                    if turn.turn_kind is TurnKind.UNKNOWN:
+                        conn.execute(
+                            "UPDATE conversation_turns SET turn_kind = ? "
+                            "WHERE chat_id = ? AND turn_id = ?",
+                            (turn_kind, normalized.chat_id, normalized.turn_id),
+                        )
+                        turn = replace(turn, turn_kind=turn_kind)
+                    elif turn.turn_kind is not turn_kind:
+                        raise EventLogInvariantError(
+                            f"turn kind mismatch: {normalized.turn_id}"
+                        )
                 if (
                     normalized.turn_sequence
                     and normalized.turn_sequence != turn.turn_sequence
@@ -568,6 +678,7 @@ class ConversationEventLog:
         sender_id: str = "",
         timestamp: float = 0.0,
         session_kind: str = "chat",
+        turn_kind: TurnKind | str = TurnKind.UNKNOWN,
     ) -> ConversationEvent:
         return await self.append_event(
             ConversationEvent(
@@ -581,7 +692,8 @@ class ConversationEventLog:
                 sender_id=sender_id,
                 timestamp=timestamp,
                 session_kind=session_kind,
-            )
+            ),
+            turn_kind=turn_kind,
         )
 
     async def append_accepted_delivery(
@@ -714,6 +826,7 @@ class ConversationEventLog:
         existing_by_id = {event.event_id: event for event in existing.events}
         turns = await self.snapshot_turns(chat_id, include_internal=True)
         turns_by_id = {turn.turn_id: turn for turn in turns.turns}
+        known_turn_ids = set(turns_by_id)
         matched_event_ids: set[str] = set()
         current_turn_id = ""
         current_terminal = False
@@ -782,14 +895,8 @@ class ConversationEventLog:
             return True
 
         def find_match(**kwargs: Any) -> Optional[ConversationEvent]:
-            return next(
-                (
-                    event
-                    for event in existing_by_id.values()
-                    if matches(event, **kwargs)
-                ),
-                None,
-            )
+            event = existing_by_id.get(kwargs["event_id"])
+            return event if event is not None and matches(event, **kwargs) else None
 
         def collision_safe_event_id(candidate: str, **kwargs: Any) -> str:
             existing = existing_by_id.get(candidate)
@@ -823,9 +930,8 @@ class ConversationEventLog:
             nonlocal imported
             appended = await self.append_event(event)
             existing_by_id[appended.event_id] = appended
+            known_turn_ids.add(appended.turn_id)
             matched_event_ids.add(appended.event_id)
-            turn_snapshot = await self.snapshot_turns(chat_id, include_internal=True)
-            turns_by_id.update({turn.turn_id: turn for turn in turn_snapshot.turns})
             imported += 1
             return appended
 
@@ -835,10 +941,11 @@ class ConversationEventLog:
             base = f"legacy-repair:{chat_id}:{index}:{digest}"
             candidate = base
             suffix = 1
-            while candidate in turns_by_id:
+            while candidate in known_turn_ids:
                 candidate = f"{base}:{suffix}"
                 suffix += 1
             current_turn_id = candidate
+            known_turn_ids.add(candidate)
             current_terminal = False
 
         async def close_previous_turn(timestamp: float) -> None:
@@ -860,8 +967,6 @@ class ConversationEventLog:
             existing_by_id[terminal.event_id] = terminal
             matched_event_ids.add(terminal.event_id)
             current_terminal = True
-            turn_snapshot = await self.snapshot_turns(chat_id, include_internal=True)
-            turns_by_id.update({item.turn_id: item for item in turn_snapshot.turns})
 
         for index, message in enumerate(messages):
             role = str(message.get("role") or "")
@@ -1171,6 +1276,19 @@ class ConversationEventLog:
             ).fetchall()
         return tuple(str(row["event_id"]) for row in rows)
 
+    async def has_user_message(self, chat_id: str, message_id: str) -> bool:
+        """Check one user identity without loading any event body."""
+        if not chat_id or not message_id:
+            return False
+        conn = await self._ensure_open()
+        async with self._lock:
+            row = conn.execute(
+                "SELECT 1 FROM conversation_events "
+                "WHERE chat_id = ? AND kind = ? AND message_id = ? LIMIT 1",
+                (chat_id, EventKind.USER_MESSAGE, message_id),
+            ).fetchone()
+        return row is not None
+
     async def latest_event_seq(self, chat_id: str) -> int:
         """Return the current watermark without materializing event contents."""
         conn = await self._ensure_open()
@@ -1215,6 +1333,201 @@ class ConversationEventLog:
             visible_turn_ids = {str(row["turn_id"]) for row in visible_rows}
             turns = tuple(turn for turn in turns if turn.turn_id in visible_turn_ids)
         return ConversationTurnSnapshot(chat_id, turns, cutoff)
+
+    async def snapshot_turn_budgets(
+        self,
+        chat_id: str,
+        *,
+        upto_seq: int | None = None,
+        include_internal: bool = False,
+        exclude_event_ids: Sequence[str] = (),
+        current_turn_id: str = "",
+    ) -> tuple[tuple[ConversationTurnBudget, ...], int]:
+        """Read turn budgets without loading event bodies.
+
+        Bounded prompt projections use this metadata pass to choose complete
+        turns before fetching the selected event rows. This keeps old cold
+        history out of the request process even when a chat has many turns.
+        The current open turn may be explicitly included so a request can be
+        assembled before its terminal event is written.
+        """
+        conn = await self._ensure_open()
+        async with self._lock:
+            event_filter = ""
+            event_params: tuple[Any, ...] = ()
+            if not include_internal:
+                event_filter = " AND events.kind IN (?, ?)"
+                event_params = (
+                    EventKind.USER_MESSAGE,
+                    EventKind.ACCEPTED_DELIVERY,
+                )
+            excluded = tuple(
+                dict.fromkeys(str(item) for item in exclude_event_ids if item)
+            )
+            for offset in range(0, len(excluded), 500):
+                chunk = excluded[offset : offset + 500]
+                event_filter += " AND events.event_id NOT IN ("
+                event_filter += ", ".join("?" for _ in chunk) + ")"
+                event_params += chunk
+            terminal_statuses = tuple(status.value for status in _TERMINAL_STATUSES)
+            cutoff = int(
+                upto_seq
+                if upto_seq is not None
+                else conn.execute(
+                    "SELECT COALESCE(MAX(event_seq), 0) FROM conversation_events "
+                    "WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()[0]
+            )
+            rows = conn.execute(
+                """
+                SELECT turns.*, COUNT(events.event_id) AS projected_event_count,
+                       COALESCE(SUM(
+                           CASE WHEN events.token_count > 0
+                                THEN events.token_count
+                                ELSE LENGTH(events.content) / 4
+                           END
+                       ), 0) AS projected_tokens
+                  FROM conversation_turns turns
+                  JOIN conversation_events events
+                    ON events.chat_id = turns.chat_id
+                   AND events.turn_id = turns.turn_id
+                   AND events.event_seq <= ?
+                """
+                + event_filter
+                + """
+                 WHERE turns.chat_id = ?
+                   AND (
+                       turns.status IN (?, ?, ?, ?, ?)
+                       OR turns.turn_id = ?
+                   )
+                 GROUP BY turns.chat_id, turns.turn_id
+                 ORDER BY turns.turn_sequence DESC, turns.turn_id DESC
+                """,
+                (cutoff, *event_params, chat_id, *terminal_statuses, current_turn_id),
+            ).fetchall()
+        budgets = tuple(
+            ConversationTurnBudget(
+                turn=self._turn_from_row(row),
+                event_count=int(row["projected_event_count"]),
+                estimated_tokens=max(0, int(row["projected_tokens"])),
+            )
+            for row in rows
+        )
+        return budgets, cutoff
+
+    async def snapshot_turn_page(
+        self,
+        chat_id: str,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        include_internal: bool = False,
+        exclude_event_ids: Sequence[str] = (),
+        include_event_ids: Sequence[str] | None = None,
+    ) -> ConversationTurnPage:
+        """Read one newest-first turn page without materializing all turns."""
+        page = max(1, int(page))
+        page_size = max(1, int(page_size))
+        conn = await self._ensure_open()
+        async with self._lock:
+            visibility = ""
+            visibility_params: tuple[Any, ...] = ()
+            event_conditions = [
+                "visible.chat_id = turns.chat_id",
+                "visible.turn_id = turns.turn_id",
+            ]
+            event_params: tuple[Any, ...] = ()
+            if not include_internal:
+                event_conditions.append("visible.kind IN (?, ?)")
+                event_params += (
+                    EventKind.USER_MESSAGE,
+                    EventKind.ACCEPTED_DELIVERY,
+                )
+            included = (
+                tuple(dict.fromkeys(str(item) for item in include_event_ids if item))
+                if include_event_ids is not None
+                else None
+            )
+            if included is not None:
+                if not included:
+                    event_conditions.append("0")
+                else:
+                    inclusion_clauses = []
+                    for offset in range(0, len(included), 500):
+                        chunk = included[offset : offset + 500]
+                        inclusion_clauses.append(
+                            "visible.event_id IN ("
+                            + ", ".join("?" for _ in chunk)
+                            + ")"
+                        )
+                        event_params += chunk
+                    event_conditions.append("(" + " OR ".join(inclusion_clauses) + ")")
+            if not include_internal:
+                excluded = tuple(
+                    dict.fromkeys(str(item) for item in exclude_event_ids if item)
+                )
+                for offset in range(0, len(excluded), 500):
+                    chunk = excluded[offset : offset + 500]
+                    event_conditions.append(
+                        "visible.event_id NOT IN ("
+                        + ", ".join("?" for _ in chunk)
+                        + ")"
+                    )
+                    event_params += chunk
+            if event_conditions:
+                visibility = (
+                    " AND EXISTS (SELECT 1 FROM conversation_events visible WHERE "
+                    + " AND ".join(event_conditions)
+                    + ")"
+                )
+                visibility_params = event_params
+            total = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM conversation_turns turns "
+                    "WHERE turns.chat_id = ?" + visibility,
+                    (chat_id, *visibility_params),
+                ).fetchone()[0]
+            )
+            page = min(page, max(1, (total + page_size - 1) // page_size))
+            offset = (page - 1) * page_size
+            rows = conn.execute(
+                "SELECT * FROM conversation_turns turns "
+                "WHERE turns.chat_id = ?"
+                + visibility
+                + " ORDER BY turns.turn_sequence DESC LIMIT ? OFFSET ?",
+                (chat_id, *visibility_params, page_size, offset),
+            ).fetchall()
+            cutoff = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(event_seq), 0) FROM conversation_events "
+                    "WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()[0]
+            )
+        turns = tuple(self._turn_from_row(row) for row in rows)
+        excluded_ids = frozenset(str(item) for item in exclude_event_ids if item)
+        events = (
+            await self.snapshot_events(
+                chat_id,
+                upto_seq=cutoff,
+                include_internal=include_internal,
+                turn_ids=tuple(turn.turn_id for turn in turns),
+            )
+        ).events
+        if excluded_ids:
+            events = tuple(
+                event for event in events if event.event_id not in excluded_ids
+            )
+        return ConversationTurnPage(
+            chat_id=chat_id,
+            turns=turns,
+            events=events,
+            cutoff_seq=cutoff,
+            page=page,
+            page_size=page_size,
+            total_turns=total,
+        )
 
     async def validate_turn(self, turn_id: str) -> TurnIntegrityReport:
         conn = await self._ensure_open()
@@ -1319,22 +1632,95 @@ class ConversationEventLog:
 
     async def session_summary(self, chat_id: str) -> dict[str, Any]:
         """Return non-content counters for lists and diagnostics."""
-        snapshot = await self.snapshot_events(chat_id, include_internal=True)
-        visible = [event for event in snapshot.events if not event.is_internal]
+        conn = await self._ensure_open()
+        async with self._lock:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS event_count,
+                    COALESCE(SUM(kind IN (?, ?)), 0) AS message_count,
+                    COALESCE(SUM(kind NOT IN (?, ?)), 0) AS protocol_count,
+                    COALESCE(SUM(kind IN (?, ?)), 0) AS wire_count,
+                    COALESCE(SUM(token_count), 0) AS estimated_tokens,
+                    COALESCE(MAX(timestamp), 0) AS last_activity
+                  FROM conversation_events
+                 WHERE chat_id = ?
+                """,
+                (
+                    EventKind.USER_MESSAGE,
+                    EventKind.ACCEPTED_DELIVERY,
+                    EventKind.USER_MESSAGE,
+                    EventKind.ACCEPTED_DELIVERY,
+                    EventKind.ASSISTANT_TOOL_CALL,
+                    EventKind.TOOL_RESULT,
+                    chat_id,
+                ),
+            ).fetchone()
         return {
-            "message_count": len(visible),
-            "event_count": len(snapshot.events),
-            "protocol_count": sum(1 for event in snapshot.events if event.is_internal),
-            "wire_count": sum(
-                1
-                for event in snapshot.events
-                if event.kind in {EventKind.ASSISTANT_TOOL_CALL, EventKind.TOOL_RESULT}
-            ),
-            "estimated_tokens": sum(event.token_count for event in snapshot.events),
-            "last_activity": max(
-                (event.timestamp for event in snapshot.events), default=0.0
-            ),
+            "message_count": int(row["message_count"]),
+            "event_count": int(row["event_count"]),
+            "protocol_count": int(row["protocol_count"]),
+            "wire_count": int(row["wire_count"]),
+            "estimated_tokens": int(row["estimated_tokens"]),
+            "last_activity": float(row["last_activity"]),
         }
+
+    async def session_summaries(
+        self, chat_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Return non-content summaries for many sessions in one query."""
+        selected = tuple(dict.fromkeys(str(item) for item in chat_ids if item))
+        if not selected:
+            return {}
+        conn = await self._ensure_open()
+        result: dict[str, dict[str, Any]] = {}
+        async with self._lock:
+            for offset in range(0, len(selected), 500):
+                chunk = selected[offset : offset + 500]
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = conn.execute(
+                    """
+                    SELECT chat_id,
+                           COUNT(*) AS event_count,
+                           COALESCE(SUM(kind IN (?, ?)), 0) AS message_count,
+                           COALESCE(SUM(kind NOT IN (?, ?)), 0) AS protocol_count,
+                           COALESCE(SUM(kind IN (?, ?)), 0) AS wire_count,
+                           COALESCE(SUM(token_count), 0) AS estimated_tokens,
+                           COALESCE(MAX(timestamp), 0) AS last_activity
+                      FROM conversation_events
+                     WHERE chat_id IN (""" + placeholders + ") GROUP BY chat_id",
+                    (
+                        EventKind.USER_MESSAGE,
+                        EventKind.ACCEPTED_DELIVERY,
+                        EventKind.USER_MESSAGE,
+                        EventKind.ACCEPTED_DELIVERY,
+                        EventKind.ASSISTANT_TOOL_CALL,
+                        EventKind.TOOL_RESULT,
+                        *chunk,
+                    ),
+                ).fetchall()
+                for row in rows:
+                    result[str(row["chat_id"])] = {
+                        "message_count": int(row["message_count"]),
+                        "event_count": int(row["event_count"]),
+                        "protocol_count": int(row["protocol_count"]),
+                        "wire_count": int(row["wire_count"]),
+                        "estimated_tokens": int(row["estimated_tokens"]),
+                        "last_activity": float(row["last_activity"]),
+                    }
+        return result
+
+    async def protocol_event_count(self, chat_id: str) -> int:
+        """Count tool wire events without loading their contents."""
+        conn = await self._ensure_open()
+        async with self._lock:
+            return int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM conversation_events "
+                    "WHERE chat_id = ? AND kind IN (?, ?)",
+                    (chat_id, EventKind.ASSISTANT_TOOL_CALL, EventKind.TOOL_RESULT),
+                ).fetchone()[0]
+            )
 
     async def history(
         self,
@@ -1356,7 +1742,10 @@ class ConversationEventLog:
             rows = conn.execute(
                 """
                 SELECT turn_id, MAX(turn_sequence) AS turn_sequence,
-                       MIN(source_date) AS source_date, COUNT(*) AS event_count
+                       MIN(source_date) AS source_date, COUNT(*) AS event_count,
+                       (SELECT turn_kind FROM conversation_turns
+                          WHERE conversation_turns.chat_id = conversation_events.chat_id
+                            AND conversation_turns.turn_id = conversation_events.turn_id) AS turn_kind
                   FROM conversation_events
                  WHERE chat_id = ? AND kind IN (?, ?)
                  GROUP BY turn_id
@@ -1370,6 +1759,7 @@ class ConversationEventLog:
                 "turn_sequence": int(row["turn_sequence"]),
                 "source_date": str(row["source_date"]),
                 "event_count": int(row["event_count"]),
+                "turn_kind": _coerce_turn_kind(row["turn_kind"]).value,
             }
             for row in rows
         ]

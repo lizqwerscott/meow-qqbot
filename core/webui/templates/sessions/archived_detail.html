@@ -129,7 +129,7 @@
     <h3 style="margin-bottom:12px">归档 batch: <code>{{ batch_id }}</code></h3>
     {% for turn in turns %}
     <details style="margin-bottom:8px">
-        <summary>Turn {{ turn.turn_sequence }} · {{ turn.events|length }} 条可见事件</summary>
+        <summary>Turn {{ turn.turn_sequence }} · {{ turn.turn_kind_label }} · {{ turn.events|length }} 条可见事件</summary>
         {% for msg in turn.events %}
         <div class="chat-message {{ msg.role }}">
             <div class="msg-meta">{{ msg.role }}{% if msg.timestamp %} · {{ msg.timestamp | format_timestamp }}{% endif %} · seq {{ msg.event_seq }}</div>
@@ -149,7 +149,7 @@
     <h3 style="margin-bottom:12px">归档: <code>{{ ts }}</code></h3>
     {% for turn in msgs %}
     <details style="margin-bottom:8px">
-        <summary>Turn {{ turn.turn_sequence }} · {{ turn.events|length }} 条可见事件</summary>
+        <summary>Turn {{ turn.turn_sequence }} · {{ turn.turn_kind_label }} · {{ turn.events|length }} 条可见事件</summary>
         {% for msg in turn.events %}
         <div class="chat-message {{ msg.get("role", "user") }}">
             <div class="msg-meta">{{ msg.get("role", "user") }}{% if msg.get("timestamp") %} · {{ msg.timestamp | format_timestamp }}{% endif %}</div>

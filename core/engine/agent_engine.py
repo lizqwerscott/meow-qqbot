@@ -28,7 +28,7 @@ from core.engine.batch_media_context import (
     BatchMediaLimits,
 )
 from core.engine.context import EngineContext
-from core.engine.conversation_event_log import ConversationEventLog
+from core.engine.conversation_event_log import ConversationEventLog, TurnKind
 from core.engine.conversation_scheduler import ConversationScheduler
 from core.engine.conversation_timeline import ConversationTimeline
 from core.engine.delivery_ledger import (
@@ -133,6 +133,7 @@ class _TurnRequest:
     internal_control: bool = False
     steering_enabled: bool = False
     steering_intent: Optional[InboundIntent] = None
+    turn_kind: TurnKind | str | None = None
     steering_admission_callback: Optional[
         Callable[[PendingInbound], Awaitable[Optional[AdmittedMessage]]]
     ] = None
@@ -706,12 +707,7 @@ class AgentEngine:
             chat_id,
             current_turn_id=current_turn_id,
         )
-        ledger_snapshot = await self._get_event_log().snapshot_events(
-            chat_id, include_internal=True
-        )
-        if projected.events or ledger_snapshot.events:
-            return projected
-        return ()
+        return projected
 
     async def _record_event_log_terminal(
         self, chat_id: str, turn_id: str, status: str
@@ -758,7 +754,11 @@ class AgentEngine:
             await archive_index.clear_chat(chat_id)
 
     async def _record_timeline_user_message(
-        self, pending: PendingInbound, *, turn_id: str = ""
+        self,
+        pending: PendingInbound,
+        *,
+        turn_id: str = "",
+        turn_kind: TurnKind | str | None = None,
     ) -> None:
         """Append the authoritative event, then best-effort legacy projection."""
         if pending.origin is not AdmissionOrigin.USER_MESSAGE:
@@ -766,6 +766,11 @@ class AgentEngine:
         message = pending.message
         event_log = getattr(self, "event_log", None)
         if event_log is not None:
+            turn_kind = turn_kind or (
+                TurnKind.AMBIENT
+                if pending.intent is InboundIntent.GROUP_AMBIENT
+                else TurnKind.AI
+            )
             await event_log.append_user_message(
                 chat_id=message.chat_id,
                 turn_id=turn_id or message.id,
@@ -774,7 +779,9 @@ class AgentEngine:
                 sender_id=message.sender_id,
                 timestamp=message.timestamp,
                 session_kind="group" if message.is_group else "private",
+                turn_kind=turn_kind,
             )
+            return
         try:
             await self._get_timeline().append_user_message(
                 chat_id=message.chat_id,
@@ -1014,7 +1021,7 @@ class AgentEngine:
             return await self._get_model_context().snapshot(scope)
         except Exception as exc:
             _log.warning(
-                "模型上下文投影读取失败，回退 timeline [%s..]: %s",
+                "模型上下文投影读取失败，将使用 bounded prompt projection [%s..]: %s",
                 scope.chat_id[:12],
                 exc,
             )
@@ -1543,7 +1550,7 @@ class AgentEngine:
         self,
         pending: PendingInbound,
         *,
-        source: Literal["initial", "steer", "passive"],
+        source: Literal["initial", "steer", "passive", "ambient"],
         get_user_nickname: Callable[[str], str],
         turn_id: str = "",
         session_lock_held: bool = False,
@@ -1568,6 +1575,7 @@ class AgentEngine:
             has_outbox_effects = bool(outbox and effect_types)
             prepared_new = False
             committed = False
+            ledger_recorded = False
             if has_outbox_effects:
                 self._admission_in_progress.add(admission_key)
             if pending.origin is AdmissionOrigin.INTERNAL_CONTROL:
@@ -1601,19 +1609,44 @@ class AgentEngine:
                     is not False
                 )
                 if not committed:
-                    if has_outbox_effects:
-                        if prepared_new:
-                            await outbox.cancel(chat_id, message.id)
-                        else:
-                            await self._process_admission_outbox()
-                    _log.info(
-                        "消息已存在于本地历史，跳过准入 [%s..]: id=%s",
-                        chat_id[:12],
-                        message.id,
+                    event_log = getattr(self, "event_log", None)
+                    if (
+                        event_log is not None
+                        and pending.origin is AdmissionOrigin.USER_MESSAGE
+                        and not await event_log.has_user_message(chat_id, message.id)
+                    ):
+                        await self._record_timeline_user_message(
+                            pending,
+                            turn_id=turn_id,
+                            turn_kind=(
+                                TurnKind.AMBIENT if source == "passive" else TurnKind.AI
+                            ),
+                        )
+                        committed = True
+                        ledger_recorded = True
+                    else:
+                        if has_outbox_effects:
+                            if prepared_new:
+                                await outbox.cancel(chat_id, message.id)
+                            else:
+                                await self._process_admission_outbox()
+                        _log.info(
+                            "消息已存在于本地历史，跳过准入 [%s..]: id=%s",
+                            chat_id[:12],
+                            message.id,
+                        )
+                        return None
+                if (
+                    pending.origin is AdmissionOrigin.USER_MESSAGE
+                    and not ledger_recorded
+                ):
+                    await self._record_timeline_user_message(
+                        pending,
+                        turn_id=turn_id,
+                        turn_kind=(
+                            TurnKind.AMBIENT if source == "passive" else TurnKind.AI
+                        ),
                     )
-                    return None
-                if pending.origin is AdmissionOrigin.USER_MESSAGE:
-                    await self._record_timeline_user_message(pending, turn_id=turn_id)
                 if getattr(self, "_archive_manager", None):
                     try:
                         archive_if_stale = self._archive_manager.archive_if_stale
@@ -1707,11 +1740,7 @@ class AgentEngine:
             return None
         event_log = getattr(self, "event_log", None)
         if event_log is not None:
-            snapshot = await event_log.snapshot_events(chat_id, include_internal=False)
-            return any(
-                event.role == "user" and event.message_id == message_id
-                for event in snapshot.events
-            )
+            return await event_log.has_user_message(chat_id, message_id)
         timeline = getattr(self, "timeline", None)
         history_reader = getattr(timeline, "history", None)
         if callable(history_reader):
@@ -2383,6 +2412,9 @@ class AgentEngine:
                 )
             if request.internal_control:
                 tools = filter_internal_control_tools(tools)
+            turn_kind = request.turn_kind or (
+                TurnKind.SYSTEM if request.internal_control else TurnKind.AI
+            )
             if request.capabilities is not None:
                 tools = request.capabilities.model_tool_schemas(tools)
             prompt_built = True
@@ -2605,6 +2637,7 @@ class AgentEngine:
                     else None
                 ),
                 turn_id=request.turn_id or request.reply_to,
+                turn_kind=turn_kind,
                 protocol_history=None,
                 transition_turn=_transition_turn if turn_state is not None else None,
                 turn_active_callback=_turn_is_active,
@@ -2829,6 +2862,7 @@ class AgentEngine:
                     source="ambient",
                     get_user_nickname=get_user_nickname,
                     turn_id=turn_id,
+                    session_lock_held=True,
                 )
                 if admitted is not None:
                     admitted_any = True
@@ -2938,6 +2972,7 @@ class AgentEngine:
                         capabilities=capabilities,
                         intent=current_pending.intent,
                         turn_id=turn_id,
+                        turn_kind=TurnKind.AI,
                         planner_control_callback=_handle_planner_control,
                         track_tool_delivery=True,
                     )

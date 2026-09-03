@@ -51,4 +51,11 @@
     </tbody>
 </table>
 </div>
+{% if pagination and pagination.total_pages > 1 %}
+<div class="conversation-pagination">
+    {% if pagination.page > 1 %}<a class="btn" href="/sessions/archived?page={{ pagination.page - 1 }}&page_size={{ pagination.page_size }}{% if query %}&q={{ query }}{% endif %}">上一页</a>{% endif %}
+    <span>{{ pagination.page }} / {{ pagination.total_pages }} · 共 {{ pagination.total }} 个会话</span>
+    {% if pagination.page < pagination.total_pages %}<a class="btn" href="/sessions/archived?page={{ pagination.page + 1 }}&page_size={{ pagination.page_size }}{% if query %}&q={{ query }}{% endif %}">下一页</a>{% endif %}
+</div>
+{% endif %}
 {% endblock %}

@@ -446,6 +446,33 @@ tr:hover td {
     overflow-y: auto;
 }
 
+/* ── Conversation view ── */
+
+.conversation-subtitle { color: var(--text-secondary); margin-bottom: 16px; }
+.conversation-date-divider { align-items: center; color: #8f99aa; display: flex; font-size: 11px; gap: 10px; justify-content: center; margin: 18px 0 10px; }
+.conversation-date-divider::before, .conversation-date-divider::after { background: #e1e6ee; content: ""; height: 1px; width: min(180px, 20%); }
+.conversation-turn { margin-bottom: 14px; }
+.conversation-turn-meta { align-items: center; color: #9aa3b2; display: flex; flex-wrap: wrap; font-size: 11px; gap: 8px; margin: 0 4px 6px; }
+.conversation-turn-meta code { color: #aab2c0; }
+.turn-kind { border: 1px solid #dfe4ec; border-radius: 999px; padding: 1px 7px; }
+.turn-kind-ai { color: var(--primary-color); }
+.turn-kind-ambient { color: var(--text-secondary); }
+.conversation-turn-simple .conversation-turn-meta { border-top: 1px solid #e7ebf1; padding-top: 8px; }
+.turn-status { background: #fff4d6; border-radius: 999px; color: #8a6816; padding: 2px 7px; }
+.turn-tools-count { color: var(--accent-light); }
+.conversation-messages { display: grid; gap: 7px; }
+.conversation-bubble { border-radius: 12px; max-width: min(860px, 88%); padding: 10px 13px; }
+.conversation-bubble.user { background: #eef3ff; border: 1px solid #dbe5ff; justify-self: start; }
+.conversation-bubble.assistant { background: #eefaf3; border: 1px solid #d7efdf; justify-self: end; }
+.conversation-bubble-meta { color: var(--text-secondary); font-size: 11px; margin-bottom: 4px; }
+.conversation-bubble-content { font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+.conversation-tool-chain { background: #fffdf5; border: 1px dashed #eadca8; border-radius: 10px; margin: 8px 0 0 28px; padding: 8px 12px; }
+.conversation-tool-chain summary { color: #8a6816; cursor: pointer; font-size: 12px; }
+.conversation-tool-event { border-top: 1px solid #f0e8c9; margin-top: 8px; padding-top: 8px; }
+.conversation-tool-event .tool-details { max-height: 180px; }
+.conversation-pagination { align-items: center; display: flex; gap: 12px; justify-content: center; margin-top: 20px; }
+.conversation-pagination > span { color: var(--text-secondary); font-size: 12px; }
+
 /* ── Pagination ── */
 
 .pagination {

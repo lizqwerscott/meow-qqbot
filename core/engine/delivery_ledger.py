@@ -843,6 +843,7 @@ class DeliveryController:
                     exc,
                 )
                 return
+            return
         if self.timeline is not None:
             await self.timeline.append_accepted_delivery(
                 chat_id=record.chat_id,

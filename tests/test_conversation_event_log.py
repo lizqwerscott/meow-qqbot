@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 from datetime import datetime, timezone
 
 import pytest
@@ -8,6 +9,7 @@ from core.engine.conversation_event_log import (
     ConversationEventLog,
     EventKind,
     EventLogInvariantError,
+    TurnKind,
 )
 
 
@@ -116,6 +118,152 @@ async def test_event_log_materializes_tool_free_delivery_without_protocol_histor
         "你好呀",
     ]
     assert await log.protocol_snapshot("turn-1") == ()
+
+
+@pytest.mark.asyncio
+async def test_event_log_distinguishes_ai_and_ambient_turns(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+
+    await log.append_user_message(
+        chat_id="group",
+        turn_id="ambient-turn",
+        message_id="ambient-message",
+        content="群里闲聊",
+        turn_kind=TurnKind.AMBIENT,
+    )
+    await log.append_turn_terminal(
+        chat_id="group", turn_id="ambient-turn", status="completed"
+    )
+    await log.append_user_message(
+        chat_id="group",
+        turn_id="ai-turn",
+        message_id="ai-message",
+        content="请回答我",
+        turn_kind=TurnKind.AI,
+    )
+    await log.append_turn_terminal(
+        chat_id="group", turn_id="ai-turn", status="completed"
+    )
+
+    snapshot = await log.snapshot_turns("group", include_internal=True)
+
+    assert {turn.turn_id: turn.turn_kind for turn in snapshot.turns} == {
+        "ambient-turn": TurnKind.AMBIENT,
+        "ai-turn": TurnKind.AI,
+    }
+    await log.close()
+
+
+@pytest.mark.asyncio
+async def test_event_log_migrates_existing_turns_with_unknown_kind(tmp_path):
+    path = tmp_path / "events.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE conversation_turns (
+            chat_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            turn_sequence INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            started_seq INTEGER NOT NULL,
+            ended_seq INTEGER NOT NULL DEFAULT 0,
+            terminal_event_id TEXT NOT NULL DEFAULT '',
+            source_date TEXT NOT NULL,
+            event_count INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (chat_id, turn_id),
+            UNIQUE (chat_id, turn_sequence),
+            UNIQUE (turn_id)
+        );
+        CREATE TABLE conversation_event_log_schema (version INTEGER NOT NULL);
+        INSERT INTO conversation_event_log_schema(version) VALUES (1);
+        INSERT INTO conversation_turns
+            (chat_id, turn_id, turn_sequence, status, started_seq,
+             source_date, created_at, updated_at)
+        VALUES ('chat', 'legacy-turn', 1, 'completed', 1,
+                '2026-01-01', 1, 1);
+        """)
+    conn.commit()
+    conn.close()
+
+    log = ConversationEventLog(str(path))
+    turns = await log.snapshot_turns("chat", include_internal=True)
+
+    assert turns.turns[0].turn_kind is TurnKind.UNKNOWN
+    await log.close()
+
+
+@pytest.mark.asyncio
+async def test_turn_page_can_exclude_prompt_hidden_events(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await log.append_user_message(
+        chat_id="chat", turn_id="turn-1", message_id="message-1", content="问题"
+    )
+    await log.append_accepted_delivery(
+        chat_id="chat", turn_id="turn-1", delivery_id="delivery-1", content="回答"
+    )
+
+    page = await log.snapshot_turn_page(
+        "chat",
+        include_internal=False,
+        exclude_event_ids=("user:message-1",),
+    )
+
+    assert page.total_turns == 1
+    assert [event.event_id for event in page.events] == ["delivery:delivery-1"]
+
+
+@pytest.mark.asyncio
+async def test_turn_page_can_select_archived_turns_by_event_ids(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    for index in range(1, 3):
+        await log.append_user_message(
+            chat_id="chat",
+            turn_id=f"turn-{index}",
+            message_id=f"message-{index}",
+            content=f"问题 {index}",
+        )
+        await log.append_accepted_delivery(
+            chat_id="chat",
+            turn_id=f"turn-{index}",
+            delivery_id=f"delivery-{index}",
+            content=f"回答 {index}",
+        )
+
+    page = await log.snapshot_turn_page(
+        "chat",
+        include_internal=True,
+        include_event_ids=("user:message-1",),
+    )
+
+    assert page.total_turns == 1
+    assert [turn.turn_id for turn in page.turns] == ["turn-1"]
+    assert {event.event_id for event in page.events} == {
+        "user:message-1",
+        "delivery:delivery-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_summary_uses_aggregate_metadata_without_event_bodies(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await log.append_user_message(
+        chat_id="chat", turn_id="turn-1", message_id="message-1", content="问题"
+    )
+    await log.append_accepted_delivery(
+        chat_id="chat", turn_id="turn-1", delivery_id="delivery-1", content="回答"
+    )
+    log.snapshot_events = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("session summary must not load event bodies")
+    )
+
+    summary = await log.session_summary("chat")
+
+    assert summary["message_count"] == 2
+    assert summary["event_count"] == 2
+    assert summary["protocol_count"] == 0
+    assert summary["wire_count"] == 0
+    await log.close()
 
 
 @pytest.mark.asyncio
@@ -429,6 +577,33 @@ async def test_legacy_repair_handles_multiple_assistant_records_without_terminal
     turns = await log.snapshot_turns("chat", include_internal=True)
     assert len(turns.turns) == 2
     assert all(turn.is_terminal for turn in turns.turns)
+
+
+@pytest.mark.asyncio
+async def test_legacy_repair_does_not_rescan_turns_for_every_record(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    original_snapshot_turns = log.snapshot_turns
+    snapshot_calls = 0
+
+    async def counted_snapshot_turns(*args, **kwargs):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        return await original_snapshot_turns(*args, **kwargs)
+
+    log.snapshot_turns = counted_snapshot_turns
+
+    imported = await log.repair_from_legacy_history(
+        "chat",
+        [
+            {"role": "user", "content": "问题", "message_id": "m1", "timestamp": 1},
+            {"role": "assistant", "content": "第一段", "timestamp": 2},
+            {"role": "assistant", "content": "第二段", "timestamp": 3},
+        ],
+        source_id="legacy-active",
+    )
+
+    assert imported == 3
+    assert snapshot_calls == 1
 
 
 @pytest.mark.asyncio

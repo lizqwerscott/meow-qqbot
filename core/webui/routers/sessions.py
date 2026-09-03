@@ -28,6 +28,13 @@ _SENSITIVE_TEXT_PATTERN = re.compile(
 _BEARER_PATTERN = re.compile(r"(?i)(bearer\s+)([^\s,;]+)")
 _PAGE_SIZE_DEFAULT = 20
 _PAGE_SIZE_MAX = 100
+_TURN_KIND_LABELS = {
+    "ai": "AI 对话",
+    "ambient": "群聊闲聊",
+    "system": "系统任务",
+    "unknown": "类型未知",
+}
+_MODEL_CONTEXT_ERROR_MESSAGE = "模型上下文诊断暂不可用"
 
 
 def _validate_chat_id(chat_id: str) -> None:
@@ -189,6 +196,8 @@ async def session_list(
     request: Request,
     q: Optional[str] = Query(None),
     kind: str = Query("all"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(_PAGE_SIZE_DEFAULT, ge=1, le=_PAGE_SIZE_MAX),
 ):
     managers = request.app.state.managers
     templates = request.app.state.templates
@@ -251,14 +260,24 @@ async def session_list(
     else:
         summaries = [None] * len(all_chat_ids)
 
+    ledger_summaries = {}
+    if event_log is not None:
+        batch_reader = getattr(event_log, "session_summaries", None)
+        if callable(batch_reader):
+            try:
+                ledger_summaries = await batch_reader(all_chat_ids)
+            except Exception:
+                ledger_summaries = {}
+
     sessions = []
     for cid, timeline_summary in zip(all_chat_ids, summaries):
         summary = timeline_summary
-        event_log = managers.get("conversation_event_log")
         ledger_summary = None
         if event_log is not None:
             try:
-                ledger_summary = await event_log.session_summary(cid)
+                ledger_summary = ledger_summaries.get(cid)
+                if ledger_summary is None:
+                    ledger_summary = await event_log.session_summary(cid)
                 if ledger_summary.get("event_count", 0):
                     summary = ledger_summary
             except Exception:
@@ -360,16 +379,18 @@ async def session_list(
             )
 
     sessions.sort(key=lambda s: s["last_activity"], reverse=True)
+    visible_sessions, pagination = _paginate_cards(sessions, page, page_size)
 
     return templates.TemplateResponse(
         request,
         "sessions/list.html",
         {
             "request": request,
-            "sessions": sessions,
+            "sessions": visible_sessions,
             "query": q or "",
             "kind": kind,
             "total_archived": len(archived_counts),
+            "pagination": pagination,
         },
     )
 
@@ -378,6 +399,8 @@ async def session_list(
 async def archived_list(
     request: Request,
     q: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(_PAGE_SIZE_DEFAULT, ge=1, le=_PAGE_SIZE_MAX),
 ):
     managers = request.app.state.managers
     templates = request.app.state.templates
@@ -385,12 +408,32 @@ async def archived_list(
     archive_index = managers.get("archive_index")
 
     if archive_index is not None:
-        all_archived_ids = []
-        for cid in await archive_index.chat_ids():
-            batches = await archive_index.list_for_webui(cid)
-            if any(batch.get("state") == "committed" for batch in batches):
-                all_archived_ids.append(cid)
-        all_archived_ids.sort()
+        visible_sessions, archive_total = await archive_index.chat_summaries_for_webui(
+            query=q or "", limit=page_size, offset=(page - 1) * page_size
+        )
+        pagination = {
+            "page": min(
+                max(1, page), max(1, (archive_total + page_size - 1) // page_size)
+            ),
+            "page_size": page_size,
+            "total": archive_total,
+            "total_pages": max(1, (archive_total + page_size - 1) // page_size),
+        }
+        current_page = pagination["page"]
+        if current_page != page:
+            visible_sessions, _ = await archive_index.chat_summaries_for_webui(
+                query=q or "", limit=page_size, offset=(current_page - 1) * page_size
+            )
+        return templates.TemplateResponse(
+            request,
+            "sessions/archived_list.html",
+            {
+                "request": request,
+                "sessions": visible_sessions,
+                "query": q or "",
+                "pagination": pagination,
+            },
+        )
     else:
         archived_counts = await context_manager.get_archived_sessions_summary_async()
         all_archived_ids = sorted(archived_counts.keys())
@@ -439,13 +482,16 @@ async def archived_list(
             }
         )
 
+    sessions.sort(key=lambda s: s["latest_archive"], reverse=True)
+    visible_sessions, pagination = _paginate_cards(sessions, page, page_size)
     return templates.TemplateResponse(
         request,
         "sessions/archived_list.html",
         {
             "request": request,
-            "sessions": sessions,
+            "sessions": visible_sessions,
             "query": q or "",
+            "pagination": pagination,
         },
     )
 
@@ -466,11 +512,15 @@ async def archived_detail(
     archive_index = managers.get("archive_index")
 
     if archive_index is not None:
-        batches = [
-            batch
-            for batch in await archive_index.list_for_webui(chat_id)
-            if batch.get("state") == "committed"
-        ]
+        batch_total = await archive_index.count_for_webui(chat_id, state="committed")
+        total_pages = max(1, (batch_total + page_size - 1) // page_size)
+        current_page = min(max(1, page), total_pages)
+        batches = await archive_index.list_for_webui(
+            chat_id,
+            limit=page_size,
+            offset=(current_page - 1) * page_size,
+            state="committed",
+        )
         summary_store = managers.get("turn_summary_store")
         summary_total = (
             await summary_store.count_for_webui(chat_id)
@@ -481,13 +531,19 @@ async def archived_detail(
             [
                 summary.to_dict()
                 for summary in await summary_store.list_for_webui(
-                    chat_id, limit=page_size, offset=(page - 1) * page_size
+                    chat_id, limit=page_size, offset=(current_page - 1) * page_size
                 )
             ]
             if summary_store is not None
             else []
         )
-        visible_batches, pagination = _paginate_cards(batches, page, page_size)
+        pagination = {
+            "page": current_page,
+            "page_size": page_size,
+            "total": batch_total,
+            "total_pages": total_pages,
+        }
+        visible_batches = batches
         messages_by_batch = {}
         if tab == "messages":
             event_log = managers.get("conversation_event_log")
@@ -497,8 +553,10 @@ async def archived_detail(
                     snapshot = await event_log.snapshot_events(
                         chat_id, include_internal=False, event_ids=tuple(event_ids)
                     )
+                    records = await archive_index.turns_for_batch(batch["batch_id"])
                     messages_by_batch[batch["batch_id"]] = _history_turn_cards(
-                        [event.to_history_dict() for event in snapshot.events]
+                        [event.to_history_dict() for event in snapshot.events],
+                        {record.turn_id: record.turn_kind for record in records},
                     )
         return templates.TemplateResponse(
             request,
@@ -597,22 +655,34 @@ async def archived_messages_full(
                 f"/sessions/archived/{chat_id}", "error", "未找到该归档 batch"
             )
         event_log = managers.get("conversation_event_log")
-        event_ids = await archive_index.event_ids(timestamp)
-        snapshot = (
-            await event_log.snapshot_events(
-                chat_id, include_internal=protocol, event_ids=tuple(event_ids)
+        if event_log is not None:
+            total_turns = await archive_index.count_turns_for_batch(timestamp)
+            total_pages = max(1, (total_turns + page_size - 1) // page_size)
+            current_page = min(max(1, page), total_pages)
+            turn_records, _ = await archive_index.turns_for_batch_page(
+                timestamp,
+                limit=page_size,
+                offset=(current_page - 1) * page_size,
             )
-            if event_log is not None
-            else None
-        )
-        messages = [
-            event.to_history_dict()
-            for event in (snapshot.events if snapshot is not None else ())
-            if event.event_id in event_ids
-        ]
-        turns, pagination = _paginate_cards(
-            _history_turn_cards(messages), page, page_size
-        )
+            snapshot = await event_log.snapshot_events(
+                chat_id,
+                include_internal=protocol,
+                turn_ids=tuple(record.turn_id for record in turn_records),
+            )
+            messages = [event.to_history_dict() for event in snapshot.events]
+            turns = _history_turn_cards(
+                messages,
+                {record.turn_id: record.turn_kind for record in turn_records},
+            )
+            pagination = {
+                "page": current_page,
+                "page_size": page_size,
+                "total": total_turns,
+                "total_pages": total_pages,
+            }
+        else:
+            messages = []
+            turns, pagination = _paginate_cards([], page, page_size)
         return templates.TemplateResponse(
             request,
             "sessions/archived_messages.html",
@@ -778,7 +848,12 @@ async def archived_delete(request: Request, chat_id: str, timestamp: str):
 
 
 @router.get("/sessions/{chat_id}", response_class=HTMLResponse)
-async def session_detail(request: Request, chat_id: str):
+async def session_detail(
+    request: Request,
+    chat_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(_PAGE_SIZE_DEFAULT, ge=1, le=_PAGE_SIZE_MAX),
+):
     _validate_chat_id(chat_id)
     managers = request.app.state.managers
     templates = request.app.state.templates
@@ -788,20 +863,58 @@ async def session_detail(request: Request, chat_id: str):
     archive_index = managers.get("archive_index")
 
     event_log = managers.get("conversation_event_log")
-    history = await event_log.history(chat_id) if event_log is not None else []
-    if event_log is None and not history:
-        history = await timeline.history(chat_id) if timeline else []
-    if event_log is None and timeline is not None and not history:
-        try:
-            await _repair_timeline_from_legacy(context_manager, timeline, chat_id)
-            history = await timeline.history(chat_id)
-        except Exception:
-            pass
-    elif event_log is None and not history:
-        history = visible_legacy_history(
-            await context_manager.get_chat_history_async(chat_id)
+    history = []
+    if event_log is not None:
+        turn_page = await event_log.snapshot_turn_page(
+            chat_id,
+            page=page,
+            page_size=page_size,
+            include_internal=True,
         )
-    history.reverse()
+        statuses = {turn.turn_id: str(turn.status) for turn in turn_page.turns}
+        turn_kinds = {turn.turn_id: turn.turn_kind.value for turn in turn_page.turns}
+        turns = _chat_turn_cards(turn_page.events, statuses, turn_kinds)
+        pagination = {
+            "page": turn_page.page,
+            "page_size": turn_page.page_size,
+            "total": turn_page.total_turns,
+            "total_pages": turn_page.total_pages,
+        }
+    else:
+        history = await timeline.history(chat_id) if timeline else []
+        if not history and timeline is not None:
+            try:
+                await _repair_timeline_from_legacy(context_manager, timeline, chat_id)
+                history = await timeline.history(chat_id)
+            except Exception:
+                pass
+        if not history:
+            history = visible_legacy_history(
+                await context_manager.get_chat_history_async(chat_id)
+            )
+        history.reverse()
+        turns, pagination = _paginate_cards(
+            _history_turn_cards(history), page, page_size
+        )
+        for turn in turns:
+            for event in turn["events"]:
+                if event.get("kind"):
+                    continue
+                event["kind"] = {
+                    "user": "user_message",
+                    "assistant": "accepted_delivery",
+                    "tool": "tool_result",
+                }.get(event.get("role"), "system_event")
+            tool_events = [
+                event
+                for event in turn["events"]
+                if event.get("kind") in {"assistant_tool_call", "tool_result"}
+            ]
+            turn["has_tools"] = bool(tool_events)
+            turn["tool_count"] = sum(
+                len(event.get("tool_calls") or ()) for event in tool_events
+            )
+            turn["is_simple"] = not turn["has_tools"]
 
     archived_files = (
         []
@@ -810,11 +923,9 @@ async def session_detail(request: Request, chat_id: str):
     )
     protocol_count = 0
     if event_log is not None:
-        protocol_count = sum(
-            1
-            for message in await event_log.history(chat_id, include_internal=True)
-            if message.get("kind") in {"assistant_tool_call", "tool_result"}
-        )
+        protocol_count_reader = getattr(event_log, "protocol_event_count", None)
+        if callable(protocol_count_reader):
+            protocol_count = await protocol_count_reader(chat_id)
     if event_log is None and protocol_history is not None:
         try:
             protocol_count = int(
@@ -847,7 +958,8 @@ async def session_detail(request: Request, chat_id: str):
         {
             "request": request,
             "chat_id": chat_id,
-            "messages": history,
+            "messages": [],
+            "turns": turns,
             "archived_count": (
                 sum(
                     1
@@ -858,6 +970,7 @@ async def session_detail(request: Request, chat_id: str):
                 else len(archived_files)
             ),
             "protocol_count": protocol_count,
+            "pagination": pagination,
         },
     )
 
@@ -903,7 +1016,13 @@ async def session_protocol_detail(
             _history_turn_cards(messages), page, page_size
         )
     else:
-        turns = _history_turn_cards(messages)
+        turns = _history_turn_cards(
+            messages,
+            {
+                item["turn_id"]: item.get("turn_kind", "unknown")
+                for item in selected_index
+            },
+        )
     return templates.TemplateResponse(
         request,
         "sessions/protocol.html",
@@ -922,10 +1041,17 @@ def _ledger_events_view(events) -> list[dict]:
     return [_redact_message(event.to_history_dict()) for event in events]
 
 
-def _history_turn_cards(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _history_turn_cards(
+    messages: list[dict[str, Any]], turn_kinds: Optional[dict[str, str]] = None
+) -> list[dict[str, Any]]:
     cards: dict[str, dict[str, Any]] = {}
     for index, message in enumerate(messages):
         turn_id = str(message.get("turn_id") or f"message:{index}")
+        turn_kind = (turn_kinds or {}).get(
+            turn_id, str(message.get("turn_kind") or "unknown")
+        )
+        if turn_kind not in _TURN_KIND_LABELS:
+            turn_kind = "unknown"
         card = cards.setdefault(
             turn_id,
             {
@@ -933,6 +1059,7 @@ def _history_turn_cards(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "turn_sequence": int(message.get("turn_sequence") or 0),
                 "source_date": str(message.get("source_date") or ""),
                 "status": str(message.get("terminal_status") or "unknown"),
+                "turn_kind": turn_kind,
                 "events": [],
             },
         )
@@ -940,6 +1067,24 @@ def _history_turn_cards(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             card["turn_sequence"], int(message.get("turn_sequence") or 0)
         )
         card["events"].append(_redact_message(message))
+    for card in cards.values():
+        tool_events = [
+            event
+            for event in card["events"]
+            if event.get("role") == "tool" or event.get("tool_calls")
+        ]
+        call_count = sum(
+            len(event.get("tool_calls") or ())
+            for event in tool_events
+            if event.get("tool_calls")
+        )
+        result_count = sum(1 for event in tool_events if event.get("role") == "tool")
+        card["has_tools"] = bool(tool_events)
+        card["tool_count"] = max(call_count, result_count)
+        card["is_simple"] = not card["has_tools"]
+        card["turn_kind_label"] = _TURN_KIND_LABELS.get(
+            card["turn_kind"], _TURN_KIND_LABELS["unknown"]
+        )
     return sorted(
         cards.values(),
         key=lambda item: (item["turn_sequence"], item["turn_id"]),
@@ -947,9 +1092,16 @@ def _history_turn_cards(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
-def _ledger_turn_cards(events, statuses: Optional[dict[str, str]] = None) -> list[dict]:
+def _ledger_turn_cards(
+    events,
+    statuses: Optional[dict[str, str]] = None,
+    turn_kinds: Optional[dict[str, str]] = None,
+) -> list[dict]:
     cards: dict[str, dict] = {}
     for event in events:
+        turn_kind = (turn_kinds or {}).get(event.turn_id, "unknown")
+        if turn_kind not in _TURN_KIND_LABELS:
+            turn_kind = "unknown"
         card = cards.setdefault(
             event.turn_id,
             {
@@ -958,10 +1110,63 @@ def _ledger_turn_cards(events, statuses: Optional[dict[str, str]] = None) -> lis
                 "source_date": event.source_date,
                 "events": [],
                 "status": (statuses or {}).get(event.turn_id, "unknown"),
+                "turn_kind": turn_kind,
             },
         )
         card["events"].append(_redact_message(event.to_history_dict()))
+    for card in cards.values():
+        tool_events = [
+            event
+            for event in card["events"]
+            if event.get("kind") in {"assistant_tool_call", "tool_result"}
+        ]
+        call_count = sum(
+            len(event.get("tool_calls") or ())
+            for event in tool_events
+            if event.get("kind") == "assistant_tool_call"
+        )
+        result_count = sum(
+            1 for event in tool_events if event.get("kind") == "tool_result"
+        )
+        card["has_tools"] = bool(tool_events)
+        card["tool_count"] = max(call_count, result_count)
+        card["is_simple"] = not card["has_tools"]
+        card["turn_kind_label"] = _TURN_KIND_LABELS.get(
+            card["turn_kind"], _TURN_KIND_LABELS["unknown"]
+        )
     return sorted(cards.values(), key=lambda item: item["turn_sequence"], reverse=True)
+
+
+def _chat_turn_cards(
+    events,
+    statuses: Optional[dict[str, str]] = None,
+    turn_kinds: Optional[dict[str, str]] = None,
+) -> list[dict]:
+    """Build compact chat cards while retaining tool events for expansion."""
+    cards = _ledger_turn_cards(events, statuses, turn_kinds)
+    for card in cards:
+        card["events"] = [
+            event
+            for event in card["events"]
+            if event.get("kind") not in {"turn_terminal", "system_event"}
+        ]
+        tool_events = [
+            event
+            for event in card["events"]
+            if event.get("kind") in {"assistant_tool_call", "tool_result"}
+        ]
+        card["has_tools"] = bool(tool_events)
+        call_count = sum(
+            len(event.get("tool_calls") or ())
+            for event in tool_events
+            if event.get("kind") == "assistant_tool_call"
+        )
+        result_count = sum(
+            1 for event in tool_events if event.get("kind") == "tool_result"
+        )
+        card["tool_count"] = max(call_count, result_count)
+        card["is_simple"] = not card["has_tools"]
+    return cards
 
 
 async def _render_ledger_view(
@@ -984,22 +1189,53 @@ async def _render_ledger_view(
             degraded_reason = events.degraded_reason
         title = "当前 Prompt 历史"
         description = "实际 bounded prompt history；归档正文不会因 WebUI 查询重新进入。"
-        turn_snapshot = await event_log.snapshot_turns(chat_id, include_internal=False)
-        statuses = {turn.turn_id: str(turn.status) for turn in turn_snapshot.turns}
+        turn_page = await event_log.snapshot_turn_page(
+            chat_id,
+            page=page,
+            page_size=page_size,
+            include_internal=False,
+            include_event_ids=tuple(event.event_id for event in events.events),
+        )
+        statuses = {turn.turn_id: str(turn.status) for turn in turn_page.turns}
+        turn_kinds = {turn.turn_id: turn.turn_kind.value for turn in turn_page.turns}
         event_values = _ledger_events_view(events.events)
-        turns, pagination = _paginate_cards(
-            _ledger_turn_cards(events.events, statuses), page, page_size
+        selected_turn_ids = {turn.turn_id for turn in turn_page.turns}
+        turns = _ledger_turn_cards(
+            tuple(
+                event for event in events.events if event.turn_id in selected_turn_ids
+            ),
+            statuses,
+            turn_kinds,
         )
+        pagination = {
+            "page": turn_page.page,
+            "page_size": turn_page.page_size,
+            "total": turn_page.total_turns,
+            "total_pages": turn_page.total_pages,
+        }
     elif view == "active":
-        snapshot = (
-            await projection.snapshot_for_active(chat_id)
+        hidden_ids = (
+            await projection.hidden_event_ids(chat_id)
             if projection is not None
-            else await event_log.snapshot_events(chat_id, include_internal=False)
+            else frozenset()
         )
-        messages = [event.to_history_dict() for event in snapshot.events]
-        turns, pagination = _paginate_cards(
-            _ledger_turn_cards(snapshot.events), page, page_size
+        turn_page = await event_log.snapshot_turn_page(
+            chat_id,
+            page=page,
+            page_size=page_size,
+            include_internal=False,
+            exclude_event_ids=hidden_ids,
         )
+        statuses = {turn.turn_id: str(turn.status) for turn in turn_page.turns}
+        turn_kinds = {turn.turn_id: turn.turn_kind.value for turn in turn_page.turns}
+        messages = [event.to_history_dict() for event in turn_page.events]
+        turns = _ledger_turn_cards(turn_page.events, statuses, turn_kinds)
+        pagination = {
+            "page": turn_page.page,
+            "page_size": turn_page.page_size,
+            "total": turn_page.total_turns,
+            "total_pages": turn_page.total_pages,
+        }
         return templates.TemplateResponse(
             request,
             "sessions/projection.html",
@@ -1012,7 +1248,7 @@ async def _render_ledger_view(
                 "turns": turns,
                 "stats": {
                     "event_count": len(messages),
-                    "turn_count": len({event.turn_id for event in snapshot.events}),
+                    "turn_count": len(turn_page.turns),
                 },
                 "degraded_reason": "",
                 "event_view": True,
@@ -1022,27 +1258,24 @@ async def _render_ledger_view(
         )
     else:
         title = "完整 Timeline"
-        description = "核心账本中的完整可见 Timeline；工具协议请查看独立的协议视图，不代表每次模型调用都会加载。"
+        description = "核心账本中的完整 Timeline，包含用户消息、助手交付、工具调用、工具结果和 Turn 边界；它不代表每次模型调用都会加载。"
         degraded_reason = ""
-        turn_snapshot = await event_log.snapshot_turns(chat_id, include_internal=False)
-        all_turns = [
-            {
-                "turn_id": turn.turn_id,
-                "turn_sequence": turn.turn_sequence,
-                "source_date": turn.source_date,
-                "status": str(turn.status),
-                "events": [],
-            }
-            for turn in reversed(turn_snapshot.turns)
-        ]
-        selected_turns, pagination = _paginate_cards(all_turns, page, page_size)
-        selected_turn_ids = [turn["turn_id"] for turn in selected_turns]
-        events = await event_log.snapshot_events(
-            chat_id, include_internal=False, turn_ids=selected_turn_ids
+        turn_page = await event_log.snapshot_turn_page(
+            chat_id,
+            page=page,
+            page_size=page_size,
+            include_internal=True,
         )
-        statuses = {turn["turn_id"]: turn["status"] for turn in selected_turns}
-        event_values = _ledger_events_view(events.events)
-        turns = _ledger_turn_cards(events.events, statuses)
+        statuses = {turn.turn_id: str(turn.status) for turn in turn_page.turns}
+        turn_kinds = {turn.turn_id: turn.turn_kind.value for turn in turn_page.turns}
+        event_values = _ledger_events_view(turn_page.events)
+        turns = _ledger_turn_cards(turn_page.events, statuses, turn_kinds)
+        pagination = {
+            "page": turn_page.page,
+            "page_size": turn_page.page_size,
+            "total": turn_page.total_turns,
+            "total_pages": turn_page.total_pages,
+        }
     return templates.TemplateResponse(
         request,
         "sessions/projection.html",
@@ -1055,7 +1288,7 @@ async def _render_ledger_view(
             "turns": turns,
             "stats": {
                 "event_count": len(event_values),
-                "turn_count": len(_ledger_turn_cards(events.events, statuses)),
+                "turn_count": len(turns),
             },
             "degraded_reason": degraded_reason,
             "event_view": True,
@@ -1138,20 +1371,58 @@ async def session_summaries_view(
 
 
 @router.get("/sessions/{chat_id}/model-context", response_class=HTMLResponse)
-async def session_model_context_view(request: Request, chat_id: str):
+async def session_model_context_view(
+    request: Request,
+    chat_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(_PAGE_SIZE_DEFAULT, ge=1, le=_PAGE_SIZE_MAX),
+):
     _validate_chat_id(chat_id)
     managers = request.app.state.managers
     templates = request.app.state.templates
     transcript = managers.get("model_context_transcript")
     report_store = managers.get("prompt_context_reports")
-    reports = (
-        await report_store.list_for_webui(chat_id) if report_store is not None else []
-    )
+    reports = []
+    report_pagination = {
+        "page": max(1, page),
+        "page_size": page_size,
+        "total": 0,
+        "total_pages": 1,
+    }
+    if report_store is not None:
+        report_total = (
+            await report_store.count_for_webui(chat_id)
+            if hasattr(report_store, "count_for_webui")
+            else len(await report_store.list_for_webui(chat_id, limit=page_size))
+        )
+        report_total_pages = max(1, (report_total + page_size - 1) // page_size)
+        current_page = min(max(1, page), report_total_pages)
+        reports = await report_store.list_for_webui(
+            chat_id, limit=page_size, offset=(current_page - 1) * page_size
+        )
+        report_pagination = {
+            "page": current_page,
+            "page_size": page_size,
+            "total": report_total,
+            "total_pages": report_total_pages,
+        }
     scopes = await transcript.scopes_for_chat(chat_id) if transcript is not None else ()
     scope_rows = []
     for scope in scopes:
         try:
-            snapshot = await transcript.snapshot(scope, max_events=1000)
+            stats_reader = getattr(transcript, "stats", None)
+            if callable(stats_reader):
+                stats = await stats_reader(scope)
+            else:
+                snapshot = await transcript.snapshot(scope, max_events=1000)
+                stats = {
+                    "event_count": len(snapshot.events),
+                    "estimated_tokens": sum(
+                        max(1, len(event.content) // 4) for event in snapshot.events
+                    ),
+                    "roles": [event.role for event in snapshot.events],
+                    "source_event_count": len(snapshot.source_event_ids),
+                }
         except Exception as exc:
             _log.warning("读取模型上下文诊断失败 [%s..]: %s", chat_id[:12], exc)
             scope_rows.append(
@@ -1161,19 +1432,29 @@ async def session_model_context_view(request: Request, chat_id: str):
                     "estimated_tokens": "不可用",
                     "roles": (),
                     "source_event_count": "不可用",
-                    "error": str(exc),
+                    "error": _MODEL_CONTEXT_ERROR_MESSAGE,
                 }
             )
             continue
         scope_rows.append(
             {
                 "scope": scope,
-                "event_count": len(snapshot.events),
-                "estimated_tokens": sum(
-                    max(1, len(event.content) // 4) for event in snapshot.events
+                "event_count": (
+                    stats.event_count
+                    if hasattr(stats, "event_count")
+                    else stats["event_count"]
                 ),
-                "roles": [event.role for event in snapshot.events],
-                "source_event_count": len(snapshot.source_event_ids),
+                "estimated_tokens": (
+                    stats.estimated_tokens
+                    if hasattr(stats, "estimated_tokens")
+                    else stats["estimated_tokens"]
+                ),
+                "roles": stats.roles if hasattr(stats, "roles") else stats["roles"],
+                "source_event_count": (
+                    stats.source_event_count
+                    if hasattr(stats, "source_event_count")
+                    else stats["source_event_count"]
+                ),
                 "error": "",
             }
         )
@@ -1185,6 +1466,8 @@ async def session_model_context_view(request: Request, chat_id: str):
             "chat_id": chat_id,
             "scopes": scope_rows,
             "reports": reports,
+            "pagination": report_pagination,
+            "pagination_query": _pagination_query(report_pagination),
         },
     )
 
@@ -1204,18 +1487,23 @@ async def session_archive_history_view(
     if event_log is None or projection is None:
         raise HTTPException(status_code=503, detail="归档投影不可用")
     hidden_ids = await projection.hidden_event_ids(chat_id)
-    events = (
-        await event_log.snapshot_events(
-            chat_id,
-            include_internal=False,
-            event_ids=tuple(sorted(hidden_ids)),
-        )
-    ).events
-    turn_snapshot = await event_log.snapshot_turns(chat_id, include_internal=True)
-    statuses = {turn.turn_id: str(turn.status) for turn in turn_snapshot.turns}
-    turns, pagination = _paginate_cards(
-        _ledger_turn_cards(events, statuses), page, page_size
+    turn_page = await event_log.snapshot_turn_page(
+        chat_id,
+        page=page,
+        page_size=page_size,
+        include_internal=True,
+        include_event_ids=tuple(sorted(hidden_ids)),
     )
+    statuses = {turn.turn_id: str(turn.status) for turn in turn_page.turns}
+    turn_kinds = {turn.turn_id: turn.turn_kind.value for turn in turn_page.turns}
+    events = turn_page.events
+    turns = _ledger_turn_cards(events, statuses, turn_kinds)
+    pagination = {
+        "page": turn_page.page,
+        "page_size": turn_page.page_size,
+        "total": turn_page.total_turns,
+        "total_pages": turn_page.total_pages,
+    }
     archive_index = managers.get("archive_index")
     archive_batches = (
         await archive_index.list_for_webui(chat_id) if archive_index is not None else []

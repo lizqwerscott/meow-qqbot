@@ -387,6 +387,7 @@ class ChatContextManager:
 
     async def clear_chat_history_async(self, chat_id: str) -> None:
         if self._event_log is not None:
+            await self.clear_legacy_history_async(chat_id)
             await self._invalidate_token_cache(chat_id)
             return
         lock = await self._get_chat_lock(chat_id)
@@ -399,6 +400,24 @@ class ChatContextManager:
                 await self._protocol_history.delete_chat(chat_id)
             # 清空 token 缓存（历史已清空，token 应为 0）
             await self._invalidate_token_cache(chat_id)
+
+    async def clear_legacy_history_async(self, chat_id: str) -> None:
+        """Remove legacy active/archive data after an explicit session reset."""
+        lock = await self._get_chat_lock(chat_id)
+        removed_context = None
+        try:
+            async with lock:
+                async with self._ctx_lock:
+                    removed_context = self.contexts.pop(chat_id, None)
+                if removed_context is not None:
+                    await removed_context.wait_for_save_async()
+                purge = getattr(self._store, "purge", None)
+                if not callable(purge):
+                    purge = self._store.delete
+                await asyncio.to_thread(purge, chat_id)
+        finally:
+            self._store.release_file_lock(chat_id)
+        await self._invalidate_token_cache(chat_id)
 
     async def remove_message_if_async(
         self, chat_id: str, role: str, message_id: str

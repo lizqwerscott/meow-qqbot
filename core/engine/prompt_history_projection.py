@@ -293,61 +293,33 @@ class PromptHistoryProjection:
                 (chat_id,),
             ).fetchall()
         hidden_ids = {str(row["event_id"]) for row in hidden_rows}
-        source_ids = set(
-            await self._event_log.event_ids(
-                chat_id, upto_seq=upto_seq, include_internal=False
-            )
-        )
-        source = await self._event_log.snapshot_events(
+        turn_budgets, cutoff = await self._event_log.snapshot_turn_budgets(
             chat_id,
             upto_seq=upto_seq,
             include_internal=False,
-            event_ids=tuple(sorted(source_ids - hidden_ids)),
+            exclude_event_ids=tuple(hidden_ids),
+            current_turn_id=current_turn_id,
         )
-        source_events = source.events
-        by_turn: dict[str, list[ConversationEvent]] = {}
-        turn_order: list[str] = []
-        for event in source_events:
-            if event.turn_id not in by_turn:
-                by_turn[event.turn_id] = []
-                turn_order.append(event.turn_id)
-            by_turn[event.turn_id].append(event)
 
         selected_turns: list[str] = []
         used_tokens = 0
         degraded_reason = ""
-        if current_turn_id in by_turn:
-            current_events = by_turn[current_turn_id]
-            current_tokens = sum(event.token_count for event in current_events)
+        budget_by_turn = {item.turn.turn_id: item for item in turn_budgets}
+        turn_order = [item.turn.turn_id for item in turn_budgets]
+        if current_turn_id in budget_by_turn:
+            current_tokens = budget_by_turn[current_turn_id].estimated_tokens
             if current_tokens <= self._max_tokens:
                 selected_turns.append(current_turn_id)
                 used_tokens = current_tokens
             else:
-                user_events = [
-                    event
-                    for event in current_events
-                    if event.kind.value == "user_message"
-                ]
-                if user_events:
-                    user_event = user_events[-1]
-                    max_chars = self._max_tokens * 4
-                    if user_event.token_count > self._max_tokens:
-                        user_event = replace(
-                            user_event,
-                            content=user_event.content[:max_chars].rstrip() + "…",
-                            token_count=self._max_tokens,
-                        )
-                    selected_turns.append(current_turn_id)
-                    used_tokens = user_event.token_count
-                    current_events = [user_event]
-                    by_turn[current_turn_id] = current_events
+                selected_turns.append(current_turn_id)
+                used_tokens = self._max_tokens
                 degraded_reason = "current_turn_exceeds_budget"
         selected_historical_turns = 0
-        for turn_id in reversed(turn_order):
+        for turn_id in turn_order:
             if turn_id == current_turn_id:
                 continue
-            turn_events = by_turn[turn_id]
-            turn_tokens = sum(event.token_count for event in turn_events)
+            turn_tokens = budget_by_turn[turn_id].estimated_tokens
             if selected_historical_turns >= self._max_turns:
                 break
             if selected_turns and used_tokens + turn_tokens > self._max_tokens:
@@ -360,18 +332,53 @@ class PromptHistoryProjection:
             used_tokens += turn_tokens
 
         selected_ids = set(selected_turns)
-        events = tuple(
-            event for event in source.events if event.turn_id in selected_ids
+        source = await self._event_log.snapshot_events(
+            chat_id,
+            upto_seq=upto_seq,
+            include_internal=False,
+            turn_ids=tuple(selected_ids),
         )
+        source_events = tuple(
+            event for event in source.events if event.event_id not in hidden_ids
+        )
+        if current_turn_id in selected_ids and current_turn_id in budget_by_turn:
+            current_events = tuple(
+                event for event in source_events if event.turn_id == current_turn_id
+            )
+            if budget_by_turn[current_turn_id].estimated_tokens > self._max_tokens:
+                user_events = tuple(
+                    event
+                    for event in current_events
+                    if event.kind.value == "user_message"
+                )
+                if user_events:
+                    user_event = user_events[-1]
+                    max_chars = self._max_tokens * 4
+                    user_event = replace(
+                        user_event,
+                        content=user_event.content[:max_chars].rstrip() + "…",
+                        token_count=self._max_tokens,
+                    )
+                    source_events = tuple(
+                        event
+                        for event in source_events
+                        if event.turn_id != current_turn_id
+                    ) + (user_event,)
+                    source_events = tuple(
+                        sorted(source_events, key=lambda event: event.event_seq)
+                    )
+        events = tuple(source_events)
         selected_event_ids = {item.event_id for item in events}
         truncated = tuple(
-            event.event_id
-            for event in source_events
-            if event.event_id not in selected_event_ids
+            event_id
+            for event_id in await self._event_log.event_ids(
+                chat_id, upto_seq=upto_seq, include_internal=False
+            )
+            if event_id not in selected_event_ids and event_id not in hidden_ids
         )
         return PromptHistorySnapshot(
             events=events,
-            cutoff_seq=source.cutoff_seq,
+            cutoff_seq=cutoff,
             projection_version=self.PROJECTION_VERSION,
             estimated_tokens=sum(event.token_count for event in events),
             truncated_event_ids=truncated,

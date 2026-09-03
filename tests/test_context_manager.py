@@ -75,6 +75,20 @@ async def test_event_log_session_enumeration_does_not_scan_legacy_store(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_event_log_session_clear_purges_legacy_store(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    store = MemoryContextStore()
+    store.flush("chat", [{"role": "user", "content": "legacy"}])
+    manager = ChatContextManager(store=store)
+    manager.set_event_log(event_log)
+
+    await manager.clear_chat_history_async("chat")
+
+    assert store.load("chat") is None
+    await event_log.close()
+
+
+@pytest.mark.asyncio
 async def test_history_access_loads_from_store(mgr, store):
     store.flush("chat_001", [{"role": "user", "content": "hello", "timestamp": 100.0}])
     history = await mgr.get_chat_history_async("chat_001")

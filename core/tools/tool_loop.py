@@ -19,6 +19,7 @@ from core.engine.conversation_event_log import (
     ConversationEvent,
     ConversationEventLog,
     EventKind,
+    TurnKind,
 )
 from core.engine.delivery_ledger import DeliveryController, DeliveryReceipt
 from core.engine.turn_capabilities import TurnCapabilities
@@ -145,6 +146,7 @@ class ToolLoop:
             Callable[[str, int, list[dict]], Awaitable[None]]
         ] = None,
         event_log: Optional[ConversationEventLog] = None,
+        turn_kind: TurnKind | str = TurnKind.UNKNOWN,
     ) -> tuple[bool, bool]:
         """执行工具调用循环。
 
@@ -194,9 +196,10 @@ class ToolLoop:
                         content=content,
                         tool_call_id=tool_call_id,
                         tool_name=tool_name,
-                    )
+                    ),
+                    turn_kind=turn_kind,
                 )
-            if protocol_history is not None:
+            if protocol_history is not None and event_log is None:
                 await protocol_history.append_tool_result(
                     turn_id=protocol_turn_id,
                     chat_id=chat_id,
@@ -559,9 +562,10 @@ class ToolLoop:
                             content=response_text or "",
                             tool_calls=tuple(tool_calls_data or ()),
                             reasoning_content=reasoning or "",
-                        )
+                        ),
+                        turn_kind=turn_kind,
                     )
-                if protocol_history is not None:
+                if protocol_history is not None and event_log is None:
                     await protocol_history.append_assistant(
                         turn_id=protocol_turn_id,
                         chat_id=chat_id,

@@ -3,7 +3,8 @@
 {% set nav_active = "sessions" %}
 
 {% block content %}
-<h2 style="margin-bottom:20px">💬 会话 <code>{{ chat_id[:16] }}..</code></h2>
+<h2 style="margin-bottom:8px">💬 会话 <code>{{ chat_id[:16] }}..</code></h2>
+<p class="conversation-subtitle">按最近 Turn 浏览；简单对话保持轻量，工具链可展开查看。</p>
 
 <div style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
     <a href="/sessions" class="btn">← 返回列表</a>
@@ -25,50 +26,61 @@
     </form>
 </div>
 
-{% if not messages %}
+{% if not turns %}
 <p style="color:var(--text-secondary)">此会话暂无消息</p>
 {% endif %}
 
-{% for msg in messages %}
-{% set role = msg.role %}
-<div class="chat-message {{ role }}">
-    <div class="msg-meta">
-        {% if role == "user" %}
-        👤 {{ msg.name or msg.sender_id or '用户' }}
-        {% elif role == "assistant" %}
-        🤖 助手
-        {% elif role == "tool" %}
-        🔧 工具: {{ msg.tool_name or '未知' }}
-        {% endif %}
-        {% if msg.timestamp %}
-        · {{ msg.timestamp | format_timestamp }}
-        {% endif %}
-        {% if msg.message_id %}
-        · <code>{{ msg.message_id[:12] }}..</code>
-        {% endif %}
+{% for turn in turns %}
+{% if loop.first or turn.source_date != turns[loop.index0 - 1].source_date %}
+<div class="conversation-date-divider"><span>{{ turn.source_date }}</span></div>
+{% endif %}
+<article class="conversation-turn{% if turn.has_tools %} conversation-turn-tools{% else %} conversation-turn-simple{% endif %}">
+    <div class="conversation-turn-meta">
+        <span>Turn {{ turn.turn_sequence }}</span>
+        <span class="turn-kind turn-kind-{{ turn.turn_kind }}">{{ turn.turn_kind_label }}</span>
+        <span>{{ turn.source_date }}</span>
+        {% if turn.status != 'completed' and turn.status != 'unknown' %}<span class="turn-status">{{ turn.status }}</span>{% endif %}
+        {% if turn.has_tools %}<span class="turn-tools-count">{{ turn.tool_count }} 个工具调用</span>{% endif %}
+        <code>{{ turn.turn_id[:12] }}..</code>
     </div>
-    <div class="msg-content">{{ msg.content or '(空)' }}</div>
-    {% if msg.tool_calls %}
-    <div class="tool-details">
-        <strong>工具调用:</strong>
-        {% for tc in msg.tool_calls %}
-        <div style="margin-top:4px">
-            <strong>{{ tc.function.name }}</strong>({{ tc.function.arguments[:200] }}{% if tc.function.arguments|length > 200 %}…{% endif %})
+    <div class="conversation-messages">
+    {% for msg in turn.events if msg.kind in ['user_message', 'accepted_delivery'] %}
+        {% set role = msg.role %}
+        <div class="conversation-bubble {{ role }}">
+            <div class="conversation-bubble-meta">
+                {% if role == 'user' %}👤 {{ msg.sender_id or '用户' }}{% else %}🤖 助手{% endif %}
+                {% if msg.timestamp %} · {{ msg.timestamp | format_timestamp }}{% endif %}
+            </div>
+            <div class="conversation-bubble-content">{{ msg.content or '（无文本消息）' }}</div>
+        </div>
+    {% endfor %}
+    </div>
+    {% if turn.has_tools %}
+    <details class="conversation-tool-chain">
+        <summary>查看工具链（{{ turn.tool_count }} 个调用）</summary>
+        {% for msg in turn.events if msg.kind in ['assistant_tool_call', 'tool_result'] %}
+        <div class="conversation-tool-event {{ msg.role }}">
+            <div class="msg-meta">{% if msg.kind == 'assistant_tool_call' %}🤖 工具调用{% else %}🔧 {{ msg.tool_name or '工具结果' }}{% endif %} · {{ msg.timestamp | format_timestamp }}</div>
+            {% if msg.tool_calls %}
+                {% for tc in msg.tool_calls %}
+                {% set function = tc.function or {} %}
+                <div class="tool-details"><strong>{{ function.name or '未知' }}</strong>({{ function.arguments or '{}' }})</div>
+                {% endfor %}
+            {% else %}
+                <div class="tool-details">{{ msg.content or '（空结果）' }}</div>
+            {% endif %}
         </div>
         {% endfor %}
-    </div>
+    </details>
     {% endif %}
-    {% if msg.tool_call_id %}
-    <div class="tool-details">
-        <strong>Call ID:</strong> {{ msg.tool_call_id[:16] }}..
-    </div>
-    {% endif %}
-    {% if msg.reasoning_content %}
-    <div class="tool-details">
-        <strong>推理过程:</strong>
-        <pre style="white-space:pre-wrap;font-size:12px;margin-top:4px">{{ msg.reasoning_content[:300] }}{% if msg.reasoning_content|length > 300 %}…{% endif %}</pre>
-    </div>
-    {% endif %}
-</div>
+</article>
 {% endfor %}
+
+{% if pagination and pagination.total_pages > 1 %}
+<div class="conversation-pagination">
+    {% if pagination.page < pagination.total_pages %}<a class="btn" href="{{ request.url.path }}?page={{ pagination.page + 1 }}&page_size={{ pagination.page_size }}">更早的对话</a>{% endif %}
+    <span>{{ pagination.page }} / {{ pagination.total_pages }} · 共 {{ pagination.total }} 个 Turn</span>
+    {% if pagination.page > 1 %}<a class="btn" href="{{ request.url.path }}?page={{ pagination.page - 1 }}&page_size={{ pagination.page_size }}">更新的对话</a>{% endif %}
+</div>
+{% endif %}
 {% endblock %}

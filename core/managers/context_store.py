@@ -72,6 +72,10 @@ class ContextStore(ABC):
     def delete(self, chat_id: str) -> None:
         """删除 chat_id 的所有持久化数据。"""
 
+    def purge(self, chat_id: str) -> None:
+        """Remove legacy active and archive data for an explicit reset."""
+        self.delete(chat_id)
+
     def replace(self, chat_id: str, messages: List[dict]) -> None:
         """Atomically replace active history where the adapter supports it."""
         self.delete(chat_id)
@@ -323,6 +327,20 @@ class JSONLContextStore(ContextStore):
                 self._flushed.pop(chat_id, None)
             path = self._get_path(chat_id)
             if path:
+                path.unlink(missing_ok=True)
+
+    def purge(self, chat_id: str) -> None:
+        with self._acquire_file_lock(chat_id):
+            with self._lock:
+                self._flushed.pop(chat_id, None)
+            self._get_path(chat_id).unlink(missing_ok=True)
+            self._get_old_path(chat_id).unlink(missing_ok=True)
+            for archive in self.list_archives(chat_id):
+                path = Path(str(archive.get("path") or ""))
+                try:
+                    path.resolve().relative_to(self._base_dir.resolve())
+                except (ValueError, OSError):
+                    continue
                 path.unlink(missing_ok=True)
 
     def replace(self, chat_id: str, messages: List[dict]) -> None:
@@ -653,6 +671,17 @@ class SQLiteContextStore(ContextStore):
             )
         self._archive_store.delete(chat_id)
 
+    def purge(self, chat_id: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM context_messages WHERE chat_id = ?", (chat_id,)
+            )
+        purge = getattr(self._archive_store, "purge", None)
+        if callable(purge):
+            purge(chat_id)
+        else:
+            self._archive_store.delete(chat_id)
+
     def replace(self, chat_id: str, messages: List[dict]) -> None:
         messages = deduplicate_history(messages)
         rows = [
@@ -776,6 +805,9 @@ class MemoryContextStore(ContextStore):
 
     def delete(self, chat_id: str) -> None:
         self._data.pop(chat_id, None)
+
+    def purge(self, chat_id: str) -> None:
+        self.delete(chat_id)
 
     def replace(self, chat_id: str, messages: List[dict]) -> None:
         if messages:

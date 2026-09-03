@@ -13,7 +13,7 @@
 
 {% for turn in turns %}
 <div class="card">
-    <h3>Turn {{ turn.turn_sequence }} <code>{{ turn.turn_id[:16] }}..</code></h3>
+    <h3>Turn {{ turn.turn_sequence }} · {{ turn.turn_kind_label }} <code>{{ turn.turn_id[:16] }}..</code></h3>
     {% for msg in turn.events %}
     {% set role = msg.role %}
     <div class="chat-message {{ role }}">

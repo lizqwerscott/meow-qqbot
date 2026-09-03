@@ -61,4 +61,11 @@
         </table>
     </div>
 </div>
+{% if pagination and pagination.total_pages > 1 %}
+<div class="conversation-pagination">
+    {% if pagination.page > 1 %}<a class="btn" href="{{ request.url.path }}?page={{ pagination.page - 1 }}&page_size={{ pagination.page_size }}">上一页</a>{% endif %}
+    <span>{{ pagination.page }} / {{ pagination.total_pages }} · 共 {{ pagination.total }} 条报告</span>
+    {% if pagination.page < pagination.total_pages %}<a class="btn" href="{{ request.url.path }}?page={{ pagination.page + 1 }}&page_size={{ pagination.page_size }}">下一页</a>{% endif %}
+</div>
+{% endif %}
 {% endblock %}

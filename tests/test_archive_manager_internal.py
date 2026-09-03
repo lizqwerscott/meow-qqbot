@@ -347,6 +347,26 @@ async def test_legacy_archive_import_deduplicates_same_history_from_multiple_fil
     )
     manager.set_event_log(event_log, projection)
 
+    original_read = store.read_archive
+    read_calls = 0
+
+    def counted_read(*args, **kwargs):
+        nonlocal read_calls
+        read_calls += 1
+        return original_read(*args, **kwargs)
+
+    store.read_archive = counted_read
+
+    original_repair = event_log.repair_from_legacy_history
+    repair_calls = 0
+
+    async def counted_repair(*args, **kwargs):
+        nonlocal repair_calls
+        repair_calls += 1
+        return await original_repair(*args, **kwargs)
+
+    event_log.repair_from_legacy_history = counted_repair
+
     report = await manager.import_legacy_archives_async(chat_id)
 
     assert report == {
@@ -357,6 +377,8 @@ async def test_legacy_archive_import_deduplicates_same_history_from_multiple_fil
         "error_count": 0,
         "status": "ok",
     }
+    assert repair_calls == 1
+    assert read_calls == 1
     events = (await event_log.snapshot_events(chat_id, include_internal=True)).events
     assert [event.content for event in events if event.role == "user"] == ["原始问题"]
     assert len(await index.list_for_webui(chat_id)) == 1

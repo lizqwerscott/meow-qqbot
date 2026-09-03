@@ -7,6 +7,7 @@ import pytest
 from core.engine.model_context_transcript import (
     ModelContextCompactionInProgressError,
     ModelContextInvariantError,
+    ModelContextLimitError,
     ModelContextScope,
     ModelContextTranscript,
 )
@@ -71,6 +72,38 @@ async def test_transcript_is_idempotent_and_scope_isolated(tmp_path):
     assert snapshot.to_wire()[-1] == {"role": "assistant", "content": "answer"}
     assert "source_turn_id" not in snapshot.to_wire()[-1]
     assert (await transcript.snapshot(_scope("user-2"))).events == ()
+    await transcript.close()
+
+
+@pytest.mark.asyncio
+async def test_stats_reads_metadata_for_large_scope_without_snapshot_limit(tmp_path):
+    transcript = ModelContextTranscript(
+        str(tmp_path / "model-context.sqlite3"), max_events=2000
+    )
+    scope = _scope()
+    for index in range(501):
+        user_event = SimpleNamespace(
+            role="user",
+            event_id=f"user:{index}",
+            content=f"question {index}",
+            sender_id="user-1",
+            timestamp=10 + index,
+        )
+        await transcript.append_turn(
+            scope,
+            turn_id=f"turn-{index}",
+            user_events=(user_event,),
+            protocol_events=_protocol(f"turn-{index}", f"answer {index}"),
+        )
+
+    with pytest.raises(ModelContextLimitError, match="event limit"):
+        await transcript.snapshot(scope, max_events=1000)
+
+    stats = await transcript.stats(scope)
+
+    assert stats.event_count == 1002
+    assert stats.roles == ("user", "assistant")
+    assert stats.source_event_count == 1002
     await transcript.close()
 
 

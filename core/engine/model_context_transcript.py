@@ -151,6 +151,15 @@ class ModelContextSnapshot:
 
 
 @dataclass(frozen=True)
+class ModelContextStats:
+    scope: ModelContextScope
+    event_count: int
+    estimated_tokens: int
+    roles: tuple[str, ...] = ()
+    source_event_count: int = 0
+
+
+@dataclass(frozen=True)
 class ModelContextCompressionResult:
     scope: ModelContextScope
     snapshot: ModelContextSnapshot
@@ -816,6 +825,76 @@ class ModelContextTranscript:
                 generation=int(row["generation"]),
             )
             for row in rows
+        )
+
+    async def stats(self, scope: ModelContextScope) -> ModelContextStats:
+        """Return bounded metadata without materializing context event bodies."""
+        current = await self.current_scope(scope)
+        conn = await self._ensure_open()
+        async with self._lock:
+            values = (*self._scope_values(current), current.generation)
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS event_count,
+                       COALESCE(SUM(
+                           CASE
+                               WHEN length(content) + length(tool_call_id)
+                                    + length(tool_name) + length(tool_calls)
+                                    + length(reasoning_content) + length(sender_id) < 4
+                               THEN 1
+                               ELSE (length(content) + length(tool_call_id)
+                                     + length(tool_name) + length(tool_calls)
+                                     + length(reasoning_content) + length(sender_id)) / 4
+                           END
+                       ), 0) AS estimated_tokens
+                  FROM model_context_events
+                 WHERE chat_id = ? AND principal_id = ?
+                   AND task_correlation_id = ? AND kind = ? AND generation = ?
+                """,
+                values,
+            ).fetchone()
+            role_rows = conn.execute(
+                """
+                SELECT role, MIN(seq) AS first_seq
+                  FROM model_context_events
+                 WHERE chat_id = ? AND principal_id = ?
+                   AND task_correlation_id = ? AND kind = ? AND generation = ?
+                 GROUP BY role ORDER BY first_seq
+                """,
+                values,
+            ).fetchall()
+            try:
+                source_count = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(DISTINCT json_each.value)
+                          FROM model_context_events events,
+                               json_each(events.source_event_ids)
+                         WHERE events.chat_id = ? AND events.principal_id = ?
+                           AND events.task_correlation_id = ?
+                           AND events.kind = ? AND events.generation = ?
+                        """,
+                        values,
+                    ).fetchone()[0]
+                )
+            except sqlite3.DatabaseError:
+                source_count = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(*) FROM model_context_events
+                         WHERE chat_id = ? AND principal_id = ?
+                           AND task_correlation_id = ? AND kind = ?
+                           AND generation = ? AND source_event_ids != '[]'
+                        """,
+                        values,
+                    ).fetchone()[0]
+                )
+        return ModelContextStats(
+            scope=current,
+            event_count=int(row["event_count"]),
+            estimated_tokens=int(row["estimated_tokens"]),
+            roles=tuple(str(item["role"]) for item in role_rows),
+            source_event_count=source_count,
         )
 
     async def record_provider_usage(
