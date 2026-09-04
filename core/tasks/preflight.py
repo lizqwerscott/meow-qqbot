@@ -167,9 +167,12 @@ def run_preflight(ctx: PreflightContext) -> PreflightResult:
         "event": WI.EVENT,
         "scheduled": WI.SCHEDULED,
     }
-    dec = ctx.cooldown.should_defer(
-        intent=intent_map.get(ctx.intent, WI.SCHEDULED),
+    cooldown_intent = (
+        WI.IMMEDIATE
+        if ctx.source_is_interval
+        else intent_map.get(ctx.intent, WI.SCHEDULED)
     )
+    dec = ctx.cooldown.should_defer(intent=cooldown_intent)
     if dec.defer:
         _log.info("[Preflight] step=11 cooldown: SKIP → %s", dec.reason)
         result.skip_reason = dec.reason

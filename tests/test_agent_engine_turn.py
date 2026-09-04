@@ -2344,6 +2344,22 @@ async def test_background_task_preserves_error_conversion(error, expected):
 
 
 @pytest.mark.asyncio
+async def test_background_task_propagates_outer_timeout():
+    engine = make_engine(FakeToolLoop(pause=asyncio.Event()))
+
+    async def build_task_messages(**kwargs):
+        return [], []
+
+    engine.prompt_builder = SimpleNamespace(build_task_messages=build_task_messages)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(
+            engine.execute_background_task("task", "work", "system"),
+            timeout=0.01,
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("replies", "expected"),
     [(["first", "second"], "second"), ([], None)],

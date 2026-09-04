@@ -3783,6 +3783,9 @@ class AgentEngine:
             )
 
         except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task and current_task.cancelling():
+                raise
             _log.warning(f"后台任务被取消: chat_id={chat_id[:20]}..")
             return BackgroundTaskResult(error="任务被取消")
         except Exception as e:

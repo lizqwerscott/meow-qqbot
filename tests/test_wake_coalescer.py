@@ -207,3 +207,34 @@ async def test_exec_wakes_preserve_coalesced_notifications():
     finally:
         dispose()
         coalescer.clear_pending()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_task_names_survive_pending_merge():
+    calls = []
+
+    async def handler(pending):
+        calls.append(pending)
+        return coalescer.WakeRunResult()
+
+    dispose = coalescer.set_wake_handler(handler)
+    try:
+        coalescer.request_wake(
+            source=coalescer.SOURCE_INTERVAL,
+            intent=coalescer.INTENT_SCHEDULED,
+            session_key="heartbeat:events",
+            heartbeat_task_names=("早安",),
+            coalesce_ms=1,
+        )
+        coalescer.request_wake(
+            source=coalescer.SOURCE_CRON,
+            intent=coalescer.INTENT_IMMEDIATE,
+            session_key="heartbeat:events",
+            coalesce_ms=1,
+        )
+        await asyncio.sleep(0.03)
+        assert len(calls) == 1
+        assert calls[0].heartbeat_task_names == ("早安",)
+    finally:
+        dispose()
+        coalescer.clear_pending()

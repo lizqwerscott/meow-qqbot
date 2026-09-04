@@ -1035,6 +1035,11 @@ class ServiceGraph:
                 if self.heartbeat_manager
                 else lambda: False
             ),
+            heartbeat_task_start_callback=(
+                self.heartbeat_manager.mark_tasks_started
+                if self.heartbeat_manager
+                else None
+            ),
         )
         set_wake_handler(self._wake_runner)
         _log.info("WakeCoalescer + WakeRunner 已初始化")

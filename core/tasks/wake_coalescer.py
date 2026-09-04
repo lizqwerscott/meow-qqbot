@@ -65,6 +65,7 @@ class PendingWake:
     delivery_target: str = ""
     work_plan_id: str = ""
     extra_prompt: str = ""
+    heartbeat_task_names: tuple[str, ...] = ()
     timestamp: float = field(default_factory=time.time)
 
 
@@ -134,6 +135,9 @@ def _merge_pending(key: str, pw: PendingWake) -> None:
         )
         _pending[key] = pw
         return
+    heartbeat_task_names = tuple(
+        dict.fromkeys((*existing.heartbeat_task_names, *pw.heartbeat_task_names))
+    )
     new_prio = _INTENT_PRIORITY.get(pw.intent, 99)
     old_prio = _INTENT_PRIORITY.get(existing.intent, 99)
     if existing.source == SOURCE_EXEC or pw.source == SOURCE_EXEC:
@@ -145,6 +149,7 @@ def _merge_pending(key: str, pw: PendingWake) -> None:
     if new_prio < old_prio or (
         new_prio == old_prio and pw.timestamp >= existing.timestamp
     ):
+        pw.heartbeat_task_names = heartbeat_task_names
         _log.debug(
             "[Coalescer] 合并覆盖: key=%s old=%s(prio=%d) new=%s(prio=%d)",
             key[:24],
@@ -154,6 +159,8 @@ def _merge_pending(key: str, pw: PendingWake) -> None:
             new_prio,
         )
         _pending[key] = pw
+    else:
+        existing.heartbeat_task_names = heartbeat_task_names
 
 
 async def _drain_pending() -> None:
@@ -312,6 +319,7 @@ def request_wake(
     delivery_target: str = "",
     work_plan_id: str = "",
     extra_prompt: str = "",
+    heartbeat_task_names: tuple[str, ...] = (),
     coalesce_ms: int = DEFAULT_COALESCE_MS,
 ) -> None:
     """标准入口 — fire and forget。所有来源的合并调度。"""
@@ -326,6 +334,7 @@ def request_wake(
         delivery_target=delivery_target or session_key,
         work_plan_id=work_plan_id,
         extra_prompt=extra_prompt,
+        heartbeat_task_names=heartbeat_task_names,
     )
     key = _target_key(pw)
     _log.info(
@@ -349,6 +358,7 @@ async def execute_immediate(
     delivery_target: str = "",
     work_plan_id: str = "",
     extra_prompt: str = "",
+    heartbeat_task_names: tuple[str, ...] = (),
 ) -> WakeRunResult:
     """同步路径 — 跳过合并，立即由 handler 执行并返回结果。
 
@@ -362,6 +372,7 @@ async def execute_immediate(
         delivery_target=delivery_target or session_key,
         work_plan_id=work_plan_id,
         extra_prompt=extra_prompt,
+        heartbeat_task_names=heartbeat_task_names,
     )
     if _handler:
         return await _handler(pw)

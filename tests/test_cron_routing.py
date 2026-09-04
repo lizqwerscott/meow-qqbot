@@ -389,6 +389,86 @@ async def test_wake_runner_tracks_active_same_session_wakes():
     assert runner._is_session_active("heartbeat:events") is False
 
 
+@pytest.mark.asyncio
+async def test_wake_runner_marks_heartbeat_tasks_when_turn_starts():
+    from core.tasks.wake_coalescer import SOURCE_INTERVAL, PendingWake
+    from core.tasks.wake_runner import WakeRunner
+
+    started = []
+    agent = SimpleNamespace(
+        prompt_builder=SimpleNamespace(
+            build_heartbeat_messages=AsyncMock(return_value=([], []))
+        ),
+        run_wake_turn=AsyncMock(return_value=SimpleNamespace(error="")),
+        context_manager=None,
+        cost_tracker=None,
+        _admin_id=[],
+    )
+    cooldown = SimpleNamespace(
+        should_defer=lambda **_: SimpleNamespace(defer=False),
+        record_run_start=lambda: None,
+    )
+    runner = WakeRunner(
+        agent,
+        None,
+        cooldown,
+        heartbeat_task_start_callback=lambda names: started.append(names),
+    )
+
+    result = await runner(
+        PendingWake(
+            source=SOURCE_INTERVAL,
+            intent="scheduled",
+            session_key="heartbeat:events",
+            extra_prompt="每日问候。",
+            heartbeat_task_names=("早安",),
+        )
+    )
+
+    assert result.status == "ran"
+    assert started == [("早安",)]
+
+
+@pytest.mark.asyncio
+async def test_wake_runner_does_not_mark_heartbeat_tasks_for_cron_wake():
+    from core.tasks.wake_coalescer import SOURCE_CRON, PendingWake
+    from core.tasks.wake_runner import WakeRunner
+
+    started = []
+    agent = SimpleNamespace(
+        prompt_builder=SimpleNamespace(
+            build_system_event_messages=AsyncMock(return_value=([], []))
+        ),
+        run_wake_turn=AsyncMock(return_value=SimpleNamespace(error="")),
+        context_manager=None,
+        cost_tracker=None,
+        _admin_id=[],
+    )
+    cooldown = SimpleNamespace(
+        should_defer=lambda **_: SimpleNamespace(defer=False),
+        record_run_start=lambda: None,
+    )
+    runner = WakeRunner(
+        agent,
+        None,
+        cooldown,
+        heartbeat_task_start_callback=lambda names: started.append(names),
+    )
+
+    result = await runner(
+        PendingWake(
+            source=SOURCE_CRON,
+            intent="immediate",
+            session_key="heartbeat:events",
+            extra_prompt="Cron 事件。",
+            heartbeat_task_names=("早安",),
+        )
+    )
+
+    assert result.status == "ran"
+    assert started == []
+
+
 def test_wake_runner_cron_branch():
     """WakeRunner 收到 source=cron 时走 system event 路径。"""
     from core.tasks.wake_coalescer import (

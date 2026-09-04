@@ -58,6 +58,9 @@ class WakeRunner:
         isolated_session_key_fn: Optional[Callable[[str], str]] = None,
         # #3: pending delivery deferral
         delivery_pending_check: Optional[Callable[[], bool]] = None,
+        heartbeat_task_start_callback: Optional[
+            Callable[[tuple[str, ...]], None]
+        ] = None,
     ):
         self._agent = agent_engine
         self._events = system_events
@@ -72,6 +75,7 @@ class WakeRunner:
         self._session_lane_busy = session_lane_busy_check or (lambda _: False)
         self._resolve_isolated_key = isolated_session_key_fn
         self._delivery_pending = delivery_pending_check or (lambda: False)
+        self._heartbeat_task_start = heartbeat_task_start_callback
         self._active_wake_tasks: dict[str, set[asyncio.Task]] = {}
 
     @staticmethod
@@ -316,6 +320,12 @@ class WakeRunner:
         # ── 3. 执行 AI turn ──
         turn_ok = False
         try:
+            if (
+                self._heartbeat_task_start
+                and pw.source in (SOURCE_INTERVAL, SOURCE_MANUAL)
+                and pw.heartbeat_task_names
+            ):
+                self._heartbeat_task_start(pw.heartbeat_task_names)
             if self._cooldown:
                 self._cooldown.record_run_start()
             result = await self._agent.run_wake_turn(

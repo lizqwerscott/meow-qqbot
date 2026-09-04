@@ -257,13 +257,14 @@ class HeartbeatManager:
             await asyncio.sleep(delay)
             if not self._running:
                 break
-            prompt = await self._load_heartbeat_content()
+            prompt, task_names = await self._load_heartbeat_content()
             _coalescer.request_wake(
                 source="interval",
                 intent="scheduled",
                 session_key="heartbeat:events",
                 reason="定时心跳",
                 extra_prompt=prompt,
+                heartbeat_task_names=task_names,
                 coalesce_ms=100,
             )
             cycle_count += 1
@@ -274,13 +275,17 @@ class HeartbeatManager:
 
     async def trigger_heartbeat(self, prompt: str = "") -> tuple[bool, Optional[str]]:
         """手动触发心跳。返回 (有通知, 通知文本)。"""
-        full_prompt = prompt or await self._load_heartbeat_content()
+        if prompt:
+            full_prompt, task_names = prompt, ()
+        else:
+            full_prompt, task_names = await self._load_heartbeat_content()
         wr = await _coalescer.execute_immediate(
             source="manual",
             intent="manual",
             session_key="heartbeat:events",
             reason="manual-trigger",
             extra_prompt=full_prompt,
+            heartbeat_task_names=task_names,
         )
         result = wr.result
         if result and result.should_notify:
@@ -289,25 +294,29 @@ class HeartbeatManager:
 
     # ── HEARTBEAT.md ──
 
-    async def _load_heartbeat_content(self) -> str:
+    async def _load_heartbeat_content(self) -> tuple[str, tuple[str, ...]]:
         content = await self._read_heartbeat_file()
         if content and content.strip():
             tasks = parse_heartbeat_tasks(content)
             clean, _ = _find_tasks_yaml(content)
             due = filter_due_tasks(tasks, self._task_last_run)
-            for t in due:
-                self._task_last_run[t.name] = time.time()
+            task_names = tuple(t.name for t in due)
             if due:
                 lines = "\n".join(f"- {t.name}: {t.prompt or t.command}" for t in due)
-                return f"{clean}\n\n当前需要关注的子任务：\n{lines}"
-            return clean
+                return f"{clean}\n\n当前需要关注的子任务：\n{lines}", task_names
+            return clean, ()
         if self._config_prompt and self._config_prompt.strip():
-            return self._config_prompt.strip()
+            return self._config_prompt.strip(), ()
         return (
             "请进行心跳检查。检查记忆和任务系统中是否有待办事项、"
             "提醒或需要关注的事情。"
             "如果没有需要关注的事项，调用 heartbeat_respond(notify=false) 静默结束。"
-        )
+        ), ()
+
+    def mark_tasks_started(self, task_names: tuple[str, ...]) -> None:
+        started_at = time.time()
+        for task_name in task_names:
+            self._task_last_run[task_name] = started_at
 
     async def _read_heartbeat_file(self) -> str:
         if not self._heartbeat_path:
