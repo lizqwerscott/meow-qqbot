@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 
 from core.engine.turn_protocol_history import (
@@ -126,6 +128,119 @@ async def test_protocol_history_deletes_one_chat_and_caches_full_event_tokens(tm
 
     assert await history.history("chat-a") == []
     assert len(await history.history("chat-b")) == 1
+    await history.close()
+
+
+@pytest.mark.asyncio
+async def test_protocol_history_bounded_read_returns_latest_events(tmp_path):
+    history = TurnProtocolHistory(str(tmp_path / "protocol.sqlite3"))
+    for index in range(4):
+        await history.append_assistant(
+            chat_id="chat-a",
+            turn_id=f"turn-{index}",
+            event_id=f"assistant:{index}",
+            content=str(index),
+            timestamp=float(index),
+        )
+
+    bounded = await history.history("chat-a", max_events=2)
+
+    assert [message["content"] for message in bounded] == ["2", "3"]
+    assert await history.history("chat-a", max_events=0) == []
+    await history.close()
+
+
+@pytest.mark.asyncio
+async def test_protocol_history_isolates_same_turn_id_across_chats(tmp_path):
+    history = TurnProtocolHistory(str(tmp_path / "protocol.sqlite3"))
+    await history.append_assistant(
+        chat_id="chat-a",
+        turn_id="shared-turn",
+        event_id="assistant:a",
+        content="a",
+        tool_calls=({"id": "call-a", "name": "read_file"},),
+    )
+    await history.append_tool_result(
+        chat_id="chat-a",
+        turn_id="shared-turn",
+        event_id="tool:a",
+        tool_call_id="call-a",
+        tool_name="read_file",
+        content="a-result",
+    )
+    await history.append_assistant(
+        chat_id="chat-b",
+        turn_id="shared-turn",
+        event_id="assistant:b",
+        content="b",
+        tool_calls=({"id": "call-b", "name": "read_file"},),
+    )
+
+    assert [event.content for event in await history.snapshot(
+        "shared-turn", chat_id="chat-a"
+    )] == ["a", "a-result"]
+    assert [event.content for event in await history.snapshot(
+        "shared-turn", chat_id="chat-b"
+    )] == ["b"]
+    with pytest.raises(ProtocolInvariantError, match="ambiguous turn"):
+        await history.snapshot("shared-turn")
+    with pytest.raises(ProtocolInvariantError, match="no assistant call"):
+        await history.append_tool_result(
+            chat_id="chat-b",
+            turn_id="shared-turn",
+            event_id="tool:wrong-chat",
+            tool_call_id="call-a",
+            tool_name="read_file",
+            content="must not cross chats",
+        )
+    await history.close()
+
+
+@pytest.mark.asyncio
+async def test_protocol_history_upgrades_legacy_turn_scoped_primary_key(tmp_path):
+    path = tmp_path / "protocol.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute("""
+        CREATE TABLE turn_protocol_history (
+            turn_id TEXT NOT NULL,
+            chat_id TEXT NOT NULL DEFAULT '',
+            seq INTEGER NOT NULL,
+            event_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            tool_call_id TEXT NOT NULL DEFAULT '',
+            tool_name TEXT NOT NULL DEFAULT '',
+            tool_calls TEXT NOT NULL DEFAULT '[]',
+            reasoning_content TEXT NOT NULL DEFAULT '',
+            timestamp REAL NOT NULL,
+            token_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (turn_id, seq),
+            UNIQUE (turn_id, event_id)
+        )
+        """)
+    conn.execute(
+        "INSERT INTO turn_protocol_history "
+        "(turn_id, chat_id, seq, event_id, role, content, timestamp) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("legacy-turn", "chat-a", 1, "assistant:1", "assistant", "old", 1.0),
+    )
+    conn.commit()
+    conn.close()
+
+    history = TurnProtocolHistory(str(path))
+    await history.append_assistant(
+        chat_id="chat-b",
+        turn_id="legacy-turn",
+        event_id="assistant:2",
+        content="new",
+    )
+
+    assert [event["content"] for event in await history.history("chat-a")] == [
+        "old"
+    ]
+    assert [event["content"] for event in await history.history("chat-b")] == [
+        "new"
+    ]
     await history.close()
 
 

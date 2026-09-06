@@ -27,7 +27,11 @@ from zoneinfo import ZoneInfo
 
 from core.engine.archive_export import ArchiveExportResult, ArchiveJSONLExportAdapter
 from core.engine.archive_index import ArchiveIndex, ArchiveTurnRecord
-from core.engine.history_projection import merge_timeline_visible_events
+from core.engine.conversation_event_log import RepairRevision, TurnStatus
+from core.engine.history_projection import (
+    merge_timeline_visible_events,
+    read_legacy_history_bounded,
+)
 from core.managers.archive_ledger import ArchiveLedger
 from core.managers.archive_manifest import ArchiveManifestStore
 from core.managers.chat_message import (
@@ -137,6 +141,7 @@ class ArchiveResult:
         replay_count: int = 0,
         operation_id: Optional[str] = None,
         batches: Optional[List[ArchiveBatchResult]] = None,
+        skipped_turns: Optional[List[Dict[str, Any]]] = None,
     ):
         self.chat_id = chat_id
         self.reason = reason
@@ -145,6 +150,7 @@ class ArchiveResult:
         self.replay_count = replay_count
         self.operation_id = operation_id
         self.batches = list(batches or [])
+        self.skipped_turns = list(skipped_turns or [])
 
     @property
     def archive_paths(self) -> List[str]:
@@ -353,6 +359,8 @@ class ArchiveManager:
         if event_log is None or index is None:
             raise RuntimeError("event archive dependencies are not configured")
         archived_ids = await index.event_ids(batch.batch_id)
+        if not archived_ids:
+            raise RuntimeError("cannot finish empty archive batch")
         manifest = self._ensure_event_manifest(batch, tuple(sorted(archived_ids)))
         phase = str(manifest.get("phase", "prepared"))
         phase_order = {
@@ -376,29 +384,56 @@ class ArchiveManager:
                 include_internal=True,
             )
         )
-        source = await event_log.snapshot_events(
+        archived_source = await event_log.snapshot_events(
             batch.chat_id,
             upto_seq=batch.captured_cutoff_seq,
             include_internal=True,
-            event_ids=tuple(sorted((source_ids - set(hidden_ids)) | set(archived_ids))),
+            event_ids=tuple(sorted(archived_ids)),
         )
+        archived_events = archived_source.events
+        unknown_archived_ids = set(archived_ids) - source_ids
+        if unknown_archived_ids:
+            raise RuntimeError(
+                "cannot archive events missing from ledger: "
+                f"{len(unknown_archived_ids)} events"
+            )
         if phase_order.get(phase, 0) < phase_order["event_partition_written"]:
             self._write_event_manifest_phase(
                 batch.operation_id, "event_partition_written"
             )
         if phase_order.get(phase, 0) < phase_order["active_projection_written"]:
-            await self._prompt_projection.snapshot_for_active(
-                batch.chat_id, upto_seq=batch.captured_cutoff_seq
-            )
             self._write_event_manifest_phase(
                 batch.operation_id, "active_projection_written"
             )
-        archived_events = tuple(
-            event for event in source.events if event.event_id in archived_ids
-        )
         turn_ids = {event.turn_id for event in archived_events}
+        full_turn_source = await event_log.snapshot_events(
+            batch.chat_id,
+            include_internal=True,
+            turn_ids=tuple(sorted(turn_ids)),
+        )
+        batch_turns = await index.turns_for_batch(batch.batch_id)
+        records_by_turn = {record.turn_id: record for record in batch_turns}
+        if set(records_by_turn) != turn_ids:
+            raise RuntimeError("archive turn metadata does not match event membership")
         for turn_id in turn_ids:
-            integrity = await event_log.validate_turn(turn_id)
+            turn_source_ids = {
+                event.event_id
+                for event in full_turn_source.events
+                if event.turn_id == turn_id
+            }
+            archived_turn_ids = {
+                event.event_id for event in archived_events if event.turn_id == turn_id
+            }
+            if archived_turn_ids != turn_source_ids:
+                raise RuntimeError(
+                    "cannot archive partial turn "
+                    f"{turn_id}: {len(archived_turn_ids)}/{len(turn_source_ids)} events"
+                )
+            if records_by_turn[turn_id].event_count != len(turn_source_ids):
+                raise RuntimeError(
+                    "archive turn metadata event count mismatch " f"for {turn_id}"
+                )
+            integrity = await event_log.validate_turn(turn_id, chat_id=batch.chat_id)
             if not integrity.valid:
                 raise RuntimeError(
                     f"cannot archive invalid turn {turn_id}: {integrity.reason}"
@@ -543,6 +578,78 @@ class ArchiveManager:
                     batch.batch_id,
                     exc,
                 )
+        if self._prompt_projection is None:
+            return
+        try:
+            hidden_projection_ids = set(
+                await self._prompt_projection.hidden_event_ids(chat_id)
+            )
+            committed = await self._archive_index.list_for_webui(
+                chat_id, state="committed"
+            )
+            for item in committed:
+                try:
+                    batch = await self._archive_index.get(str(item["batch_id"]))
+                    if batch is None:
+                        continue
+                    event_ids = await self._archive_index.event_ids(batch.batch_id)
+                    if not event_ids:
+                        continue
+                    if set(event_ids).issubset(hidden_projection_ids):
+                        continue
+                    repair_operation = getattr(
+                        self._prompt_projection, "repair_archive_operation", None
+                    )
+                    if callable(repair_operation) and await repair_operation(
+                        batch.operation_id
+                    ):
+                        hidden_projection_ids.update(event_ids)
+                        continue
+                    await self._prompt_projection.apply_archive_retention(
+                        chat_id,
+                        operation_id=f"{batch.operation_id}:projection-reconcile",
+                        hidden_event_ids=tuple(sorted(event_ids)),
+                        captured_cutoff_seq=batch.captured_cutoff_seq,
+                    )
+                    hidden_projection_ids.update(event_ids)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    _log.warning(
+                        "单个已提交归档投影修复失败 [%s..] batch=%s: %s",
+                        chat_id[:12],
+                        item.get("batch_id", ""),
+                        exc,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.warning("已提交归档投影修复失败 [%s..]: %s", chat_id[:12], exc)
+
+    async def recover_event_log_archives_async(
+        self, chat_ids: Optional[Sequence[str]] = None
+    ) -> int:
+        """Recover pending ledger archive operations before serving requests."""
+        if self._event_log is None or self._archive_index is None:
+            return 0
+        if isinstance(chat_ids, str):
+            selected = (chat_ids,)
+        elif chat_ids is not None:
+            selected = tuple(
+                dict.fromkeys(str(chat_id) for chat_id in chat_ids if chat_id)
+            )
+        else:
+            selected = tuple(await self._event_log.chat_ids())
+        recovered = 0
+        for chat_id in selected:
+            try:
+                await self._recover_event_log_archives(chat_id)
+                recovered += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log.warning("启动期账本归档恢复失败 [%s..]: %s", chat_id[:12], exc)
+        return recovered
 
     async def _archive_event_log_if_needed(
         self, chat_id: str, is_group: bool, *, force: bool = False
@@ -554,95 +661,108 @@ class ArchiveManager:
         if event_log is None or index is None:
             return None
         await self._recover_event_log_archives(chat_id)
-        source = await event_log.snapshot_events(chat_id, include_internal=True)
-        if not source.events:
+        all_budgets, cutoff_seq = await event_log.snapshot_turn_budgets(
+            chat_id,
+            include_internal=True,
+            include_nonterminal=True,
+        )
+        if not all_budgets:
             return None
-        turns_snapshot = await event_log.snapshot_turns(chat_id, include_internal=True)
-        events_by_turn: Dict[str, List[Any]] = {}
-        for event in source.events:
-            events_by_turn.setdefault(event.turn_id, []).append(event)
         hidden = (
             set(await projection.hidden_event_ids(chat_id))
             if projection is not None
             else set()
         )
-        hot_turns = [
-            turn
-            for turn in turns_snapshot.turns
-            if events_by_turn.get(turn.turn_id)
-            and all(
-                event.event_id not in hidden
-                for event in events_by_turn.get(turn.turn_id, ())
-            )
+        visible_budgets, _ = await event_log.snapshot_turn_budgets(
+            chat_id,
+            upto_seq=cutoff_seq,
+            include_internal=True,
+            exclude_event_ids=tuple(hidden),
+            include_nonterminal=True,
+        )
+        visible_by_turn = {budget.turn.turn_id: budget for budget in visible_budgets}
+        hot_budgets = [
+            budget
+            for budget in all_budgets
+            if budget.event_count > 0
+            and visible_by_turn.get(budget.turn.turn_id) is not None
+            and visible_by_turn[budget.turn.turn_id].event_count == budget.event_count
         ]
-        if not hot_turns:
+        if not hot_budgets:
             return None
-        hot_events = [event for event in source.events if event.event_id not in hidden]
-        hot_tokens = sum(event.token_count for event in hot_events)
-        hot_bytes = sum(self._event_hot_bytes(event) for event in hot_events)
-        terminal_turns = []
-        for turn in hot_turns:
-            if not turn.is_terminal or str(turn.status) == "incomplete":
-                continue
-            integrity = await event_log.validate_turn(turn.turn_id)
-            if integrity.valid:
-                terminal_turns.append(turn)
-            else:
-                _log.warning(
-                    "跳过不完整归档 turn [%s..] turn=%s reason=%s",
-                    chat_id[:12],
-                    turn.turn_id[:12],
-                    integrity.reason,
-                )
-        terminal_turns.sort(key=lambda turn: turn.turn_sequence)
-        if not terminal_turns:
+        hot_budgets.sort(key=lambda budget: budget.turn.turn_sequence)
+        hot_tokens = sum(budget.estimated_tokens for budget in hot_budgets)
+        hot_bytes = sum(budget.estimated_bytes for budget in hot_budgets)
+        terminal_budgets = [
+            budget
+            for budget in hot_budgets
+            if budget.turn.is_terminal
+            and budget.turn.status is not TurnStatus.INCOMPLETE
+        ]
+        if not terminal_budgets:
             return None
 
-        def turn_age(turn: Any) -> float:
-            events = events_by_turn.get(turn.turn_id, ())
-            timestamp = min(
-                (event.timestamp for event in events), default=turn.updated_at
-            )
-            return max(0.0, time.time() - timestamp)
+        def turn_age(budget: Any) -> float:
+            return max(0.0, time.time() - budget.oldest_timestamp)
 
         capacity_exceeded = (
             hot_tokens > self._hot_max_tokens
-            or len(hot_turns) > self._hot_max_turns
+            or len(hot_budgets) > self._hot_max_turns
             or hot_bytes > self._hot_max_bytes
         )
-        age_exceeded = turn_age(terminal_turns[0]) > self._hot_max_age_seconds
-        if not force and not capacity_exceeded and not age_exceeded:
-            return None
+        age_exceeded = force or capacity_exceeded
 
         low_tokens = max(1, int(self._hot_max_tokens * self._hot_low_water_ratio))
         low_turns = max(1, int(self._hot_max_turns * self._hot_low_water_ratio))
         low_bytes = max(1, int(self._hot_max_bytes * self._hot_low_water_ratio))
         selected_turns: List[Any] = []
-        selected_ids: set[str] = set()
-        remaining_turns = list(hot_turns)
-        while terminal_turns:
-            candidate = terminal_turns.pop(0)
-            candidate_events = events_by_turn.get(candidate.turn_id, ())
-            candidate_ids = {event.event_id for event in candidate_events}
+        selected_events_by_turn: Dict[str, tuple[Any, ...]] = {}
+        remaining_turns = [budget.turn for budget in hot_budgets]
+        while terminal_budgets:
+            candidate_budget = terminal_budgets.pop(0)
+            candidate = candidate_budget.turn
+            candidate_source = await event_log.snapshot_events(
+                chat_id,
+                upto_seq=cutoff_seq,
+                include_internal=True,
+                turn_ids=(candidate.turn_id,),
+            )
+            candidate_events = candidate_source.events
+            if len(candidate_events) != candidate_budget.event_count:
+                _log.warning(
+                    "跳过事件数漂移归档 turn [%s..] turn=%s expected=%s actual=%s",
+                    chat_id[:12],
+                    candidate.turn_id[:12],
+                    candidate_budget.event_count,
+                    len(candidate_events),
+                )
+                continue
+            integrity = await event_log.validate_turn(
+                candidate.turn_id, chat_id=chat_id
+            )
+            if not integrity.valid:
+                _log.warning(
+                    "跳过不完整归档 turn [%s..] turn=%s reason=%s",
+                    chat_id[:12],
+                    candidate.turn_id[:12],
+                    integrity.reason,
+                )
+                continue
+            if not age_exceeded:
+                if turn_age(candidate_budget) <= self._hot_max_age_seconds:
+                    return None
+                age_exceeded = True
             selected_turns.append(candidate)
-            selected_ids.update(candidate_ids)
+            selected_events_by_turn[candidate.turn_id] = candidate_events
             remaining_turns = [
                 turn for turn in remaining_turns if turn.turn_id != candidate.turn_id
             ]
-            hot_tokens -= sum(
-                event.token_count
-                for event in candidate_events
-                if event.event_id not in hidden
-            )
-            hot_bytes -= sum(
-                self._event_hot_bytes(event)
-                for event in candidate_events
-                if event.event_id not in hidden
-            )
+            hot_tokens -= candidate_budget.estimated_tokens
+            hot_bytes -= candidate_budget.estimated_bytes
             hot_turns_count = len(remaining_turns)
             next_age_exceeded = (
-                bool(terminal_turns)
-                and turn_age(terminal_turns[0]) > self._hot_max_age_seconds
+                bool(terminal_budgets)
+                and turn_age(terminal_budgets[0]) > self._hot_max_age_seconds
             )
             if not force and (
                 hot_tokens <= low_tokens
@@ -655,11 +775,13 @@ class ArchiveManager:
         if not selected_turns:
             return None
         selected_events = [
-            event for event in source.events if event.event_id in selected_ids
+            event
+            for turn in selected_turns
+            for event in selected_events_by_turn[turn.turn_id]
         ]
         selected_turn_ids = [turn.turn_id for turn in selected_turns]
         operation_id = self._event_archive_operation_id(
-            chat_id, source.cutoff_seq, selected_turn_ids
+            chat_id, cutoff_seq, selected_turn_ids
         )
         batch_id = f"batch:{operation_id}"
         turn_records = [
@@ -667,9 +789,11 @@ class ArchiveManager:
                 turn_id=turn.turn_id,
                 turn_sequence=turn.turn_sequence,
                 source_date=turn.source_date,
-                event_count=len(events_by_turn.get(turn.turn_id, ())),
-                estimated_tokens=sum(
-                    event.token_count for event in events_by_turn.get(turn.turn_id, ())
+                event_count=len(selected_events_by_turn[turn.turn_id]),
+                estimated_tokens=next(
+                    budget.estimated_tokens
+                    for budget in hot_budgets
+                    if budget.turn.turn_id == turn.turn_id
                 ),
                 turn_kind=turn.turn_kind.value,
             )
@@ -679,7 +803,7 @@ class ArchiveManager:
             batch_id=batch_id,
             operation_id=operation_id,
             chat_id=chat_id,
-            captured_cutoff_seq=source.cutoff_seq,
+            captured_cutoff_seq=cutoff_seq,
             turn_records=turn_records,
             event_ids=[(event.event_id, event.turn_id) for event in selected_events],
         )
@@ -738,14 +862,25 @@ class ArchiveManager:
         hidden_ids -= retained_ids
         if not hidden_ids and not retained_ids:
             return
-        snapshot = await event_log.snapshot_events(chat_id, include_internal=True)
-        source_ids = {event.event_id for event in snapshot.events}
+        captured_cutoff = manifest.get("captured_cutoff_seq")
+        cutoff_seq = (
+            int(captured_cutoff)
+            if captured_cutoff is not None
+            else await event_log.latest_event_seq(chat_id)
+        )
+        source_ids = set(
+            await event_log.event_ids(
+                chat_id,
+                upto_seq=cutoff_seq,
+                include_internal=True,
+            )
+        )
         await projection.apply_archive_retention(
             chat_id,
             operation_id=operation_id,
             hidden_event_ids=tuple(sorted(hidden_ids & source_ids)),
             retained_event_ids=tuple(sorted(retained_ids & source_ids)),
-            captured_cutoff_seq=snapshot.cutoff_seq,
+            captured_cutoff_seq=cutoff_seq,
         )
         summary_store = self._summary_store
         summaries = ()
@@ -823,6 +958,11 @@ class ArchiveManager:
                 "latest_committed_batch": committed[0] if committed else None,
             }
         return self.get_archive_operation_status(chat_id)
+
+    async def clear_pending_operations_async(self, chat_id: str) -> int:
+        """Discard resumable archive work for an explicitly cleared chat."""
+        self._pending_injection.discard(chat_id)
+        return await asyncio.to_thread(self._manifest_store.clear_pending, chat_id)
 
     def recover_incomplete_archives(self) -> int:
         """Resume pending archive manifests and return the recovered count."""
@@ -1538,6 +1678,62 @@ class ArchiveManager:
             return []
         return await self._archive_index.list_for_webui(chat_id)
 
+    async def get_event_integrity_async(self, chat_id: str) -> dict[str, Any]:
+        """Return bounded turn-integrity diagnostics for an administrator."""
+        if self._event_log is None:
+            return {
+                "turn_count": 0,
+                "invalid_turn_count": 0,
+                "invalid_reasons": {},
+                "error": "event_log_not_configured",
+            }
+        summary = await self._event_log.integrity_summary(chat_id)
+        turns = await self._event_log.snapshot_turns(chat_id, include_internal=True)
+        reports = await self._event_log.validate_turns(
+            [turn.turn_id for turn in turns.turns], chat_id=chat_id
+        )
+        summary["invalid_turns"] = [
+            {
+                "turn_id": report.turn_id,
+                "status": report.status,
+                "event_count": report.event_count,
+                "reason": report.reason or "invalid_turn",
+                "missing_tool_result_ids": list(report.missing_tool_result_ids),
+                "duplicate_tool_result_ids": list(report.duplicate_tool_result_ids),
+            }
+            for report in reports.values()
+            if not report.valid
+        ]
+        return summary
+
+    async def record_turn_repair_revision_async(
+        self,
+        chat_id: str,
+        turn_id: str,
+        revision_id: str,
+        reason: str,
+        *,
+        operator: str = "",
+    ) -> RepairRevision:
+        """Append an administrator repair note without rewriting ledger facts."""
+        if self._event_log is None:
+            raise RuntimeError("event log is not configured")
+        return await self._event_log.append_repair_revision(
+            chat_id=chat_id,
+            original_turn_id=turn_id,
+            revision_id=revision_id,
+            reason=reason,
+            operator=operator,
+        )
+
+    async def get_turn_repair_revisions_async(
+        self, chat_id: str, turn_id: str = ""
+    ) -> tuple[RepairRevision, ...]:
+        """Read bounded administrator repair notes for a chat or turn."""
+        if self._event_log is None:
+            return ()
+        return await self._event_log.repair_revisions(chat_id, original_turn_id=turn_id)
+
     async def archive_batch_turns_async(self, batch_id: str) -> list[ArchiveTurnRecord]:
         if self._archive_index is None:
             return []
@@ -1587,6 +1783,22 @@ class ArchiveManager:
         imported_events = 0
         imported_batches = 0
         error_count = 0
+        duplicate_record_count = 0
+        invalid_record_count = 0
+        conflict_event_ids: list[str] = []
+        conflict_reader = getattr(self._event_log, "legacy_conflict_event_ids", None)
+        if callable(conflict_reader):
+            try:
+                conflict_event_ids.extend(await conflict_reader(chat_id))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                error_count += 1
+                _log.warning(
+                    "legacy conflict audit read failed [%s..]: %s",
+                    chat_id[:12],
+                    exc,
+                )
         seen_content_hashes: set[str] = set()
         seen_file_hashes: set[str] = set()
         seen_record_keys: set[str] = set()
@@ -1647,8 +1859,20 @@ class ArchiveManager:
                     continue
                 seen_content_hashes.add(content_hash)
                 for record in records:
+                    role = str(record.get("role") or "")
+                    if (
+                        role not in {"user", "assistant", "tool"}
+                        or (role == "tool" and not record.get("tool_call_id"))
+                        or (
+                            role == "assistant"
+                            and not normalize_legacy_content(record)
+                            and not record.get("tool_calls")
+                        )
+                    ):
+                        invalid_record_count += 1
                     key = record_key(record)
                     if key in seen_record_keys:
+                        duplicate_record_count += 1
                         continue
                     seen_record_keys.add(key)
                     legacy_records.append(record)
@@ -1680,6 +1904,9 @@ class ArchiveManager:
                     for event in snapshot.events
                     if event.event_id not in before_ids
                 }
+                conflict_event_ids = sorted(
+                    event_id for event_id in new_ids if ":legacy-conflict:" in event_id
+                )
                 new_turn_ids = {
                     event.turn_id
                     for event in snapshot.events
@@ -1693,7 +1920,9 @@ class ArchiveManager:
                 for turn_id in new_turn_ids:
                     turn = turns_by_id.get(turn_id)
                     if turn is not None and not turn.is_terminal:
-                        report = await self._event_log.validate_turn(turn_id)
+                        report = await self._event_log.validate_turn(
+                            turn_id, chat_id=chat_id
+                        )
                         await self._event_log.append_turn_terminal(
                             chat_id=chat_id,
                             turn_id=turn_id,
@@ -1727,7 +1956,9 @@ class ArchiveManager:
                         )
                     ):
                         continue
-                    report = await self._event_log.validate_turn(turn_id)
+                    report = await self._event_log.validate_turn(
+                        turn_id, chat_id=chat_id
+                    )
                     if not report.valid:
                         continue
                     turn_records.append(
@@ -1778,14 +2009,50 @@ class ArchiveManager:
                     len(source_paths),
                     exc,
                 )
-        return {
+        conflict_event_ids = list(dict.fromkeys(conflict_event_ids))
+        status = (
+            "degraded"
+            if error_count or invalid_record_count or conflict_event_ids
+            else "ok"
+        )
+        result = {
             "chat_id": chat_id,
             "archive_count": len(archives),
             "imported_event_count": imported_events,
             "imported_batch_count": imported_batches,
             "error_count": error_count,
-            "status": "ok" if error_count == 0 else "degraded",
+            "status": status,
         }
+        if (
+            error_count
+            or duplicate_record_count
+            or invalid_record_count
+            or conflict_event_ids
+        ):
+            result.update(
+                {
+                    "duplicate_record_count": duplicate_record_count,
+                    "invalid_record_count": invalid_record_count,
+                    "conflict_event_count": len(conflict_event_ids),
+                    "conflict_event_ids": conflict_event_ids[:100],
+                }
+            )
+            self._write_migration_audit(
+                chat_id,
+                {
+                    "chat_id": chat_id,
+                    "archive_count": len(archives),
+                    "source_files": source_paths,
+                    "duplicate_record_count": duplicate_record_count,
+                    "invalid_record_count": invalid_record_count,
+                    "conflict_event_count": len(conflict_event_ids),
+                    "conflict_event_ids": conflict_event_ids[:100],
+                    "error_count": error_count,
+                    "status": result["status"],
+                },
+            )
+            result["conflict_report_path"] = str(self._migration_audit_path(chat_id))
+        return result
 
     def consume_summary(self, chat_id: str) -> Optional[str]:
         if chat_id not in self._pending_injection:
@@ -1822,7 +2089,7 @@ class ArchiveManager:
             message_count = summary["message_count"]
             last_activity = summary["last_activity"]
         else:
-            history = await self._cm.get_chat_history_async(chat_id)
+            history = await read_legacy_history_bounded(self._cm, chat_id)
             if self._timeline is not None:
                 repair = getattr(self._timeline, "repair_from_legacy_history", None)
                 if repair is not None:
@@ -1876,6 +2143,314 @@ class ArchiveManager:
             # 手动归档同样可能保留已归档的回放前缀；重启后必须能识别它。
             self._save_daily_state()
         return result
+
+    async def repair_event_log_archives(
+        self,
+        chat_id: str,
+        *,
+        before_date: str,
+        captured_cutoff_seq: Optional[int] = None,
+    ) -> ArchiveResult:
+        """Repair missing archive projections for complete turns before a date."""
+        if self._session_lock_provider is None:
+            return await self._repair_event_log_archives_unlocked(
+                chat_id,
+                before_date=before_date,
+                captured_cutoff_seq=captured_cutoff_seq,
+            )
+        session_lock = await self._session_lock_provider(chat_id)
+        async with session_lock:
+            archive_lock = self._event_archive_locks.setdefault(chat_id, asyncio.Lock())
+            async with archive_lock:
+                return await self._repair_event_log_archives_unlocked(
+                    chat_id,
+                    before_date=before_date,
+                    captured_cutoff_seq=captured_cutoff_seq,
+                )
+
+    async def _repair_event_log_archives_unlocked(
+        self,
+        chat_id: str,
+        *,
+        before_date: str,
+        captured_cutoff_seq: Optional[int] = None,
+    ) -> ArchiveResult:
+        """Repair missing archive projections for complete turns before a date."""
+        event_log = self._event_log
+        index = self._archive_index
+        if event_log is None or index is None:
+            raise RuntimeError("event archive dependencies are not configured")
+        if not chat_id or not before_date:
+            raise ValueError("chat_id and before_date are required")
+        try:
+            datetime.strptime(before_date, "%Y-%m-%d")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("before_date must be YYYY-MM-DD") from exc
+        await self._recover_event_log_archives(chat_id)
+        cutoff_seq = (
+            int(captured_cutoff_seq)
+            if captured_cutoff_seq is not None
+            else await event_log.latest_event_seq(chat_id)
+        )
+        event_identities = await event_log.event_identities(
+            chat_id,
+            upto_seq=cutoff_seq,
+            include_internal=True,
+        )
+        committed_ids = set(await index.committed_event_ids(chat_id))
+        turns_snapshot = await event_log.snapshot_turns(
+            chat_id,
+            upto_turn_sequence=None,
+            include_internal=True,
+        )
+        turns_by_id = {turn.turn_id: turn for turn in turns_snapshot.turns}
+        event_ids_by_turn: Dict[str, List[str]] = {}
+        for event_id, turn_id in event_identities:
+            event_ids_by_turn.setdefault(turn_id, []).append(event_id)
+        repair_scope_ids = {
+            event_id
+            for event_id, turn_id in event_identities
+            if turns_by_id.get(turn_id) is not None
+            and turns_by_id[turn_id].source_date < before_date
+        }
+        visible_metadata_ids = (
+            set(await self._prompt_projection.visibility_event_ids(chat_id))
+            if self._prompt_projection is not None
+            else set()
+        )
+        missing_ids = repair_scope_ids - visible_metadata_ids
+        hidden_ids = (
+            set(await self._prompt_projection.hidden_event_ids(chat_id))
+            if self._prompt_projection is not None
+            else set()
+        )
+        selected_turns = []
+        skipped_turns: List[Dict[str, Any]] = []
+        for turn in turns_snapshot.turns:
+            if turn.source_date >= before_date:
+                continue
+            turn_event_ids = event_ids_by_turn.get(turn.turn_id, ())
+            if not turn_event_ids:
+                continue
+            turn_ids = set(turn_event_ids)
+            candidate_ids = turn_ids - committed_ids - hidden_ids
+            if not candidate_ids:
+                continue
+            if not turn.is_terminal:
+                skipped_turns.append(
+                    {
+                        "turn_id": turn.turn_id,
+                        "turn_sequence": turn.turn_sequence,
+                        "source_date": turn.source_date,
+                        "reason": "incomplete_turn",
+                    }
+                )
+                continue
+            if turn.status is TurnStatus.INCOMPLETE:
+                skipped_turns.append(
+                    {
+                        "turn_id": turn.turn_id,
+                        "turn_sequence": turn.turn_sequence,
+                        "source_date": turn.source_date,
+                        "reason": "incomplete_turn",
+                    }
+                )
+                continue
+            if turn.ended_seq > cutoff_seq or len(turn_event_ids) != turn.event_count:
+                skipped_turns.append(
+                    {
+                        "turn_id": turn.turn_id,
+                        "turn_sequence": turn.turn_sequence,
+                        "source_date": turn.source_date,
+                        "reason": "cutoff_splits_turn",
+                    }
+                )
+                continue
+            membership_ids = turn_ids & (committed_ids | hidden_ids)
+            if membership_ids:
+                if membership_ids != turn_ids:
+                    skipped_turns.append(
+                        {
+                            "turn_id": turn.turn_id,
+                            "turn_sequence": turn.turn_sequence,
+                            "source_date": turn.source_date,
+                            "reason": "partial_archive_membership",
+                        }
+                    )
+                continue
+            selected_turns.append(turn)
+        selected_turns.sort(key=lambda turn: turn.turn_sequence)
+        validate_many = getattr(event_log, "validate_turns", None)
+        if callable(validate_many) and selected_turns:
+            integrity_reports = await validate_many(
+                [turn.turn_id for turn in selected_turns], chat_id=chat_id
+            )
+        else:
+            integrity_reports = {
+                turn.turn_id: await event_log.validate_turn(
+                    turn.turn_id, chat_id=chat_id
+                )
+                for turn in selected_turns
+            }
+        valid_turns = []
+        for turn in selected_turns:
+            integrity = integrity_reports[turn.turn_id]
+            if integrity.valid:
+                valid_turns.append(turn)
+            else:
+                skipped_turns.append(
+                    {
+                        "turn_id": turn.turn_id,
+                        "turn_sequence": turn.turn_sequence,
+                        "source_date": turn.source_date,
+                        "reason": integrity.reason or "invalid_turn",
+                    }
+                )
+        selected_turns = valid_turns
+        selected_events_by_turn: Dict[str, tuple[Any, ...]] = {}
+        if selected_turns:
+            selected_source = await event_log.snapshot_events(
+                chat_id,
+                upto_seq=cutoff_seq,
+                include_internal=True,
+                turn_ids=tuple(turn.turn_id for turn in selected_turns),
+            )
+            selected_events_by_turn = {}
+            for event in selected_source.events:
+                selected_events_by_turn.setdefault(event.turn_id, ())
+                selected_events_by_turn[event.turn_id] += (event,)
+        repair_operation_payload = json.dumps(
+            {
+                "chat_id": chat_id,
+                "before_date": before_date,
+                "event_ids": tuple(sorted(repair_scope_ids)),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        repair_operation_id = (
+            "event-repair-visibility:"
+            + hashlib.sha256(repair_operation_payload.encode("utf-8")).hexdigest()[:32]
+        )
+        if not selected_turns and not missing_ids:
+            return ArchiveResult(
+                chat_id=chat_id,
+                reason="repair",
+                operation_id=repair_operation_id,
+                skipped_turns=skipped_turns,
+            )
+        if selected_turns:
+            selected_ids = {
+                event.event_id
+                for turn in selected_turns
+                for event in selected_events_by_turn.get(turn.turn_id, ())
+            }
+            operation_payload = json.dumps(
+                {"chat_id": chat_id, "event_ids": sorted(selected_ids)},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            operation_id = (
+                "event-repair-archive:"
+                + hashlib.sha256(operation_payload.encode("utf-8")).hexdigest()[:32]
+            )
+            batch = await index.prepare_batch(
+                batch_id=f"batch:{operation_id}",
+                operation_id=operation_id,
+                chat_id=chat_id,
+                captured_cutoff_seq=cutoff_seq,
+                turn_records=[
+                    ArchiveTurnRecord(
+                        turn_id=turn.turn_id,
+                        turn_sequence=turn.turn_sequence,
+                        source_date=turn.source_date,
+                        event_count=len(selected_events_by_turn.get(turn.turn_id, ())),
+                        estimated_tokens=sum(
+                            event.token_count
+                            for event in selected_events_by_turn.get(turn.turn_id, ())
+                        ),
+                        turn_kind=turn.turn_kind.value,
+                    )
+                    for turn in selected_turns
+                ],
+                event_ids=[
+                    (event.event_id, event.turn_id)
+                    for event in (
+                        event
+                        for turn in selected_turns
+                        for event in selected_events_by_turn.get(turn.turn_id, ())
+                    )
+                    if event.event_id in selected_ids
+                ],
+            )
+            result = await self._finish_event_archive_batch(batch)
+            visible_after = (
+                set(await self._prompt_projection.visibility_event_ids(chat_id))
+                if self._prompt_projection is not None
+                else set()
+            )
+            remaining_hidden_ids = tuple(
+                sorted(
+                    (missing_ids & committed_ids)
+                    - hidden_ids
+                    - selected_ids
+                    - visible_after
+                )
+            )
+            remaining_retained_ids = tuple(
+                sorted(
+                    missing_ids
+                    - committed_ids
+                    - hidden_ids
+                    - selected_ids
+                    - visible_after
+                )
+            )
+            if self._prompt_projection is not None and (
+                remaining_hidden_ids or remaining_retained_ids
+            ):
+                await self._prompt_projection.apply_archive_retention(
+                    chat_id,
+                    operation_id=repair_operation_id,
+                    hidden_event_ids=remaining_hidden_ids,
+                    retained_event_ids=remaining_retained_ids,
+                    captured_cutoff_seq=cutoff_seq,
+                )
+            result.reason = "repair"
+            result.skipped_turns.extend(skipped_turns)
+            return result
+
+        retained_ids = tuple(sorted(repair_scope_ids - hidden_ids - committed_ids))
+        hidden_ids_to_repair = tuple(sorted((missing_ids & committed_ids) - hidden_ids))
+        operation_payload = json.dumps(
+            {
+                "chat_id": chat_id,
+                "before_date": before_date,
+                "event_ids": retained_ids,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        operation_id = (
+            "event-repair-visibility:"
+            + hashlib.sha256(operation_payload.encode("utf-8")).hexdigest()[:32]
+        )
+        if self._prompt_projection is not None and (
+            hidden_ids_to_repair or retained_ids
+        ):
+            await self._prompt_projection.apply_archive_retention(
+                chat_id,
+                operation_id=operation_id,
+                hidden_event_ids=hidden_ids_to_repair,
+                retained_event_ids=retained_ids,
+                captured_cutoff_seq=cutoff_seq,
+            )
+        return ArchiveResult(
+            chat_id=chat_id,
+            reason="repair",
+            operation_id=operation_id,
+            skipped_turns=skipped_turns,
+        )
 
     async def archive_snapshot(
         self, chat_id: str, is_group: Optional[bool] = None
@@ -2657,6 +3232,60 @@ class ArchiveManager:
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
+
+    def _migration_audit_path(self, chat_id: str) -> Path:
+        safe_chat_id = "".join(
+            character if character.isalnum() or character in "-_." else "_"
+            for character in chat_id
+        )
+        return (
+            Path(self._memory_dir).parent
+            / "archive_audit"
+            / (f"{safe_chat_id}.migration.json")
+        )
+
+    def _write_migration_audit(self, chat_id: str, payload: dict[str, Any]) -> None:
+        path = self._migration_audit_path(chat_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
+    async def get_legacy_migration_audit_async(self, chat_id: str) -> dict[str, Any]:
+        """Read a content-free legacy import conflict report for an administrator."""
+        if not chat_id:
+            return {"status": "not_found"}
+        path = self._migration_audit_path(chat_id)
+
+        def _read() -> dict[str, Any]:
+            if not path.is_file():
+                return {"status": "not_found"}
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return {"status": "invalid_report"}
+            if not isinstance(payload, dict):
+                return {"status": "invalid_report"}
+            payload.setdefault("conflict_report_path", str(path))
+            return payload
+
+        return await asyncio.to_thread(_read)
 
     async def _apply_timeline_projection(
         self, chat_id: str, messages: List[Any]

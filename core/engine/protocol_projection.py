@@ -11,11 +11,15 @@ class ProtocolProjection:
     def __init__(self, event_log: ConversationEventLog):
         self._event_log = event_log
 
-    async def snapshot(self, turn_id: str) -> tuple[ConversationEvent, ...]:
-        return await self._event_log.protocol_snapshot(turn_id)
+    async def snapshot(
+        self, turn_id: str, *, chat_id: str | None = None
+    ) -> tuple[ConversationEvent, ...]:
+        return await self._event_log.protocol_snapshot(turn_id, chat_id=chat_id)
 
-    async def snapshot_wire(self, turn_id: str) -> list[dict[str, Any]]:
-        return await self._event_log.protocol_wire(turn_id)
+    async def snapshot_wire(
+        self, turn_id: str, *, chat_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        return await self._event_log.protocol_wire(turn_id, chat_id=chat_id)
 
     @staticmethod
     def to_wire_messages(

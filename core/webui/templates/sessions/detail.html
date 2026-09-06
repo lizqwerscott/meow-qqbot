@@ -40,6 +40,8 @@
         <span class="turn-kind turn-kind-{{ turn.turn_kind }}">{{ turn.turn_kind_label }}</span>
         <span>{{ turn.source_date }}</span>
         {% if turn.status != 'completed' and turn.status != 'unknown' %}<span class="turn-status">{{ turn.status }}</span>{% endif %}
+        {% if turn.integrity and turn.integrity.available and not turn.integrity.valid %}<span class="turn-status">完整性: {{ turn.integrity.reason or '异常' }}</span>{% endif %}
+        {% if turn.repair_revisions %}<span class="turn-status">修订 {{ turn.repair_revisions|length }}</span>{% endif %}
         {% if turn.has_tools %}<span class="turn-tools-count">{{ turn.tool_count }} 个工具调用</span>{% endif %}
         <code>{{ turn.turn_id[:12] }}..</code>
     </div>
@@ -70,6 +72,15 @@
                 <div class="tool-details">{{ msg.content or '（空结果）' }}</div>
             {% endif %}
         </div>
+        {% endfor %}
+    </details>
+    {% endif %}
+    {% if turn.repair_revisions %}
+    <details class="conversation-repair-notes">
+        <summary>查看完整性修订记录</summary>
+        {% for revision in turn.repair_revisions %}
+        <div class="msg-meta">revision={{ revision.revision_id }} · {{ revision.original_status }}/{{ revision.original_reason }}</div>
+        <div class="tool-details">{{ revision.reason }}</div>
         {% endfor %}
     </details>
     {% endif %}

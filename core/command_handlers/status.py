@@ -84,6 +84,9 @@ class StatusCommand:
             if get_history_migration_summary is not None:
                 history_migration_summary = await get_history_migration_summary()
             model_context = stats.get("model_context", {})
+            prompt_projection = stats.get("prompt_projection", {})
+            prompt_reports = stats.get("prompt_reports", {})
+            archive_stats = stats.get("archive", {})
             model_context_lines = []
             if model_context:
                 model_context_lines = [
@@ -109,9 +112,25 @@ class StatusCommand:
                 f"- 可见消息: `legacy={history_migration.get('legacy_visible_count', 0)}` `timeline={history_migration.get('timeline_visible_count', 0)}`",
                 f"- 缺口: `{history_migration.get('missing_legacy_visible_count', 0)}`，legacy protocol: `{history_migration.get('legacy_protocol_count', 0)}`",
                 f"- 可移除 legacy read: `{'yes' if history_migration.get('ready_for_legacy_read_removal') else 'no'}`",
+                f"- 旧历史迁移水位: `{'complete' if history_migration.get('legacy_migration_complete', True) else 'pending'}`",
                 f"- 全局会话: `{history_migration_summary.get('session_count', 0)}`，可退出 fallback: `{history_migration_summary.get('sessions_ready_for_legacy_read_removal', 0)}`",
                 f"- 全局缺口会话: `{history_migration_summary.get('sessions_with_missing_legacy_visible', 0)}`，协议残留会话: `{history_migration_summary.get('sessions_with_legacy_protocol', 0)}`",
+                f"- identity 冲突: `chat={history_migration.get('legacy_conflict_count', 0)}` `global={history_migration_summary.get('legacy_conflict_count', 0)}`",
             ]
+            projection_lines = []
+            if prompt_projection or prompt_reports or archive_stats:
+                projection_lines = [
+                    "",
+                    "**账本投影观测**",
+                    f"- Prompt visibility: `total={prompt_projection.get('visibility_count', 0)}` `visible={prompt_projection.get('visible_count', 0)}` `hidden={prompt_projection.get('hidden_count', 0)}` `lag={prompt_projection.get('projection_lag', 0)}`",
+                    f"- Prompt reports: `total={prompt_reports.get('report_count', 0)}` `fallback={prompt_reports.get('fallback_count', 0)}` `degraded={prompt_reports.get('degraded_count', 0)}`",
+                    f"- Archive: `batches={archive_stats.get('batch_count', 0)}` `pending={archive_stats.get('pending_count', 0)}` `events={archive_stats.get('event_count', 0)}` `export_failed={archive_stats.get('export_failed_count', 0)}`",
+                ]
+            event_integrity = history_migration.get("event_integrity", {})
+            if event_integrity:
+                history_lines.append(
+                    f"- 账本 turn: `total={event_integrity.get('turn_count', 0)}` `invalid={event_integrity.get('invalid_turn_count', 0)}` `incomplete={event_integrity.get('incomplete_turn_count', 0)}` `open={event_integrity.get('open_turn_count', 0)}` `waiting_tool={event_integrity.get('waiting_tool_turn_count', 0)}`"
+                )
             skill_count = len(sm.list_skill_names()) if sm and sm.has_skills else 0
 
             cost = stats.get("cost", {})
@@ -148,6 +167,7 @@ class StatusCommand:
                 *self._approval_line(),
                 *engagement_lines,
                 *history_lines,
+                *projection_lines,
                 "",
                 "**记忆系统**",
                 f"- Hindsight: {_hindsight_status_line(hindsight_health)}",

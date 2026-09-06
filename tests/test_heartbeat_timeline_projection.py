@@ -46,3 +46,31 @@ async def test_heartbeat_main_prompt_repairs_legacy_gap_in_nonempty_timeline(tmp
 
     assert {message["content"] for message in messages} >= {"hello", "legacy answer"}
     await timeline.close()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_legacy_context_fallback_is_bounded():
+    calls = []
+
+    class ContextManager:
+        async def get_pruned_history_async(self, chat_id, max_messages=None):
+            calls.append((chat_id, max_messages))
+            return [{"role": "user", "content": "bounded"}]
+
+    builder = PromptBuilder.__new__(PromptBuilder)
+    builder.context_manager = ContextManager()
+    builder.timeline = None
+    builder.hindsight = None
+    builder._workspace_manager = None
+    builder._has_tasks = False
+    builder._system_events = None
+    builder._deps = None
+
+    messages, _ = await builder.build_heartbeat_messages(
+        "check",
+        session_mode="main",
+        admin_chat_id="admin-chat",
+    )
+
+    assert calls == [("admin-chat", 20)]
+    assert {message["content"] for message in messages} >= {"bounded", "check"}

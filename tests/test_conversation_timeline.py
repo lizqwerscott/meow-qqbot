@@ -196,6 +196,24 @@ async def test_timeline_does_not_share_event_keys_between_chats(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_timeline_snapshot_bounds_rows_in_sql(tmp_path):
+    timeline = ConversationTimeline(str(tmp_path / "timeline.sqlite3"))
+    for index in range(3):
+        await timeline.append_user_message(
+            chat_id="chat",
+            message_id=f"m{index}",
+            content=f"message-{index}",
+            sender_id="user",
+            timestamp=index + 1,
+        )
+
+    snapshot = await timeline.snapshot("chat", max_events=2)
+
+    assert [event.message_id for event in snapshot] == ["m1", "m2"]
+    await timeline.close()
+
+
+@pytest.mark.asyncio
 async def test_timeline_history_zero_limit_is_empty(tmp_path):
     timeline = ConversationTimeline(str(tmp_path / "timeline.sqlite3"))
     await timeline.append_user_message(

@@ -3,13 +3,13 @@ from types import SimpleNamespace
 import pytest
 
 from core.command_handlers.history import HistoryCommand
+from core.engine.history_projection import read_legacy_history_bounded
 from core.message import InputMessage
 
 
 @pytest.mark.asyncio
-async def test_history_command_compacts_through_context_manager():
+async def test_history_command_does_not_use_legacy_context_compactor():
     calls = []
-    context = SimpleNamespace(get_history_count=lambda: 2)
 
     class ContextManager:
         compaction_threshold_tokens = 100
@@ -33,8 +33,8 @@ async def test_history_command_compacts_through_context_manager():
 
     replies = await command._compact(input_message, "")
 
-    assert calls == [("chat_001", True)]
-    assert "压缩完成" in replies[0]["content"]
+    assert calls == []
+    assert "bounded Prompt projection" in replies[0]["content"]
 
 
 @pytest.mark.asyncio
@@ -175,6 +175,79 @@ async def test_history_command_filters_legacy_protocol_when_timeline_unavailable
     assert await command._get_visible_history("chat_001") == [
         {"role": "user", "content": "visible"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_history_command_uses_bounded_prompt_projection_in_ledger_mode():
+    class Event:
+        def to_history_dict(self):
+            return {"role": "user", "content": "bounded"}
+
+    class Projection:
+        async def snapshot_for_prompt(self, chat_id):
+            assert chat_id == "chat_001"
+            return type("Snapshot", (), {"events": (Event(),)})()
+
+    class EventLog:
+        async def history(self, *args, **kwargs):
+            raise AssertionError("history command must not load full ledger")
+
+    command = HistoryCommand(
+        context_manager=object(),
+        event_log=EventLog(),
+        prompt_history_projection=Projection(),
+    )
+
+    assert await command._get_visible_history("chat_001") == [
+        {"role": "user", "content": "bounded"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_legacy_history_compatibility_reader_is_bounded():
+    calls = []
+
+    class ContextManager:
+        async def get_legacy_chat_history_async(self, chat_id, max_messages=None):
+            calls.append((chat_id, max_messages))
+            return [{"role": "user", "content": str(index)} for index in range(200)]
+
+    history = await read_legacy_history_bounded(ContextManager(), "legacy-chat")
+
+    assert calls == [("legacy-chat", 100)]
+    assert len(history) == 100
+    assert history[0]["content"] == "100"
+
+
+@pytest.mark.asyncio
+async def test_legacy_history_compatibility_reader_supports_limit_parameter():
+    calls = []
+
+    class ContextManager:
+        async def get_legacy_chat_history_async(self, chat_id, limit=None):
+            calls.append((chat_id, limit))
+            return [{"role": "user", "content": str(index)} for index in range(200)]
+
+    history = await read_legacy_history_bounded(ContextManager(), "legacy-chat")
+
+    assert calls == [("legacy-chat", 100)]
+    assert len(history) == 100
+    assert history[0]["content"] == "100"
+
+
+@pytest.mark.asyncio
+async def test_legacy_history_compatibility_reader_supports_positional_only_limit():
+    calls = []
+
+    class ContextManager:
+        async def get_legacy_chat_history_async(self, chat_id, max_messages, /):
+            calls.append((chat_id, max_messages))
+            return [{"role": "user", "content": str(index)} for index in range(200)]
+
+    history = await read_legacy_history_bounded(ContextManager(), "legacy-chat")
+
+    assert calls == [("legacy-chat", 100)]
+    assert len(history) == 100
 
 
 @pytest.mark.asyncio

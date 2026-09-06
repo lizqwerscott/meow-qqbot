@@ -86,6 +86,7 @@ class ArchiveJSONLExportAdapter:
             batch.chat_id,
             upto_seq=batch.captured_cutoff_seq,
             include_internal=True,
+            event_ids=tuple(sorted(event_ids)),
         )
         events = tuple(
             event for event in snapshot.events if event.event_id in event_ids

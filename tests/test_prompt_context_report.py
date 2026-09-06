@@ -50,3 +50,30 @@ async def test_prompt_context_report_webui_listing_supports_count_and_offset(tmp
     assert len(reports) == 1
     assert reports[0].turn_id == "turn-1"
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_prompt_context_report_status_aggregates_fallbacks(tmp_path):
+    store = PromptContextReportStore(str(tmp_path / "reports.sqlite3"))
+    await store.record(
+        chat_id="chat",
+        turn_id="turn-1",
+        source="prompt_projection",
+        estimated_tokens=12,
+    )
+    await store.record(
+        chat_id="chat",
+        turn_id="turn-2",
+        source="bounded_fallback",
+        estimated_tokens=8,
+        fallback_reason="projection unavailable",
+        degraded_reason="bounded",
+    )
+
+    assert await store.status() == {
+        "report_count": 2,
+        "fallback_count": 1,
+        "degraded_count": 1,
+        "estimated_tokens": 20,
+    }
+    await store.close()

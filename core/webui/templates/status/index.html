@@ -68,6 +68,18 @@
 </div>
 {% endif %}
 
+{% if stats.prompt_projection or stats.archive or stats.prompt_reports %}
+<div class="card" style="margin-top:20px">
+    <h2>📚 账本投影与归档观测</h2>
+    {% set projection = stats.prompt_projection or {} %}
+    {% set archive = stats.archive or {} %}
+    {% set reports = stats.prompt_reports or {} %}
+    <p>Prompt visibility: {{ projection.visibility_count or 0 }}（visible {{ projection.visible_count or 0 }} · hidden {{ projection.hidden_count or 0 }}） · projection lag {{ projection.projection_lag or 0 }}</p>
+    <p>Archive batches: {{ archive.batch_count or 0 }}（pending {{ archive.pending_count or 0 }} · events {{ archive.event_count or 0 }}） · export failures {{ archive.export_failed_count or 0 }}</p>
+    <p>Prompt reports: {{ reports.report_count or 0 }} · fallback {{ reports.fallback_count or 0 }} · degraded {{ reports.degraded_count or 0 }}</p>
+</div>
+{% endif %}
+
 {% set ambient = stats.engagement_status.ambient if stats.engagement_status else {} %}
 <div class="card" style="margin-top:20px">
     <h2>群聊自动回复</h2>

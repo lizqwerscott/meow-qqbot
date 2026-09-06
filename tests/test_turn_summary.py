@@ -87,6 +87,39 @@ async def test_turn_summary_uses_complete_terminal_turn_and_is_idempotent(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_archived_summary_reads_only_selected_turn_bodies(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    store = TurnSummaryStore(log, path=str(tmp_path / "summaries.sqlite3"))
+    for index in range(2):
+        turn_id = f"turn-{index}"
+        await log.append_user_message(
+            chat_id="chat",
+            turn_id=turn_id,
+            message_id=f"message-{index}",
+            content=f"问题 {index}",
+        )
+        await log.append_turn_terminal(chat_id="chat", turn_id=turn_id)
+
+    original_snapshot_events = log.snapshot_events
+    snapshot_calls = []
+
+    async def tracked_snapshot_events(*args, **kwargs):
+        snapshot_calls.append(kwargs)
+        return await original_snapshot_events(*args, **kwargs)
+
+    log.snapshot_events = tracked_snapshot_events
+    await store.ensure_for_archived_events("chat", ["user:message-0"])
+
+    assert snapshot_calls[0].get("event_ids") == ("user:message-0",)
+    assert snapshot_calls[1].get("turn_ids") == ("turn-0",)
+    assert all(
+        call.get("event_ids") or call.get("turn_ids") for call in snapshot_calls
+    )
+    await store.close()
+    await log.close()
+
+
+@pytest.mark.asyncio
 async def test_summary_selection_limits_batches_and_rolls_up_older_turns(tmp_path):
     log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
     store = TurnSummaryStore(

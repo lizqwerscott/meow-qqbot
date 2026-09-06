@@ -28,7 +28,11 @@ from core.engine.batch_media_context import (
     BatchMediaLimits,
 )
 from core.engine.context import EngineContext
-from core.engine.conversation_event_log import ConversationEventLog, TurnKind
+from core.engine.conversation_event_log import (
+    ConversationEventLog,
+    EventLogInvariantError,
+    TurnKind,
+)
 from core.engine.conversation_scheduler import ConversationScheduler
 from core.engine.conversation_timeline import ConversationTimeline
 from core.engine.delivery_ledger import (
@@ -41,6 +45,7 @@ from core.engine.delivery_ledger import (
 from core.engine.delivery_prompt_contract import DeliveryPromptContract
 from core.engine.engagement_config import get_group_reply_settings
 from core.engine.group_engagement import GroupEngagementManager
+from core.engine.history_projection import read_legacy_history_bounded
 from core.engine.mode_router import (
     ActiveWorkPlanHint,
     ModeRouteInput,
@@ -282,7 +287,7 @@ class AgentEngine:
         self._delivery_recovery_task: Optional[asyncio.Task] = None
         self._engagement_admission_lock = asyncio.Lock()
         self._group_target_observer = None
-        self.timeline = ConversationTimeline()
+        self.timeline = None
         self.event_log = ConversationEventLog(
             timezone_name=str(
                 getattr(ctx.mgmt, "archive_timezone", "Asia/Shanghai")
@@ -293,7 +298,7 @@ class AgentEngine:
         self.turn_summary_store = TurnSummaryStore(self.event_log)
         self.prompt_context_reports = PromptContextReportStore()
         self.protocol_projection = ProtocolProjection(self.event_log)
-        self.protocol_history = TurnProtocolHistory()
+        self.protocol_history = None
         model_context_config = getattr(ctx.mgmt, "model_context_config", {}) or {}
         projection_enabled = bool(model_context_config.get("enabled", False))
         projection_mode = str(
@@ -686,12 +691,14 @@ class AgentEngine:
             self.protocol_projection = projection
         return projection
 
-    async def _get_protocol_snapshot(self, turn_id: str) -> tuple:
+    async def _get_protocol_snapshot(
+        self, turn_id: str, *, chat_id: str | None = None
+    ) -> tuple:
         if not turn_id:
             return ()
         if getattr(self, "event_log", None) is None:
             return ()
-        return await self._get_protocol_projection().snapshot(turn_id)
+        return await self._get_protocol_projection().snapshot(turn_id, chat_id=chat_id)
 
     async def _get_prompt_timeline_snapshot(
         self, chat_id: str, *, current_turn_id: str = ""
@@ -700,7 +707,7 @@ class AgentEngine:
             timeline = getattr(self, "timeline", None)
             snapshot = getattr(timeline, "snapshot", None)
             if callable(snapshot):
-                return await snapshot(chat_id)
+                return await snapshot(chat_id, max_events=100)
             return ()
         projection = self._get_prompt_history_projection()
         projected = await projection.snapshot_for_prompt(
@@ -721,6 +728,36 @@ class AgentEngine:
                 turn_id=turn_id,
                 status=status,
             )
+        except EventLogInvariantError as exc:
+            if status == "incomplete":
+                _log.warning(
+                    "核心会话 turn 终态校验失败 [%s..] turn=%s: %s",
+                    chat_id[:12],
+                    turn_id[:12],
+                    exc,
+                )
+                return
+            try:
+                await event_log.append_turn_terminal(
+                    chat_id=chat_id,
+                    turn_id=turn_id,
+                    status="incomplete",
+                )
+                _log.warning(
+                    "核心会话 turn 协议不完整，已降级为 incomplete [%s..] turn=%s: %s",
+                    chat_id[:12],
+                    turn_id[:12],
+                    exc,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as fallback_exc:
+                _log.warning(
+                    "核心会话 turn incomplete 终态写入失败 [%s..] turn=%s: %s",
+                    chat_id[:12],
+                    turn_id[:12],
+                    fallback_exc,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -752,6 +789,9 @@ class AgentEngine:
         archive_index = getattr(archive_manager, "_archive_index", None)
         if archive_index is not None:
             await archive_index.clear_chat(chat_id)
+        clear_pending = getattr(archive_manager, "clear_pending_operations_async", None)
+        if callable(clear_pending):
+            await clear_pending(chat_id)
 
     async def _record_timeline_user_message(
         self,
@@ -805,6 +845,8 @@ class AgentEngine:
         get_history = getattr(
             self.context_manager, "get_legacy_chat_history_async", None
         )
+        if getattr(self, "event_log", None) is not None:
+            return
         if get_history is None:
             get_history = getattr(self.context_manager, "get_chat_history_async", None)
         if get_history is None:
@@ -814,11 +856,10 @@ class AgentEngine:
         if repair is None:
             return
         try:
-            history = await get_history(chat_id)
             event_log = self._get_event_log()
-            existing = await event_log.snapshot_events(chat_id, include_internal=True)
-            if existing.events:
+            if await event_log.latest_event_seq(chat_id):
                 return
+            history = await get_history(chat_id)
             migrated = await repair(chat_id, history)
             event_log_repair = getattr(event_log, "repair_from_legacy_history", None)
             if event_log_repair is not None:
@@ -852,16 +893,159 @@ class AgentEngine:
 
     async def get_history_migration_status(self, chat_id: str) -> dict:
         """Return non-content readiness for retiring legacy prompt history."""
+        event_log = getattr(self, "event_log", None)
+        if event_log is not None:
+            summary = await event_log.session_summary(chat_id)
+            migration_check = getattr(event_log, "legacy_migration_is_complete", None)
+            global_migration_complete = (
+                bool(await migration_check()) if callable(migration_check) else True
+            )
+            chat_migration_check = getattr(
+                event_log, "legacy_chat_migration_is_complete", None
+            )
+            migration_complete = (
+                bool(await chat_migration_check(chat_id))
+                if callable(chat_migration_check)
+                else global_migration_complete
+            )
+            conflict_reader = getattr(event_log, "legacy_conflict_event_ids", None)
+            conflict_count = 0
+            if callable(conflict_reader):
+                try:
+                    conflict_count = len(await conflict_reader(chat_id, max_ids=100))
+                except (asyncio.CancelledError,):
+                    raise
+                except Exception as exc:
+                    _log.warning(
+                        "读取 legacy identity 冲突失败 [%s..]: %s",
+                        chat_id[:12],
+                        exc,
+                    )
+            report = {
+                "chat_id": chat_id,
+                "legacy_visible_count": int(summary.get("message_count", 0)),
+                "timeline_visible_count": int(summary.get("message_count", 0)),
+                "missing_legacy_visible_count": 0,
+                "extra_timeline_visible_count": 0,
+                "legacy_protocol_count": 0,
+                "ready_for_legacy_read_removal": migration_complete,
+                "legacy_read": False,
+                "legacy_migration_complete": global_migration_complete,
+                "legacy_chat_migration_complete": migration_complete,
+                "legacy_conflict_count": conflict_count,
+            }
+            try:
+                report["event_integrity"] = await event_log.integrity_summary(chat_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log.warning("读取账本完整性状态失败 [%s..]: %s", chat_id[:12], exc)
+                report["event_integrity"] = {"error": "unavailable"}
+            return report
         get_legacy = getattr(
             self.context_manager, "get_legacy_chat_history_async", None
         )
         legacy = await (get_legacy or self.context_manager.get_chat_history_async)(
             chat_id
         )
-        return (await self._get_timeline().migration_report(chat_id, legacy)).to_dict()
+        report = (
+            await self._get_timeline().migration_report(chat_id, legacy)
+        ).to_dict()
+        return report
 
     async def get_history_migration_summary(self) -> dict:
         """Scan all known sessions and return content-free migration readiness."""
+        event_log = getattr(self, "event_log", None)
+        if event_log is not None:
+            chat_ids = set(await event_log.chat_ids())
+            migration_check = getattr(event_log, "legacy_migration_is_complete", None)
+            global_migration_complete = (
+                bool(await migration_check()) if callable(migration_check) else True
+            )
+            legacy_scan_error = False
+            legacy_chat_ids: set[str] | None = None
+            if not global_migration_complete:
+                legacy_ids_reader = getattr(
+                    self.context_manager, "get_legacy_chat_ids_async", None
+                )
+                if callable(legacy_ids_reader):
+                    try:
+                        legacy_chat_ids = {
+                            str(chat_id) for chat_id in await legacy_ids_reader()
+                        }
+                        chat_ids.update(legacy_chat_ids)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        legacy_scan_error = True
+                        _log.warning(
+                            "枚举 legacy 迁移会话失败，摘要保持未完成: %s", exc
+                        )
+            chat_migration_check = getattr(
+                event_log, "legacy_chat_migration_is_complete", None
+            )
+            reports = []
+            ready_count = 0
+            missing_legacy_count = 0
+            for chat_id in sorted(chat_ids):
+                summary = await event_log.session_summary(chat_id)
+                needs_legacy_migration = not global_migration_complete and (
+                    legacy_scan_error
+                    or legacy_chat_ids is None
+                    or chat_id in legacy_chat_ids
+                )
+                chat_complete = (
+                    bool(await chat_migration_check(chat_id))
+                    if needs_legacy_migration and callable(chat_migration_check)
+                    else not needs_legacy_migration
+                )
+                ready_count += int(chat_complete)
+                if needs_legacy_migration and not summary.get(
+                    "event_count", summary.get("message_count", 0)
+                ):
+                    missing_legacy_count += int(not chat_complete)
+                conflict_count = 0
+                conflict_reader = getattr(event_log, "legacy_conflict_event_ids", None)
+                if callable(conflict_reader):
+                    try:
+                        conflict_count = len(
+                            await conflict_reader(chat_id, max_ids=100)
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        _log.warning(
+                            "读取 legacy identity 冲突失败 [%s..]: %s",
+                            chat_id[:12],
+                            exc,
+                        )
+                reports.append(
+                    {
+                        "legacy_visible_count": int(summary.get("message_count", 0)),
+                        "timeline_visible_count": int(summary.get("message_count", 0)),
+                        "missing_legacy_visible_count": 0,
+                        "extra_timeline_visible_count": 0,
+                        "legacy_protocol_count": 0,
+                        "ready_for_legacy_read_removal": chat_complete,
+                        "legacy_conflict_count": conflict_count,
+                    }
+                )
+            migration_complete = global_migration_complete and (
+                not legacy_scan_error and ready_count == len(reports)
+            )
+            return {
+                "session_count": len(reports),
+                "sessions_with_missing_legacy_visible": missing_legacy_count,
+                "sessions_with_legacy_protocol": 0,
+                "legacy_conflict_count": sum(
+                    int(report.get("legacy_conflict_count", 0)) for report in reports
+                ),
+                "sessions_ready_for_legacy_read_removal": ready_count,
+                "sessions_with_scan_errors": int(legacy_scan_error),
+                "ready_for_legacy_read_removal": migration_complete,
+                "legacy_read": False,
+                "legacy_migration_complete": global_migration_complete,
+            }
         chat_ids: set[str] = set()
         for method_name in (
             "get_all_chat_ids_async",
@@ -1037,15 +1221,12 @@ class AgentEngine:
         if scope is None or not getattr(self, "model_context_write_enabled", False):
             return
         scope = await self._get_model_context().current_scope(scope)
-        event_snapshot = await self._get_event_log().snapshot_events(
-            scope.chat_id, include_internal=False
+        user_events = await self._get_event_log().user_messages_by_id(
+            scope.chat_id, tuple(message_ids)
         )
-        user_events = tuple(
-            event
-            for event in event_snapshot.events
-            if event.role == "user" and event.message_id in message_ids
+        protocol_events = await self._get_protocol_snapshot(
+            turn_id, chat_id=scope.chat_id
         )
-        protocol_events = await self._get_protocol_snapshot(turn_id)
         if not protocol_events:
             raise ModelContextInvariantError(
                 f"turn has no protocol to materialize: {turn_id}"
@@ -1124,12 +1305,13 @@ class AgentEngine:
                 from core.engine.engagement_config import EngagementConfig
 
                 config = EngagementConfig()
+            event_log = getattr(self, "event_log", None)
             controller = DeliveryController(
                 DeliveryLedger(),
                 retry_base_seconds=config.delivery_retry_base_seconds,
                 max_attempts=config.delivery_retry_max_attempts,
-                timeline=self._get_timeline(),
-                event_log=getattr(self, "event_log", None),
+                timeline=None if event_log is not None else self._get_timeline(),
+                event_log=event_log,
                 audit_delivery=(
                     task_state_store.record_delivery
                     if (task_state_store := getattr(self, "_task_state_store", None))
@@ -1157,15 +1339,30 @@ class AgentEngine:
 
             async def _resolve_content(record: DeliveryRecord) -> Optional[str]:
                 event_log = getattr(self, "event_log", None)
+                if event_log is not None:
+                    reader = getattr(event_log, "accepted_delivery_content", None)
+                    if callable(reader):
+                        content = await reader(chat_id, record.reply_anchor_id)
+                        if content:
+                            return content
+                        return None
                 history = (
-                    await event_log.history(chat_id) if event_log is not None else []
+                    await event_log.history(chat_id, max_events=100)
+                    if event_log is not None
+                    else []
                 )
                 if event_log is None:
                     timeline = getattr(self, "timeline", None)
                     history_reader = getattr(timeline, "history", None)
-                    history = await history_reader(chat_id) if history_reader else []
+                    history = (
+                        await history_reader(chat_id, max_events=100)
+                        if history_reader
+                        else []
+                    )
                 if event_log is None and not history:
-                    history = await self.context_manager.get_chat_history_async(chat_id)
+                    history = await read_legacy_history_bounded(
+                        self.context_manager, chat_id
+                    )
                 for item in reversed(history):
                     if (
                         item.get("role") == "assistant"
@@ -1745,7 +1942,7 @@ class AgentEngine:
         history_reader = getattr(timeline, "history", None)
         if callable(history_reader):
             try:
-                timeline_history = await history_reader(chat_id)
+                timeline_history = await history_reader(chat_id, max_events=100)
                 if any(
                     item.get("role") == "user" and item.get("message_id") == message_id
                     for item in timeline_history
@@ -1755,10 +1952,7 @@ class AgentEngine:
                 raise
             except Exception as exc:
                 _log.debug("timeline 准入检查失败 [%s..]: %s", chat_id[:12], exc)
-        get_history = getattr(self.context_manager, "get_chat_history_async", None)
-        if get_history is None:
-            return False
-        history = await get_history(chat_id)
+        history = await read_legacy_history_bounded(self.context_manager, chat_id)
         return any(
             item.get("role") == "user" and item.get("message_id") == message_id
             for item in history
@@ -1785,10 +1979,59 @@ class AgentEngine:
             expired_waits = await task_state_store.expire_waiting_turns()
             if expired_waits:
                 _log.info("已终止 %d 个重启后已过期的 WAITING turn", len(expired_waits))
+        archive_manager = getattr(self, "_archive_manager", None)
+        recover_archives = getattr(
+            archive_manager, "recover_event_log_archives_async", None
+        )
+        if callable(recover_archives):
+            recovered_archives = await recover_archives()
+            if recovered_archives:
+                _log.info("启动期账本归档恢复完成: %d 个会话", recovered_archives)
+        await self._repair_prompt_projection_on_startup()
         await self._repair_model_context_on_startup()
         await self._process_admission_outbox()
         await self._ensure_delivery_recovery_worker()
         await self._resume_preserved_consumers()
+
+    async def _repair_prompt_projection_on_startup(self) -> None:
+        """Backfill missing prompt visibility metadata without reading legacy history."""
+        event_log = getattr(self, "event_log", None)
+        projection = getattr(self, "prompt_history_projection", None)
+        if event_log is None or projection is None:
+            return
+        try:
+            chat_ids = await event_log.chat_ids()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.warning("Prompt projection 启动 repair 会话枚举失败: %s", exc)
+            return
+        interactive_chat_ids = [
+            chat_id
+            for chat_id in chat_ids
+            if not str(chat_id).startswith(("task:", "cron:", "heartbeat:"))
+        ]
+        inserted = 0
+        failed = 0
+        for chat_id in interactive_chat_ids:
+            try:
+                report = await projection.repair_chat(chat_id)
+                inserted += report.inserted_event_count
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failed += 1
+                _log.warning(
+                    "Prompt projection 启动 repair 失败 [%s..]: %s",
+                    str(chat_id)[:12],
+                    exc,
+                )
+        _log.info(
+            "Prompt projection 启动 repair 完成: chats=%d inserted=%d failed=%d",
+            len(interactive_chat_ids),
+            inserted,
+            failed,
+        )
 
     async def _repair_model_context_on_startup(self) -> None:
         if not getattr(self, "model_context_enabled", False):
@@ -2883,7 +3126,9 @@ class AgentEngine:
                 timeline_snapshot=await self._get_prompt_timeline_snapshot(
                     chat_id, current_turn_id=turn_id
                 ),
-                protocol_snapshot=await self._get_protocol_snapshot(turn_id),
+                protocol_snapshot=await self._get_protocol_snapshot(
+                    turn_id, chat_id=chat_id
+                ),
                 delivery_contract=self._delivery_contract(
                     current_pending.intent, decision.reply_anchor_id or input_message.id
                 ),
@@ -3187,7 +3432,9 @@ class AgentEngine:
                 timeline_snapshot=await self._get_prompt_timeline_snapshot(
                     chat_id, current_turn_id=active_turn_id
                 ),
-                protocol_snapshot=await self._get_protocol_snapshot(active_turn_id),
+                protocol_snapshot=await self._get_protocol_snapshot(
+                    active_turn_id, chat_id=chat_id
+                ),
                 model_context_snapshot=await self._model_context_snapshot(
                     prompt_state["scope"]
                 ),
@@ -4029,6 +4276,35 @@ class AgentEngine:
             "cache_usage_missing_count": g.cache_usage_missing_count,
         }
 
+        prompt_projection = getattr(self, "prompt_history_projection", None)
+        if prompt_projection is not None:
+            try:
+                stats["prompt_projection"] = await prompt_projection.status()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log.warning("读取 Prompt projection 状态失败: %s", exc)
+                stats["prompt_projection"] = {"error": "unavailable"}
+        archive_manager = getattr(self, "_archive_manager", None)
+        archive_index = getattr(archive_manager, "_archive_index", None)
+        if archive_index is not None:
+            try:
+                stats["archive"] = await archive_index.status()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log.warning("读取归档索引状态失败: %s", exc)
+                stats["archive"] = {"error": "unavailable"}
+        prompt_reports = getattr(self, "prompt_context_reports", None)
+        if prompt_reports is not None:
+            try:
+                stats["prompt_reports"] = await prompt_reports.status()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log.warning("读取 Prompt 报告状态失败: %s", exc)
+                stats["prompt_reports"] = {"error": "unavailable"}
+
         if getattr(self, "model_context_enabled", False):
             stats["model_context"] = {
                 **await self._get_model_context().status(),
@@ -4105,6 +4381,13 @@ class AgentEngine:
         archive_index = getattr(archive_manager, "_archive_index", None)
         if archive_index is not None:
             await archive_index.close()
+        for legacy_projection in (
+            getattr(self, "timeline", None),
+            getattr(self, "protocol_history", None),
+        ):
+            close = getattr(legacy_projection, "close", None)
+            if close is not None:
+                await close()
 
         if self.hindsight:
             await self.hindsight.close()

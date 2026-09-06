@@ -254,6 +254,26 @@ class PromptContextReportStore:
                 ).fetchone()[0]
             )
 
+    async def status(self) -> dict[str, int]:
+        """Return aggregate prompt source and fallback counters."""
+        conn = await self._ensure_open()
+        async with self._lock:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS report_count,
+                       COALESCE(SUM(fallback_reason <> ''), 0) AS fallback_count,
+                       COALESCE(SUM(degraded_reason <> ''), 0) AS degraded_count,
+                       COALESCE(SUM(estimated_tokens), 0) AS estimated_tokens
+                  FROM prompt_context_reports
+                """
+            ).fetchone()
+        return {
+            "report_count": int(row["report_count"]),
+            "fallback_count": int(row["fallback_count"]),
+            "degraded_count": int(row["degraded_count"]),
+            "estimated_tokens": int(row["estimated_tokens"]),
+        }
+
     async def clear_chat(self, chat_id: str) -> None:
         conn = await self._ensure_open()
         async with self._lock:

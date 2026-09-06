@@ -1,13 +1,15 @@
 import asyncio
 import threading
+from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from core.engine.conversation_event_log import ConversationEventLog
+from core.engine.prompt_history_projection import PromptHistoryProjection
 from core.managers.context_compactor import CompactionResult
-from core.managers.context_manager import ChatContextManager
+from core.managers.context_manager import ChatContextManager, _scan_legacy_store_ids
 from core.managers.context_store import MemoryContextStore
 
 
@@ -34,6 +36,35 @@ class FakeCompactor:
 @pytest.fixture
 def compactor():
     return FakeCompactor()
+
+
+def test_scan_legacy_store_ids_includes_archived_sessions():
+    class LegacyStore(MemoryContextStore):
+        def get_all_disk_ids(self):
+            return []
+
+        def get_archived_summary(self):
+            return {"archived-chat": 2}
+
+    assert _scan_legacy_store_ids(LegacyStore()) == {"archived-chat"}
+
+
+def test_token_cache_prune_removes_matching_timestamp():
+    manager = ChatContextManager(store=MemoryContextStore())
+    manager._token_cache = OrderedDict(
+        [("old", 1), ("new", 2), ("newest", 3)]
+    )
+    manager._token_cache_time = {
+        "old": 10.0,
+        "new": 20.0,
+        "newest": 30.0,
+    }
+    manager._token_cache_max_size = 2
+
+    manager._prune_token_cache()
+
+    assert list(manager._token_cache) == ["new", "newest"]
+    assert manager._token_cache_time == {"new": 20.0, "newest": 30.0}
 
 
 @pytest.fixture
@@ -75,6 +106,67 @@ async def test_event_log_session_enumeration_does_not_scan_legacy_store(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_event_log_user_dedup_uses_identity_lookup_without_snapshot(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    manager = ChatContextManager(store=MemoryContextStore())
+    manager.set_event_log(event_log)
+    await event_log.append_user_message(
+        chat_id="ledger-chat",
+        turn_id="turn-1",
+        message_id="message-1",
+        content="已有消息",
+    )
+    event_log.snapshot_events = AsyncMock(
+        side_effect=AssertionError("dedup must not materialize the ledger")
+    )
+
+    assert await manager.add_user_message_async(
+        "ledger-chat", "已有消息", message_id="message-1"
+    ) is False
+    assert await manager.add_user_message_async(
+        "ledger-chat", "新消息", message_id="message-2"
+    ) is True
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_recent_user_contents_uses_bounded_prompt_projection(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    projection = PromptHistoryProjection(
+        event_log, metadata_path=str(tmp_path / "projection.sqlite3")
+    )
+    manager = ChatContextManager(store=MemoryContextStore())
+    manager.set_event_log(event_log)
+    manager.set_prompt_projection(projection)
+    await event_log.append_user_message(
+        chat_id="chat",
+        turn_id="turn-old",
+        message_id="old",
+        content="old duplicate",
+    )
+    await event_log.append_turn_terminal(chat_id="chat", turn_id="turn-old")
+    await event_log.append_user_message(
+        chat_id="chat",
+        turn_id="turn-new",
+        message_id="new",
+        content="new message",
+    )
+    await event_log.append_turn_terminal(chat_id="chat", turn_id="turn-new")
+    await projection.apply_archive_retention(
+        "chat",
+        operation_id="archive-old",
+        hidden_event_ids=("user:old", "terminal:turn-old"),
+        captured_cutoff_seq=2,
+    )
+
+    assert await manager.get_recent_user_contents_async("chat", count=2) == [
+        "new message"
+    ]
+    await event_log.close()
+    await projection.close()
+
+
+@pytest.mark.asyncio
 async def test_event_log_session_clear_purges_legacy_store(tmp_path):
     event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
     store = MemoryContextStore()
@@ -85,7 +177,75 @@ async def test_event_log_session_clear_purges_legacy_store(tmp_path):
     await manager.clear_chat_history_async("chat")
 
     assert store.load("chat") is None
+    assert await event_log.history("chat") == []
     await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_recent_user_contents_bounds_ledger_read(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await event_log.append_user_message(
+        chat_id="chat", turn_id="turn-1", message_id="message-1", content="hello"
+    )
+    manager = ChatContextManager(store=MemoryContextStore())
+    manager.set_event_log(event_log)
+
+    assert await manager.get_recent_user_contents_async("chat", count=2) == ["hello"]
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_recent_user_contents_uses_bounded_event_window():
+    calls = []
+
+    class EventLog:
+        async def history(self, chat_id, **kwargs):
+            calls.append((chat_id, kwargs))
+            return [{"role": "user", "content": "hello"}]
+
+    manager = ChatContextManager(store=MemoryContextStore())
+    manager.set_event_log(EventLog())
+
+    assert await manager.get_recent_user_contents_async("chat", count=3) == ["hello"]
+    assert calls == [("chat", {"max_events": 20})]
+
+
+@pytest.mark.asyncio
+async def test_event_log_history_defaults_to_bounded_window():
+    calls = []
+
+    class EventLog:
+        async def history(self, chat_id, **kwargs):
+            calls.append((chat_id, kwargs))
+            return [{"role": "user", "content": "hello"}]
+
+    manager = ChatContextManager(store=MemoryContextStore())
+    manager.set_event_log(EventLog())
+
+    assert await manager.get_chat_history_async("chat") == [
+        {"role": "user", "content": "hello"}
+    ]
+    assert calls == [("chat", {"max_events": 100})]
+
+
+@pytest.mark.asyncio
+async def test_event_log_mode_does_not_read_legacy_archives():
+    class LegacyStore(MemoryContextStore):
+        def get_archived_summary(self):
+            raise AssertionError("ledger mode must not read legacy archive summary")
+
+        def list_archives(self, chat_id):
+            raise AssertionError("ledger mode must not list legacy archives")
+
+        def read_archive(self, file_path, max_messages=200):
+            raise AssertionError("ledger mode must not read legacy archive bodies")
+
+    manager = ChatContextManager(store=LegacyStore())
+    manager.set_event_log(object())
+
+    assert await manager.get_archived_sessions_summary_async() == {}
+    assert await manager.get_archived_files_async("chat") == []
+    assert await manager.read_archived_messages_async("archive.jsonl") == []
 
 
 @pytest.mark.asyncio
@@ -295,6 +455,29 @@ async def test_compact_history_if_needed_noop(mgr):
     assert compacted is False
     assert usage is None
     assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_ledger_compaction_noop_uses_bounded_projection():
+    calls = []
+
+    class EventLog:
+        async def history(self, chat_id, **kwargs):
+            raise AssertionError("legacy compaction must not read ledger bodies")
+
+    class Projection:
+        async def snapshot_for_prompt(self, chat_id):
+            calls.append(chat_id)
+            return SimpleNamespace(events=(1, 2))
+
+    manager = ChatContextManager(store=MemoryContextStore())
+    manager.set_event_log(EventLog())
+    manager.set_prompt_projection(Projection())
+
+    result = await manager.compact_history_if_needed("chat", force=True)
+
+    assert result == (False, None, 2)
+    assert calls == ["chat"]
 
 
 @pytest.mark.asyncio

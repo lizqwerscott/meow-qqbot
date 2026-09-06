@@ -177,6 +177,44 @@ async def test_archive_rotation_replay_does_not_advance_generation_again(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_archive_rotation_invalidates_stale_scope_for_future_appends(tmp_path):
+    transcript = ModelContextTranscript(str(tmp_path / "model-context.sqlite3"))
+    scope = _scope()
+    await transcript.append_turn(
+        scope,
+        turn_id="turn-1",
+        user_events=(
+            SimpleNamespace(
+                role="user",
+                event_id="user:1",
+                content="old",
+                sender_id="user-1",
+                timestamp=10,
+            ),
+        ),
+        protocol_events=_protocol("turn-1", "old answer"),
+    )
+    await transcript.rotate_for_hidden_sources(
+        scope,
+        ["user:1"],
+        summary_texts=("old turn summary",),
+        operation_id="archive-op:stale-scope",
+    )
+
+    with pytest.raises(ModelContextInvariantError, match="stale model context"):
+        await transcript.append_turn(
+            scope,
+            turn_id="turn-2",
+            user_events=(),
+            protocol_events=_protocol("turn-2", "must use new generation"),
+        )
+    snapshot = await transcript.snapshot(scope)
+    assert [event.content for event in snapshot.events] == ["old turn summary"]
+    assert "old answer" not in str(snapshot.to_wire())
+    await transcript.close()
+
+
+@pytest.mark.asyncio
 async def test_transcript_rejects_incomplete_tool_protocol(tmp_path):
     transcript = ModelContextTranscript(str(tmp_path / "model-context.sqlite3"))
     assistant = ProtocolEvent(

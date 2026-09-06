@@ -343,6 +343,60 @@ async def test_session_detail_pages_complete_turns_and_keeps_tools_collapsed(tmp
 
 
 @pytest.mark.asyncio
+async def test_session_detail_shows_turn_integrity_and_repair_revision(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await event_log.append_user_message(
+        chat_id="broken-chat",
+        turn_id="broken-turn",
+        message_id="user-1",
+        content="需要工具",
+        timestamp=1,
+    )
+    await event_log.append_event(
+        ConversationEvent(
+            chat_id="broken-chat",
+            turn_id="broken-turn",
+            event_id="assistant:call-1",
+            role="assistant",
+            kind="assistant_tool_call",
+            tool_calls=(
+                {"id": "call-1", "function": {"name": "lookup"}},
+            ),
+        )
+    )
+    await event_log.append_turn_terminal(
+        chat_id="broken-chat",
+        turn_id="broken-turn",
+        status="incomplete",
+        timestamp=2,
+    )
+    await event_log.append_repair_revision(
+        chat_id="broken-chat",
+        original_turn_id="broken-turn",
+        revision_id="rev-1",
+        reason="保留异常供人工核对",
+        operator="admin",
+    )
+
+    app = create_app(
+        {
+            "context_manager": _ContextManager(),
+            "conversation_event_log": event_log,
+        },
+        {},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/sessions/broken-chat")
+
+    assert response.status_code == 200
+    assert "完整性: missing_tool_result" in response.text
+    assert "rev-1" in response.text
+    assert "保留异常供人工核对" in response.text
+    await event_log.close()
+
+
+@pytest.mark.asyncio
 async def test_archive_views_use_ledger_index_without_reading_jsonl(tmp_path):
     event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
     projection = PromptHistoryProjection(
@@ -618,3 +672,34 @@ async def test_prompt_view_pages_selected_turns_without_materializing_turn_index
     assert "Prompt 问题 1" not in response.text
     await event_log.close()
     await projection.close()
+
+
+@pytest.mark.asyncio
+async def test_prompt_view_without_projection_uses_bounded_ledger_fallback(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await event_log.append_user_message(
+        chat_id="bounded-fallback",
+        turn_id="turn-1",
+        message_id="message-1",
+        content="bounded",
+    )
+    original_snapshot = event_log.snapshot_events
+    observed = {}
+
+    async def snapshot(*args, **kwargs):
+        observed.update(kwargs)
+        return await original_snapshot(*args, **kwargs)
+
+    event_log.snapshot_events = snapshot
+    app = create_app(
+        {"context_manager": _ContextManager(), "conversation_event_log": event_log},
+        {},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/sessions/bounded-fallback/prompt")
+
+    assert response.status_code == 200
+    assert observed["max_events"] == 100
+    assert "projection_unavailable_bounded" in response.text
+    await event_log.close()

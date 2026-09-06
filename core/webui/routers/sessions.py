@@ -10,7 +10,10 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.status import HTTP_303_SEE_OTHER, HTTP_400_BAD_REQUEST
 
-from core.engine.history_projection import visible_legacy_history
+from core.engine.history_projection import (
+    read_legacy_history_bounded,
+    visible_legacy_history,
+)
 from core.managers.chat_message import strip_content_prefix
 
 _log = logging.getLogger(__name__)
@@ -28,6 +31,7 @@ _SENSITIVE_TEXT_PATTERN = re.compile(
 _BEARER_PATTERN = re.compile(r"(?i)(bearer\s+)([^\s,;]+)")
 _PAGE_SIZE_DEFAULT = 20
 _PAGE_SIZE_MAX = 100
+_LEGACY_PROTOCOL_MAX_EVENTS = 1000
 _TURN_KIND_LABELS = {
     "ai": "AI 对话",
     "ambient": "群聊闲聊",
@@ -161,19 +165,15 @@ async def _repair_timeline_from_legacy(context_manager, timeline, chat_id: str):
     if timeline is None:
         return
     repair = getattr(timeline, "repair_from_legacy_history", None)
-    get_history = getattr(context_manager, "get_chat_history_async", None)
-    if not callable(repair) or not callable(get_history):
+    if not callable(repair):
         return
-    legacy_history = await get_history(chat_id)
+    legacy_history = await read_legacy_history_bounded(context_manager, chat_id)
     await repair(chat_id, legacy_history)
 
 
 async def _legacy_protocol_history(context_manager, chat_id: str) -> list[dict]:
     """Expose protocol records persisted before the protocol projection existed."""
-    get_history = getattr(context_manager, "get_chat_history_async", None)
-    if not callable(get_history):
-        return []
-    history = await get_history(chat_id)
+    history = await read_legacy_history_bounded(context_manager, chat_id)
     return [
         message for message in history if message.get("role") in {"assistant", "tool"}
     ]
@@ -183,10 +183,9 @@ async def _claim_legacy_protocol_history(
     protocol_history, context_manager, chat_id: str
 ) -> None:
     claim = getattr(protocol_history, "claim_orphan_turns", None)
-    get_history = getattr(context_manager, "get_chat_history_async", None)
-    if not callable(claim) or not callable(get_history):
+    if not callable(claim):
         return
-    history = await get_history(chat_id)
+    history = await read_legacy_history_bounded(context_manager, chat_id)
     turn_ids = [str(message.get("message_id") or "") for message in history]
     await claim(chat_id, turn_ids)
 
@@ -874,6 +873,7 @@ async def session_detail(
         statuses = {turn.turn_id: str(turn.status) for turn in turn_page.turns}
         turn_kinds = {turn.turn_id: turn.turn_kind.value for turn in turn_page.turns}
         turns = _chat_turn_cards(turn_page.events, statuses, turn_kinds)
+        await _attach_integrity_diagnostics(event_log, chat_id, turns)
         pagination = {
             "page": turn_page.page,
             "page_size": turn_page.page_size,
@@ -881,16 +881,16 @@ async def session_detail(
             "total_pages": turn_page.total_pages,
         }
     else:
-        history = await timeline.history(chat_id) if timeline else []
+        history = await timeline.history(chat_id, max_events=100) if timeline else []
         if not history and timeline is not None:
             try:
                 await _repair_timeline_from_legacy(context_manager, timeline, chat_id)
-                history = await timeline.history(chat_id)
+                history = await timeline.history(chat_id, max_events=100)
             except Exception:
                 pass
         if not history:
             history = visible_legacy_history(
-                await context_manager.get_chat_history_async(chat_id)
+                await read_legacy_history_bounded(context_manager, chat_id)
             )
         history.reverse()
         turns, pagination = _paginate_cards(
@@ -1001,12 +1001,16 @@ async def session_protocol_detail(
             if message.get("kind") in {"assistant_tool_call", "tool_result"}
         ]
     if event_log is None and not messages and protocol_history is not None:
-        messages = await protocol_history.history(chat_id)
+        messages = await protocol_history.history(
+            chat_id, max_events=_LEGACY_PROTOCOL_MAX_EVENTS
+        )
         if not messages:
             await _claim_legacy_protocol_history(
                 protocol_history, managers.get("context_manager"), chat_id
             )
-            messages = await protocol_history.history(chat_id)
+            messages = await protocol_history.history(
+                chat_id, max_events=_LEGACY_PROTOCOL_MAX_EVENTS
+            )
     if event_log is None and not messages:
         messages = await _legacy_protocol_history(
             managers.get("context_manager"), chat_id
@@ -1169,6 +1173,51 @@ def _chat_turn_cards(
     return cards
 
 
+async def _attach_integrity_diagnostics(event_log, chat_id: str, turns: list[dict]):
+    """Attach bounded, content-free turn integrity diagnostics to ledger cards."""
+    if event_log is None or not turns:
+        return
+    turn_ids = tuple(
+        str(turn.get("turn_id") or "") for turn in turns if turn.get("turn_id")
+    )
+    try:
+        reports = await event_log.validate_turns(turn_ids, chat_id=chat_id)
+        revisions = await event_log.repair_revisions(chat_id)
+    except Exception as exc:
+        _log.warning("读取 turn 完整性诊断失败 [%s..]: %s", chat_id[:12], exc)
+        for turn in turns:
+            turn["integrity"] = {"available": False, "reason": "unavailable"}
+            turn["repair_revisions"] = []
+        return
+    revisions_by_turn: dict[str, list[dict]] = {}
+    for revision in revisions:
+        revisions_by_turn.setdefault(revision.original_turn_id, []).append(
+            {
+                "revision_id": revision.revision_id,
+                "original_status": revision.original_status,
+                "original_reason": revision.original_reason,
+                "reason": _redact_text(revision.reason, limit=500),
+                "operator": _redact_text(revision.operator, limit=120),
+                "timestamp": revision.timestamp,
+            }
+        )
+    for turn in turns:
+        turn_id = str(turn.get("turn_id") or "")
+        report = reports.get(turn_id)
+        if report is None:
+            turn["integrity"] = {"available": False, "reason": "unavailable"}
+        else:
+            turn["integrity"] = {
+                "available": True,
+                "valid": report.valid,
+                "reason": _redact_text(report.reason or "", limit=300),
+                "event_count": report.event_count,
+                "missing_tool_result_count": len(report.missing_tool_result_ids),
+                "duplicate_tool_result_count": len(report.duplicate_tool_result_ids),
+            }
+        turn["repair_revisions"] = revisions_by_turn.get(turn_id, [])
+
+
 async def _render_ledger_view(
     request: Request, chat_id: str, view: str, page: int = 1, page_size: int = 20
 ):
@@ -1182,8 +1231,10 @@ async def _render_ledger_view(
 
     if view == "prompt":
         if projection is None:
-            events = await event_log.snapshot_events(chat_id, include_internal=False)
-            degraded_reason = "projection_unavailable"
+            events = await event_log.snapshot_events(
+                chat_id, include_internal=False, max_events=100
+            )
+            degraded_reason = "projection_unavailable_bounded"
         else:
             events = await projection.snapshot_for_prompt(chat_id)
             degraded_reason = events.degraded_reason

@@ -150,6 +150,28 @@ class ArchiveManifestStore:
             return len(manifests)
         return sum(1 for manifest in manifests if manifest.get("chat_id") == chat_id)
 
+    def clear_pending(self, chat_id: str) -> int:
+        """Remove resumable manifests for an explicitly cleared chat."""
+        if not chat_id or not self._root.is_dir():
+            return 0
+        removed = 0
+        for path in tuple(self._root.glob("*.json")):
+            try:
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+                self._validate(manifest)
+            except (OSError, json.JSONDecodeError, ValueError):
+                continue
+            if (
+                manifest.get("chat_id") == chat_id
+                and manifest.get("state") != "committed"
+            ):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+                removed += 1
+        return removed
+
     def find_pending(self, chat_id: str, reason: str) -> Dict[str, Any] | None:
         candidates = [
             manifest

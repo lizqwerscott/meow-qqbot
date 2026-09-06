@@ -353,12 +353,14 @@ class TurnSummaryStore:
         *,
         archived_event_ids: Sequence[str] = (),
         archive_batch_id: str = "",
+        events_snapshot: Optional[Sequence[ConversationEvent]] = None,
     ) -> Optional[TurnSummary]:
-        events_snapshot = await self._event_log.snapshot_events(
-            chat_id, include_internal=True
-        )
+        if events_snapshot is None:
+            events_snapshot = (
+                await self._event_log.snapshot_events(chat_id, include_internal=True)
+            ).events
         events = tuple(
-            event for event in events_snapshot.events if event.turn_id == turn_id
+            event for event in events_snapshot if event.turn_id == turn_id
         )
         if not events:
             return None
@@ -366,7 +368,7 @@ class TurnSummaryStore:
         turn = next((item for item in turns.turns if item.turn_id == turn_id), None)
         if turn is None or not turn.is_terminal or turn.status is TurnStatus.INCOMPLETE:
             return None
-        report = await self._event_log.validate_turn(turn_id)
+        report = await self._event_log.validate_turn(turn_id, chat_id=chat_id)
         if not report.valid:
             return None
         archived = set(archived_event_ids)
@@ -476,11 +478,22 @@ class TurnSummaryStore:
         archive_batch_id: str = "",
     ) -> tuple[TurnSummary, ...]:
         archived = set(archived_event_ids)
-        snapshot = await self._event_log.snapshot_events(chat_id, include_internal=True)
+        snapshot = await self._event_log.snapshot_events(
+            chat_id,
+            include_internal=True,
+            event_ids=tuple(sorted(archived)),
+        )
         turn_ids = []
         for event in snapshot.events:
             if event.event_id in archived and event.turn_id not in turn_ids:
                 turn_ids.append(event.turn_id)
+        if not turn_ids:
+            return ()
+        turn_snapshot = await self._event_log.snapshot_events(
+            chat_id,
+            include_internal=True,
+            turn_ids=tuple(turn_ids),
+        )
         result = []
         for turn_id in turn_ids:
             summary = await self.ensure_turn_summary(
@@ -488,6 +501,7 @@ class TurnSummaryStore:
                 turn_id,
                 archived_event_ids=archived_event_ids,
                 archive_batch_id=archive_batch_id,
+                events_snapshot=turn_snapshot.events,
             )
             if summary is not None:
                 result.append(summary)

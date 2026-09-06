@@ -10,6 +10,7 @@ from core.engine.conversation_event_log import (
     EventKind,
     EventLogInvariantError,
     TurnKind,
+    TurnStatus,
 )
 
 
@@ -121,6 +122,161 @@ async def test_event_log_materializes_tool_free_delivery_without_protocol_histor
 
 
 @pytest.mark.asyncio
+async def test_user_messages_by_id_reads_only_requested_chat_events(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await log.append_user_message(
+        chat_id="chat-a", turn_id="turn-a", message_id="message-a", content="A"
+    )
+    await log.append_user_message(
+        chat_id="chat-a", turn_id="turn-b", message_id="message-b", content="B"
+    )
+    await log.append_user_message(
+        chat_id="chat-b", turn_id="turn-a", message_id="message-a", content="other"
+    )
+
+    events = await log.user_messages_by_id("chat-a", ("message-b", "message-a"))
+
+    assert [event.message_id for event in events] == ["message-a", "message-b"]
+    assert [event.content for event in events] == ["A", "B"]
+    assert await log.user_messages_by_id("chat-a", ("missing",)) == ()
+
+
+@pytest.mark.asyncio
+async def test_turn_ids_are_scoped_to_chat(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    for chat_id in ("chat-a", "chat-b"):
+        await log.append_user_message(
+            chat_id=chat_id,
+            turn_id="same-turn",
+            message_id=f"message-{chat_id}",
+            content=chat_id,
+        )
+
+    turns = await log.snapshot_turns("chat-a", include_internal=True)
+    assert turns.turns[0].turn_id == "same-turn"
+    assert (await log.validate_turn("same-turn", chat_id="chat-b")).valid is True
+    with pytest.raises(EventLogInvariantError, match="ambiguous turn"):
+        await log.validate_turn("same-turn")
+    with pytest.raises(EventLogInvariantError, match="ambiguous turn"):
+        await log.protocol_snapshot("same-turn")
+
+
+@pytest.mark.asyncio
+async def test_history_can_read_only_latest_events(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    for index in range(3):
+        turn_id = f"turn-{index}"
+        await log.append_user_message(
+            chat_id="chat",
+            turn_id=turn_id,
+            message_id=f"message-{index}",
+            content=f"question-{index}",
+        )
+        await log.append_accepted_delivery(
+            chat_id="chat",
+            turn_id=turn_id,
+            delivery_id=f"delivery-{index}",
+            content=f"answer-{index}",
+        )
+
+    latest = await log.history("chat", max_events=2)
+
+    assert [item["content"] for item in latest] == ["question-2", "answer-2"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_migration_watermark_persists(tmp_path):
+    path = tmp_path / "events.sqlite3"
+    log = ConversationEventLog(str(path))
+
+    assert await log.legacy_migration_is_complete() is False
+    await log.mark_legacy_migration_complete()
+    assert await log.legacy_migration_is_complete() is True
+    await log.close()
+
+    reopened = ConversationEventLog(str(path))
+    assert await reopened.legacy_migration_is_complete() is True
+    await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_event_log_upgrades_missing_per_chat_migration_checkpoint(tmp_path):
+    path = tmp_path / "events.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE conversation_event_log_schema (version INTEGER NOT NULL)"
+    )
+    conn.execute("INSERT INTO conversation_event_log_schema(version) VALUES (2)")
+    conn.execute(
+        "CREATE TABLE conversation_migration_state "
+        "(migration_key TEXT PRIMARY KEY, completed_at REAL NOT NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    log = ConversationEventLog(str(path))
+
+    assert await log.legacy_chat_migration_is_complete("chat") is False
+    await log.mark_legacy_chat_migration_complete("chat")
+    assert await log.legacy_chat_migration_is_complete("chat") is True
+    await log.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_conflict_event_ids_are_bounded_and_content_free(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await log.append_event(
+        ConversationEvent(
+            chat_id="chat",
+            turn_id="turn",
+            event_id="user:message:legacy-conflict:abc",
+            role="user",
+            kind=EventKind.USER_MESSAGE,
+            content="敏感内容不应返回",
+        )
+    )
+
+    assert await log.legacy_conflict_event_ids("chat") == (
+        "user:message:legacy-conflict:abc",
+    )
+    await log.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_chat_migration_checkpoint_persists_per_chat(tmp_path):
+    path = str(tmp_path / "events.sqlite3")
+    log = ConversationEventLog(path)
+
+    assert await log.legacy_chat_migration_is_complete("chat-1") is False
+    await log.mark_legacy_chat_migration_complete("chat-1")
+    assert await log.legacy_chat_migration_is_complete("chat-1") is True
+    assert await log.legacy_chat_migration_is_complete("chat-2") is False
+    await log.close()
+
+    reopened = ConversationEventLog(path)
+    assert await reopened.legacy_chat_migration_is_complete("chat-1") is True
+    assert await reopened.legacy_chat_migration_is_complete("chat-2") is False
+    await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_accepted_delivery_content_reads_by_anchor(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await log.append_accepted_delivery(
+        chat_id="chat",
+        turn_id="turn-1",
+        delivery_id="delivery-1",
+        message_id="anchor-1",
+        content="恢复内容",
+    )
+
+    assert await log.accepted_delivery_content("chat", "anchor-1") == "恢复内容"
+    assert await log.accepted_delivery_content("chat", "delivery-1") == "恢复内容"
+    assert await log.accepted_delivery_content("chat", "missing") is None
+    await log.close()
+
+
+@pytest.mark.asyncio
 async def test_event_log_distinguishes_ai_and_ambient_turns(tmp_path):
     log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
 
@@ -190,6 +346,12 @@ async def test_event_log_migrates_existing_turns_with_unknown_kind(tmp_path):
     turns = await log.snapshot_turns("chat", include_internal=True)
 
     assert turns.turns[0].turn_kind is TurnKind.UNKNOWN
+    await log.append_user_message(
+        chat_id="other-chat",
+        turn_id="legacy-turn",
+        message_id="other-message",
+        content="same turn id in another chat",
+    )
     await log.close()
 
 
@@ -361,6 +523,51 @@ async def test_terminal_turn_rejects_late_event_and_reports_missing_tool_result(
 
 
 @pytest.mark.asyncio
+async def test_open_turn_with_missing_tool_result_is_not_valid_for_completion(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await log.append_event(
+        ConversationEvent(
+            chat_id="chat",
+            turn_id="turn-1",
+            event_id="assistant:1",
+            role="assistant",
+            kind=EventKind.ASSISTANT_TOOL_CALL,
+            tool_calls=({"id": "call-1"},),
+        )
+    )
+
+    report = await log.validate_turn("turn-1")
+
+    assert report.valid is False
+    assert report.reason == "missing_tool_result"
+    with pytest.raises(EventLogInvariantError, match="invalid turn"):
+        await log.append_turn_terminal(chat_id="chat", turn_id="turn-1")
+
+
+@pytest.mark.asyncio
+async def test_turn_integrity_rejects_corrupt_persisted_metadata(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await log.append_user_message(
+        chat_id="chat", turn_id="turn-1", message_id="message-1", content="问题"
+    )
+    await log.append_turn_terminal(chat_id="chat", turn_id="turn-1")
+
+    conn = await log._ensure_open()
+    conn.execute(
+        "UPDATE conversation_turns SET event_count = event_count + 1 "
+        "WHERE turn_id = ?",
+        ("turn-1",),
+    )
+    conn.commit()
+
+    report = await log.validate_turn("turn-1")
+
+    assert report.valid is False
+    assert report.reason == "event_count_mismatch"
+    await log.close()
+
+
+@pytest.mark.asyncio
 async def test_late_delivery_is_recorded_as_orphan_with_lineage(tmp_path):
     log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
 
@@ -474,8 +681,12 @@ async def test_legacy_repair_groups_tool_wire_events_into_turns_idempotently(tmp
         {"role": "user", "content": "下一件事", "message_id": "m2", "timestamp": 5},
     ]
 
-    first = await log.repair_from_legacy_history("chat", history)
-    second = await log.repair_from_legacy_history("chat", history)
+    first = await log.repair_from_legacy_history(
+        "chat", history, session_kind="private"
+    )
+    second = await log.repair_from_legacy_history(
+        "chat", history, session_kind="private"
+    )
     turns = await log.snapshot_turns("chat", include_internal=True)
     events = await log.snapshot_events("chat", include_internal=True)
 
@@ -492,6 +703,7 @@ async def test_legacy_repair_groups_tool_wire_events_into_turns_idempotently(tmp
         EventKind.TURN_TERMINAL,
         EventKind.USER_MESSAGE,
     ]
+    assert all(event.session_kind == "private" for event in events.events)
 
 
 @pytest.mark.asyncio
@@ -607,6 +819,116 @@ async def test_legacy_repair_does_not_rescan_turns_for_every_record(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_legacy_repair_marks_cutoff_tool_turn_incomplete(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+
+    await log.repair_from_legacy_history(
+        "chat",
+        [
+            {
+                "role": "user",
+                "content": "需要工具",
+                "message_id": "m1",
+                "timestamp": 1,
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call-1", "function": {"name": "lookup"}}],
+                "timestamp": 2,
+            },
+            {"role": "user", "content": "下一条", "message_id": "m2", "timestamp": 3},
+        ],
+        source_id="legacy-active",
+    )
+
+    turns = await log.snapshot_turns("chat", include_internal=True)
+
+    assert len(turns.turns) == 2
+    assert turns.turns[0].status.value == "incomplete"
+    assert turns.turns[1].status.value == "open"
+
+
+@pytest.mark.asyncio
+async def test_repair_revision_is_append_only_and_idempotent(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await log.append_user_message(
+        chat_id="chat",
+        turn_id="broken-turn",
+        message_id="m1",
+        content="需要工具",
+    )
+    await log.append_event(
+        ConversationEvent(
+            chat_id="chat",
+            turn_id="broken-turn",
+            event_id="call-event",
+            role="assistant",
+            kind=EventKind.ASSISTANT_TOOL_CALL,
+            tool_calls=({"id": "call-1", "function": {"name": "lookup"}},),
+        )
+    )
+    await log.append_turn_terminal(
+        chat_id="chat", turn_id="broken-turn", status=TurnStatus.INCOMPLETE
+    )
+
+    first = await log.append_repair_revision(
+        chat_id="chat",
+        original_turn_id="broken-turn",
+        revision_id="rev-1",
+        reason="外部工具已在旧系统完成，无法补录原始结果",
+        operator="admin",
+    )
+    second = await log.append_repair_revision(
+        chat_id="chat",
+        original_turn_id="broken-turn",
+        revision_id="rev-1",
+        reason="外部工具已在旧系统完成，无法补录原始结果",
+        operator="admin",
+    )
+
+    original = await log.validate_turn("broken-turn")
+    revisions = await log.repair_revisions("chat", original_turn_id="broken-turn")
+    assert not original.valid
+    assert original.reason == "missing_tool_result"
+    assert first == second
+    assert len(revisions) == 1
+    assert revisions[0].revision_turn_id == first.revision_turn_id
+    assert revisions[0].original_reason == "missing_tool_result"
+    assert revisions[0].reason == "外部工具已在旧系统完成，无法补录原始结果"
+    revision_events = [
+        event
+        for event in (await log.snapshot_events("chat", include_internal=True)).events
+        if event.turn_id == first.revision_turn_id
+    ]
+    assert all(event.session_kind == "repair" for event in revision_events)
+
+
+@pytest.mark.asyncio
+async def test_repair_revision_rejects_valid_or_cross_chat_turn(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await log.append_user_message(
+        chat_id="chat", turn_id="valid-turn", message_id="m1", content="ok"
+    )
+    await log.append_turn_terminal(chat_id="chat", turn_id="valid-turn")
+
+    with pytest.raises(EventLogInvariantError, match="requires invalid turn"):
+        await log.append_repair_revision(
+            chat_id="chat",
+            original_turn_id="valid-turn",
+            revision_id="rev-1",
+            reason="不应记录",
+        )
+    with pytest.raises(EventLogInvariantError, match="chat mismatch"):
+        await log.append_repair_revision(
+            chat_id="other",
+            original_turn_id="valid-turn",
+            revision_id="rev-2",
+            reason="跨会话不应记录",
+        )
+
+
+@pytest.mark.asyncio
 async def test_legacy_repair_strips_nested_display_prefixes(tmp_path):
     log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
 
@@ -629,3 +951,153 @@ async def test_legacy_repair_strips_nested_display_prefixes(tmp_path):
     event = (await log.snapshot_events("chat")).events[0]
     assert event.content == "原始内容"
     assert (await log.history("chat"))[0]["content"] == "原始内容"
+
+
+@pytest.mark.asyncio
+async def test_validate_turns_matches_single_turn_validation(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    for index in range(3):
+        turn_id = f"turn-{index}"
+        await log.append_user_message(
+            chat_id="chat",
+            turn_id=turn_id,
+            message_id=f"message-{index}",
+            content=f"question-{index}",
+        )
+        await log.append_turn_terminal(chat_id="chat", turn_id=turn_id)
+
+    batch = await log.validate_turns(["turn-0", "turn-1", "turn-0", "missing"])
+
+    assert set(batch) == {"turn-0", "turn-1", "missing"}
+    assert batch["turn-0"] == await log.validate_turn("turn-0")
+    assert batch["turn-1"] == await log.validate_turn("turn-1")
+    assert batch["missing"].reason == "turn_not_found"
+
+
+@pytest.mark.asyncio
+async def test_integrity_summary_is_content_free_and_counts_invalid_turns(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await log.append_event(
+        ConversationEvent(
+            chat_id="chat",
+            turn_id="turn-1",
+            event_id="assistant:1",
+            role="assistant",
+            kind=EventKind.ASSISTANT_TOOL_CALL,
+            tool_calls=({"id": "call-1"},),
+        )
+    )
+
+    summary = await log.integrity_summary("chat")
+
+    assert summary == {
+        "turn_count": 1,
+        "invalid_turn_count": 1,
+        "incomplete_turn_count": 0,
+        "open_turn_count": 0,
+        "waiting_tool_turn_count": 1,
+        "invalid_reasons": {"missing_tool_result": 1},
+    }
+    assert "content" not in str(summary)
+
+
+@pytest.mark.asyncio
+async def test_validate_turn_reports_corrupt_persisted_status(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await log.append_user_message(
+        chat_id="chat", turn_id="turn-1", message_id="message-1", content="问题"
+    )
+    conn = await log._ensure_open()
+    conn.execute(
+        "UPDATE conversation_turns SET status = ? WHERE turn_id = ?",
+        ("corrupt", "turn-1"),
+    )
+    conn.commit()
+
+    report = await log.validate_turn("turn-1")
+
+    assert report.valid is False
+    assert report.reason == "invalid_turn_status"
+    assert report.status == "corrupt"
+    await log.close()
+
+
+@pytest.mark.asyncio
+async def test_validate_turn_reports_corrupt_persisted_metadata(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await log.append_user_message(
+        chat_id="chat", turn_id="turn-1", message_id="message-1", content="问题"
+    )
+    conn = await log._ensure_open()
+    conn.execute(
+        "UPDATE conversation_turns SET event_count = ? WHERE turn_id = ?",
+        ("not-a-number", "turn-1"),
+    )
+    conn.commit()
+
+    report = await log.validate_turn("turn-1")
+
+    assert report.valid is False
+    assert report.reason == "persisted_turn_metadata_invalid"
+    await log.close()
+
+
+@pytest.mark.asyncio
+async def test_validate_turn_rejects_empty_persisted_turn(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    conn = await log._ensure_open()
+    conn.execute(
+        "INSERT INTO conversation_turns "
+        "(chat_id, turn_id, turn_sequence, status, started_seq, turn_kind, "
+        "source_date, event_count, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("chat", "turn-empty", 1, "open", 0, "unknown", "2026-09-04", 0, 1, 1),
+    )
+    conn.commit()
+
+    report = await log.validate_turn("turn-empty")
+
+    assert report.valid is False
+    assert report.reason == "empty_turn"
+    await log.close()
+
+
+@pytest.mark.asyncio
+async def test_validate_turn_rejects_turn_sequence_index_mismatch(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await log.append_user_message(
+        chat_id="chat", turn_id="turn-1", message_id="message-1", content="问题"
+    )
+    conn = await log._ensure_open()
+    conn.execute(
+        "UPDATE conversation_turns SET turn_sequence = turn_sequence + 1 "
+        "WHERE turn_id = ?",
+        ("turn-1",),
+    )
+    conn.commit()
+
+    report = await log.validate_turn("turn-1")
+
+    assert report.valid is False
+    assert report.reason == "turn_sequence_index_mismatch"
+    await log.close()
+
+
+@pytest.mark.asyncio
+async def test_validate_turn_rejects_source_date_mismatch(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await log.append_user_message(
+        chat_id="chat", turn_id="turn-1", message_id="message-1", content="问题"
+    )
+    conn = await log._ensure_open()
+    conn.execute(
+        "UPDATE conversation_events SET source_date = ? WHERE turn_id = ?",
+        ("2000-01-01", "turn-1"),
+    )
+    conn.commit()
+
+    report = await log.validate_turn("turn-1")
+
+    assert report.valid is False
+    assert report.reason == "source_date_mismatch"
+    await log.close()

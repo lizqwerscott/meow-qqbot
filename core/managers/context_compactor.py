@@ -16,6 +16,15 @@ class CompactionResult:
 
 
 class ContextCompactor:
+    """Legacy message-list compactor kept only for migration compatibility.
+
+    Production sessions wired to ``ConversationEventLog`` never call this
+    adapter. New compaction must go through ``ModelContextTranscript`` or the
+    bounded prompt projection; this class can be removed after legacy rollout.
+    """
+
+    legacy_only = True
+
     def __init__(
         self,
         ai_service,

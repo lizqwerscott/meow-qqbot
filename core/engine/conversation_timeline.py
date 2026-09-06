@@ -454,24 +454,40 @@ class ConversationTimeline:
             return 0.0
 
     async def snapshot(
-        self, chat_id: str, *, upto_seq: int | None = None
+        self,
+        chat_id: str,
+        *,
+        upto_seq: int | None = None,
+        max_events: int | None = None,
     ) -> tuple[TimelineEvent, ...]:
         """Read a stable sequence snapshot for a new turn."""
         conn = await self._ensure_open()
+        limit = None if max_events is None else max(0, int(max_events))
         async with self._lock:
-            if upto_seq is None:
+            if limit == 0:
+                rows = []
+            elif upto_seq is None and limit is None:
                 rows = conn.execute(
                     "SELECT * FROM conversation_timeline WHERE chat_id = ? ORDER BY seq",
                     (chat_id,),
+                ).fetchall()
+            elif limit is None:
+                rows = conn.execute(
+                    "SELECT * FROM conversation_timeline "
+                    "WHERE chat_id = ? AND seq <= ? ORDER BY seq",
+                    (chat_id, upto_seq),
                 ).fetchall()
             else:
                 rows = conn.execute(
                     """
                     SELECT * FROM conversation_timeline
-                     WHERE chat_id = ? AND seq <= ? ORDER BY seq
+                     WHERE chat_id = ?
+                       AND (? IS NULL OR seq <= ?)
+                     ORDER BY seq DESC LIMIT ?
                     """,
-                    (chat_id, upto_seq),
+                    (chat_id, upto_seq, upto_seq, limit),
                 ).fetchall()
+                rows.reverse()
         return tuple(self._event(row) for row in rows)
 
     async def latest_seq(self, chat_id: str) -> int:
@@ -493,9 +509,7 @@ class ConversationTimeline:
         return [str(row[0]) for row in rows]
 
     async def history(self, chat_id: str, max_events: int | None = None) -> list[dict]:
-        events = await self.snapshot(chat_id)
-        if max_events is not None:
-            events = events[-max_events:] if max_events > 0 else ()
+        events = await self.snapshot(chat_id, max_events=max_events)
         return [event.to_history_dict() for event in events]
 
     async def session_summary(self, chat_id: str) -> dict:

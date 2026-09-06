@@ -92,8 +92,8 @@ class TurnProtocolHistory:
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS turn_protocol_history (
-                    turn_id TEXT NOT NULL,
                     chat_id TEXT NOT NULL DEFAULT '',
+                    turn_id TEXT NOT NULL,
                     seq INTEGER NOT NULL,
                     event_id TEXT NOT NULL,
                     role TEXT NOT NULL,
@@ -104,8 +104,8 @@ class TurnProtocolHistory:
                     reasoning_content TEXT NOT NULL DEFAULT '',
                     timestamp REAL NOT NULL,
                     token_count INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (turn_id, seq),
-                    UNIQUE (turn_id, event_id)
+                    PRIMARY KEY (chat_id, turn_id, seq),
+                    UNIQUE (chat_id, turn_id, event_id)
                 )
                 """)
             columns = {
@@ -130,6 +130,47 @@ class TurnProtocolHistory:
                            + LENGTH(reasoning_content)
                        ) / 4
                     """)
+            primary_key = {
+                row["name"]: int(row["pk"])
+                for row in self._conn.execute(
+                    "PRAGMA table_info(turn_protocol_history)"
+                ).fetchall()
+                if int(row["pk"])
+            }
+            if primary_key != {"chat_id": 1, "turn_id": 2, "seq": 3}:
+                self._conn.execute(
+                    "ALTER TABLE turn_protocol_history "
+                    "RENAME TO turn_protocol_history_legacy"
+                )
+                self._conn.execute("""
+                    CREATE TABLE turn_protocol_history (
+                        chat_id TEXT NOT NULL DEFAULT '',
+                        turn_id TEXT NOT NULL,
+                        seq INTEGER NOT NULL,
+                        event_id TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        tool_call_id TEXT NOT NULL DEFAULT '',
+                        tool_name TEXT NOT NULL DEFAULT '',
+                        tool_calls TEXT NOT NULL DEFAULT '[]',
+                        reasoning_content TEXT NOT NULL DEFAULT '',
+                        timestamp REAL NOT NULL,
+                        token_count INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (chat_id, turn_id, seq),
+                        UNIQUE (chat_id, turn_id, event_id)
+                    )
+                    """)
+                self._conn.execute("""
+                    INSERT INTO turn_protocol_history
+                        (chat_id, turn_id, seq, event_id, role, content,
+                         tool_call_id, tool_name, tool_calls, reasoning_content,
+                         timestamp, token_count)
+                    SELECT chat_id, turn_id, seq, event_id, role, content,
+                           tool_call_id, tool_name, tool_calls,
+                           reasoning_content, timestamp, token_count
+                      FROM turn_protocol_history_legacy
+                    """)
+                self._conn.execute("DROP TABLE turn_protocol_history_legacy")
             self._conn.commit()
         return self._conn
 
@@ -217,9 +258,9 @@ class TurnProtocolHistory:
             assistant_calls = conn.execute(
                 """
                 SELECT tool_calls FROM turn_protocol_history
-                 WHERE turn_id = ? AND role = 'assistant'
+                 WHERE chat_id = ? AND turn_id = ? AND role = 'assistant'
                 """,
-                (turn_id,),
+                (chat_id, turn_id),
             ).fetchall()
             known_ids = {
                 call.get("id")
@@ -232,17 +273,19 @@ class TurnProtocolHistory:
                     f"tool result has no assistant call: {tool_call_id}"
                 )
             duplicate = conn.execute(
-                "SELECT * FROM turn_protocol_history WHERE turn_id = ? AND event_id = ?",
-                (turn_id, event_id),
+                "SELECT * FROM turn_protocol_history "
+                "WHERE chat_id = ? AND turn_id = ? AND event_id = ?",
+                (chat_id, turn_id, event_id),
             ).fetchone()
             if duplicate is not None:
                 return self._event(duplicate)
             existing_result = conn.execute(
                 """
                 SELECT 1 FROM turn_protocol_history
-                 WHERE turn_id = ? AND role = 'tool' AND tool_call_id = ?
+                 WHERE chat_id = ? AND turn_id = ?
+                   AND role = 'tool' AND tool_call_id = ?
                 """,
-                (turn_id, tool_call_id),
+                (chat_id, turn_id, tool_call_id),
             ).fetchone()
             if existing_result is not None:
                 raise ProtocolInvariantError(f"duplicate tool result: {tool_call_id}")
@@ -308,14 +351,16 @@ class TurnProtocolHistory:
         if role not in {"assistant", "tool"}:
             raise ValueError(f"invalid protocol role: {role}")
         existing = conn.execute(
-            "SELECT * FROM turn_protocol_history WHERE turn_id = ? AND event_id = ?",
-            (turn_id, event_id),
+            "SELECT * FROM turn_protocol_history "
+            "WHERE chat_id = ? AND turn_id = ? AND event_id = ?",
+            (chat_id, turn_id, event_id),
         ).fetchone()
         if existing is not None:
             return self._event(existing)
         seq = conn.execute(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM turn_protocol_history WHERE turn_id = ?",
-            (turn_id,),
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM turn_protocol_history "
+            "WHERE chat_id = ? AND turn_id = ?",
+            (chat_id, turn_id),
         ).fetchone()[0]
         now = time.time() if timestamp is None else timestamp
         token_count = self._estimate_tokens(
@@ -347,17 +392,37 @@ class TurnProtocolHistory:
         )
         conn.commit()
         row = conn.execute(
-            "SELECT * FROM turn_protocol_history WHERE turn_id = ? AND event_id = ?",
-            (turn_id, event_id),
+            "SELECT * FROM turn_protocol_history "
+            "WHERE chat_id = ? AND turn_id = ? AND event_id = ?",
+            (chat_id, turn_id, event_id),
         ).fetchone()
         return self._event(row)
 
-    async def snapshot(self, turn_id: str) -> tuple[ProtocolEvent, ...]:
+    async def snapshot(
+        self, turn_id: str, *, chat_id: str | None = None
+    ) -> tuple[ProtocolEvent, ...]:
         conn = await self._ensure_open()
         async with self._lock:
+            params: tuple[Any, ...] = (turn_id,)
+            scope = ""
+            if chat_id is not None:
+                scope = " AND chat_id = ?"
+                params += (chat_id,)
+            else:
+                chat_rows = conn.execute(
+                    "SELECT DISTINCT chat_id FROM turn_protocol_history "
+                    "WHERE turn_id = ?",
+                    (turn_id,),
+                ).fetchall()
+                if len(chat_rows) > 1:
+                    raise ProtocolInvariantError(
+                        "chat_id is required for an ambiguous turn"
+                    )
             rows = conn.execute(
-                "SELECT * FROM turn_protocol_history WHERE turn_id = ? ORDER BY seq",
-                (turn_id,),
+                "SELECT * FROM turn_protocol_history WHERE turn_id = ?"
+                + scope
+                + " ORDER BY seq",
+                params,
             ).fetchall()
         return tuple(self._event(row) for row in rows)
 
@@ -366,26 +431,41 @@ class TurnProtocolHistory:
         """Project a frozen turn snapshot without exposing storage metadata."""
         return [event.to_wire() for event in events]
 
-    async def snapshot_wire(self, turn_id: str) -> list[dict[str, Any]]:
+    async def snapshot_wire(
+        self, turn_id: str, *, chat_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Read one turn's protocol snapshot in provider wire form."""
-        return self.to_wire_messages(await self.snapshot(turn_id))
+        return self.to_wire_messages(await self.snapshot(turn_id, chat_id=chat_id))
 
     async def history(
         self, chat_id: str, max_events: int | None = None
     ) -> list[dict[str, Any]]:
         """Return protocol events for one chat in chronological order."""
         conn = await self._ensure_open()
-        async with self._lock:
-            rows = conn.execute(
-                """
-                SELECT * FROM turn_protocol_history
-                 WHERE chat_id = ? ORDER BY timestamp, turn_id, seq
-                """,
-                (chat_id,),
-            ).fetchall()
-        events = [self._event(row) for row in rows]
         if max_events is not None:
-            events = events[-max_events:] if max_events > 0 else []
+            max_events = int(max_events)
+            if max_events <= 0:
+                return []
+        async with self._lock:
+            if max_events is None:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM turn_protocol_history
+                     WHERE chat_id = ? ORDER BY timestamp, turn_id, seq
+                    """,
+                    (chat_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM turn_protocol_history
+                     WHERE chat_id = ? ORDER BY timestamp DESC, turn_id DESC, seq DESC
+                     LIMIT ?
+                    """,
+                    (chat_id, max_events),
+                ).fetchall()
+                rows.reverse()
+        events = [self._event(row) for row in rows]
         return [event.to_history_dict() for event in events]
 
     async def chat_ids(self) -> list[str]:

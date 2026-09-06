@@ -549,6 +549,37 @@ class ArchiveIndex:
             ).fetchall()
         return [str(row["chat_id"]) for row in rows]
 
+    async def status(self) -> dict[str, int]:
+        """Return archive and export counters for rollout monitoring."""
+        conn = await self._ensure_open()
+        async with self._lock:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS batch_count,
+                       COUNT(DISTINCT chat_id) AS chat_count,
+                       COALESCE(SUM(state = 'prepared'), 0) AS pending_count,
+                       COALESCE(SUM(state IN ('committed', 'export_degraded', 'soft_deleted')), 0) AS committed_count,
+                       COALESCE(SUM(event_count), 0) AS event_count
+                  FROM archive_batches
+                """
+            ).fetchone()
+            export_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(status = 'exported'), 0) AS exported_count,
+                       COALESCE(SUM(status = 'failed'), 0) AS failed_count
+                  FROM archive_exports
+                """
+            ).fetchone()
+        return {
+            "chat_count": int(row["chat_count"]),
+            "batch_count": int(row["batch_count"]),
+            "pending_count": int(row["pending_count"]),
+            "committed_count": int(row["committed_count"]),
+            "event_count": int(row["event_count"]),
+            "exported_count": int(export_row["exported_count"]),
+            "export_failed_count": int(export_row["failed_count"]),
+        }
+
     async def event_ids(self, batch_id: str) -> frozenset[str]:
         conn = await self._ensure_open()
         async with self._lock:

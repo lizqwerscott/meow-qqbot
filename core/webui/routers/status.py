@@ -23,11 +23,30 @@ async def status_page(request: Request):
     )
 
     context_manager = managers.get("context_manager")
-    archived_counts = (
-        await context_manager.get_archived_sessions_summary_async()
-        if context_manager
-        else {}
-    )
+    archive_index = managers.get("archive_index")
+    if archive_index is not None:
+        try:
+            summary_reader = getattr(archive_index, "chat_summaries_for_webui", None)
+            if callable(summary_reader):
+                summaries, _total = await summary_reader(limit=None)
+                archived_counts = {
+                    str(summary["chat_id"]): int(summary.get("archive_count", 0))
+                    for summary in summaries
+                    if int(summary.get("archive_count", 0)) > 0
+                }
+            else:
+                archived_counts = {
+                    str(chat_id): 1 for chat_id in await archive_index.chat_ids()
+                }
+        except Exception as exc:
+            _log.warning("读取账本归档会话统计失败: %s", exc)
+            archived_counts = {}
+    else:
+        archived_counts = (
+            await context_manager.get_archived_sessions_summary_async()
+            if context_manager
+            else {}
+        )
 
     queue_details = list(stats.get("queue_sizes", {}).items())
     stats["queue_details"] = queue_details

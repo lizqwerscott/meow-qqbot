@@ -150,24 +150,72 @@ class ServiceGraph:
 
     async def _migrate_legacy_history(self) -> None:
         """Import legacy active/archive records before exposing new read paths."""
+        event_log = getattr(getattr(self, "agent_engine", None), "event_log", None)
+        migration_check = getattr(event_log, "legacy_migration_is_complete", None)
+        if callable(migration_check) and await migration_check():
+            _log.info("旧历史迁移已完成，跳过旧存储扫描")
+            return
         get_ids = getattr(self.context_manager, "get_legacy_chat_ids_async", None)
         if get_ids is None:
             return
-        chat_ids = await get_ids()
+        try:
+            chat_ids = await get_ids()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.warning("旧历史会话扫描失败，保留迁移水位: %s", exc)
+            return
         if chat_ids:
             _log.info("开始迁移旧历史: %d 个会话", len(chat_ids))
         started = time.monotonic()
+        failed = False
+        chat_migration_check = getattr(
+            event_log, "legacy_chat_migration_is_complete", None
+        )
+        mark_chat_complete = getattr(
+            event_log, "mark_legacy_chat_migration_complete", None
+        )
         for index, chat_id in enumerate(chat_ids, start=1):
+            if callable(chat_migration_check):
+                try:
+                    if await chat_migration_check(chat_id):
+                        _log.info("旧历史会话已迁移，跳过: [%s..]", chat_id[:12])
+                        continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    failed = True
+                    _log.warning("读取会话迁移水位失败 [%s..]: %s", chat_id[:12], exc)
+                    continue
             _log.info(
                 "迁移旧历史会话: %d/%d [%s..]", index, len(chat_ids), chat_id[:12]
             )
+            chat_failed = False
             try:
                 await self.agent_engine.migrate_legacy_history_async(chat_id)
+                conflict_reader = getattr(event_log, "legacy_conflict_event_ids", None)
+                if callable(conflict_reader):
+                    conflict_ids = await conflict_reader(chat_id)
+                    if conflict_ids:
+                        failed = True
+                        chat_failed = True
+                        _log.warning(
+                            "旧历史迁移发现 identity collision [%s..]: %d 条，"
+                            "保留 chat checkpoint 待人工核对",
+                            chat_id[:12],
+                            len(conflict_ids),
+                        )
                 result = {}
                 if self.archive_manager is not None:
                     result = await self.archive_manager.import_legacy_archives_async(
                         chat_id
                     )
+                    if (
+                        result.get("error_count", 0)
+                        or result.get("status") == "degraded"
+                    ):
+                        failed = True
+                        chat_failed = True
                 if result.get("imported_event_count") or result.get(
                     "imported_batch_count"
                 ):
@@ -177,6 +225,8 @@ class ServiceGraph:
                         result.get("imported_event_count", 0),
                         result.get("imported_batch_count", 0),
                     )
+                if not chat_failed and callable(mark_chat_complete):
+                    await mark_chat_complete(chat_id)
                 if index == 1 or index % 25 == 0 or index == len(chat_ids):
                     _log.info(
                         "旧历史迁移进度: %d/%d 个会话, elapsed=%.1fs",
@@ -187,7 +237,12 @@ class ServiceGraph:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                failed = True
                 _log.warning("旧历史迁移失败 [%s..]: %s", chat_id[:12], exc)
+        mark_complete = getattr(event_log, "mark_legacy_migration_complete", None)
+        if not failed and callable(mark_complete):
+            await mark_complete()
+            _log.info("旧历史迁移已完成并记录水位: %d 个会话", len(chat_ids))
 
     # ── 阶段 1: 构造所有服务 ───────────────────────────────────────
 
@@ -334,10 +389,8 @@ class ServiceGraph:
             if _cache_dir
             else MemoryContextStore()
         )
-        self.context_compactor = None
         self.context_manager = ChatContextManager(
             store=_store,
-            compactor=self.context_compactor,
             max_history_per_chat=ctx_mgmt.get("max_history", 10000),
             max_tool_results=ctx_mgmt.get("max_tool_results", 5),
             keep_last_assistants=ctx_mgmt.get("keep_last_assistants", 3),

@@ -13,6 +13,7 @@ from core.engine.agent_engine import (
     _TurnRequest,
     _TurnResult,
 )
+from core.engine.conversation_event_log import EventLogInvariantError
 from core.engine.conversation_scheduler import ConversationScheduler
 from core.engine.delivery_ledger import (
     DeliveryController,
@@ -290,6 +291,58 @@ async def test_prompt_snapshot_does_not_probe_full_ledger_history(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_legacy_prompt_snapshot_is_bounded_at_storage(tmp_path):
+    from core.engine.conversation_timeline import ConversationTimeline
+
+    timeline = ConversationTimeline(str(tmp_path / "timeline.sqlite3"))
+    for index in range(101):
+        await timeline.append_user_message(
+            chat_id="chat",
+            message_id=f"message-{index}",
+            content=f"message-{index}",
+            sender_id="user",
+            timestamp=index,
+        )
+
+    engine = make_engine(FakeToolLoop())
+    engine.timeline = timeline
+
+    snapshot = await engine._get_prompt_timeline_snapshot("chat")
+
+    assert len(snapshot) == 100
+    assert snapshot[0].message_id == "message-1"
+    assert snapshot[-1].message_id == "message-100"
+    await timeline.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_timeline_repair_skips_legacy_read_when_ledger_exists(tmp_path):
+    from core.engine.conversation_event_log import ConversationEventLog
+
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await event_log.append_user_message(
+        chat_id="chat", turn_id="turn", message_id="message", content="ledger"
+    )
+
+    class LegacyContext:
+        async def get_chat_history_async(self, chat_id):
+            raise AssertionError("legacy history must not be read")
+
+    class Timeline:
+        async def repair_from_legacy_history(self, chat_id, history):
+            raise AssertionError("legacy repair must not run")
+
+    engine = make_engine(FakeToolLoop())
+    engine._get_event_log = lambda: event_log
+    engine.timeline = Timeline()
+    engine.context_manager = LegacyContext()
+
+    await engine._repair_timeline_from_legacy_history("chat")
+
+    await event_log.close()
+
+
+@pytest.mark.asyncio
 async def test_admission_duplicate_check_prefers_timeline_projection():
     engine = make_engine(FakeToolLoop())
     engine.timeline = SimpleNamespace(
@@ -360,6 +413,135 @@ async def test_history_migration_summary_scans_legacy_and_timeline_session_union
     }
     assert "hello" not in str(summary)
     await timeline.close()
+
+
+@pytest.mark.asyncio
+async def test_history_migration_status_uses_ledger_without_legacy_reads(tmp_path):
+    from core.engine.conversation_event_log import ConversationEventLog
+
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await event_log.append_user_message(
+        chat_id="ledger-chat",
+        turn_id="turn-1",
+        message_id="message-1",
+        content="hello",
+    )
+
+    class LegacyContextManager:
+        async def get_chat_history_async(self, chat_id):
+            raise AssertionError("ledger migration status must not read legacy history")
+
+        async def get_all_chat_ids_async(self):
+            raise AssertionError(
+                "ledger migration summary must not scan legacy sessions"
+            )
+
+        async def get_all_disk_chat_ids_async(self):
+            raise AssertionError(
+                "ledger migration summary must not scan legacy sessions"
+            )
+
+    engine = make_engine(FakeToolLoop())
+    engine.context_manager = LegacyContextManager()
+    engine.event_log = event_log
+
+    status = await engine.get_history_migration_status("ledger-chat")
+    summary = await engine.get_history_migration_summary()
+
+    assert status["legacy_read"] is False
+    assert status["missing_legacy_visible_count"] == 0
+    assert status["legacy_migration_complete"] is False
+    assert summary["session_count"] == 1
+    assert summary["legacy_read"] is False
+    assert summary["legacy_migration_complete"] is False
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_history_migration_status_uses_per_chat_checkpoint(tmp_path):
+    from core.engine.conversation_event_log import ConversationEventLog
+
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await event_log.append_user_message(
+        chat_id="migrated-chat",
+        turn_id="turn-1",
+        message_id="message-1",
+        content="hello",
+    )
+    await event_log.mark_legacy_chat_migration_complete("migrated-chat")
+
+    engine = make_engine(FakeToolLoop())
+    engine.context_manager = object()
+    engine.event_log = event_log
+
+    status = await engine.get_history_migration_status("migrated-chat")
+    summary = await engine.get_history_migration_summary()
+
+    assert status["legacy_chat_migration_complete"] is True
+    assert status["ready_for_legacy_read_removal"] is True
+    assert status["legacy_migration_complete"] is False
+    assert summary["sessions_ready_for_legacy_read_removal"] == 1
+    assert summary["ready_for_legacy_read_removal"] is False
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_history_migration_summary_includes_legacy_only_chats(tmp_path):
+    from core.engine.conversation_event_log import ConversationEventLog
+
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await event_log.append_user_message(
+        chat_id="ledger-chat",
+        turn_id="turn-1",
+        message_id="message-1",
+        content="hello",
+    )
+
+    class LegacyContext:
+        async def get_legacy_chat_ids_async(self):
+            return ["ledger-chat", "legacy-only"]
+
+    engine = make_engine(FakeToolLoop())
+    engine.context_manager = LegacyContext()
+    engine.event_log = event_log
+
+    summary = await engine.get_history_migration_summary()
+
+    assert summary["session_count"] == 2
+    assert summary["sessions_with_missing_legacy_visible"] == 1
+    assert summary["sessions_ready_for_legacy_read_removal"] == 0
+    assert summary["ready_for_legacy_read_removal"] is False
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_history_migration_summary_does_not_block_on_new_ledger_only_chat(
+    tmp_path,
+):
+    from core.engine.conversation_event_log import ConversationEventLog
+
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await event_log.append_user_message(
+        chat_id="new-chat",
+        turn_id="turn-1",
+        message_id="message-1",
+        content="new",
+    )
+
+    class LegacyContext:
+        async def get_legacy_chat_ids_async(self):
+            return []
+
+    engine = make_engine(FakeToolLoop())
+    engine.context_manager = LegacyContext()
+    engine.event_log = event_log
+
+    summary = await engine.get_history_migration_summary()
+
+    assert summary["session_count"] == 1
+    assert summary["sessions_ready_for_legacy_read_removal"] == 1
+    assert summary["ready_for_legacy_read_removal"] is False
+    await event_log.close()
 
 
 @pytest.mark.asyncio
@@ -546,6 +728,19 @@ def make_engine(tool_loop, *, rule_router=None, model_registry=None):
     return engine
 
 
+def test_delivery_controller_does_not_create_legacy_timeline_in_ledger_mode():
+    engine = make_engine(FakeToolLoop())
+    engine.event_log = object()
+    engine._get_timeline = lambda: pytest.fail(
+        "ledger mode must not instantiate the legacy timeline"
+    )
+
+    controller = engine._get_delivery_controller()
+
+    assert controller.event_log is engine.event_log
+    assert controller.timeline is None
+
+
 @pytest.mark.asyncio
 async def test_heartbeat_session_activity_is_isolated_from_user_activity():
     engine = make_engine(FakeToolLoop())
@@ -642,6 +837,65 @@ async def test_start_repairs_enabled_model_context_before_workers():
     await engine.start()
 
     assert events == ["repair", "outbox", "delivery", "consumers"]
+
+
+@pytest.mark.asyncio
+async def test_prompt_projection_startup_repair_skips_background_sessions():
+    engine = make_engine(FakeToolLoop())
+    repairs = []
+
+    class EventLog:
+        async def chat_ids(self):
+            return ["chat", "private", "task:1", "cron:1", "heartbeat:1"]
+
+    class Projection:
+        async def repair_chat(self, chat_id):
+            repairs.append(chat_id)
+            return SimpleNamespace(inserted_event_count=1)
+
+    engine.event_log = EventLog()
+    engine.prompt_history_projection = Projection()
+
+    await engine._repair_prompt_projection_on_startup()
+
+    assert repairs == ["chat", "private"]
+
+
+@pytest.mark.asyncio
+async def test_completed_event_log_terminal_degrades_to_incomplete_on_invariant_error():
+    engine = make_engine(FakeToolLoop())
+    statuses = []
+
+    class EventLog:
+        async def append_turn_terminal(self, **kwargs):
+            statuses.append(kwargs["status"])
+            if kwargs["status"] == "completed":
+                raise EventLogInvariantError("missing_tool_result")
+
+    engine.event_log = EventLog()
+
+    await engine._record_event_log_terminal("chat", "turn", "completed")
+
+    assert statuses == ["completed", "incomplete"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested_status", ["failed", "aborted", "blocked"])
+async def test_noncompleted_invalid_terminal_degrades_to_incomplete(requested_status):
+    engine = make_engine(FakeToolLoop())
+    statuses = []
+
+    class EventLog:
+        async def append_turn_terminal(self, **kwargs):
+            statuses.append(kwargs["status"])
+            if kwargs["status"] == requested_status:
+                raise EventLogInvariantError("missing_tool_result")
+
+    engine.event_log = EventLog()
+
+    await engine._record_event_log_terminal("chat", "turn", requested_status)
+
+    assert statuses == [requested_status, "incomplete"]
 
 
 @pytest.mark.asyncio

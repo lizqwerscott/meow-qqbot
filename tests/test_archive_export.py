@@ -50,11 +50,23 @@ async def test_jsonl_export_is_one_way_and_idempotent(tmp_path):
     adapter = ArchiveJSONLExportAdapter(
         event_log, index, str(tmp_path / "exports"), enabled=True
     )
+    original_snapshot_events = event_log.snapshot_events
+    observed = []
+
+    async def tracked_snapshot_events(*args, **kwargs):
+        observed.append(kwargs.get("event_ids"))
+        return await original_snapshot_events(*args, **kwargs)
+
+    event_log.snapshot_events = tracked_snapshot_events
     first = await adapter.export_batch(batch.batch_id)
     second = await adapter.export_batch(batch.batch_id)
 
     assert first.status == "exported"
     assert second.content_hash == first.content_hash
+    assert observed == [
+        tuple(sorted(event.event_id for event in events.events)),
+        tuple(sorted(event.event_id for event in events.events)),
+    ]
     lines = [
         json.loads(line)
         for line in Path(first.path).read_text(encoding="utf-8").splitlines()
@@ -111,4 +123,38 @@ async def test_archive_index_webui_queries_support_pagination_and_aggregation(tm
     assert await index.count_for_webui("chat-1", state="committed") == 1
     assert total == 3
     assert [item["chat_id"] for item in summaries] == ["chat-1", "chat-0"]
+    await index.close()
+
+
+@pytest.mark.asyncio
+async def test_archive_index_status_reports_pending_and_export_failures(tmp_path):
+    index = ArchiveIndex(str(tmp_path / "index.sqlite3"))
+    await index.prepare_batch(
+        batch_id="batch-pending",
+        operation_id="operation-pending",
+        chat_id="chat",
+        captured_cutoff_seq=1,
+        turn_records=[ArchiveTurnRecord("turn-pending", 1, "2026-09-01", 2, 10)],
+        event_ids=[("user:pending", "turn-pending")],
+    )
+    committed = await index.prepare_batch(
+        batch_id="batch-committed",
+        operation_id="operation-committed",
+        chat_id="chat",
+        captured_cutoff_seq=2,
+        turn_records=[ArchiveTurnRecord("turn-committed", 2, "2026-09-01", 3, 20)],
+        event_ids=[("user:committed", "turn-committed")],
+    )
+    await index.mark_state(committed.batch_id, "committed")
+    await index.record_export(committed.batch_id, status="failed", error="disk full")
+
+    assert await index.status() == {
+        "chat_count": 1,
+        "batch_count": 2,
+        "pending_count": 1,
+        "committed_count": 1,
+        "event_count": 2,
+        "exported_count": 0,
+        "export_failed_count": 1,
+    }
     await index.close()

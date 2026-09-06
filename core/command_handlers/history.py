@@ -3,7 +3,10 @@ import time
 from typing import Any, Dict, List, Optional
 
 from core.command_handlers.base import command, make_reply
-from core.engine.history_projection import visible_legacy_history
+from core.engine.history_projection import (
+    read_legacy_history_bounded,
+    visible_legacy_history,
+)
 from core.managers.context_manager import ChatContextManager
 from core.message import InputMessage
 
@@ -42,17 +45,20 @@ class HistoryCommand:
         self.archive_index = archive_index
 
     async def _get_visible_history(self, chat_id: str) -> List[Dict[str, Any]]:
+        if self.prompt_history_projection is not None:
+            snapshot = await self.prompt_history_projection.snapshot_for_prompt(chat_id)
+            return [event.to_history_dict() for event in snapshot.events]
         if self.event_log is not None:
-            return await self.event_log.history(chat_id)
+            return await self.event_log.history(chat_id, max_events=100)
         if self.timeline is not None:
-            projected = await self.timeline.history(chat_id)
-            legacy = await self.context_manager.get_chat_history_async(chat_id)
+            projected = await self.timeline.history(chat_id, max_events=100)
+            legacy = await read_legacy_history_bounded(self.context_manager, chat_id)
             await self.timeline.repair_from_legacy_history(chat_id, legacy)
             if projected or legacy:
-                return await self.timeline.history(chat_id)
+                return await self.timeline.history(chat_id, max_events=100)
             return projected
         return visible_legacy_history(
-            await self.context_manager.get_chat_history_async(chat_id)
+            await read_legacy_history_bounded(self.context_manager, chat_id)
         )
 
     async def execute(
@@ -162,16 +168,6 @@ class HistoryCommand:
                     input_message,
                     f"会话 {target[:24]}… 已执行增量模型上下文压缩：{changed} 个 scope，按完整 turn/checkpoint 处理。",
                 )
-            if self.event_log is None:
-                compact = getattr(
-                    self.context_manager, "compact_history_if_needed", None
-                )
-                if callable(compact):
-                    changed, _usage, count = await compact(target, force=True)
-                    return make_reply(
-                        input_message,
-                        f"会话 {target[:24]}… {'压缩完成' if changed else '无需压缩'}（{count} 条）。",
-                    )
             return make_reply(
                 input_message,
                 f"会话 {target[:24]}… 没有可压缩的模型上下文 scope；当前使用 bounded Prompt projection。",
@@ -242,7 +238,9 @@ class HistoryCommand:
                 try:
                     candidate = await self.timeline.session_summary(cid)
                     if not candidate.get("message_count", 0):
-                        legacy = await self.context_manager.get_chat_history_async(cid)
+                        legacy = await read_legacy_history_bounded(
+                            self.context_manager, cid
+                        )
                         await self.timeline.repair_from_legacy_history(cid, legacy)
                         candidate = await self.timeline.session_summary(cid)
                     summary = candidate
@@ -254,7 +252,7 @@ class HistoryCommand:
                     "%H:%M", time.localtime(summary["last_activity"])
                 )
             elif self.event_log is None:
-                history = await self.context_manager.get_chat_history_async(cid)
+                history = await read_legacy_history_bounded(self.context_manager, cid)
                 visible_history = visible_legacy_history(history)
                 count = len(visible_history)
                 last_act = (

@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 from core.engine.batch_media_context import BatchMediaContext
 from core.engine.delivery_prompt_contract import DeliveryPromptContract
+from core.engine.history_projection import read_legacy_history_bounded
 from core.engine.model_context_transcript import (
     ModelContextScope,
     ModelContextSnapshot,
@@ -127,7 +128,7 @@ class PromptBuilder:
     """AI 请求消息组装器。
 
     职责：
-    1. 触发历史压缩（compaction）
+    1. 组装 bounded prompt history，并在启用时协调模型上下文 compaction
     2. 根据可用能力确定工具列表
     3. 渲染静态 system prompt（模板）
     4. 拼接动态上下文（记忆、时间、表情标签、群友列表、技能条目）
@@ -895,12 +896,19 @@ class PromptBuilder:
                     recent = [
                         event.to_history_dict() for event in recent_snapshot.events
                     ]
+                elif getattr(self, "event_log", None) is not None:
+                    recent = await self.event_log.history(
+                        admin_chat_id,
+                        max_events=15,
+                    )
                 else:
                     get_pruned_history = getattr(
                         self.context_manager, "get_pruned_history_async", None
                     )
                     if callable(get_pruned_history):
-                        recent = await get_pruned_history(admin_chat_id)
+                        recent = await get_pruned_history(
+                            admin_chat_id, max_messages=20
+                        )
                     else:
                         recent = (
                             await timeline.history(admin_chat_id, max_events=20)
@@ -908,14 +916,12 @@ class PromptBuilder:
                             else []
                         )
                         repair = getattr(timeline, "repair_from_legacy_history", None)
-                        get_history = getattr(
-                            self.context_manager, "get_legacy_chat_history_async", None
-                        ) or getattr(
-                            self.context_manager, "get_chat_history_async", None
-                        )
-                        if callable(repair) and callable(get_history):
+                        if callable(repair):
                             await repair(
-                                admin_chat_id, await get_history(admin_chat_id)
+                                admin_chat_id,
+                                await read_legacy_history_bounded(
+                                    self.context_manager, admin_chat_id, max_messages=20
+                                ),
                             )
                             recent = await timeline.history(
                                 admin_chat_id, max_events=20
