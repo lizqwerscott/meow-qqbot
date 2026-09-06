@@ -123,7 +123,7 @@ class StatusCommand:
                     "",
                     "**账本投影观测**",
                     f"- Prompt visibility: `total={prompt_projection.get('visibility_count', 0)}` `visible={prompt_projection.get('visible_count', 0)}` `hidden={prompt_projection.get('hidden_count', 0)}` `lag={prompt_projection.get('projection_lag', 0)}`",
-                    f"- Prompt reports: `total={prompt_reports.get('report_count', 0)}` `fallback={prompt_reports.get('fallback_count', 0)}` `degraded={prompt_reports.get('degraded_count', 0)}`",
+                    f"- Prompt reports: `total={prompt_reports.get('report_count', 0)}` `fallback={prompt_reports.get('fallback_count', 0)}` `degraded={prompt_reports.get('degraded_count', 0)}` `historical_excluded={prompt_reports.get('historical_exclusion_count', 0)}`",
                     f"- Archive: `batches={archive_stats.get('batch_count', 0)}` `pending={archive_stats.get('pending_count', 0)}` `events={archive_stats.get('event_count', 0)}` `export_failed={archive_stats.get('export_failed_count', 0)}`",
                 ]
             event_integrity = history_migration.get("event_integrity", {})

@@ -255,22 +255,50 @@ class PromptContextReportStore:
             )
 
     async def status(self) -> dict[str, int]:
-        """Return aggregate prompt source and fallback counters."""
+        """Return aggregate prompt source and fallback counters.
+
+        Historical tool-protocol violations are excluded from prompts on purpose.
+        Keep those exclusions visible separately so they do not look like active
+        prompt degradation in the operational status.
+        """
         conn = await self._ensure_open()
         async with self._lock:
-            row = conn.execute(
-                """
+            row = conn.execute("""
                 SELECT COUNT(*) AS report_count,
                        COALESCE(SUM(fallback_reason <> ''), 0) AS fallback_count,
-                       COALESCE(SUM(degraded_reason <> ''), 0) AS degraded_count,
+                       COALESCE(SUM(
+                           CASE
+                               WHEN degraded_reason <> ''
+                                AND trim(
+                                    replace(
+                                        ';' || degraded_reason || ';',
+                                        ';invalid_historical_turn_excluded;',
+                                        ';'
+                                    ),
+                                    ';'
+                                ) <> ''
+                               THEN 1
+                               ELSE 0
+                           END
+                       ), 0) AS degraded_count,
+                       COALESCE(SUM(
+                           CASE
+                               WHEN instr(
+                                   ';' || degraded_reason || ';',
+                                   ';invalid_historical_turn_excluded;'
+                               ) > 0
+                               THEN 1
+                               ELSE 0
+                           END
+                       ), 0) AS historical_exclusion_count,
                        COALESCE(SUM(estimated_tokens), 0) AS estimated_tokens
                   FROM prompt_context_reports
-                """
-            ).fetchone()
+                """).fetchone()
         return {
             "report_count": int(row["report_count"]),
             "fallback_count": int(row["fallback_count"]),
             "degraded_count": int(row["degraded_count"]),
+            "historical_exclusion_count": int(row["historical_exclusion_count"]),
             "estimated_tokens": int(row["estimated_tokens"]),
         }
 

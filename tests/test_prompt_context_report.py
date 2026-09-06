@@ -74,6 +74,40 @@ async def test_prompt_context_report_status_aggregates_fallbacks(tmp_path):
         "report_count": 2,
         "fallback_count": 1,
         "degraded_count": 1,
+        "historical_exclusion_count": 0,
         "estimated_tokens": 20,
+    }
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_prompt_context_report_status_separates_historical_exclusions(tmp_path):
+    store = PromptContextReportStore(str(tmp_path / "reports.sqlite3"))
+    await store.record(
+        chat_id="chat",
+        turn_id="turn-1",
+        source="model_context",
+        degraded_reason="invalid_historical_turn_excluded",
+    )
+    await store.record(
+        chat_id="chat",
+        turn_id="turn-2",
+        source="model_context",
+        fallback_reason="provider_fallback",
+        degraded_reason="invalid_historical_turn_excluded;budget",
+    )
+    await store.record(
+        chat_id="chat",
+        turn_id="turn-3",
+        source="model_context",
+        degraded_reason="budget",
+    )
+
+    assert await store.status() == {
+        "report_count": 3,
+        "fallback_count": 1,
+        "degraded_count": 2,
+        "historical_exclusion_count": 2,
+        "estimated_tokens": 0,
     }
     await store.close()
