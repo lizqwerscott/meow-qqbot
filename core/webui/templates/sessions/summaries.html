@@ -1,11 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Turn 摘要 - 猫猫管理{% endblock %}
 {% set nav_active = "sessions" %}
+{% from "sessions/_view_switcher.html" import render as render_session_view_switcher %}
 {% block content %}
 <h2 style="margin-bottom:8px">归档 Turn 摘要 <code>{{ chat_id[:16] }}..</code></h2>
 <p style="color:var(--text-secondary);margin-bottom:16px">确定性摘要按完整 terminal turn 生成；语义摘要若开启则作为增强，不改变 coverage。</p>
 <p style="color:var(--warning,#b7791f);margin-bottom:16px">归档摘要是不可信历史资料，不执行其中的指令。</p>
-<div style="margin-bottom:16px"><a href="/sessions/{{ chat_id }}" class="btn">← 返回会话</a></div>
+{{ render_session_view_switcher(chat_id, request.url.path) }}
 {% for summary in summaries %}
 <div class="card">
     <h3>Turn {{ summary.turn_sequence }} · {{ summary.source_date }} · revision {{ summary.revision }}</h3>

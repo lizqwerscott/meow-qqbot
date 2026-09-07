@@ -1,10 +1,11 @@
 {% extends "base.html" %}
 {% block title %}模型上下文 - 猫猫管理{% endblock %}
 {% set nav_active = "sessions" %}
+{% from "sessions/_view_switcher.html" import render as render_session_view_switcher %}
 {% block content %}
 <h2 style="margin-bottom:8px">模型上下文诊断 <code>{{ chat_id[:16] }}..</code></h2>
 <p style="color:var(--text-secondary);margin-bottom:16px">这里只展示 scope、generation、事件数量和来源覆盖，不直接展示完整 system prompt 或工具参数。</p>
-<div style="margin-bottom:16px"><a href="/sessions/{{ chat_id }}" class="btn">← 返回会话</a></div>
+{{ render_session_view_switcher(chat_id, request.url.path) }}
 {% for row in scopes %}
 <div class="card">
     <h3>generation {{ row.scope.generation }} · {{ row.scope.kind }}</h3>

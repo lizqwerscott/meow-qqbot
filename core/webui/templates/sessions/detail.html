@@ -1,40 +1,36 @@
 {% extends "base.html" %}
 {% block title %}会话详情 - 猫猫管理{% endblock %}
 {% set nav_active = "sessions" %}
+{% from "sessions/_view_switcher.html" import render as render_session_view_switcher %}
 
 {% block content %}
-<h2 style="margin-bottom:8px">💬 会话 <code>{{ chat_id[:16] }}..</code></h2>
-<p class="conversation-subtitle">按最近 Turn 浏览；简单对话保持轻量，工具链可展开查看。</p>
+<div class="session-page-header">
+    <div>
+        <div class="eyebrow">CONVERSATION</div>
+        <h2>💬 会话 <code>{{ chat_id[:16] }}..</code></h2>
+        <p class="conversation-subtitle">按时间顺序阅读，最新消息固定在当前页底部；工具链默认收起。</p>
+    </div>
+    <a href="/sessions" class="btn btn-ghost">← 返回列表</a>
+</div>
 
-<div style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
-    <a href="/sessions" class="btn">← 返回列表</a>
-    <a href="/sessions/{{ chat_id }}/active" class="btn">Active</a>
-    <a href="/sessions/{{ chat_id }}/prompt" class="btn">Prompt</a>
-    <a href="/sessions/{{ chat_id }}/timeline" class="btn">完整 Timeline</a>
-    <a href="/sessions/{{ chat_id }}/archive-history" class="btn">归档历史</a>
-    <a href="/sessions/{{ chat_id }}/summaries" class="btn">Turn 摘要</a>
-    <a href="/sessions/{{ chat_id }}/model-context" class="btn">模型上下文</a>
-    {% if protocol_count > 0 %}
-    <a href="/sessions/{{ chat_id }}/protocol" class="btn">🧪 协议历史 ({{ protocol_count }})</a>
-    {% endif %}
-    {% if archived_count > 0 %}
-    <a href="/sessions/archived/{{ chat_id }}" class="btn">📦 归档 ({{ archived_count }})</a>
-    {% endif %}
+{{ render_session_view_switcher(chat_id, request.url.path) }}
+<div class="session-toolbar session-toolbar-actions">
+    {% if archived_count > 0 %}<a href="/sessions/archived/{{ chat_id }}" class="btn">📦 归档（{{ archived_count }}）</a>{% endif %}
     <form method="post" action="/sessions/{{ chat_id }}/clear" style="display:inline" onsubmit="return confirm('确定清空此会话？')">
         {{ csrf_input(request) }}
         <button type="submit" class="btn btn-danger">清空会话</button>
     </form>
 </div>
 
-{% if not turns %}
-<p style="color:var(--text-secondary)">此会话暂无消息</p>
-{% endif %}
-
+<section class="conversation-panel">
+<div class="conversation-panel-heading"><strong>最近对话</strong><span>{{ pagination.total }} 个 Turn · 当前页 {{ pagination.page }}/{{ pagination.total_pages }}</span></div>
+<div class="conversation-stream" id="conversation-stream">
+{% if not turns %}<p class="conversation-empty">此会话暂无消息</p>{% endif %}
 {% for turn in turns %}
 {% if loop.first or turn.source_date != turns[loop.index0 - 1].source_date %}
 <div class="conversation-date-divider"><span>{{ turn.source_date }}</span></div>
 {% endif %}
-<article class="conversation-turn{% if turn.has_tools %} conversation-turn-tools{% else %} conversation-turn-simple{% endif %}">
+<article class="conversation-turn{% if loop.last %} conversation-turn-latest{% endif %}{% if turn.has_tools %} conversation-turn-tools{% else %} conversation-turn-simple{% endif %}">
     <div class="conversation-turn-meta">
         <span>Turn {{ turn.turn_sequence }}</span>
         <span class="turn-kind turn-kind-{{ turn.turn_kind }}">{{ turn.turn_kind_label }}</span>
@@ -86,12 +82,14 @@
     {% endif %}
 </article>
 {% endfor %}
+</div>
+</section>
 
 {% if pagination and pagination.total_pages > 1 %}
 <div class="conversation-pagination">
-    {% if pagination.page < pagination.total_pages %}<a class="btn" href="{{ request.url.path }}?page={{ pagination.page + 1 }}&page_size={{ pagination.page_size }}">更早的对话</a>{% endif %}
+    {% if pagination.page < pagination.total_pages %}<a class="btn btn-primary" href="{{ request.url.path }}?page={{ pagination.page + 1 }}&page_size={{ pagination.page_size }}">查看更早的消息</a>{% endif %}
     <span>{{ pagination.page }} / {{ pagination.total_pages }} · 共 {{ pagination.total }} 个 Turn</span>
-    {% if pagination.page > 1 %}<a class="btn" href="{{ request.url.path }}?page={{ pagination.page - 1 }}&page_size={{ pagination.page_size }}">更新的对话</a>{% endif %}
+    {% if pagination.page > 1 %}<a class="btn" href="{{ request.url.path }}?page={{ pagination.page - 1 }}&page_size={{ pagination.page_size }}">回到更新的消息</a>{% endif %}
 </div>
 {% endif %}
 {% endblock %}

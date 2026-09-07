@@ -46,6 +46,13 @@
     }
   }
 
+  var sessionView = document.querySelector("[data-session-view]");
+  if (sessionView) {
+    sessionView.addEventListener("change", function () {
+      if (this.value) window.location.href = this.value;
+    });
+  }
+
   var groupOptions = document.querySelector("[data-group-options]");
   var groupSearch = document.querySelector("[data-group-search]");
   var selectedList = document.querySelector("[data-selected-list]");

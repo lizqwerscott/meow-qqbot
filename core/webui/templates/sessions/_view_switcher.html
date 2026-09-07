@@ -1,0 +1,17 @@
+{% macro render(chat_id, current_path) %}
+<div class="session-toolbar">
+    <label class="session-view-select">视图
+        <select data-session-view>
+            <option value="/sessions/{{ chat_id }}" {% if current_path == '/sessions/' ~ chat_id %}selected{% endif %}>会话总览</option>
+            <option value="/sessions/{{ chat_id }}/active" {% if current_path == '/sessions/' ~ chat_id ~ '/active' %}selected{% endif %}>Active：当前上下文</option>
+            <option value="/sessions/{{ chat_id }}/prompt" {% if current_path == '/sessions/' ~ chat_id ~ '/prompt' %}selected{% endif %}>Prompt：实际提示词</option>
+            <option value="/sessions/{{ chat_id }}/timeline" {% if current_path == '/sessions/' ~ chat_id ~ '/timeline' %}selected{% endif %}>Timeline：完整事件</option>
+            <option value="/sessions/{{ chat_id }}/archive-history" {% if current_path == '/sessions/' ~ chat_id ~ '/archive-history' %}selected{% endif %}>归档历史</option>
+            <option value="/sessions/{{ chat_id }}/summaries" {% if current_path == '/sessions/' ~ chat_id ~ '/summaries' %}selected{% endif %}>Turn 摘要</option>
+            <option value="/sessions/{{ chat_id }}/model-context" {% if current_path == '/sessions/' ~ chat_id ~ '/model-context' %}selected{% endif %}>模型上下文</option>
+            <option value="/sessions/{{ chat_id }}/protocol" {% if current_path == '/sessions/' ~ chat_id ~ '/protocol' %}selected{% endif %}>协议历史</option>
+        </select>
+    </label>
+    <span class="session-toolbar-hint">切换视图即可查看不同层级的历史</span>
+</div>
+{% endmacro %}

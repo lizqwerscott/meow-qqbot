@@ -1,15 +1,14 @@
 {% extends "base.html" %}
 {% block title %}协议历史 - 猫猫管理{% endblock %}
 {% set nav_active = "sessions" %}
+{% from "sessions/_view_switcher.html" import render as render_session_view_switcher %}
 
 {% block content %}
 <h2 style="margin-bottom:20px">🧪 协议历史 <code>{{ chat_id[:16] }}..</code></h2>
 <p style="color:var(--text-secondary);margin-bottom:16px">此页面仅用于已登录管理面板的诊断；内容已脱敏且不会自动进入下一次 Prompt。</p>
 
-<div style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
-    <a href="/sessions/{{ chat_id }}" class="btn">← 可见聊天</a>
-    <a href="/sessions" class="btn">会话列表</a>
-</div>
+{{ render_session_view_switcher(chat_id, request.url.path) }}
+<div style="margin-bottom:16px"><a href="/sessions" class="btn">← 会话列表</a></div>
 
 {% for turn in turns %}
 <div class="card">

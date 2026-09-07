@@ -31,6 +31,7 @@ _SENSITIVE_TEXT_PATTERN = re.compile(
 _BEARER_PATTERN = re.compile(r"(?i)(bearer\s+)([^\s,;]+)")
 _PAGE_SIZE_DEFAULT = 20
 _PAGE_SIZE_MAX = 100
+_SESSION_DETAIL_PAGE_SIZE_DEFAULT = 50
 _LEGACY_PROTOCOL_MAX_EVENTS = 1000
 _TURN_KIND_LABELS = {
     "ai": "AI 对话",
@@ -851,7 +852,7 @@ async def session_detail(
     request: Request,
     chat_id: str,
     page: int = Query(1, ge=1),
-    page_size: int = Query(_PAGE_SIZE_DEFAULT, ge=1, le=_PAGE_SIZE_MAX),
+    page_size: int = Query(_SESSION_DETAIL_PAGE_SIZE_DEFAULT, ge=1, le=_PAGE_SIZE_MAX),
 ):
     _validate_chat_id(chat_id)
     managers = request.app.state.managers
@@ -915,6 +916,8 @@ async def session_detail(
                 len(event.get("tool_calls") or ()) for event in tool_events
             )
             turn["is_simple"] = not turn["has_tools"]
+
+    turns.reverse()
 
     archived_files = (
         []
@@ -1268,6 +1271,7 @@ async def _render_ledger_view(
             statuses,
             turn_kinds,
         )
+        turns.reverse()
         pagination = {
             "page": turn_page.page,
             "page_size": turn_page.page_size,
@@ -1297,6 +1301,7 @@ async def _render_ledger_view(
             turn_kinds,
             turn_order=tuple(turn.turn_id for turn in turn_page.turns),
         )
+        turns.reverse()
         pagination = {
             "page": turn_page.page,
             "page_size": turn_page.page_size,
@@ -1310,7 +1315,7 @@ async def _render_ledger_view(
                 "request": request,
                 "chat_id": chat_id,
                 "view_title": "Active History",
-                "view_description": "当前热区兼容投影，按首条可见消息的发生时间倒序；它不等于完整账本，也不等于实际 Prompt。",
+                "view_description": "当前热区兼容投影，按首条可见消息的发生时间正序；最新消息位于底部。它不等于完整账本，也不等于实际 Prompt。",
                 "events": messages,
                 "turns": turns,
                 "stats": {
@@ -1337,6 +1342,7 @@ async def _render_ledger_view(
         turn_kinds = {turn.turn_id: turn.turn_kind.value for turn in turn_page.turns}
         event_values = _ledger_events_view(turn_page.events)
         turns = _ledger_turn_cards(turn_page.events, statuses, turn_kinds)
+        turns.reverse()
         pagination = {
             "page": turn_page.page,
             "page_size": turn_page.page_size,
@@ -1565,6 +1571,7 @@ async def session_archive_history_view(
     turn_kinds = {turn.turn_id: turn.turn_kind.value for turn in turn_page.turns}
     events = turn_page.events
     turns = _ledger_turn_cards(events, statuses, turn_kinds)
+    turns.reverse()
     pagination = {
         "page": turn_page.page,
         "page_size": turn_page.page_size,

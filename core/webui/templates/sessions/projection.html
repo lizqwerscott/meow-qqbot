@@ -1,20 +1,13 @@
 {% extends "base.html" %}
 {% block title %}{{ view_title }} - 猫猫管理{% endblock %}
 {% set nav_active = "sessions" %}
+{% from "sessions/_view_switcher.html" import render as render_session_view_switcher %}
 
 {% block content %}
 <h2 style="margin-bottom:8px">{{ view_title }} <code>{{ chat_id[:16] }}..</code></h2>
 <p style="color:var(--text-secondary);margin-bottom:16px">{{ view_description }}</p>
 <p style="color:var(--warning,#b7791f);font-size:13px">按完整 Turn 浏览；当前页之外的历史不会混入本页显示。Timeline 包含工具调用与结果，Prompt 页面才表示模型实际使用的历史。</p>
-<div style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap">
-    <a href="/sessions/{{ chat_id }}" class="btn">会话总览</a>
-    <a href="/sessions/{{ chat_id }}/active" class="btn">Active</a>
-    <a href="/sessions/{{ chat_id }}/prompt" class="btn">Prompt</a>
-    <a href="/sessions/{{ chat_id }}/timeline" class="btn">完整 Timeline</a>
-    <a href="/sessions/{{ chat_id }}/archive-history" class="btn">归档历史</a>
-    <a href="/sessions/{{ chat_id }}/summaries" class="btn">归档摘要</a>
-    <a href="/sessions/{{ chat_id }}/model-context" class="btn">模型上下文</a>
-</div>
+{{ render_session_view_switcher(chat_id, request.url.path) }}
 <div class="card"><strong>事件数：</strong>{{ stats.event_count }}{% if stats.turn_count is defined %} · <strong>Turn 数：</strong>{{ stats.turn_count }}{% endif %}{% if degraded_reason %} · <span style="color:var(--warning,#b7791f)">降级：{{ degraded_reason }}</span>{% endif %}</div>
 {% if archive_batches is defined and archive_batches %}
 <div class="card"><strong>归档批次：</strong>

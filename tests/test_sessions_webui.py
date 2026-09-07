@@ -335,6 +335,7 @@ async def test_session_detail_pages_complete_turns_and_keeps_tools_collapsed(tmp
     assert response.status_code == 200
     assert "问题 3" in response.text
     assert "问题 1" not in response.text
+    assert response.text.index("问题 2") < response.text.index("问题 3")
     assert "AI 对话" in response.text
     assert "查看工具链" in response.text
     assert '<details class="conversation-tool-chain">' in response.text
@@ -378,7 +379,7 @@ async def test_active_history_orders_turns_by_visible_timestamp(tmp_path):
     assert "written-first" in response.text
     assert "written-third" in response.text
     assert "written-second" not in response.text
-    assert response.text.index("written-first") < response.text.index("written-third")
+    assert response.text.index("written-third") < response.text.index("written-first")
     await event_log.close()
 
 
