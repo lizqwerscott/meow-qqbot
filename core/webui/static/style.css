@@ -91,6 +91,8 @@ a:hover {
 
 .main {
     flex: 1;
+    height: 100vh;
+    min-height: 0;
     padding: 24px 32px;
     max-width: 1320px;
     overflow-y: auto;
