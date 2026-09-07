@@ -2459,6 +2459,8 @@ async def test_background_task_serializes_context_build_and_reply_result():
     tool_loop = FakeToolLoop()
     engine = make_engine(tool_loop)
     events = []
+    archive_manager = SimpleNamespace(archive_if_stale=AsyncMock())
+    engine._archive_manager = archive_manager
 
     async def add_user_message(*args, **kwargs):
         events.append("context")
@@ -2482,6 +2484,9 @@ async def test_background_task_serializes_context_build_and_reply_result():
 
     assert (result, error) == ("reply", None)
     assert events == ["context", "prompt"]
+    archive_manager.archive_if_stale.assert_awaited_once_with(
+        "task-chat", True, session_lock_held=True
+    )
     assert tool_loop.calls[0]["delivery_channel"] == "delivery"
     assert tool_loop.calls[0]["reply_to_message_id"] == "original"
     assert tool_loop.calls[0]["internal_control"] is True

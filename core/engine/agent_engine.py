@@ -3954,6 +3954,7 @@ class AgentEngine:
                     ),
                     source="initial",
                     get_user_nickname=lambda _: "system",
+                    session_lock_held=True,
                 )
                 media_context = None
                 resources = await _resolve_media_resources()
