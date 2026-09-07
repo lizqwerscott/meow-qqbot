@@ -1021,6 +1021,87 @@ async def test_tool_loop_isolates_send_message_callback_from_other_tools(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_tool_loop_namespaces_protocol_events_between_turn_scopes(
+    monkeypatch, tmp_path
+):
+    from core.engine.conversation_event_log import ConversationEventLog
+
+    class FakeAI:
+        model = "test"
+
+        def __init__(self):
+            self.responses = iter(
+                [
+                    AssistantMessage(
+                        content=None,
+                        tool_calls=[AssistantToolCall("chat-call", "memory", "{}")],
+                    ),
+                    AssistantMessage(
+                        content=None,
+                        tool_calls=[AssistantToolCall("agent-call", "cron", "{}")],
+                    ),
+                ]
+            )
+
+        async def chat_completion_with_tools(self, **kwargs):
+            return next(self.responses), None
+
+    class FakeContext:
+        async def add_assistant_message_async(self, *args, **kwargs):
+            return None
+
+        async def add_tool_result_async(self, *args, **kwargs):
+            return None
+
+    async def fake_execute(name, args, tool_ctx, permission_manager):
+        return ToolResult(content=f"{name} result")
+
+    monkeypatch.setattr("core.tools.tool_loop.execute_tool", fake_execute)
+    ai = FakeAI()
+    ctx = SimpleNamespace(
+        ai=SimpleNamespace(
+            ai_service=ai,
+            max_tool_rounds=1,
+            model_registry=None,
+            stream_reply=False,
+        ),
+        mgmt=SimpleNamespace(
+            permission_manager=None,
+            cost_tracker=None,
+            context_manager=FakeContext(),
+        ),
+        memory=SimpleNamespace(hindsight_memory=None),
+    )
+    loop = ToolLoop(ctx)
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+
+    async def reply_callback(**kwargs):
+        return None
+
+    common = {
+        "messages": [],
+        "tools": [],
+        "chat_id": "chat",
+        "is_group": False,
+        "reply_to": "message",
+        "reply_callback": reply_callback,
+        "event_log": event_log,
+        "turn_id": "message",
+    }
+    await loop.run(**common, protocol_scope="chat")
+    await loop.run(**common, protocol_scope="agent")
+
+    events = (await event_log.snapshot_events("chat", include_internal=True)).events
+    assert [event.event_id for event in events] == [
+        "assistant:message:chat:0:0",
+        "tool:message:chat:0:chat-call",
+        "assistant:message:agent:1:0",
+        "tool:message:agent:1:agent-call",
+    ]
+    await event_log.close()
+
+
+@pytest.mark.asyncio
 async def test_tool_loop_prepares_media_delivery_before_execution(monkeypatch):
     class FakeAI:
         model = "test"

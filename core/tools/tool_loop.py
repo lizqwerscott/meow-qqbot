@@ -119,6 +119,7 @@ class ToolLoop:
         capabilities: Optional[TurnCapabilities] = None,
         delivery_controller: Optional[DeliveryController] = None,
         turn_id: str = "",
+        protocol_scope: str = "",
         protocol_history: Optional[TurnProtocolHistory] = None,
         transition_turn: Optional[Callable[..., Awaitable[Any]]] = None,
         turn_active_callback: Optional[Callable[[], Awaitable[bool]]] = None,
@@ -172,6 +173,20 @@ class ToolLoop:
         suppress_reply = False
         inbound_message_ids = list(inbound_message_ids or [])
         protocol_turn_id = turn_id or reply_to
+        protocol_event_scope = (
+            f"{protocol_turn_id}:{protocol_scope}"
+            if protocol_scope
+            else protocol_turn_id
+        )
+        if event_log is not None and protocol_scope:
+            existing_protocol = await event_log.protocol_snapshot(
+                protocol_turn_id, chat_id=chat_id
+            )
+            existing_assistant_count = sum(
+                event.kind is EventKind.ASSISTANT_TOOL_CALL
+                for event in existing_protocol
+            )
+            protocol_event_scope = f"{protocol_event_scope}:{existing_assistant_count}"
         if prompt_snapshot is not None:
             messages = prompt_snapshot.to_wire_messages()
             tools = prompt_snapshot.to_wire_tools()
@@ -190,7 +205,7 @@ class ToolLoop:
                     ConversationEvent(
                         chat_id=chat_id,
                         turn_id=protocol_turn_id,
-                        event_id=f"tool:{protocol_turn_id}:{tool_call_id}",
+                        event_id=f"tool:{protocol_event_scope}:{tool_call_id}",
                         role="tool",
                         kind=EventKind.TOOL_RESULT,
                         content=content,
@@ -556,7 +571,7 @@ class ToolLoop:
                         ConversationEvent(
                             chat_id=chat_id,
                             turn_id=protocol_turn_id,
-                            event_id=f"assistant:{protocol_turn_id}:{round_idx}",
+                            event_id=f"assistant:{protocol_event_scope}:{round_idx}",
                             role="assistant",
                             kind=EventKind.ASSISTANT_TOOL_CALL,
                             content=response_text or "",

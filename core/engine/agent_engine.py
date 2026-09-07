@@ -2880,6 +2880,9 @@ class AgentEngine:
                     else None
                 ),
                 turn_id=request.turn_id or request.reply_to,
+                protocol_scope=(
+                    capabilities.mode.value if capabilities is not None else ""
+                ),
                 turn_kind=turn_kind,
                 protocol_history=None,
                 transition_turn=_transition_turn if turn_state is not None else None,
