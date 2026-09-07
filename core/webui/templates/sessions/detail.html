@@ -24,64 +24,12 @@
 
 <section class="conversation-panel">
 <div class="conversation-panel-heading"><strong>最近对话</strong><span>{{ pagination.total }} 个 Turn · 当前页 {{ pagination.page }}/{{ pagination.total_pages }}</span></div>
-<div class="conversation-stream" id="conversation-stream">
+<div class="conversation-stream" id="conversation-stream" data-session-stream data-chat-id="{{ chat_id }}" data-page="{{ pagination.page }}" data-total-pages="{{ pagination.total_pages }}" data-page-size="{{ pagination.page_size }}">
+<div class="conversation-load-older{% if pagination.page >= pagination.total_pages %} is-hidden{% endif %}" data-load-older-wrap>
+    <button class="btn btn-ghost" type="button" data-load-older>↑ 加载更早消息</button>
+</div>
 {% if not turns %}<p class="conversation-empty">此会话暂无消息</p>{% endif %}
-{% for turn in turns %}
-{% if loop.first or turn.source_date != turns[loop.index0 - 1].source_date %}
-<div class="conversation-date-divider"><span>{{ turn.source_date }}</span></div>
-{% endif %}
-<article class="conversation-turn{% if loop.last %} conversation-turn-latest{% endif %}{% if turn.has_tools %} conversation-turn-tools{% else %} conversation-turn-simple{% endif %}">
-    <div class="conversation-turn-meta">
-        <span>Turn {{ turn.turn_sequence }}</span>
-        <span class="turn-kind turn-kind-{{ turn.turn_kind }}">{{ turn.turn_kind_label }}</span>
-        <span>{{ turn.source_date }}</span>
-        {% if turn.status != 'completed' and turn.status != 'unknown' %}<span class="turn-status">{{ turn.status }}</span>{% endif %}
-        {% if turn.integrity and turn.integrity.available and not turn.integrity.valid %}<span class="turn-status">完整性: {{ turn.integrity.reason or '异常' }}</span>{% endif %}
-        {% if turn.repair_revisions %}<span class="turn-status">修订 {{ turn.repair_revisions|length }}</span>{% endif %}
-        {% if turn.has_tools %}<span class="turn-tools-count">{{ turn.tool_count }} 个工具调用</span>{% endif %}
-        <code>{{ turn.turn_id[:12] }}..</code>
-    </div>
-    <div class="conversation-messages">
-    {% for msg in turn.events if msg.kind in ['user_message', 'accepted_delivery'] %}
-        {% set role = msg.role %}
-        <div class="conversation-bubble {{ role }}">
-            <div class="conversation-bubble-meta">
-                {% if role == 'user' %}👤 {{ msg.sender_id or '用户' }}{% else %}🤖 助手{% endif %}
-                {% if msg.timestamp %} · {{ msg.timestamp | format_timestamp }}{% endif %}
-            </div>
-            <div class="conversation-bubble-content">{{ msg.content or '（无文本消息）' }}</div>
-        </div>
-    {% endfor %}
-    </div>
-    {% if turn.has_tools %}
-    <details class="conversation-tool-chain">
-        <summary>查看工具链（{{ turn.tool_count }} 个调用）</summary>
-        {% for msg in turn.events if msg.kind in ['assistant_tool_call', 'tool_result'] %}
-        <div class="conversation-tool-event {{ msg.role }}">
-            <div class="msg-meta">{% if msg.kind == 'assistant_tool_call' %}🤖 工具调用{% else %}🔧 {{ msg.tool_name or '工具结果' }}{% endif %} · {{ msg.timestamp | format_timestamp }}</div>
-            {% if msg.tool_calls %}
-                {% for tc in msg.tool_calls %}
-                {% set function = tc.function or {} %}
-                <div class="tool-details"><strong>{{ function.name or '未知' }}</strong>({{ function.arguments or '{}' }})</div>
-                {% endfor %}
-            {% else %}
-                <div class="tool-details">{{ msg.content or '（空结果）' }}</div>
-            {% endif %}
-        </div>
-        {% endfor %}
-    </details>
-    {% endif %}
-    {% if turn.repair_revisions %}
-    <details class="conversation-repair-notes">
-        <summary>查看完整性修订记录</summary>
-        {% for revision in turn.repair_revisions %}
-        <div class="msg-meta">revision={{ revision.revision_id }} · {{ revision.original_status }}/{{ revision.original_reason }}</div>
-        <div class="tool-details">{{ revision.reason }}</div>
-        {% endfor %}
-    </details>
-    {% endif %}
-</article>
-{% endfor %}
+{% include "sessions/_turns.html" %}
 </div>
 </section>
 

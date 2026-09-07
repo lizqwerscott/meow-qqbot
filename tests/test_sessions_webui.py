@@ -344,6 +344,74 @@ async def test_session_detail_pages_complete_turns_and_keeps_tools_collapsed(tmp
 
 
 @pytest.mark.asyncio
+async def test_session_detail_loads_older_turns_as_partial_html(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    for index in range(1, 4):
+        await event_log.append_user_message(
+            chat_id="partial-chat",
+            turn_id=f"turn-{index}",
+            message_id=f"user-{index}",
+            content=f"消息 {index}",
+            timestamp=index,
+        )
+        await event_log.append_turn_terminal(
+            chat_id="partial-chat", turn_id=f"turn-{index}"
+        )
+
+    app = create_app(
+        {"context_manager": _ContextManager(), "conversation_event_log": event_log},
+        {},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/sessions/partial-chat?page=2&page_size=2&partial=true"
+        )
+
+    assert response.status_code == 200
+    assert "消息 1" in response.text
+    assert "<!DOCTYPE html>" not in response.text
+    assert "conversation-panel" not in response.text
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_session_detail_renders_persisted_message_resources(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await event_log.append_user_message(
+        chat_id="resource-chat",
+        turn_id="turn-1",
+        message_id="user-1",
+        content="看看这个",
+        timestamp=1,
+        resources=(
+            {
+                "resource_type": "image",
+                "media_id": "image-1",
+                "media_uri": "media://inbound/image-1",
+                "mime_type": "image/png",
+                "filename": "cat.png",
+            },
+        ),
+    )
+    await event_log.append_turn_terminal(chat_id="resource-chat", turn_id="turn-1")
+
+    app = create_app(
+        {"context_manager": _ContextManager(), "conversation_event_log": event_log},
+        {},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/sessions/resource-chat")
+
+    assert response.status_code == 200
+    assert "conversation-resource" in response.text
+    assert "/media/image-1/content" in response.text
+    assert "cat.png" in response.text
+    await event_log.close()
+
+
+@pytest.mark.asyncio
 async def test_active_history_orders_turns_by_visible_timestamp(tmp_path):
     event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
     for turn_id, timestamp in (

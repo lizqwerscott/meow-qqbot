@@ -114,6 +114,7 @@ class ConversationEvent:
     tool_call_id: str = ""
     tool_name: str = ""
     tool_calls: tuple[dict[str, Any], ...] = ()
+    resources: tuple[dict[str, Any], ...] = ()
     reasoning_content: str = ""
     terminal_status: str = ""
     session_kind: str = "chat"
@@ -177,6 +178,8 @@ class ConversationEvent:
             result["tool_name"] = self.tool_name
         if self.tool_calls:
             result["tool_calls"] = [dict(call) for call in self.tool_calls]
+        if self.resources:
+            result["resources"] = [dict(resource) for resource in self.resources]
         if self.reasoning_content:
             result["reasoning_content"] = self.reasoning_content
         if self.terminal_status:
@@ -295,6 +298,20 @@ class ConversationEventLog:
     """Deep module for immutable conversation events and turn validation."""
 
     SCHEMA_VERSION = 3
+    _RESOURCE_FIELDS = (
+        "resource_type",
+        "resource_id",
+        "media_id",
+        "media_uri",
+        "storage_status",
+        "hash",
+        "mime_type",
+        "width",
+        "height",
+        "size",
+        "duration",
+        "filename",
+    )
 
     def __init__(
         self,
@@ -338,6 +355,7 @@ class ConversationEventLog:
                     tool_call_id TEXT NOT NULL DEFAULT '',
                     tool_name TEXT NOT NULL DEFAULT '',
                     tool_calls TEXT NOT NULL DEFAULT '[]',
+                    resources TEXT NOT NULL DEFAULT '[]',
                     reasoning_content TEXT NOT NULL DEFAULT '',
                     terminal_status TEXT NOT NULL DEFAULT '',
                     session_kind TEXT NOT NULL DEFAULT 'chat',
@@ -375,6 +393,17 @@ class ConversationEventLog:
                     PRIMARY KEY (migration_key, chat_id)
                 );
                 """)
+            event_columns = {
+                str(row["name"])
+                for row in self._conn.execute(
+                    "PRAGMA table_info(conversation_events)"
+                ).fetchall()
+            }
+            if "resources" not in event_columns:
+                self._conn.execute(
+                    "ALTER TABLE conversation_events "
+                    "ADD COLUMN resources TEXT NOT NULL DEFAULT '[]'"
+                )
             legacy_turn_columns = {
                 str(row["name"])
                 for row in self._conn.execute(
@@ -521,6 +550,14 @@ class ConversationEventLog:
             isinstance(call, dict) for call in tool_calls
         ):
             raise EventLogInvariantError("persisted tool_calls must be objects")
+        try:
+            resources = json.loads(row["resources"] or "[]")
+        except json.JSONDecodeError as exc:
+            raise EventLogInvariantError("invalid persisted resources JSON") from exc
+        if not isinstance(resources, list) or not all(
+            isinstance(resource, dict) for resource in resources
+        ):
+            raise EventLogInvariantError("persisted resources must be objects")
         return ConversationEvent(
             chat_id=row["chat_id"],
             turn_id=row["turn_id"],
@@ -537,6 +574,7 @@ class ConversationEventLog:
             tool_call_id=row["tool_call_id"],
             tool_name=row["tool_name"],
             tool_calls=tuple(tool_calls),
+            resources=tuple(resources),
             reasoning_content=row["reasoning_content"],
             terminal_status=row["terminal_status"],
             session_kind=row["session_kind"],
@@ -581,6 +619,7 @@ class ConversationEventLog:
             "tool_call_id": event.tool_call_id,
             "tool_name": event.tool_name,
             "tool_calls": event.tool_calls,
+            "resources": event.resources,
             "reasoning_content": event.reasoning_content,
             "terminal_status": event.terminal_status,
             "session_kind": event.session_kind,
@@ -791,10 +830,10 @@ class ConversationEventLog:
                     INSERT INTO conversation_events
                         (chat_id, event_seq, event_id, turn_id, turn_sequence, role,
                          kind, content, timestamp, source_date, message_id, sender_id,
-                         tool_call_id, tool_name, tool_calls, reasoning_content,
+                         tool_call_id, tool_name, tool_calls, resources, reasoning_content,
                          terminal_status,
                          session_kind, token_count)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         committed.chat_id,
@@ -813,6 +852,9 @@ class ConversationEventLog:
                         committed.tool_name,
                         json.dumps(
                             committed.tool_calls, ensure_ascii=False, sort_keys=True
+                        ),
+                        json.dumps(
+                            committed.resources, ensure_ascii=False, sort_keys=True
                         ),
                         committed.reasoning_content,
                         committed.terminal_status,
@@ -856,6 +898,7 @@ class ConversationEventLog:
         timestamp: float = 0.0,
         session_kind: str = "chat",
         turn_kind: TurnKind | str = TurnKind.UNKNOWN,
+        resources: Sequence[dict[str, Any]] = (),
     ) -> ConversationEvent:
         return await self.append_event(
             ConversationEvent(
@@ -869,6 +912,14 @@ class ConversationEventLog:
                 sender_id=sender_id,
                 timestamp=timestamp,
                 session_kind=session_kind,
+                resources=tuple(
+                    {
+                        key: resource.get(key, "")
+                        for key in self._RESOURCE_FIELDS
+                        if resource.get(key, "") not in ("", 0, 0.0, None)
+                    }
+                    for resource in resources
+                ),
             ),
             turn_kind=turn_kind,
         )

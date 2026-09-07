@@ -29,6 +29,8 @@ _SENSITIVE_TEXT_PATTERN = re.compile(
     r"(?i)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|cookie|authorization)\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;}]+)"
 )
 _BEARER_PATTERN = re.compile(r"(?i)(bearer\s+)([^\s,;]+)")
+_MEDIA_REFERENCE_PATTERN = re.compile(r"media://inbound/[A-Za-z0-9._-]+")
+_SAFE_MEDIA_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 _PAGE_SIZE_DEFAULT = 20
 _PAGE_SIZE_MAX = 100
 _SESSION_DETAIL_PAGE_SIZE_DEFAULT = 50
@@ -90,12 +92,16 @@ def _redact_value(value: Any) -> Any:
 
 
 def _redact_message(message: dict[str, Any]) -> dict[str, Any]:
+    media_refs = _MEDIA_REFERENCE_PATTERN.findall(str(message.get("content") or ""))
     safe = _redact_value(dict(message))
     if not isinstance(safe, dict):
         return {}
     safe["content"] = _redact_text(safe.get("content"), limit=4000)
     if safe.get("role") == "user":
         safe["content"] = strip_content_prefix(safe["content"])
+    if media_refs:
+        safe["_media_refs"] = tuple(dict.fromkeys(media_refs))
+        safe["content"] = _MEDIA_REFERENCE_PATTERN.sub("", safe["content"]).strip()
     if safe.get("reasoning_content"):
         safe["reasoning_content"] = _redact_text(safe["reasoning_content"], limit=1200)
     tool_calls = safe.get("tool_calls")
@@ -853,6 +859,7 @@ async def session_detail(
     chat_id: str,
     page: int = Query(1, ge=1),
     page_size: int = Query(_SESSION_DETAIL_PAGE_SIZE_DEFAULT, ge=1, le=_PAGE_SIZE_MAX),
+    partial: bool = Query(False),
 ):
     _validate_chat_id(chat_id)
     managers = request.app.state.managers
@@ -918,6 +925,14 @@ async def session_detail(
             turn["is_simple"] = not turn["has_tools"]
 
     turns.reverse()
+    await _attach_resource_views(request, chat_id, turns)
+
+    if partial:
+        partial_template = templates.env.get_template("sessions/_turns.html")
+        return HTMLResponse(
+            partial_template.render(request=request, turns=turns),
+            headers={"X-Session-Page": str(pagination["page"])},
+        )
 
     archived_files = (
         []
@@ -1229,6 +1244,113 @@ async def _attach_integrity_diagnostics(event_log, chat_id: str, turns: list[dic
                 "duplicate_tool_result_count": len(report.duplicate_tool_result_ids),
             }
         turn["repair_revisions"] = revisions_by_turn.get(turn_id, [])
+
+
+def _safe_media_id(value: Any) -> str:
+    value = str(value or "")
+    return value if _SAFE_MEDIA_ID_PATTERN.fullmatch(value) else ""
+
+
+def _resource_view(resource: dict[str, Any]) -> dict[str, Any]:
+    view = {
+        key: resource.get(key, "")
+        for key in (
+            "resource_type",
+            "resource_id",
+            "media_id",
+            "media_uri",
+            "storage_status",
+            "hash",
+            "mime_type",
+            "width",
+            "height",
+            "size",
+            "duration",
+            "filename",
+        )
+    }
+    media_id = _safe_media_id(view.get("media_id"))
+    if not media_id:
+        media_uri = str(view.get("media_uri") or "")
+        if media_uri.startswith("media://inbound/"):
+            media_id = _safe_media_id(media_uri.removeprefix("media://inbound/"))
+    view["media_id"] = media_id
+    resource_type = str(view.get("resource_type") or "file").lower()
+    mime_type = str(view.get("mime_type") or "").lower()
+    view["display_type"] = {
+        "emoji": "自定义表情",
+        "image": "图片",
+        "voice": "语音",
+        "audio": "音频",
+        "video": "视频",
+        "file": "文件",
+    }.get(resource_type, "附件")
+    view["is_image"] = resource_type in {"emoji", "image"} or mime_type.startswith(
+        "image/"
+    )
+    view["is_audio"] = resource_type in {"voice", "audio"} or mime_type.startswith(
+        "audio/"
+    )
+    view["is_video"] = resource_type == "video" or mime_type.startswith("video/")
+    if media_id:
+        view["preview_url"] = f"/media/{media_id}/content"
+        view["download_url"] = f"/media/{media_id}/content?download=true"
+        view["detail_url"] = f"/media/{media_id}"
+    else:
+        view["preview_url"] = ""
+        view["download_url"] = ""
+        view["detail_url"] = ""
+    return view
+
+
+async def _attach_resource_views(
+    request: Request, chat_id: str, turns: list[dict]
+) -> None:
+    managers = request.app.state.managers
+    media_service = managers.get("media_service")
+    emoji_manager = managers.get("emoji_manager")
+    for turn in turns:
+        for message in turn.get("events", ()):
+            resources = list(message.get("resources") or ())
+            for media_uri in message.pop("_media_refs", ()):
+                if any(item.get("media_uri") == media_uri for item in resources):
+                    continue
+                record = None
+                store = getattr(media_service, "store", None)
+                authorize = getattr(store, "authorize", None)
+                if callable(authorize):
+                    try:
+                        record = await authorize(chat_id, media_uri)
+                    except Exception as exc:
+                        _log.debug("恢复媒体引用失败 [%s..]: %s", chat_id[:12], exc)
+                if record is not None:
+                    resources.append(
+                        {
+                            "resource_type": record.resource_type,
+                            "media_id": record.media_id,
+                            "media_uri": record.media_uri,
+                            "storage_status": "ready",
+                            "hash": record.sha256,
+                            "mime_type": record.mime_type,
+                            "size": record.size,
+                            "filename": record.filename,
+                        }
+                    )
+            views = []
+            for resource in resources:
+                view = _resource_view(dict(resource))
+                if view["resource_type"] == "emoji" and emoji_manager is not None:
+                    emoji_hash = str(view.get("resource_id") or view.get("hash") or "")
+                    info = emoji_manager.get_info(emoji_hash)
+                    if info:
+                        filename = str(info.get("file_name") or "")
+                        if re.fullmatch(r"[A-Za-z0-9._-]+", filename):
+                            view["filename"] = view["filename"] or filename
+                            view["preview_url"] = f"/static/emojis/{filename}"
+                            view["download_url"] = view["preview_url"]
+                            view["detail_url"] = ""
+                views.append(view)
+            message["resources"] = views
 
 
 async def _render_ledger_view(

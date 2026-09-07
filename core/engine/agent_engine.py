@@ -820,6 +820,32 @@ class AgentEngine:
                 timestamp=message.timestamp,
                 session_kind="group" if message.is_group else "private",
                 turn_kind=turn_kind,
+                resources=tuple(
+                    {
+                        key: getattr(resource, key, "")
+                        for key in (
+                            "resource_type",
+                            "resource_id",
+                            "media_id",
+                            "media_uri",
+                            "storage_status",
+                            "hash",
+                            "mime_type",
+                            "width",
+                            "height",
+                            "size",
+                            "duration",
+                            "filename",
+                        )
+                        if getattr(resource, key, "") not in ("", 0, 0.0, None)
+                    }
+                    for resource in (
+                        *message.resources,
+                        *message.replied_resources,
+                    )
+                    if getattr(resource, "media_uri", "")
+                    or getattr(resource, "resource_type", "") == "emoji"
+                ),
             )
             return
         try:

@@ -53,6 +53,59 @@
     });
   }
 
+  var sessionStream = document.querySelector("[data-session-stream]");
+  var olderButton = document.querySelector("[data-load-older]");
+  var olderWrap = document.querySelector("[data-load-older-wrap]");
+  if (sessionStream && olderButton) {
+    var currentPage = parseInt(sessionStream.dataset.page || "1", 10);
+    var totalPages = parseInt(sessionStream.dataset.totalPages || "1", 10);
+    var pageSize = parseInt(sessionStream.dataset.pageSize || "50", 10);
+    var loadingOlder = false;
+
+    function updateOlderButton() {
+      var available = currentPage < totalPages;
+      olderButton.disabled = loadingOlder || !available;
+      if (olderWrap) olderWrap.classList.toggle("is-hidden", !available && !loadingOlder);
+    }
+
+    async function loadOlderMessages() {
+      if (loadingOlder || currentPage >= totalPages) return;
+      loadingOlder = true;
+      updateOlderButton();
+      var oldHeight = document.documentElement.scrollHeight;
+      var oldScrollY = window.scrollY;
+      var url = new URL(window.location.href);
+      url.searchParams.set("page", String(currentPage + 1));
+      url.searchParams.set("page_size", String(pageSize));
+      url.searchParams.set("partial", "true");
+      try {
+        var response = await fetch(url.toString(), {headers: {"X-Requested-With": "fetch"}});
+        if (!response.ok) throw new Error("加载历史消息失败");
+        var html = await response.text();
+        sessionStream.insertAdjacentHTML("afterbegin", html);
+        currentPage += 1;
+        sessionStream.dataset.page = String(currentPage);
+        window.scrollTo(0, oldScrollY + document.documentElement.scrollHeight - oldHeight);
+      } catch (error) {
+        olderButton.textContent = "加载失败，重试";
+      } finally {
+        loadingOlder = false;
+        updateOlderButton();
+      }
+    }
+
+    olderButton.addEventListener("click", loadOlderMessages);
+    window.addEventListener("scroll", function () {
+      if (window.scrollY < 180) loadOlderMessages();
+    }, {passive: true});
+    updateOlderButton();
+    if (currentPage === 1 && totalPages > 1) {
+      window.requestAnimationFrame(function () {
+        window.scrollTo(0, document.documentElement.scrollHeight);
+      });
+    }
+  }
+
   var groupOptions = document.querySelector("[data-group-options]");
   var groupSearch = document.querySelector("[data-group-search]");
   var selectedList = document.querySelector("[data-selected-list]");

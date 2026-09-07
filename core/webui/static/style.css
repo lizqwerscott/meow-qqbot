@@ -465,6 +465,9 @@ tr:hover td {
 .conversation-panel-heading { align-items: center; background: linear-gradient(135deg, #fff, #f8faff); border-bottom: 1px solid #edf0f5; display: flex; justify-content: space-between; padding: 13px 20px; }
 .conversation-panel-heading span { color: var(--text-secondary); font-size: 12px; }
 .conversation-stream { padding: 8px 20px 22px; }
+.conversation-load-older { display: flex; justify-content: center; padding: 8px 0 14px; }
+.conversation-load-older.is-hidden { display: none; }
+.conversation-load-older .btn { border-radius: 999px; font-size: 12px; }
 .conversation-empty { color: var(--text-secondary); padding: 42px 12px; text-align: center; }
 .conversation-date-divider { align-items: center; color: #8f99aa; display: flex; font-size: 11px; gap: 10px; justify-content: center; margin: 18px 0 10px; }
 .conversation-date-divider::before, .conversation-date-divider::after { background: #e1e6ee; content: ""; height: 1px; width: min(180px, 20%); }
@@ -483,6 +486,14 @@ tr:hover td {
 .conversation-bubble.assistant { background: #eefaf3; border: 1px solid #d7efdf; justify-self: end; }
 .conversation-bubble-meta { color: var(--text-secondary); font-size: 11px; margin-bottom: 4px; }
 .conversation-bubble-content { font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+.conversation-empty-message { color: var(--text-secondary); font-style: italic; }
+.conversation-resources { align-items: flex-start; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 9px; }
+.conversation-resource { display: block; }
+.conversation-resource-image { background: #fff; border: 1px solid #dce3ed; border-radius: 10px; overflow: hidden; }
+.conversation-resource-image img { display: block; max-height: 240px; max-width: min(360px, 70vw); object-fit: contain; }
+.conversation-resource audio { max-width: min(360px, 70vw); }
+.conversation-resource video { border-radius: 10px; max-height: 300px; max-width: min(480px, 70vw); }
+.conversation-resource-file { align-items: center; background: rgba(255, 255, 255, .72); border: 1px solid #dce3ed; border-radius: 9px; color: var(--primary-color); display: inline-flex; font-size: 12px; gap: 5px; padding: 8px 10px; text-decoration: none; }
 .conversation-tool-chain { background: #fffdf5; border: 1px dashed #eadca8; border-radius: 10px; margin: 8px 0 0 28px; padding: 8px 12px; }
 .conversation-tool-chain summary { color: #8a6816; cursor: pointer; font-size: 12px; }
 .conversation-tool-event { border-top: 1px solid #f0e8c9; margin-top: 8px; padding-top: 8px; }
