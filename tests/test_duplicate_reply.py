@@ -12,8 +12,12 @@ class FakeContext:
         self.history = ["same", "same"]
         self.assistant_messages = []
 
-    async def get_recent_user_contents_async(self, _chat_id):
-        return self.history
+    async def get_recent_user_messages_async(self, _chat_id, count=2):
+        messages = [
+            item if isinstance(item, dict) else {"content": item, "resources": []}
+            for item in self.history
+        ]
+        return messages[-count:]
 
     async def add_assistant_message_async(self, chat_id, content, message_id):
         self.assistant_messages.append((chat_id, content, message_id))
@@ -61,5 +65,34 @@ async def test_duplicate_reply_does_not_project_failed_delivery(tmp_path):
 
     assert record is not None
     assert record.status == "failed"
+    assert context.assistant_messages == []
+    await controller.ledger.close()
+
+
+async def test_duplicate_reply_ignores_stale_history_for_current_message(tmp_path):
+    context = FakeContext()
+    context.history = ["[表情: 卡通角色大笑指向前方]", "[表情: 卡通角色大笑指向前方]"]
+    controller = DeliveryController(DeliveryLedger(str(tmp_path / "delivery.sqlite3")))
+    detector = DuplicateReplyDetector(context, lambda: controller)
+    message = InputMessage("message-3", "user", "chat", "deepseek发力了", True)
+
+    assert not await detector.handle_message(message, callback, lambda _: "")
+    assert await controller.ledger.get("external:dupe_message-3") is None
+    assert context.assistant_messages == []
+    await controller.ledger.close()
+
+
+async def test_duplicate_reply_rejects_non_text_message_between_texts(tmp_path):
+    context = FakeContext()
+    context.history = [
+        {"content": "same", "resources": []},
+        {"content": "[表情: 大笑]", "resources": [{"resource_type": "emoji"}]},
+    ]
+    controller = DeliveryController(DeliveryLedger(str(tmp_path / "delivery.sqlite3")))
+    detector = DuplicateReplyDetector(context, lambda: controller)
+    message = InputMessage("message-4", "user", "chat", "same", True)
+
+    assert not await detector.handle_message(message, callback, lambda _: "")
+    assert await controller.ledger.get("external:dupe_message-4") is None
     assert context.assistant_messages == []
     await controller.ledger.close()

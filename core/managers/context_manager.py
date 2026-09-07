@@ -386,6 +386,27 @@ class ChatContextManager:
                 message.content for message in context.history if message.role == "user"
             ][-count:]
 
+    async def get_recent_user_messages_async(
+        self, chat_id: str, count: int = 2
+    ) -> List[Dict[str, Any]]:
+        if self._event_log is not None:
+            bounded_events = max(20, max(1, int(count)) * 4)
+            history = await self._event_log.history(
+                chat_id,
+                max_events=bounded_events,
+            )
+            return [message for message in history if message.get("role") == "user"][
+                -count:
+            ]
+        lock = await self._get_chat_lock(chat_id)
+        async with lock:
+            context = await self._get_or_restore_context_locked(chat_id)
+            return [
+                {"content": message.content, "resources": []}
+                for message in context.history
+                if message.role == "user"
+            ][-count:]
+
     async def get_pruned_history_async(
         self,
         chat_id: str,

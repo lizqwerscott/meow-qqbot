@@ -34,27 +34,36 @@ class DuplicateReplyDetector:
         if input_message.msg_type != MessageType.TEXT:
             return False
 
-        user_contents = await self._cm.get_recent_user_contents_async(
-            input_message.chat_id
-        )
-        if len(user_contents) < 2:
+        current_content = (input_message.content or "").strip()
+        if not current_content:
             return False
 
-        last_content = user_contents[-1].strip()
-        prev_content = user_contents[-2].strip()
-        if not last_content:
+        user_messages = await self._cm.get_recent_user_messages_async(
+            input_message.chat_id, count=2
+        )
+        user_messages = [
+            message
+            for message in user_messages
+            if message.get("message_id") != input_message.id
+        ]
+        if not user_messages:
             return False
-        if last_content != prev_content:
+
+        previous_message = user_messages[-1]
+        if previous_message.get("resources"):
+            return False
+        previous_content = str(previous_message.get("content", "")).strip()
+        if previous_content != current_content:
             return False
 
         async with self._lock:
-            if self._replied.get(input_message.chat_id) == last_content:
+            if self._replied.get(input_message.chat_id) == current_content:
                 return False
 
         _log.info(
             "检测到重复消息 [%s..]，自动复读: %s",
             input_message.chat_id[:12],
-            last_content[:30],
+            current_content[:30],
         )
         reply_id = f"dupe_{input_message.id}"
         project_to_history = True
@@ -67,7 +76,7 @@ class DuplicateReplyDetector:
             if controller is None:
                 await reply_callback(
                     chat_id=input_message.chat_id,
-                    content=last_content,
+                    content=current_content,
                     message_id=input_message.id,
                     is_group=True,
                 )
@@ -75,7 +84,7 @@ class DuplicateReplyDetector:
                 receipt = await controller.deliver_text(
                     delivery_id=reply_id,
                     chat_id=input_message.chat_id,
-                    content=last_content,
+                    content=current_content,
                     callback=reply_callback,
                     message_id=input_message.id,
                     is_group=True,
@@ -89,7 +98,7 @@ class DuplicateReplyDetector:
             return False
 
         async with self._lock:
-            self._replied[input_message.chat_id] = last_content
+            self._replied[input_message.chat_id] = current_content
             self._replied.move_to_end(input_message.chat_id)
             if len(self._replied) > _MAX_CACHED_CHATS:
                 self._replied.popitem(last=False)
@@ -97,7 +106,7 @@ class DuplicateReplyDetector:
         if project_to_history:
             await self._cm.add_assistant_message_async(
                 input_message.chat_id,
-                last_content,
+                current_content,
                 reply_id,
             )
         return True
