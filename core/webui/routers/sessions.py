@@ -1100,6 +1100,7 @@ def _ledger_turn_cards(
     events,
     statuses: Optional[dict[str, str]] = None,
     turn_kinds: Optional[dict[str, str]] = None,
+    turn_order: tuple[str, ...] = (),
 ) -> list[dict]:
     cards: dict[str, dict] = {}
     for event in events:
@@ -1137,6 +1138,15 @@ def _ledger_turn_cards(
         card["is_simple"] = not card["has_tools"]
         card["turn_kind_label"] = _TURN_KIND_LABELS.get(
             card["turn_kind"], _TURN_KIND_LABELS["unknown"]
+        )
+    if turn_order:
+        positions = {turn_id: index for index, turn_id in enumerate(turn_order)}
+        return sorted(
+            cards.values(),
+            key=lambda item: (
+                positions.get(item["turn_id"], len(positions)),
+                -item["turn_sequence"],
+            ),
         )
     return sorted(cards.values(), key=lambda item: item["turn_sequence"], reverse=True)
 
@@ -1276,11 +1286,17 @@ async def _render_ledger_view(
             page_size=page_size,
             include_internal=False,
             exclude_event_ids=hidden_ids,
+            order_by_visible_timestamp=True,
         )
         statuses = {turn.turn_id: str(turn.status) for turn in turn_page.turns}
         turn_kinds = {turn.turn_id: turn.turn_kind.value for turn in turn_page.turns}
         messages = [event.to_history_dict() for event in turn_page.events]
-        turns = _ledger_turn_cards(turn_page.events, statuses, turn_kinds)
+        turns = _ledger_turn_cards(
+            turn_page.events,
+            statuses,
+            turn_kinds,
+            turn_order=tuple(turn.turn_id for turn in turn_page.turns),
+        )
         pagination = {
             "page": turn_page.page,
             "page_size": turn_page.page_size,
@@ -1294,7 +1310,7 @@ async def _render_ledger_view(
                 "request": request,
                 "chat_id": chat_id,
                 "view_title": "Active History",
-                "view_description": "当前热区兼容投影；它不等于完整账本，也不等于实际 Prompt。",
+                "view_description": "当前热区兼容投影，按首条可见消息的发生时间倒序；它不等于完整账本，也不等于实际 Prompt。",
                 "events": messages,
                 "turns": turns,
                 "stats": {

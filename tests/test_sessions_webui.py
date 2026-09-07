@@ -343,6 +343,46 @@ async def test_session_detail_pages_complete_turns_and_keeps_tools_collapsed(tmp
 
 
 @pytest.mark.asyncio
+async def test_active_history_orders_turns_by_visible_timestamp(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    for turn_id, timestamp in (
+        ("written-first", 300),
+        ("written-second", 100),
+        ("written-third", 200),
+    ):
+        await event_log.append_user_message(
+            chat_id="chronological-chat",
+            turn_id=turn_id,
+            message_id=f"message-{turn_id}",
+            content=turn_id,
+            timestamp=timestamp,
+        )
+        await event_log.append_turn_terminal(
+            chat_id="chronological-chat", turn_id=turn_id
+        )
+
+    app = create_app(
+        {
+            "context_manager": _ContextManager(),
+            "conversation_event_log": event_log,
+        },
+        {},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/sessions/chronological-chat/active?page=1&page_size=2"
+        )
+
+    assert response.status_code == 200
+    assert "written-first" in response.text
+    assert "written-third" in response.text
+    assert "written-second" not in response.text
+    assert response.text.index("written-first") < response.text.index("written-third")
+    await event_log.close()
+
+
+@pytest.mark.asyncio
 async def test_session_detail_shows_turn_integrity_and_repair_revision(tmp_path):
     event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
     await event_log.append_user_message(

@@ -369,10 +369,49 @@ async def test_turn_page_can_exclude_prompt_hidden_events(tmp_path):
         "chat",
         include_internal=False,
         exclude_event_ids=("user:message-1",),
+        order_by_visible_timestamp=True,
     )
 
     assert page.total_turns == 1
     assert [event.event_id for event in page.events] == ["delivery:delivery-1"]
+
+
+@pytest.mark.asyncio
+async def test_turn_page_orders_visible_turns_by_timestamp(tmp_path):
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    for turn_id, timestamp in (
+        ("written-first", 300),
+        ("written-second", 100),
+        ("written-third", 200),
+    ):
+        await log.append_user_message(
+            chat_id="chat",
+            turn_id=turn_id,
+            message_id=f"message-{turn_id}",
+            content=turn_id,
+            timestamp=timestamp,
+        )
+        await log.append_turn_terminal(chat_id="chat", turn_id=turn_id)
+
+    first_page = await log.snapshot_turn_page(
+        "chat",
+        page=1,
+        page_size=2,
+        order_by_visible_timestamp=True,
+    )
+    second_page = await log.snapshot_turn_page(
+        "chat",
+        page=2,
+        page_size=2,
+        order_by_visible_timestamp=True,
+    )
+
+    assert [turn.turn_id for turn in first_page.turns] == [
+        "written-first",
+        "written-third",
+    ]
+    assert [turn.turn_id for turn in second_page.turns] == ["written-second"]
+    await log.close()
 
 
 @pytest.mark.asyncio

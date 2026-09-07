@@ -1866,8 +1866,9 @@ class ConversationEventLog:
         include_internal: bool = False,
         exclude_event_ids: Sequence[str] = (),
         include_event_ids: Sequence[str] | None = None,
+        order_by_visible_timestamp: bool = False,
     ) -> ConversationTurnPage:
-        """Read one newest-first turn page without materializing all turns."""
+        """Read one turn page without materializing all turns."""
         page = max(1, int(page))
         page_size = max(1, int(page_size))
         conn = await self._ensure_open()
@@ -1878,9 +1879,12 @@ class ConversationEventLog:
                 "visible.chat_id = turns.chat_id",
                 "visible.turn_id = turns.turn_id",
             ]
+            event_filter_conditions: list[str] = []
             event_params: tuple[Any, ...] = ()
             if not include_internal:
-                event_conditions.append("visible.kind IN (?, ?)")
+                condition = "visible.kind IN (?, ?)"
+                event_conditions.append(condition)
+                event_filter_conditions.append(condition)
                 event_params += (
                     EventKind.USER_MESSAGE,
                     EventKind.ACCEPTED_DELIVERY,
@@ -1903,18 +1907,22 @@ class ConversationEventLog:
                             + ")"
                         )
                         event_params += chunk
-                    event_conditions.append("(" + " OR ".join(inclusion_clauses) + ")")
+                    condition = "(" + " OR ".join(inclusion_clauses) + ")"
+                    event_conditions.append(condition)
+                    event_filter_conditions.append(condition)
             if not include_internal:
                 excluded = tuple(
                     dict.fromkeys(str(item) for item in exclude_event_ids if item)
                 )
                 for offset in range(0, len(excluded), 500):
                     chunk = excluded[offset : offset + 500]
-                    event_conditions.append(
+                    condition = (
                         "visible.event_id NOT IN ("
                         + ", ".join("?" for _ in chunk)
                         + ")"
                     )
+                    event_conditions.append(condition)
+                    event_filter_conditions.append(condition)
                     event_params += chunk
             if event_conditions:
                 visibility = (
@@ -1923,22 +1931,54 @@ class ConversationEventLog:
                     + ")"
                 )
                 visibility_params = event_params
-            total = int(
-                conn.execute(
-                    "SELECT COUNT(*) FROM conversation_turns turns "
-                    "WHERE turns.chat_id = ?" + visibility,
-                    (chat_id, *visibility_params),
-                ).fetchone()[0]
-            )
+            if order_by_visible_timestamp:
+                event_filter = (
+                    " AND " + " AND ".join(event_filter_conditions)
+                    if event_filter_conditions
+                    else ""
+                )
+                visible_turns = (
+                    "WITH visible_turns AS ("
+                    "SELECT visible.turn_id, MIN(visible.timestamp) "
+                    "AS first_visible_timestamp "
+                    "FROM conversation_events visible "
+                    "WHERE visible.chat_id = ?"
+                    + event_filter
+                    + " GROUP BY visible.turn_id) "
+                )
+                total = int(
+                    conn.execute(
+                        visible_turns + "SELECT COUNT(*) FROM visible_turns",
+                        (chat_id, *event_params),
+                    ).fetchone()[0]
+                )
+            else:
+                total = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM conversation_turns turns "
+                        "WHERE turns.chat_id = ?" + visibility,
+                        (chat_id, *visibility_params),
+                    ).fetchone()[0]
+                )
             page = min(page, max(1, (total + page_size - 1) // page_size))
             offset = (page - 1) * page_size
-            rows = conn.execute(
-                "SELECT * FROM conversation_turns turns "
-                "WHERE turns.chat_id = ?"
-                + visibility
-                + " ORDER BY turns.turn_sequence DESC LIMIT ? OFFSET ?",
-                (chat_id, *visibility_params, page_size, offset),
-            ).fetchall()
+            if order_by_visible_timestamp:
+                rows = conn.execute(
+                    visible_turns + "SELECT turns.* FROM conversation_turns turns "
+                    "JOIN visible_turns ON visible_turns.turn_id = turns.turn_id "
+                    "WHERE turns.chat_id = ? "
+                    "ORDER BY visible_turns.first_visible_timestamp DESC, "
+                    "turns.turn_sequence DESC LIMIT ? OFFSET ?",
+                    (chat_id, *event_params, chat_id, page_size, offset),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM conversation_turns turns "
+                    "WHERE turns.chat_id = ?"
+                    + visibility
+                    + " ORDER BY turns.turn_sequence DESC LIMIT ? OFFSET ?",
+                    (chat_id, *visibility_params, page_size, offset),
+                ).fetchall()
             cutoff = int(
                 conn.execute(
                     "SELECT COALESCE(MAX(event_seq), 0) FROM conversation_events "
