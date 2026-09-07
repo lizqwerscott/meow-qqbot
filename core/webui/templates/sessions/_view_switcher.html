@@ -1,5 +1,5 @@
 {% macro render(chat_id, current_path) %}
-<div class="session-toolbar">
+<div class="session-toolbar session-view-toolbar">
     <label class="session-view-select">视图
         <select data-session-view>
             <option value="/sessions/{{ chat_id }}" {% if current_path == '/sessions/' ~ chat_id %}selected{% endif %}>会话总览</option>
