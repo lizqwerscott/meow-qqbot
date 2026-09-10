@@ -3,6 +3,8 @@
 import logging
 from pathlib import Path
 
+from core.session_identity import build_workspace_slug, parse_chat_session_key
+
 _log = logging.getLogger(__name__)
 
 
@@ -18,8 +20,14 @@ class WorkspaceManager:
         _log.info(f"工作区根目录: {self._root.resolve()}")
 
     def _workspace_dir(self, is_group: bool, chat_id: str) -> Path:
-        sub = "groups" if is_group else "private"
-        path = self._root / sub / chat_id
+        path: Path
+        try:
+            target = parse_chat_session_key(chat_id)
+        except (TypeError, ValueError):
+            sub = "groups" if is_group else "private"
+            path = self._root / sub / chat_id
+        else:
+            path = self._root / build_workspace_slug(target)
         path.mkdir(parents=True, exist_ok=True)
         return path
 

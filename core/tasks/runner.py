@@ -22,6 +22,7 @@ from typing import Any, Callable, List, Optional
 
 import core.tasks.wake_coalescer as _wake_coalescer
 from core.engine.delivery_ledger import DeliveryReceipt
+from core.session_identity import DeliveryTarget
 from core.tools.shell_env import build_exec_env_for
 
 from .delivery_policy import decide_cron_delivery
@@ -46,8 +47,9 @@ class BackgroundTaskRunner:
     通过回调与 AgentEngine 解耦。
     """
 
-    def __init__(self, task_manager: Any = None):
+    def __init__(self, task_manager: Any = None, session_identity_resolver: Any = None):
         self._task_manager = task_manager
+        self._session_identity_resolver = session_identity_resolver
         self._permission_manager: Optional[Any] = None
 
         # 外部注入的回调
@@ -57,6 +59,9 @@ class BackgroundTaskRunner:
         # async (chat_id, content, message_id, is_group) -> None
         self._system_events: Optional[Any] = None
         self._wake_dispatcher: Optional[Any] = None
+
+    def set_session_identity_resolver(self, resolver: Any) -> None:
+        self._session_identity_resolver = resolver
 
     def set_permission_manager(self, permission_manager: Any) -> None:
         """注入权限管理器：命令载荷的 login shell 开关与 exec 工具
@@ -237,10 +242,14 @@ class BackgroundTaskRunner:
             target = task.delivery_channel or f"task:{task.id}"
             event_prefix = f"后台任务{status_text}"
             if self._wake_dispatcher and task.delivery_channel:
+                wake_session_key = self._resolve_delivery_target_session_key(
+                    task.delivery_channel, is_group=is_group
+                )
                 await self._wake_dispatcher.request(
                     source="background-task",
                     intent="immediate",
-                    session_key=target,
+                    session_key=wake_session_key,
+                    delivery_target=task.delivery_channel,
                     event_text=self._format_result_event_text(event_prefix, task),
                     event_context_key=f"task:{task.id}",
                 )
@@ -372,6 +381,49 @@ class BackgroundTaskRunner:
             return "cron:main"
         else:  # isolated（默认）
             return f"task:{task_id}"
+
+    def _resolve_execution_session_key(self, job: CronJob, task_id: str) -> str:
+        resolver = self._session_identity_resolver
+        if resolver is not None and getattr(resolver, "canonical_enabled", False):
+            ref = resolver.resolve_cron_execution(
+                mode=job.session_mode,
+                job_id=job.id,
+                task_id=task_id,
+                custom_id=job.custom_session_id or "",
+            )
+            return ref.session_key
+        return self._resolve_session_id(job, task_id)
+
+    def _resolve_delivery_session_key(self, job: CronJob, task_id: str) -> str:
+        """Resolve a cron event's session key while keeping delivery raw IDs out."""
+        resolver = self._session_identity_resolver
+        if resolver is None or not getattr(resolver, "canonical_enabled", False):
+            return job.delivery_channel or self._resolve_session_id(job, task_id)
+        if job.delivery_channel:
+            return self._resolve_delivery_target_session_key(
+                job.delivery_channel, is_group=job.is_group
+            )
+        return self._resolve_execution_session_key(job, task_id)
+
+    def _resolve_delivery_target_session_key(
+        self, delivery_target: str, *, is_group: bool
+    ) -> str:
+        resolver = self._session_identity_resolver
+        if resolver is None or not getattr(resolver, "canonical_enabled", False):
+            return delivery_target
+        target = DeliveryTarget(
+            "qq",
+            "default",
+            "group" if is_group else "direct",
+            delivery_target,
+        )
+        return resolver.resolve_inbound(target, legacy_key=delivery_target).session_key
+
+    def _heartbeat_session_key(self) -> str:
+        resolver = self._session_identity_resolver
+        if resolver is not None and getattr(resolver, "canonical_enabled", False):
+            return resolver.resolve_internal("heartbeat", name="events").session_key
+        return "heartbeat:events"
 
     @staticmethod
     def _format_result_event_text(
@@ -515,7 +567,7 @@ class BackgroundTaskRunner:
         """向目标 session 入队系统事件。"""
         if not self._system_events:
             return
-        target = self._resolve_event_target(job, task_id)
+        target = self._resolve_delivery_session_key(job, task_id)
         self._system_events.enqueue(
             session_key=target,
             text=text,
@@ -540,7 +592,7 @@ class BackgroundTaskRunner:
             # Main session: 入队到 heartbeat:events，由心跳系统消费
             if self._system_events:
                 self._system_events.enqueue(
-                    session_key="heartbeat:events",
+                    session_key=self._heartbeat_session_key(),
                     text=text,
                     context_key=f"cron:{job.id}",
                     replace=True,
@@ -550,7 +602,7 @@ class BackgroundTaskRunner:
                 _wake_coalescer.request_wake(
                     source="cron",
                     intent="immediate",
-                    session_key="heartbeat:events",
+                    session_key=self._heartbeat_session_key(),
                     reason=f"cron:{job.id}",
                 )
             return await self._task_manager.finish_task(
@@ -562,7 +614,7 @@ class BackgroundTaskRunner:
         # Isolated/custom: 入队到 delivery_channel（不 wake AI，等待下次用户消息）
         if self._system_events and job.delivery_channel:
             self._system_events.enqueue(
-                session_key=job.delivery_channel,
+                session_key=self._resolve_delivery_session_key(job, task.id),
                 text=text,
                 context_key=f"cron:{job.id}",
                 replace=True,
@@ -607,7 +659,8 @@ class BackgroundTaskRunner:
         )
 
         # 根据 session_mode 覆盖 session_id
-        task.session_id = self._resolve_session_id(job, task.id)
+        task.execution_session_key = self._resolve_execution_session_key(job, task.id)
+        task.session_id = task.execution_session_key
         await self._task_manager.update_task_record(task)
         _log.info(
             f"CronJob [{job.name}] payload={job.payload_type} "
@@ -709,7 +762,7 @@ class BackgroundTaskRunner:
                 # Main session: 入队到 heartbeat:events，wake 心跳系统
                 if self._system_events:
                     self._system_events.enqueue(
-                        session_key="heartbeat:events",
+                        session_key=self._heartbeat_session_key(),
                         text=self._format_result_event_text(event_prefix, task),
                         context_key=f"task:{task.id}",
                         heartbeat_only=True,
@@ -718,7 +771,7 @@ class BackgroundTaskRunner:
                     _wake_coalescer.request_wake(
                         source="cron",
                         intent="immediate",
-                        session_key="heartbeat:events",
+                        session_key=self._heartbeat_session_key(),
                         reason=f"task:{task.id}",
                     )
             elif job.payload_type == "command":
@@ -729,7 +782,8 @@ class BackgroundTaskRunner:
                 await self._wake_dispatcher.request(
                     source="cron",
                     intent="event",
-                    session_key=job.delivery_channel,
+                    session_key=self._resolve_delivery_session_key(job, task.id),
+                    delivery_target=job.delivery_channel,
                     event_text=self._format_result_event_text(event_prefix, task),
                     event_context_key=f"task:{task.id}",
                 )

@@ -9,6 +9,7 @@ from core.engine.client import (
     _ReplyDeliveryState,
 )
 from core.engine.delivery_ledger import DeliveryReceipt
+from core.session_identity import DeliveryTarget
 
 
 def make_engine(api):
@@ -28,6 +29,14 @@ def make_api():
     api.post_group_message = AsyncMock(return_value={"id": "sent"})
     api.post_c2c_message = AsyncMock(return_value={"id": "sent"})
     return api
+
+
+def group_target():
+    return DeliveryTarget("qq", "default", "group", "group-1")
+
+
+def direct_target():
+    return DeliveryTarget("qq", "default", "direct", "user-1")
 
 
 def test_passive_reply_limit_error_is_narrow():
@@ -63,7 +72,7 @@ async def test_expired_reply_msgid_falls_back_proactively():
     )
     engine = make_engine(api)
 
-    await engine._send("group-1", "hello", reply_to="message-1", is_group=True)
+    await engine._send(group_target(), "hello", reply_to="message-1")
 
     # 第一次以 reply_to=message-1 被动发送失败，msg_id 过期，应降级为不带 msg_id 的主动发送
     api.send_text.assert_awaited_once_with(
@@ -81,7 +90,7 @@ async def test_passive_limit_falls_back_once_without_reply_id():
     api.send_text.side_effect = RuntimeError("被动回复时间或者次数超过限制")
     engine = make_engine(api)
 
-    await engine._send("group-1", "hello", reply_to="message-1", is_group=True)
+    await engine._send(group_target(), "hello", reply_to="message-1")
 
     api.send_text.assert_awaited_once_with(
         "group", "group-1", "hello", reply_to="message-1", markdown=True, retries=1
@@ -103,7 +112,7 @@ async def test_passive_limit_switches_all_following_chunks_to_proactive():
     original_split = client_module.split_markdown
     client_module.split_markdown = lambda content: ["one", "two"]
     try:
-        await engine._send("group-1", "ignored", reply_to="message-1", is_group=True)
+        await engine._send(group_target(), "ignored", reply_to="message-1")
     finally:
         client_module.split_markdown = original_split
 
@@ -128,7 +137,7 @@ async def test_successful_passive_chunk_switches_following_chunks_to_proactive()
     original_split = client_module.split_markdown
     client_module.split_markdown = lambda content: ["one", "two"]
     try:
-        await engine._send("group-1", "ignored", reply_to="message-1", is_group=True)
+        await engine._send(group_target(), "ignored", reply_to="message-1")
     finally:
         client_module.split_markdown = original_split
 
@@ -145,7 +154,7 @@ async def test_non_passive_error_does_not_send_proactively():
     engine = make_engine(api)
 
     with pytest.raises(RuntimeError):
-        await engine._send("user-1", "hello", reply_to="message-1")
+        await engine._send(direct_target(), "hello", reply_to="message-1")
 
     api.post_c2c_message.assert_not_awaited()
 
@@ -159,7 +168,7 @@ async def test_markdown_error_retries_plain_text_once():
     ]
     engine = make_engine(api)
 
-    await engine._send("user-1", "hello", reply_to="message-1")
+    await engine._send(direct_target(), "hello", reply_to="message-1")
 
     assert api.send_text.await_count == 2
     assert api.send_text.await_args_list[0].kwargs["markdown"] is True
@@ -177,10 +186,9 @@ async def test_media_passive_limit_falls_back_without_msg_id():
     engine = make_engine(api)
 
     await engine._send(
-        "group-1",
+        group_target(),
         "",
         reply_to="message-1",
-        is_group=True,
         media_file_info="file-token",
     )
 
@@ -198,7 +206,7 @@ async def test_keyboard_passive_limit_falls_back_without_msg_id():
     ]
     engine = make_engine(api)
 
-    await engine._send("user-1", "hello", reply_to="message-1", keyboard=Mock())
+    await engine._send(direct_target(), "hello", reply_to="message-1", keyboard=Mock())
 
     assert api.post_c2c_message.await_count == 2
     assert api.post_c2c_message.await_args_list[0].args[1].msg_id == "message-1"
@@ -229,7 +237,7 @@ async def test_proactive_fallback_failure_does_not_retry():
     engine = make_engine(api)
 
     with pytest.raises(RuntimeError, match="proactive failed"):
-        await engine._send("group-1", "hello", reply_to="message-1", is_group=True)
+        await engine._send(group_target(), "hello", reply_to="message-1")
 
     assert api.send_text.await_count == 1
     assert api.post_group_message.await_count == 1

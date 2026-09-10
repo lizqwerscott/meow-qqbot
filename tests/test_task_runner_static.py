@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.engine.agent_engine import BackgroundTaskResult
+from core.session_identity import SessionIdentityRegistry, SessionIdentityResolver
 from core.tasks.delivery_policy import decide_cron_delivery
 from core.tasks.models import (
     CronJob,
@@ -53,6 +54,34 @@ def test_session_id_current_fallback():
     job = CronJob(name="test", session_mode="current")
     result = BackgroundTaskRunner._resolve_session_id(job, "task_001")
     assert result == "task:task_001"
+
+
+def test_execution_session_key_uses_canonical_resolver(tmp_path):
+    resolver = SessionIdentityResolver(
+        SessionIdentityRegistry(tmp_path / "identity.sqlite3"),
+        canonical_enabled=True,
+    )
+    runner = BackgroundTaskRunner(session_identity_resolver=resolver)
+
+    isolated = runner._resolve_execution_session_key(
+        CronJob(id="job_1", name="test", session_mode="isolated"), "run_1"
+    )
+    custom = runner._resolve_execution_session_key(
+        CronJob(
+            id="job_1",
+            name="test",
+            session_mode="custom",
+            custom_session_id="shared",
+        ),
+        "run_1",
+    )
+    main = runner._resolve_execution_session_key(
+        CronJob(id="job_1", name="test", session_mode="main"), "run_1"
+    )
+
+    assert isolated == "agent:main:cron:job:job_1:run:run_1"
+    assert custom == "agent:main:cron:custom:shared"
+    assert main == "agent:main:cron:main"
 
 
 # ── _check_command_safe ──

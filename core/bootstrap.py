@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Mapping
@@ -60,6 +61,12 @@ from core.runtime_settings import (
     ObservedGroupTargetVerifier,
     RuntimeSettingsCoordinator,
     RuntimeSettingsStore,
+)
+from core.session_identity import (
+    ChannelRegistry,
+    DeliveryTargetCatalog,
+    SessionIdentityRegistry,
+    SessionIdentityResolver,
 )
 from core.tasks import (
     BackgroundTaskRunner,
@@ -130,6 +137,10 @@ class ServiceGraph:
         self.model_registry = None
         self.media_service = None
         self.bot_engine = None
+        self.session_identity_registry = None
+        self.delivery_target_catalog = None
+        self.session_identity_resolver = None
+        self.channel_registry = ChannelRegistry()
         self.webui_task = None
         self._services_started = False
         self.group_target_verifier = (
@@ -150,6 +161,12 @@ class ServiceGraph:
 
     async def _migrate_legacy_history(self) -> None:
         """Import legacy active/archive records before exposing new read paths."""
+        resolver = getattr(self, "session_identity_resolver", None)
+        if resolver is not None and getattr(resolver, "canonical_enabled", False):
+            _log.info(
+                "canonical session identity 已启用，跳过运行期 legacy history 扫描"
+            )
+            return
         event_log = getattr(getattr(self, "agent_engine", None), "event_log", None)
         migration_check = getattr(event_log, "legacy_migration_is_complete", None)
         if callable(migration_check) and await migration_check():
@@ -249,6 +266,27 @@ class ServiceGraph:
     async def _build_services(self):
 
         self.http_client = httpx.AsyncClient(timeout=60.0)
+        self.session_identity_registry = SessionIdentityRegistry(
+            "data/session_identity.sqlite3"
+        )
+        self.delivery_target_catalog = DeliveryTargetCatalog(
+            "data/delivery_targets.sqlite3"
+        )
+        identity_config = getattr(self.cfg, "session_identity", {}) or {}
+        self.session_identity_resolver = SessionIdentityResolver(
+            self.session_identity_registry,
+            agent_id=str(identity_config.get("agent_id", "main")),
+            canonical_enabled=bool(identity_config.get("canonical_enabled", False)),
+        )
+        if self.session_identity_resolver.canonical_enabled:
+            hindsight_config = getattr(self.cfg, "hindsight", {}) or {}
+            self._assert_canonical_cutover_ready(
+                Path("data"),
+                registry=self.session_identity_registry,
+                hindsight_enabled=bool(hindsight_config.get("enabled", True)),
+                hindsight_bank_id=str(hindsight_config.get("bank_id", "qq_bot")),
+            )
+        _log.info("会话身份 registry 与投递目标 catalog 已初始化")
         self.heartbeat_manager = None
         self._wake_runner = None
 
@@ -362,6 +400,7 @@ class ServiceGraph:
             voice_transcriber=None,
             voice_transcription=voice_config,
             ai_service=self.ai_service,
+            session_identity_resolver=self.session_identity_resolver,
             provider_chains=provider_chains,
         )
 
@@ -453,6 +492,7 @@ class ServiceGraph:
             self.hindsight_memory = HindsightMemory(
                 base_url=hindsight_config.get("base_url", "http://127.0.0.1:8888"),
                 bank_id=hindsight_config.get("bank_id", "qq_bot"),
+                session_identity_resolver=self.session_identity_resolver,
             )
             _log.info("Hindsight 记忆系统已启用: %s", hindsight_config.get("base_url"))
         else:
@@ -495,7 +535,8 @@ class ServiceGraph:
                 )
             self.cron_job_manager = CronJobManager(store=task_store)
             self.background_task_runner = BackgroundTaskRunner(
-                task_manager=self.task_manager
+                task_manager=self.task_manager,
+                session_identity_resolver=self.session_identity_resolver,
             )
 
             if scheduler_cfg.get("enabled", True):
@@ -668,6 +709,9 @@ class ServiceGraph:
                 task_state_store=self.task_state_store,
                 model_context_config=self.cfg.model_context_projection,
                 archive_timezone=str(archive_config.get("timezone", "Asia/Shanghai")),
+                session_identity_registry=self.session_identity_registry,
+                session_identity_resolver=self.session_identity_resolver,
+                delivery_target_catalog=self.delivery_target_catalog,
             ),
             bg=BgContext(
                 task_manager=self.task_manager,
@@ -819,6 +863,90 @@ class ServiceGraph:
             registry.register(entry)
         _log.info("工具系统已初始化: %d 个工具", len(entries))
 
+    @staticmethod
+    def _assert_canonical_cutover_ready(
+        data_dir: Path,
+        *,
+        registry: SessionIdentityRegistry | None = None,
+        hindsight_enabled: bool = True,
+        hindsight_bank_id: str = "qq_bot",
+    ) -> None:
+        """Reject startup when canonical mode lacks a verified cold cutover."""
+        if not data_dir.is_dir():
+            return
+        business_databases = [
+            path
+            for path in data_dir.rglob("*")
+            if path.is_file() and path.suffix.lower() in {".sqlite", ".sqlite3"}
+            if path.name not in {"session_identity.sqlite3", "delivery_targets.sqlite3"}
+            and "migrations" not in path.relative_to(data_dir).parts
+        ]
+        if not business_databases:
+            return
+        migration_manifests = []
+        for path in data_dir.glob("migrations/*/manifest.json"):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            migration_manifests.append((path, payload))
+        if not migration_manifests:
+            raise RuntimeError(
+                "canonical session identity is enabled but no verified cold migration "
+                "manifest exists"
+            )
+        latest_manifest, latest_payload = max(
+            migration_manifests,
+            key=lambda item: float(
+                item[1].get("created_at") or item[0].stat().st_mtime
+            ),
+        )
+        if latest_payload.get("state") != "canonical_cutover":
+            raise RuntimeError(
+                "canonical session identity is enabled but the latest cold migration "
+                f"is not cut over (state={latest_payload.get('state')!r})"
+            )
+        mappings = latest_payload.get("mappings")
+        if not isinstance(mappings, list) or not mappings:
+            raise RuntimeError(
+                "canonical session identity is enabled but migration mappings are missing"
+            )
+        if registry is not None:
+            expected_keys = {
+                str(item.get("canonical_key"))
+                for item in mappings
+                if isinstance(item, dict) and item.get("canonical_key")
+            }
+            missing = registry.missing_migration_keys(expected_keys)
+            if missing:
+                raise RuntimeError(
+                    "canonical session identity is enabled but registry keys are missing: "
+                    + ", ".join(missing[:5])
+                )
+        if not hindsight_enabled:
+            return
+
+        verified_run = str(latest_payload.get("run_id") or latest_manifest.parent.name)
+
+        hindsight_plans = []
+        for path in data_dir.glob("migrations/*/hindsight-tag-plan.json"):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if (
+                payload.get("state") == "verified"
+                and str(payload.get("bank_id") or "") == hindsight_bank_id
+                and str(payload.get("source_run_id") or path.parent.name)
+                == verified_run
+            ):
+                hindsight_plans.append(path)
+        if not hindsight_plans:
+            raise RuntimeError(
+                "canonical session identity is enabled but no verified Hindsight "
+                f"tag migration exists for bank {hindsight_bank_id!r}"
+            )
+
     # ── 阶段 2: 构造 BotEngine ─────────────────────────────────────
 
     def _build_bot_engine(self):
@@ -835,6 +963,8 @@ class ServiceGraph:
             emoji_manager=self.emoji_manager,
             multimodal_service=self.multimodal_service,
             media_service=self.media_service,
+            channel_registry=getattr(self, "channel_registry", None),
+            session_identity_resolver=self.session_identity_resolver,
         )
 
     async def _deliver_pending_task_recovery(self) -> None:
@@ -873,20 +1003,27 @@ class ServiceGraph:
             )
 
             async def _deliver(chat_id, content, message_id, is_group, delivery_id=""):
-                actual = self.context_manager.get_chat_type(chat_id)
+                session_key = chat_id
+                target = self.agent_engine.resolve_delivery_target(
+                    chat_id, is_group=is_group
+                )
+                transport_chat_id = target.target_id if target is not None else chat_id
+                if target is not None:
+                    is_group = target.chat_type == "group"
+                actual = self.context_manager.get_chat_type(session_key)
                 if actual is not None:
                     is_group = actual
 
                 async def transport(**kwargs):
                     return await self.bot_engine.send_proactive(
-                        kwargs["chat_id"],
+                        transport_chat_id,
                         kwargs["content"],
-                        is_group=kwargs["is_group"],
+                        is_group=is_group,
                     )
 
                 return await self.agent_engine._get_delivery_controller().deliver_text(
                     delivery_id=delivery_id or f"background:{chat_id}",
-                    chat_id=chat_id,
+                    chat_id=session_key,
                     content=content,
                     callback=transport,
                     message_id=message_id,
@@ -1022,6 +1159,7 @@ class ServiceGraph:
             reply_callback=self.bot_engine._send_reply,
             context_manager=self.context_manager,
             delivery_controller=self.agent_engine._get_delivery_controller(),
+            session_identity_resolver=self.session_identity_resolver,
         )
 
         work_plan_delivery = ChatReplyDeliveryStrategy(
@@ -1030,6 +1168,7 @@ class ServiceGraph:
             delivery_controller=self.agent_engine._get_delivery_controller(),
             require_delivery=True,
             allow_result_target=False,
+            session_identity_resolver=self.session_identity_resolver,
         )
         hb_delivery = None
         if self.heartbeat_manager is not None:
@@ -1042,6 +1181,7 @@ class ServiceGraph:
                 show_ok=show_ok,
                 show_alerts=show_alerts,
                 delivery_controller=self.agent_engine._get_delivery_controller(),
+                session_identity_resolver=self.session_identity_resolver,
             )
 
         active_hours_cfg = self.cfg.heartbeat.get("active_hours", {})
@@ -1103,6 +1243,20 @@ class ServiceGraph:
         # ── exec 进程退出回调 ──
         async def _on_exec_exit(session):
             chat_id = session.delivery_channel or session.chat_id
+            target = self.agent_engine.resolve_delivery_target(
+                chat_id,
+                is_group=self.context_manager.get_chat_type(chat_id),
+            )
+            if target is not None:
+                delivery_target = target.target_id
+                session_key = (
+                    self.agent_engine.session_identity_resolver.resolve_inbound(
+                        target, legacy_key=chat_id
+                    ).session_key
+                )
+            else:
+                delivery_target = chat_id
+                session_key = chat_id
             exit_code = session.exit_code
             status = "成功" if exit_code == 0 else f"失败 (exit={exit_code})"
             stdout = "".join(session.stdout_lines[-5:]) if session.stdout_lines else ""
@@ -1114,8 +1268,8 @@ class ServiceGraph:
             _coalescer.request_wake(
                 source="exec-event",
                 intent="event",
-                session_key=chat_id,
-                delivery_target=chat_id,
+                session_key=session_key,
+                delivery_target=delivery_target,
                 extra_prompt=extra,
                 reason=f"后台进程完成: {session.command[:80]}",
             )
@@ -1150,6 +1304,7 @@ class ServiceGraph:
             delivery_controller=self.agent_engine._get_delivery_controller(),
             approval_manager=self.approval_manager,
             media_service=self.media_service,
+            delivery_target_catalog=self.delivery_target_catalog,
         )
 
         # ── 插件加载 ──
@@ -1188,6 +1343,7 @@ class ServiceGraph:
                     "archive_manager": self.archive_manager,
                     "media_service": self.media_service,
                     "runtime_settings": self.runtime_settings,
+                    "session_identity_resolver": self.session_identity_resolver,
                 },
                 webui_config=webui_config,
             )
@@ -1403,3 +1559,18 @@ class ServiceGraph:
         runtime_settings = getattr(self, "runtime_settings", None)
         if runtime_settings is not None:
             await self._safe_cleanup("runtime_settings", runtime_settings.close)
+
+        delivery_target_catalog = getattr(self, "delivery_target_catalog", None)
+        self.delivery_target_catalog = None
+        if delivery_target_catalog is not None:
+            await self._safe_cleanup(
+                "delivery_target_catalog", delivery_target_catalog.close
+            )
+
+        session_identity_registry = getattr(self, "session_identity_registry", None)
+        self.session_identity_registry = None
+        self.session_identity_resolver = None
+        if session_identity_registry is not None:
+            await self._safe_cleanup(
+                "session_identity_registry", session_identity_registry.close
+            )

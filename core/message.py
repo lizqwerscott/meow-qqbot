@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Dict, List, Optional
 
+from core.session_identity import DeliveryTarget, build_chat_session_key
+
 
 class MessageType(StrEnum):
     TEXT = "text"
@@ -43,6 +45,8 @@ class InputMessage:
     chat_id: str
     content: str
     is_group: bool
+    delivery_target: Optional[DeliveryTarget] = None
+    session_key: str = ""
     is_at_mention: bool = False
     bot_id: str = ""
     mentioned_ids: List[str] = field(default_factory=list)
@@ -61,3 +65,27 @@ class InputMessage:
     def __post_init__(self):
         if self.timestamp is None:
             self.timestamp = time.time()
+        internal_key = self.chat_id.startswith(
+            (
+                "task:",
+                "cron:",
+                "heartbeat:",
+                "work-plan:",
+                "workplan:",
+                "agent:",
+                "system:",
+                "exec:",
+                "subagent:",
+            )
+        )
+        if self.delivery_target is None and not self.session_key and internal_key:
+            self.session_key = self.chat_id
+        if self.delivery_target is None and not self.session_key:
+            self.delivery_target = DeliveryTarget(
+                channel="qq",
+                account_id="default",
+                chat_type="group" if self.is_group else "direct",
+                target_id=self.chat_id,
+            )
+        if not self.session_key and self.delivery_target is not None:
+            self.session_key = build_chat_session_key(self.delivery_target)

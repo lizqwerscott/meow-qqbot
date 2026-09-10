@@ -6,6 +6,7 @@ from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
 from core.engine.delivery_ledger import DeliveryReceipt
 from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
+from core.tools.impl._delivery import resolve_transport_target
 
 _log = logging.getLogger(__name__)
 
@@ -74,8 +75,14 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
                 )
             )
 
-        effective_chat_id = ctx.delivery_channel or ctx.chat_id
-        is_background = bool(ctx.delivery_channel)
+        effective_chat_id, is_background = resolve_transport_target(ctx, bot_engine)
+        if not effective_chat_id:
+            return ToolResult(
+                content=json.dumps(
+                    {"success": False, "reason": "当前会话没有可用的投递目标"},
+                    ensure_ascii=False,
+                )
+            )
         effective_reply_to = None if is_background else ctx.reply_to
 
         if (

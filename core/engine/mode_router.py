@@ -42,10 +42,11 @@ class ActiveWorkPlanHint:
     is_eligible: bool = True
 
     def matches(self, message: InputMessage, scheduler_revision: int) -> bool:
+        message_session_key = message.session_key or message.chat_id
         return (
             self.is_eligible
             and bool(self.work_plan_id)
-            and self.chat_id == message.chat_id
+            and self.chat_id in {message.chat_id, message_session_key}
             and self.owner_id == message.sender_id
             and (
                 self.scheduler_revision

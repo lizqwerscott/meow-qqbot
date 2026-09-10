@@ -57,9 +57,36 @@ def make_reply(
 ) -> List[Dict[str, Any]]:
     return [
         {
-            "chat_id": input_message.chat_id,
+            "chat_id": (
+                input_message.delivery_target.target_id
+                if input_message.delivery_target is not None
+                else input_message.chat_id
+            ),
             "content": content,
             "message_id": input_message.id,
             "is_group": input_message.is_group,
         }
     ]
+
+
+def session_key_for_message(input_message: InputMessage, agent_engine=None) -> str:
+    """Return the internal key while keeping reply transport IDs raw."""
+    if agent_engine is not None:
+        resolver = getattr(agent_engine, "_session_key_for_message", None)
+        if callable(resolver):
+            return resolver(input_message)
+    if input_message.chat_id.startswith(
+        (
+            "task:",
+            "cron:",
+            "heartbeat:",
+            "work-plan:",
+            "workplan:",
+            "agent:",
+            "system:",
+            "exec:",
+            "subagent:",
+        )
+    ):
+        return input_message.session_key or input_message.chat_id
+    return input_message.chat_id

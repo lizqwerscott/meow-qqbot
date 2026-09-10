@@ -51,6 +51,7 @@ class AppConfig(BaseModel):
     approval: dict = {}  # [approval]：审批卡转发目标等
     work_plans: dict = {}
     model_context_projection: dict = {}
+    session_identity: dict = {}
 
 
 class ConfigLoader:
@@ -248,3 +249,8 @@ class ConfigLoader:
     @property
     def model_context_projection(self) -> dict:
         return self._cfg.model_context_projection
+
+    @property
+    def session_identity(self) -> dict:
+        """[session_identity] canonical cutover controls."""
+        return self._cfg.session_identity

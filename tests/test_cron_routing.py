@@ -773,6 +773,8 @@ async def test_background_task_intent_immediate(runner):
     call_kwargs = runner._wake_dispatcher.request.call_args.kwargs
     assert call_kwargs["source"] == "background-task"
     assert call_kwargs["intent"] == "immediate"
+    assert call_kwargs["session_key"] == "user_001"
+    assert call_kwargs["delivery_target"] == "user_001"
 
 
 @pytest.mark.asyncio

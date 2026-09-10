@@ -33,6 +33,7 @@ class HeartbeatDeliveryStrategy(DeliveryStrategy):
         show_ok: bool = False,
         show_alerts: bool = True,
         delivery_controller: Optional[DeliveryController] = None,
+        session_identity_resolver: Any = None,
     ):
         self._hb = heartbeat_manager
         self._send = reply_callback
@@ -40,6 +41,7 @@ class HeartbeatDeliveryStrategy(DeliveryStrategy):
         self._show_ok = show_ok
         self._show_alerts = show_alerts
         self._delivery_controller = delivery_controller
+        self._resolver = session_identity_resolver
 
     def _admin_delivery_id(self, result: Any, text: str, kind: str) -> str:
         turn_id = str(getattr(result, "turn_id", "") or "")
@@ -82,8 +84,19 @@ class HeartbeatDeliveryStrategy(DeliveryStrategy):
             if deliver_to_user and self._send:
                 # 投递到用户聊天（系统事件结果）
                 is_group = False
+                session_key = deliver_to_user
+                transport_target = deliver_to_user
+                if self._resolver is not None:
+                    try:
+                        ref = self._resolver.resolve_legacy(deliver_to_user)
+                    except (TypeError, ValueError):
+                        ref = None
+                    if ref is not None and ref.target is not None:
+                        session_key = ref.session_key
+                        transport_target = ref.target.target_id
+                        is_group = ref.target.chat_type == "group"
                 if self._ctx:
-                    chat_type = self._ctx.get_chat_type(deliver_to_user)
+                    chat_type = self._ctx.get_chat_type(session_key)
                     if chat_type is not None:
                         is_group = chat_type
                 _log.info(
@@ -94,15 +107,21 @@ class HeartbeatDeliveryStrategy(DeliveryStrategy):
                 if self._delivery_controller:
                     await self._delivery_controller.deliver_text(
                         delivery_id=f"heartbeat:{getattr(result, 'turn_id', '')}:user",
-                        chat_id=deliver_to_user,
+                        chat_id=session_key,
                         content=text,
-                        callback=self._send,
+                        callback=lambda **kwargs: self._send(
+                            **{
+                                **kwargs,
+                                "chat_id": transport_target,
+                                "is_group": is_group,
+                            }
+                        ),
                         message_id="",
                         is_group=is_group,
                     )
                 else:
                     await self._send(
-                        chat_id=deliver_to_user,
+                        chat_id=transport_target,
                         content=text,
                         message_id="",
                         is_group=is_group,
@@ -148,27 +167,47 @@ class ChatReplyDeliveryStrategy(DeliveryStrategy):
         delivery_controller: Optional[DeliveryController] = None,
         require_delivery: bool = False,
         allow_result_target: bool = True,
+        session_identity_resolver: Any = None,
     ):
         self._send = reply_callback
         self._ctx = context_manager
         self._delivery_controller = delivery_controller
         self._require_delivery = require_delivery
         self._allow_result_target = allow_result_target
+        self._resolver = session_identity_resolver
+
+    def _target_parts(self, value: str) -> tuple[str, str, bool]:
+        resolver = self._resolver
+        if resolver is not None:
+            try:
+                ref = resolver.resolve_legacy(value)
+            except (TypeError, ValueError):
+                ref = None
+            if ref is not None and ref.target is not None:
+                return (
+                    ref.session_key,
+                    ref.target.target_id,
+                    ref.target.chat_type == "group",
+                )
+        return value, value, False
 
     async def _send_text(
         self, text: str, target: str, *, delivery_id: str = ""
     ) -> None:
-        is_group = False
+        session_key, transport_target, resolved_group = self._target_parts(target)
+        is_group = resolved_group
         if self._ctx:
-            chat_type = self._ctx.get_chat_type(target)
+            chat_type = self._ctx.get_chat_type(session_key)
             if chat_type is not None:
                 is_group = chat_type
         if self._delivery_controller:
             receipt = await self._delivery_controller.deliver_text(
                 delivery_id=delivery_id or f"chat-reply:{target}",
-                chat_id=target,
+                chat_id=session_key,
                 content=text,
-                callback=self._send,
+                callback=lambda **kwargs: self._send(
+                    **{**kwargs, "chat_id": transport_target, "is_group": is_group}
+                ),
                 message_id="",
                 is_group=is_group,
             )
@@ -176,7 +215,7 @@ class ChatReplyDeliveryStrategy(DeliveryStrategy):
                 raise RuntimeError(f"chat delivery was not confirmed: {receipt.status}")
             return
         await self._send(
-            chat_id=target,
+            chat_id=transport_target,
             content=text,
             message_id="",
             is_group=is_group,

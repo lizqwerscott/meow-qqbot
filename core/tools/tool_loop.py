@@ -856,7 +856,7 @@ class ToolLoop:
                         if preprepared_content:
                             preprepared_record = (
                                 await delivery_controller.prepare_tool_delivery(
-                                    chat_id=delivery_channel or chat_id,
+                                    chat_id=chat_id,
                                     turn_id=turn_id or reply_to,
                                     tool_name=tc.name,
                                     tool_call_id=tc.id,

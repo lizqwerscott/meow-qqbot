@@ -9,6 +9,7 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -19,14 +20,29 @@ from core.message import MessageType, ResourceMeta
 _log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class HindsightDocumentRef:
+    """Stable remote append identity and tags for one conversation."""
+
+    document_id: str
+    canonical_chat_tag: str
+    legacy_chat_tags: tuple[str, ...] = ()
+
+    @property
+    def chat_tags(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys((self.canonical_chat_tag, *self.legacy_chat_tags)))
+
+
 class HindsightMemory:
     def __init__(
         self,
         base_url: str = "http://127.0.0.1:8888",
         bank_id: str = "qq_bot",
+        session_identity_resolver: Any = None,
     ):
         self._client = Hindsight(base_url=base_url, timeout=30.0)
         self._bank_id = bank_id
+        self._session_identity_resolver = session_identity_resolver
         self._health_cache: Optional[Dict[str, Any]] = None
         self._health_cache_time: float = 0.0
         self._health_cache_ttl: float = 10.0
@@ -56,13 +72,16 @@ class HindsightMemory:
 
     async def add_message(
         self,
-        session_id: str,
-        content: str,
+        session_id: str = "",
+        content: str = "",
         sender_id: str = "",
         timestamp: Optional[float] = None,
         context: Optional[str] = None,
         resources: Optional[List[ResourceMeta]] = None,
         idempotency_key: Optional[str] = None,
+        document: Optional[HindsightDocumentRef] = None,
+        document_id: Optional[str] = None,
+        chat_tags: Optional[List[str]] = None,
     ) -> bool:
         """保留一条消息到记忆库，并返回是否成功提交。同一 session 共享 document_id 持续追加。
         content 已由调用方（agent_engine）预格式化，格式为 [ID(别名)]: 消息正文。
@@ -76,12 +95,34 @@ class HindsightMemory:
                 while len(self._seen_idempotency_keys) > self._seen_idempotency_limit:
                     self._seen_idempotency_keys.popitem(last=False)
         try:
+            if document is not None and document_id is not None:
+                raise ValueError("pass document or document_id, not both")
+            if document is not None:
+                resolved_document_id = document.document_id
+                resolved_chat_tags = list(document.chat_tags)
+            else:
+                resolved_document_id = document_id or f"session-{session_id}"
+                resolved_chat_tags = chat_tags or [f"chat:{session_id}"]
+                resolver = self._session_identity_resolver
+                if resolver is not None and session_id:
+                    try:
+                        ref = resolver.resolve_legacy(session_id)
+                    except (TypeError, ValueError):
+                        ref = None
+                    if ref is not None:
+                        resolved_document_id = (
+                            ref.hindsight_document_id or resolved_document_id
+                        )
+                        resolved_chat_tags = list(resolver.recall_aliases(ref))
+            if not resolved_document_id:
+                raise ValueError("document_id or session_id is required")
+            tags = list(dict.fromkeys([f"user:{sender_id}", *resolved_chat_tags]))
             kwargs: dict = dict(
                 bank_id=self._bank_id,
                 content=content,
-                document_id=f"session-{session_id}",
+                document_id=resolved_document_id,
                 update_mode="append",
-                tags=[f"user:{sender_id}", f"chat:{session_id}"],
+                tags=tags,
                 timestamp=self._to_datetime(timestamp),
                 retain_async=True,
             )
@@ -177,22 +218,49 @@ class HindsightMemory:
         query: str = "",
         top_k: int = 10,
         method: str = "hybrid",
+        aliases: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Recall only shared events retained for one chat, never a user profile."""
         try:
-            response = await self._client.arecall(
-                bank_id=self._bank_id,
-                query=query,
-                tags=[f"chat:{chat_id}"],
-                tags_match="all_strict",
-                max_tokens=top_k * 500,
+            resolved_aliases = list(aliases or [])
+            resolver = self._session_identity_resolver
+            if resolver is not None and not resolved_aliases:
+                try:
+                    ref = resolver.resolve_legacy(chat_id)
+                except (TypeError, ValueError):
+                    ref = None
+                if ref is not None:
+                    resolved_aliases = list(resolver.recall_aliases(ref))
+            tags = list(dict.fromkeys([f"chat:{chat_id}", *resolved_aliases]))
+            responses = await asyncio.gather(
+                *(
+                    self._client.arecall(
+                        bank_id=self._bank_id,
+                        query=query,
+                        tags=[tag if tag.startswith("chat:") else f"chat:{tag}"],
+                        tags_match="all_strict",
+                        max_tokens=top_k * 500,
+                    )
+                    for tag in tags
+                )
             )
             episodes: List[Dict] = []
-            for result in response.results:
-                if result.type in ("experience", "observation"):
+            seen: set[tuple[str, str]] = set()
+            for response in responses:
+                for result in response.results:
+                    if result.type not in ("experience", "observation"):
+                        continue
+                    identity = (result.type, result.text)
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
                     episodes.append(
                         {"summary": result.text, "memory_type": result.type}
                     )
+                    if len(episodes) >= top_k:
+                        break
+                if len(episodes) >= top_k:
+                    break
             self._cache_health({"status": "ok"})
             return {"episodes": episodes, "profiles": []}
         except Exception as exc:

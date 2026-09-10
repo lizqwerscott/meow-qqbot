@@ -2,7 +2,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from core.command_handlers.base import command, make_reply
+from core.command_handlers.base import command, make_reply, session_key_for_message
 from core.engine.history_projection import (
     read_legacy_history_bounded,
     visible_legacy_history,
@@ -43,6 +43,19 @@ class HistoryCommand:
         self.turn_summary_store = turn_summary_store
         self.prompt_context_reports = prompt_context_reports
         self.archive_index = archive_index
+
+    def _session_key(self, input_message: InputMessage, requested: str = "") -> str:
+        if not requested or requested == input_message.chat_id:
+            return session_key_for_message(input_message, self.agent_engine)
+        resolver = getattr(self.agent_engine, "session_identity_resolver", None)
+        if resolver is not None:
+            try:
+                return resolver.resolve_legacy(
+                    requested, is_group=input_message.is_group
+                ).session_key
+            except (TypeError, ValueError):
+                pass
+        return requested
 
     async def _get_visible_history(self, chat_id: str) -> List[Dict[str, Any]]:
         if self.prompt_history_projection is not None:
@@ -88,7 +101,7 @@ class HistoryCommand:
             return make_reply(input_message, f"处理失败: {e}")
 
     async def _show_status(self, input_message: InputMessage) -> List[Dict[str, Any]]:
-        chat_id = input_message.chat_id
+        chat_id = session_key_for_message(input_message, self.agent_engine)
         history = await self._get_visible_history(chat_id)
         count = len(history)
         last = history[-1] if history else None
@@ -120,7 +133,7 @@ class HistoryCommand:
     async def _view_chat(
         self, input_message: InputMessage, chat_id: str
     ) -> List[Dict[str, Any]]:
-        target = chat_id or input_message.chat_id
+        target = self._session_key(input_message, chat_id)
         try:
             history = await self._get_visible_history(target)
             lines = []
@@ -150,7 +163,7 @@ class HistoryCommand:
         self, input_message: InputMessage, chat_id: str
     ) -> List[Dict[str, Any]]:
         try:
-            target = chat_id or input_message.chat_id
+            target = self._session_key(input_message, chat_id)
             if self.model_context_transcript is not None:
                 scopes = await self.model_context_transcript.scopes_for_chat(target)
                 changed = 0
@@ -178,7 +191,7 @@ class HistoryCommand:
     async def _clear(
         self, input_message: InputMessage, chat_id: str
     ) -> List[Dict[str, Any]]:
-        target = chat_id or input_message.chat_id
+        target = self._session_key(input_message, chat_id)
         try:
             clear_session = getattr(self.agent_engine, "clear_session_async", None)
             if callable(clear_session):

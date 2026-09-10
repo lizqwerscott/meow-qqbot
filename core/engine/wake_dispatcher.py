@@ -53,6 +53,7 @@ class WakeDispatcher:
         intent: str = INTENT_EVENT,
         session_key: str = "",
         *,
+        delivery_target: str = "",
         reason: str = "",
         extra_prompt: str = "",
         event_text: str = "",
@@ -83,6 +84,7 @@ class WakeDispatcher:
                 source=source,
                 intent=intent,
                 session_key=session_key,
+                delivery_target=delivery_target,
                 extra_prompt=extra_prompt,
             )
             return self._to_wake_result(wr)
@@ -92,6 +94,7 @@ class WakeDispatcher:
             source=source,
             intent=intent,
             session_key=session_key,
+            delivery_target=delivery_target,
             extra_prompt=extra_prompt,
             coalesce_ms=coalesce_ms,
         )

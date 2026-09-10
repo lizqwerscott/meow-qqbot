@@ -11,8 +11,13 @@ from core.engine.conversation_event_log import (
 )
 from core.engine.prompt_history_projection import PromptHistoryProjection
 from core.engine.turn_protocol_history import TurnProtocolHistory
+from core.session_identity import (
+    DeliveryTarget,
+    SessionIdentityRegistry,
+    SessionIdentityResolver,
+)
 from core.webui.app import create_app
-from core.webui.routers.sessions import _redact_message
+from core.webui.routers.sessions import _redact_message, _validate_chat_id
 
 
 class _ContextManager:
@@ -67,6 +72,12 @@ def test_webui_history_redaction_covers_nested_tool_arguments():
 
     assert "top-secret" not in str(safe)
     assert "[已脱敏]" in str(safe)
+
+
+def test_webui_accepts_percent_encoded_canonical_session_keys():
+    _validate_chat_id("agent:main:qq:default:group:abc%3A123%2F456")
+    with pytest.raises(Exception):
+        _validate_chat_id("agent:main:qq:default:group:abc%ZZ")
 
 
 def test_webui_redaction_normalizes_legacy_user_display_prefix():
@@ -198,6 +209,43 @@ async def test_protocol_view_falls_back_to_legacy_context_history(tmp_path):
     assert "旧回复" in response.text
     assert "旧工具结果" in response.text
     await protocol.close()
+
+
+@pytest.mark.asyncio
+async def test_session_protocol_view_resolves_legacy_url_to_canonical_key(tmp_path):
+    protocol = TurnProtocolHistory(str(tmp_path / "protocol.sqlite3"))
+    registry = SessionIdentityRegistry(tmp_path / "identity.sqlite3")
+    target = DeliveryTarget("qq", "default", "group", "old-chat")
+    ref = registry.register_chat(
+        target,
+        legacy_key="old-chat",
+        hindsight_document_id="session-old-chat",
+        state="verified",
+    )
+    resolver = SessionIdentityResolver(registry, canonical_enabled=True)
+    await protocol.append_assistant(
+        chat_id=ref.session_key,
+        turn_id="turn-1",
+        event_id="assistant:0",
+        content="canonical reply",
+    )
+    app = create_app(
+        {
+            "context_manager": _ContextManager(),
+            "protocol_history": protocol,
+            "session_identity_resolver": resolver,
+        },
+        {},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/sessions/old-chat/protocol")
+
+    assert response.status_code == 200
+    assert "canonical reply" in response.text
+    assert ref.session_key in response.text
+    await protocol.close()
+    registry.close()
 
 
 @pytest.mark.asyncio

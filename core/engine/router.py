@@ -50,6 +50,10 @@ class Router:
             _log.error("command_manager 未初始化，无法处理命令")
             return
 
+        resolve_identity = getattr(self.agent_engine, "resolve_message_identity", None)
+        if callable(resolve_identity):
+            resolve_identity(input_message)
+
         # ── 1. 命令检测 ──
         command_messages = await self.command_manager.process_message(input_message)
         if command_messages:
@@ -64,8 +68,19 @@ class Router:
                     _log.warning("命令回复 ledger 初始化失败: %s", exc)
             for index, msg in enumerate(command_messages):
                 try:
+                    delivery_chat_id = msg["chat_id"]
+                    session_key = getattr(input_message, "session_key", "")
+                    if session_key and msg.get("chat_id") == input_message.chat_id:
+                        delivery_chat_id = session_key
+
+                    async def _transport(**kwargs):
+                        if msg.get("chat_id") == input_message.chat_id:
+                            kwargs["chat_id"] = msg["chat_id"]
+                            kwargs["is_group"] = input_message.is_group
+                        return await reply_callback(**kwargs)
+
                     if delivery_controller is None:
-                        await reply_callback(
+                        await _transport(
                             chat_id=msg["chat_id"],
                             content=msg["content"],
                             message_id=msg["message_id"],
@@ -77,9 +92,9 @@ class Router:
                                 f"command:{input_message.chat_id}:"
                                 f"{input_message.id}:{index}"
                             ),
-                            chat_id=msg["chat_id"],
+                            chat_id=delivery_chat_id,
                             content=msg["content"],
-                            callback=reply_callback,
+                            callback=_transport,
                             message_id=msg["message_id"],
                             is_group=msg["is_group"],
                             reason="command_reply",

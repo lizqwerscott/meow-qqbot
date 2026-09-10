@@ -140,6 +140,12 @@ def _safe_float(value: Any, default: float, minimum: float = 0.1) -> float:
 class MediaService:
     """媒体生命周期模块：保存、授权、摘要和按需图片分析。"""
 
+    def _session_key_for_message(self, message: InputMessage) -> str:
+        resolver = self._session_identity_resolver
+        if resolver is not None and getattr(resolver, "canonical_enabled", False):
+            return message.session_key or message.chat_id
+        return message.chat_id
+
     def __init__(
         self,
         *,
@@ -172,11 +178,13 @@ class MediaService:
         voice_transcriber=None,
         voice_transcription=None,
         ocr_engine=None,
+        session_identity_resolver=None,
         provider_chains=None,
     ):
         self.enabled = enabled
         self.http_client = http_client
         self.multimodal = multimodal
+        self._session_identity_resolver = session_identity_resolver
         image_config = (
             image_understanding if isinstance(image_understanding, Mapping) else {}
         )
@@ -536,7 +544,7 @@ class MediaService:
                 record = await self._ingest_resource(
                     resource,
                     source_url,
-                    message.chat_id,
+                    self._session_key_for_message(message),
                     message.id,
                     message.sender_id,
                     index,
@@ -569,7 +577,7 @@ class MediaService:
                 record = await self._ingest_resource(
                     resource,
                     resource.source_url,
-                    message.chat_id,
+                    self._session_key_for_message(message),
                     message.replied_message_id or f"reply:{message.id}",
                     message.replied_author_id or message.sender_id,
                     index,
@@ -589,7 +597,7 @@ class MediaService:
         if not message.replied_message_id:
             return
         records = await self.store.find_message_media(
-            message.chat_id, message.replied_message_id
+            self._session_key_for_message(message), message.replied_message_id
         )
         for resource, record in zip(message.replied_resources, records):
             resource.media_id = record.media_id
@@ -739,7 +747,10 @@ class MediaService:
                 break
             label = "当前图片" if resource in message.resources else "引用图片"
             block = await self._summarize_resource(
-                message.chat_id, resource, label, len(current) + len(replied) + 1
+                self._session_key_for_message(message),
+                resource,
+                label,
+                len(current) + len(replied) + 1,
             )
             if block:
                 (current if label == "当前图片" else replied).append(block)
@@ -747,7 +758,9 @@ class MediaService:
             if resource.resource_type != "file" or not resource.media_uri:
                 continue
             label = "当前文件" if resource in message.resources else "引用文件"
-            block = await self._summarize_file_context(message.chat_id, resource, label)
+            block = await self._summarize_file_context(
+                self._session_key_for_message(message), resource, label
+            )
             if block:
                 (current if label == "当前文件" else replied).append(block)
         for resource in (*message.resources, *message.replied_resources):
@@ -755,7 +768,7 @@ class MediaService:
                 continue
             label = "当前语音" if resource in message.resources else "引用语音"
             block = await self._transcribe_voice_context(
-                message.chat_id, resource, label
+                self._session_key_for_message(message), resource, label
             )
             if block:
                 (current if label == "当前语音" else replied).append(block)
@@ -767,7 +780,9 @@ class MediaService:
         recent = [
             r
             for r in await self.store.recent(
-                message.chat_id, self.recent_window_seconds, self.recent_max_items
+                self._session_key_for_message(message),
+                self.recent_window_seconds,
+                self.recent_max_items,
             )
             if r.media_uri not in used
         ]
@@ -796,7 +811,7 @@ class MediaService:
             if count >= self.max_auto_images:
                 break
             block = await self._summarize_resource(
-                message.chat_id, resource, label, count + 1
+                self._session_key_for_message(message), resource, label, count + 1
             )
             if block:
                 blocks.append(block)

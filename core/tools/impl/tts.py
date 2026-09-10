@@ -7,6 +7,7 @@ from core.ai.tts_service import TtsService
 from core.engine.delivery_ledger import DeliveryReceipt
 from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
+from core.tools.impl._delivery import resolve_transport_target
 
 _log = logging.getLogger(__name__)
 
@@ -139,8 +140,14 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
 
         temp_path = tts_service.save_temp_audio(audio_bytes)
 
-        effective_chat_id = ctx.delivery_channel or ctx.chat_id
-        effective_reply_to = None if ctx.delivery_channel else ctx.reply_to
+        effective_chat_id, is_background = resolve_transport_target(ctx, bot_engine)
+        if not effective_chat_id:
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "当前会话没有可用的投递目标"}, ensure_ascii=False
+                )
+            )
+        effective_reply_to = None if is_background else ctx.reply_to
         chat_type = "group" if ctx.is_group else "c2c"
 
         try:

@@ -3,7 +3,7 @@
 import logging
 from typing import Any, Dict, List
 
-from core.command_handlers.base import command, make_reply
+from core.command_handlers.base import command, make_reply, session_key_for_message
 from core.learners.orchestrator import LearningOrchestrator
 from core.message import InputMessage
 
@@ -17,8 +17,9 @@ _log = logging.getLogger(__name__)
     description="添加社群俚语。用法：猫猫学词 <词> = <定义> [例:<例句>]",
 )
 class JargonLearnCommand:
-    def __init__(self, learning_orchestrator: LearningOrchestrator):
+    def __init__(self, learning_orchestrator: LearningOrchestrator, agent_engine=None):
         self.learners = learning_orchestrator
+        self.agent_engine = agent_engine
 
     async def execute(
         self, input_message: InputMessage, args: str
@@ -56,7 +57,7 @@ class JargonLearnCommand:
             definition=definition,
             examples=examples,
             added_by=input_message.sender_id,
-            chat_id=input_message.chat_id,
+            chat_id=session_key_for_message(input_message, self.agent_engine),
         )
 
         return make_reply(

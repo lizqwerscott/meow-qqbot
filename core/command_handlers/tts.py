@@ -2,7 +2,7 @@ import logging
 from typing import Any, Dict, List
 
 from core.ai.tts_service import TtsService
-from core.command_handlers.base import command, make_reply
+from core.command_handlers.base import command, make_reply, session_key_for_message
 from core.engine.client import BotEngine
 from core.engine.delivery_ledger import DeliveryController, DeliveryReceipt
 from core.message import InputMessage
@@ -40,6 +40,14 @@ class TtsCommand:
 
         temp_path = self.tts_service.save_temp_audio(audio_bytes)
         chat_type = "group" if input_message.is_group else "c2c"
+        session_key = session_key_for_message(
+            input_message, getattr(self.bot_engine, "agent_engine", None)
+        )
+        transport_chat_id = (
+            input_message.delivery_target.target_id
+            if input_message.delivery_target is not None
+            else input_message.chat_id
+        )
 
         try:
             from qqbot_agent_sdk.constants import MEDIA_TYPE_VOICE
@@ -50,7 +58,7 @@ class TtsCommand:
 
             file_info = await uploader.upload(
                 chat_type=chat_type,
-                chat_id=input_message.chat_id,
+                chat_id=transport_chat_id,
                 source=temp_path,
                 file_type=MEDIA_TYPE_VOICE,
                 file_name="tts.wav",
@@ -58,7 +66,7 @@ class TtsCommand:
 
             async def _send_media(**kwargs):
                 return await self.bot_engine.send_reply(
-                    chat_id=kwargs["chat_id"],
+                    chat_id=transport_chat_id,
                     content="",
                     message_id=kwargs["message_id"],
                     is_group=kwargs["is_group"],
@@ -67,10 +75,8 @@ class TtsCommand:
 
             if self.delivery_controller is not None:
                 receipt = await self.delivery_controller.deliver_text(
-                    delivery_id=(
-                        f"command:{input_message.chat_id}:{input_message.id}:tts"
-                    ),
-                    chat_id=input_message.chat_id,
+                    delivery_id=(f"command:{session_key}:{input_message.id}:tts"),
+                    chat_id=session_key,
                     content="",
                     callback=_send_media,
                     message_id=input_message.id,

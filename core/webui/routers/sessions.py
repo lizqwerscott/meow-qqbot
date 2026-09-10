@@ -20,8 +20,8 @@ _log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["sessions"])
 
-# chat_id 必须仅含字母数字、下划线、冒号、横线、点（避免路径遍历）
-_CHAT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_:\-\.]+$")
+# chat_id 允许 canonical key 的 percent-encoded target segment，但拒绝路径分隔符。
+_CHAT_ID_PATTERN = re.compile(r"^(?:[a-zA-Z0-9_:\-.]|%[0-9A-Fa-f]{2})+$")
 _SENSITIVE_KEY_PATTERN = re.compile(
     r"(?i)(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|cookie|authorization)"
 )
@@ -47,6 +47,19 @@ _MODEL_CONTEXT_ERROR_MESSAGE = "模型上下文诊断暂不可用"
 def _validate_chat_id(chat_id: str) -> None:
     if not _CHAT_ID_PATTERN.match(chat_id):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="无效的 chat_id")
+
+
+def _resolve_request_session(request: Request, chat_id: str) -> str:
+    """Resolve a legacy URL alias before reading canonical session stores."""
+    resolver = getattr(request.app.state, "managers", {}).get(
+        "session_identity_resolver"
+    )
+    if resolver is None or not getattr(resolver, "canonical_enabled", False):
+        return chat_id
+    try:
+        return resolver.resolve_legacy(chat_id).session_key
+    except (TypeError, ValueError):
+        return chat_id
 
 
 def _validate_date(date: str) -> None:
@@ -511,6 +524,7 @@ async def archived_detail(
     page_size: int = Query(_PAGE_SIZE_DEFAULT, ge=1, le=_PAGE_SIZE_MAX),
 ):
     _validate_chat_id(chat_id)
+    chat_id = _resolve_request_session(request, chat_id)
     managers = request.app.state.managers
     templates = request.app.state.templates
     context_manager = managers.get("context_manager")
@@ -650,6 +664,7 @@ async def archived_messages_full(
     protocol: bool = Query(False),
 ):
     _validate_chat_id(chat_id)
+    chat_id = _resolve_request_session(request, chat_id)
     managers = request.app.state.managers
     templates = request.app.state.templates
     context_manager = managers.get("context_manager")
@@ -751,6 +766,7 @@ async def archived_messages_full(
 @router.get("/sessions/archived/{chat_id}/summary/{date}", response_class=HTMLResponse)
 async def archived_summary_view(request: Request, chat_id: str, date: str):
     _validate_chat_id(chat_id)
+    chat_id = _resolve_request_session(request, chat_id)
     _validate_date(date)
     managers = request.app.state.managers
     templates = request.app.state.templates
@@ -805,6 +821,7 @@ async def archived_summary_view(request: Request, chat_id: str, date: str):
 @router.post("/sessions/archived/{chat_id}/delete/{timestamp}")
 async def archived_delete(request: Request, chat_id: str, timestamp: str):
     _validate_chat_id(chat_id)
+    chat_id = _resolve_request_session(request, chat_id)
     managers = request.app.state.managers
     context_manager = managers.get("context_manager")
     archive_manager = managers.get("archive_manager")
@@ -862,6 +879,7 @@ async def session_detail(
     partial: bool = Query(False),
 ):
     _validate_chat_id(chat_id)
+    chat_id = _resolve_request_session(request, chat_id)
     managers = request.app.state.managers
     templates = request.app.state.templates
     context_manager = managers.get("context_manager")
@@ -1001,6 +1019,7 @@ async def session_protocol_detail(
     page_size: int = Query(_PAGE_SIZE_DEFAULT, ge=1, le=_PAGE_SIZE_MAX),
 ):
     _validate_chat_id(chat_id)
+    chat_id = _resolve_request_session(request, chat_id)
     managers = request.app.state.managers
     templates = request.app.state.templates
     protocol_history = managers.get("protocol_history")
@@ -1357,6 +1376,7 @@ async def _render_ledger_view(
     request: Request, chat_id: str, view: str, page: int = 1, page_size: int = 20
 ):
     _validate_chat_id(chat_id)
+    chat_id = _resolve_request_session(request, chat_id)
     managers = request.app.state.managers
     templates = request.app.state.templates
     event_log = managers.get("conversation_event_log")
@@ -1531,6 +1551,7 @@ async def session_summaries_view(
     page_size: int = Query(_PAGE_SIZE_DEFAULT, ge=1, le=_PAGE_SIZE_MAX),
 ):
     _validate_chat_id(chat_id)
+    chat_id = _resolve_request_session(request, chat_id)
     managers = request.app.state.managers
     templates = request.app.state.templates
     store = managers.get("turn_summary_store")
@@ -1573,6 +1594,7 @@ async def session_model_context_view(
     page_size: int = Query(_PAGE_SIZE_DEFAULT, ge=1, le=_PAGE_SIZE_MAX),
 ):
     _validate_chat_id(chat_id)
+    chat_id = _resolve_request_session(request, chat_id)
     managers = request.app.state.managers
     templates = request.app.state.templates
     transcript = managers.get("model_context_transcript")
@@ -1675,6 +1697,7 @@ async def session_archive_history_view(
     page_size: int = Query(_PAGE_SIZE_DEFAULT, ge=1, le=_PAGE_SIZE_MAX),
 ):
     _validate_chat_id(chat_id)
+    chat_id = _resolve_request_session(request, chat_id)
     managers = request.app.state.managers
     templates = request.app.state.templates
     event_log = managers.get("conversation_event_log")
@@ -1727,6 +1750,7 @@ async def session_archive_history_view(
 @router.post("/sessions/{chat_id}/clear")
 async def session_clear(request: Request, chat_id: str):
     _validate_chat_id(chat_id)
+    chat_id = _resolve_request_session(request, chat_id)
     managers = request.app.state.managers
     context_manager = managers.get("context_manager")
     timeline = managers.get("conversation_timeline")

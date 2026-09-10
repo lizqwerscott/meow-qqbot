@@ -52,6 +52,9 @@ class MgmtContext:
     task_state_store: Any = None
     model_context_config: dict = field(default_factory=dict)
     archive_timezone: str = "Asia/Shanghai"
+    session_identity_registry: Any = None
+    session_identity_resolver: Any = None
+    delivery_target_catalog: Any = None
 
 
 @dataclass

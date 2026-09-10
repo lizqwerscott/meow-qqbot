@@ -77,7 +77,7 @@ class TaskRecord:
     """后台任务记录。
 
     每次 cron 执行或手动后台任务都会创建一条 TaskRecord。
-    每个 TaskRecord 拥有独立 session（session_id = 'task:<id>'）。
+    每个 TaskRecord 拥有独立 execution session；``session_id`` 保留为旧 JSON 字段。
     """
 
     id: str = field(default_factory=_new_id)
@@ -88,7 +88,8 @@ class TaskRecord:
     media_refs: tuple[str, ...] = ()
     media_source_chat_id: str = ""
     job_id: Optional[str] = None  # 关联的 CronJob ID
-    session_id: str = ""  # 运行时填充：task:<id>
+    session_id: str = ""  # 旧字段；读取兼容
+    execution_session_key: str = ""  # 新字段；canonical cron execution identity
     created_at: float = field(default_factory=_now)
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
@@ -104,8 +105,12 @@ class TaskRecord:
     reply_to_message_id: str = ""  # 创建任务时的原始消息 ID（用于发消息时构造 msg_id）
 
     def __post_init__(self):
+        if self.execution_session_key and not self.session_id:
+            self.session_id = self.execution_session_key
         if not self.session_id:
             self.session_id = f"task:{self.id}"
+        if not self.execution_session_key:
+            self.execution_session_key = self.session_id
 
     def to_dict(self) -> dict:
         d = asdict(self)

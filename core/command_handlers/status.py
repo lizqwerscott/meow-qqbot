@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 import psutil
 
-from core.command_handlers.base import command, make_reply
+from core.command_handlers.base import command, make_reply, session_key_for_message
 from core.engine.agent_engine import AgentEngine
 from core.message import InputMessage
 
@@ -75,7 +75,7 @@ class StatusCommand:
             )
             if get_history_migration_status is not None:
                 history_migration = await get_history_migration_status(
-                    input_message.chat_id
+                    session_key_for_message(input_message, self.agent_engine)
                 )
             history_migration_summary = {}
             get_history_migration_summary = getattr(

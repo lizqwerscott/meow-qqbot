@@ -33,6 +33,12 @@ from core.managers.emoji_manager import EmojiManager
 from core.managers.nickname_manager import NicknameManager
 from core.markdown_split import split_markdown
 from core.message import InputMessage
+from core.session_identity import (
+    ChannelRegistry,
+    DeliveryTarget,
+    DeliveryValidation,
+    QQAdapter,
+)
 
 _log = logging.getLogger(__name__)
 _REPLY_DELIVERY_STATE_TTL = 600.0
@@ -124,6 +130,8 @@ class BotEngine:
         multimodal_service: Optional[MultimodalService] = None,
         permission_manager=None,
         media_service=None,
+        channel_registry: Optional[ChannelRegistry] = None,
+        session_identity_resolver=None,
     ):
         self._app_id = app_id
         self._client_secret = client_secret
@@ -145,6 +153,12 @@ class BotEngine:
         self.multimodal_service = multimodal_service
         self.permission_manager = permission_manager
         self.media_service = media_service
+        self.channel_registry = channel_registry or ChannelRegistry()
+        self.session_identity_resolver = session_identity_resolver
+        if not self.channel_registry.list_accounts("qq"):
+            self.channel_registry.register(
+                QQAdapter(account_id="default", send_callback=self._send_target)
+            )
         self.parser = MessageParser(MessageParserDeps(emoji_manager=emoji_manager))
         self.command_manager: CommandManager = CommandManager(
             admin_id=admin_id,
@@ -162,6 +176,60 @@ class BotEngine:
         )
 
         _log.info("BotEngine 已初始化")
+
+    async def _send_target(
+        self, target: DeliveryTarget, content: str, *, reply_to: str = ""
+    ) -> Any:
+        """Adapter callback: convert a target to QQ's raw transport arguments."""
+        return await self._send(
+            target,
+            content,
+            reply_to=reply_to or None,
+        )
+
+    def _resolve_delivery_target(
+        self, value: str, *, is_group: bool
+    ) -> DeliveryTarget:
+        resolver = getattr(self, "session_identity_resolver", None)
+        if resolver is not None:
+            try:
+                reference = resolver.resolve_legacy(value, is_group=is_group)
+            except (TypeError, ValueError):
+                reference = None
+            if reference is not None and reference.target is not None:
+                return reference.target
+        if value.startswith(
+            (
+                "agent:",
+                "task:",
+                "cron:",
+                "heartbeat:",
+                "work-plan:",
+                "workplan:",
+                "system:",
+                "exec:",
+                "subagent:",
+            )
+        ):
+            raise ValueError("internal session cannot be used as a delivery target")
+        return DeliveryTarget(
+            "qq", "default", "group" if is_group else "direct", value
+        )
+
+    async def validate_target(self, target: DeliveryTarget) -> DeliveryValidation:
+        """Validate a delivery target through the registered channel adapter."""
+        adapter = self.channel_registry.for_target(target)
+        return await adapter.validate_target(target)
+
+    async def send_target(
+        self, target: DeliveryTarget, content: str, *, reply_to: str = ""
+    ) -> Any:
+        """Send through a channel adapter; session keys are not accepted."""
+        adapter = self.channel_registry.for_target(target)
+        validation = await adapter.validate_target(target)
+        if not validation.ok:
+            raise ValueError(validation.reason or "delivery target rejected")
+        return await adapter.send_message(target, content, reply_to=reply_to)
 
     # ── 生命周期 ──
 
@@ -304,6 +372,12 @@ class BotEngine:
             chat_id=parsed.chat_id,
             content=parsed.content,
             is_group=(parsed.chat_scope == "group"),
+            delivery_target=DeliveryTarget(
+                channel="qq",
+                account_id="default",
+                chat_type="group" if parsed.chat_scope == "group" else "direct",
+                target_id=parsed.chat_id,
+            ),
             is_at_mention=parsed.is_at_mention,
             bot_id=self._bot_id,
             mentioned_ids=parsed.mentioned_ids,
@@ -316,6 +390,10 @@ class BotEngine:
             resources=parsed.resources,
             replied_resources=parsed.replied_resources,
         )
+
+        resolver = getattr(self.agent_engine, "resolve_message_identity", None)
+        if callable(resolver):
+            resolver(input_message)
 
         if self.media_service:
             await self.media_service.ingest_message(input_message)
@@ -379,11 +457,10 @@ class BotEngine:
 
     async def _send(
         self,
-        chat_id: str,
+        target: DeliveryTarget,
         content: str = "",
         *,
         reply_to: str | None = None,
-        is_group: bool = False,
         media_file_info: Optional[str] = None,
         markdown: bool = True,
         keyboard: Optional[InlineKeyboard] = None,
@@ -391,6 +468,10 @@ class BotEngine:
         chunk_index: Optional[int] = None,
         delivery_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        if not isinstance(target, DeliveryTarget):
+            raise TypeError("BotEngine._send requires a DeliveryTarget")
+        chat_id = target.target_id
+        is_group = target.chat_type == "group"
         chat_type = "group" if is_group else "c2c"
         state = delivery_state or _ReplyDeliveryState(
             mode="passive" if reply_to is not None else "proactive"
@@ -579,14 +660,16 @@ class BotEngine:
         keyboard: Optional[InlineKeyboard] = None,
         delivery_id: Optional[str] = None,
     ) -> DeliveryReceipt:
-        logical_delivery_id = delivery_id or f"reply:{chat_id}:{message_id or 'proactive'}"
+        logical_delivery_id = (
+            delivery_id or f"reply:{chat_id}:{message_id or 'proactive'}"
+        )
         state = self._get_reply_delivery_state(chat_id, message_id, is_group)
         try:
+            target = self._resolve_delivery_target(chat_id, is_group=is_group)
             await self._send(
-                chat_id,
+                target,
                 content,
                 reply_to=message_id,
-                is_group=is_group,
                 media_file_info=media_file_info,
                 markdown=markdown,
                 keyboard=keyboard,
@@ -611,11 +694,11 @@ class BotEngine:
         logical_delivery_id = delivery_id or f"proactive:{chat_id}:{time.time_ns()}"
         state = _ReplyDeliveryState(mode="proactive", last_used=time.monotonic())
         try:
+            target = self._resolve_delivery_target(chat_id, is_group=is_group)
             await self._send(
-                chat_id,
+                target,
                 content,
                 reply_to=None,
-                is_group=is_group,
                 media_file_info=media_file_info,
                 markdown=markdown,
                 keyboard=keyboard,
@@ -637,15 +720,17 @@ class BotEngine:
         keyboard: Optional[InlineKeyboard] = None,
         delivery_id: Optional[str] = None,
     ) -> DeliveryReceipt:
-        logical_delivery_id = delivery_id or f"reply:{chat_id}:{message_id or 'proactive'}"
+        logical_delivery_id = (
+            delivery_id or f"reply:{chat_id}:{message_id or 'proactive'}"
+        )
         try:
             reply_to = message_id if message_id else None
             state = self._get_reply_delivery_state(chat_id, message_id, is_group)
+            target = self._resolve_delivery_target(chat_id, is_group=is_group)
             result = await self._send(
-                chat_id,
+                target,
                 content,
                 reply_to=reply_to,
-                is_group=is_group,
                 media_file_info=media_file_info,
                 markdown=markdown,
                 keyboard=keyboard,

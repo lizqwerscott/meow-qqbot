@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from core.command_handlers.base import command, make_reply
+from core.command_handlers.base import command, make_reply, session_key_for_message
 from core.managers.archive_manager import ArchiveManager
 from core.message import InputMessage
 
@@ -25,8 +25,26 @@ def _is_date(value: str) -> bool:
     name="归档", aliases=["archive"], permission="admin", description="会话归档管理"
 )
 class ArchiveCommand:
-    def __init__(self, archive_manager: Optional[ArchiveManager] = None):
+    def __init__(
+        self,
+        archive_manager: Optional[ArchiveManager] = None,
+        agent_engine=None,
+    ):
         self.archive_manager = archive_manager
+        self.agent_engine = agent_engine
+
+    def _session_key(self, input_message: InputMessage, requested: str = "") -> str:
+        if not requested or requested == input_message.chat_id:
+            return session_key_for_message(input_message, self.agent_engine)
+        identity = getattr(self.agent_engine, "session_identity_resolver", None)
+        if identity is not None:
+            try:
+                return identity.resolve_legacy(
+                    requested, is_group=input_message.is_group
+                ).session_key
+            except (TypeError, ValueError):
+                pass
+        return requested
 
     async def execute(
         self, input_message: InputMessage, args: str
@@ -67,7 +85,7 @@ class ArchiveCommand:
         )
 
     async def _show_status(self, input_message: InputMessage) -> List[Dict[str, Any]]:
-        chat_id = input_message.chat_id
+        chat_id = self._session_key(input_message)
         status = await self.archive_manager.get_session_status_async(chat_id)
         count = status["message_count"]
         last_act = (
@@ -101,7 +119,7 @@ class ArchiveCommand:
     async def _list_archives(
         self, input_message: InputMessage, chat_id: str
     ) -> List[Dict[str, Any]]:
-        target = chat_id or input_message.chat_id
+        target = self._session_key(input_message, chat_id)
         list_batches = getattr(self.archive_manager, "list_archive_batches_async", None)
         if callable(list_batches):
             batches = await list_batches(target)
@@ -136,7 +154,7 @@ class ArchiveCommand:
     async def _show_summary(
         self, input_message: InputMessage, chat_id: str
     ) -> List[Dict[str, Any]]:
-        target = chat_id or input_message.chat_id
+        target = self._session_key(input_message, chat_id)
         text = await self.archive_manager.load_recent_summaries_async(target)
         if not text:
             return make_reply(
@@ -150,10 +168,8 @@ class ArchiveCommand:
     async def _show_integrity(
         self, input_message: InputMessage, chat_id: str
     ) -> List[Dict[str, Any]]:
-        target = chat_id or input_message.chat_id
-        get_integrity = getattr(
-            self.archive_manager, "get_event_integrity_async", None
-        )
+        target = self._session_key(input_message, chat_id)
+        get_integrity = getattr(self.archive_manager, "get_event_integrity_async", None)
         if not callable(get_integrity):
             return make_reply(input_message, "账本完整性检查不可用。")
         try:
@@ -161,7 +177,9 @@ class ArchiveCommand:
         except Exception as exc:
             return make_reply(input_message, f"完整性检查失败: {exc}")
         if summary.get("error"):
-            return make_reply(input_message, f"账本完整性检查不可用: {summary['error']}")
+            return make_reply(
+                input_message, f"账本完整性检查不可用: {summary['error']}"
+            )
         invalid_turns = summary.get("invalid_turns", [])
         lines = [
             f"会话 {target[:24]}… turn 完整性:",
@@ -174,9 +192,7 @@ class ArchiveCommand:
         if reasons:
             lines.append(
                 "原因: "
-                + ", ".join(
-                    f"{reason}={count}" for reason, count in reasons.items()
-                )
+                + ", ".join(f"{reason}={count}" for reason, count in reasons.items())
             )
         get_revisions = getattr(
             self.archive_manager, "get_turn_repair_revisions_async", None
@@ -205,16 +221,14 @@ class ArchiveCommand:
         return make_reply(input_message, "\n".join(lines))
 
     @staticmethod
-    def _parse_repair_args(
-        input_message: InputMessage, args: str
-    ) -> tuple[str, str]:
+    def _parse_repair_args(input_message: InputMessage, args: str) -> tuple[str, str]:
         tokens = args.strip().split()
         dates = [token for token in tokens if _is_date(token)]
         if len(dates) != 1 or len(tokens) > 2:
             raise ValueError("用法: 修复 <YYYY-MM-DD> [chat_id]")
         before_date = dates[0]
         target = next((token for token in tokens if token != before_date), None)
-        return target or input_message.chat_id, before_date
+        return target or session_key_for_message(input_message), before_date
 
     async def _run_repair(
         self, input_message: InputMessage, args: str
@@ -224,6 +238,7 @@ class ArchiveCommand:
             return make_reply(input_message, "账本归档修复不可用。")
         try:
             target, before_date = self._parse_repair_args(input_message, args)
+            target = self._session_key(input_message, target)
             result = await repair(target, before_date=before_date)
         except Exception as exc:
             return make_reply(input_message, f"归档修复失败: {exc}")
@@ -243,19 +258,15 @@ class ArchiveCommand:
                 reasons[reason] = reasons.get(reason, 0) + 1
             lines.append(
                 "跳过原因: "
-                + ", ".join(
-                    f"{reason}={count}" for reason, count in reasons.items()
-                )
+                + ", ".join(f"{reason}={count}" for reason, count in reasons.items())
             )
         return make_reply(input_message, "\n".join(lines))
 
     async def _show_migration_audit(
         self, input_message: InputMessage, chat_id: str
     ) -> List[Dict[str, Any]]:
-        target = chat_id or input_message.chat_id
-        reader = getattr(
-            self.archive_manager, "get_legacy_migration_audit_async", None
-        )
+        target = self._session_key(input_message, chat_id)
+        reader = getattr(self.archive_manager, "get_legacy_migration_audit_async", None)
         if not callable(reader):
             return make_reply(input_message, "旧归档迁移报告不可用。")
         try:
@@ -298,7 +309,7 @@ class ArchiveCommand:
         turn_id, revision_id, reason = tokens
         try:
             revision = await record(
-                input_message.chat_id,
+                self._session_key(input_message),
                 turn_id,
                 revision_id,
                 reason,
@@ -315,10 +326,12 @@ class ArchiveCommand:
     async def _run_archive(
         self, input_message: InputMessage, chat_id: str
     ) -> List[Dict[str, Any]]:
-        target = chat_id or input_message.chat_id
+        target = self._session_key(input_message, chat_id)
         try:
             target_is_group = (
-                input_message.is_group if target == input_message.chat_id else None
+                input_message.is_group
+                if target == session_key_for_message(input_message, self.agent_engine)
+                else None
             )
             result = await self.archive_manager.archive_manual(target, target_is_group)
             has_archived = bool(
@@ -347,10 +360,12 @@ class ArchiveCommand:
     async def _run_snapshot(
         self, input_message: InputMessage, chat_id: str
     ) -> List[Dict[str, Any]]:
-        target = chat_id or input_message.chat_id
+        target = self._session_key(input_message, chat_id)
         try:
             target_is_group = (
-                input_message.is_group if target == input_message.chat_id else None
+                input_message.is_group
+                if target == session_key_for_message(input_message, self.agent_engine)
+                else None
             )
             result = await self.archive_manager.archive_snapshot(
                 target, target_is_group

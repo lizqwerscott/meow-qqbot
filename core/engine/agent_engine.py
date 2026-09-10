@@ -45,6 +45,7 @@ from core.engine.delivery_ledger import (
 from core.engine.delivery_prompt_contract import DeliveryPromptContract
 from core.engine.engagement_config import get_group_reply_settings
 from core.engine.group_engagement import GroupEngagementManager
+from core.engine.hindsight_memory import HindsightDocumentRef
 from core.engine.history_projection import read_legacy_history_bounded
 from core.engine.mode_router import (
     ActiveWorkPlanHint,
@@ -230,6 +231,15 @@ class AgentEngine:
         self._workspace_manager = ctx.mgmt.workspace_manager
         self._task_state_store = ctx.mgmt.task_state_store
         self._permission_manager = ctx.mgmt.permission_manager
+        self.session_identity_registry = getattr(
+            ctx.mgmt, "session_identity_registry", None
+        )
+        self.session_identity_resolver = getattr(
+            ctx.mgmt, "session_identity_resolver", None
+        )
+        self.delivery_target_catalog = getattr(
+            ctx.mgmt, "delivery_target_catalog", None
+        )
 
         # ── 子模块 ──
         self.session_manager = SessionTaskManager()
@@ -506,6 +516,7 @@ class AgentEngine:
         if not getattr(self, "mode_routing_enabled", False) or self.mode_router is None:
             return pending
         message = pending.message
+        session_key = self._session_key_for_message(message)
         role = (
             self._permission_manager.get_user_role(message.sender_id)
             if self._permission_manager is not None
@@ -518,7 +529,7 @@ class AgentEngine:
                 from core.orchestration.work_plan_service import PlanPrincipal
 
                 plan = await self.work_plan_service.get(
-                    PlanPrincipal(message.chat_id, message.sender_id, role),
+                    PlanPrincipal(session_key, message.sender_id, role),
                     previous.work_plan_hint,
                 )
                 active_work_plan = ActiveWorkPlanHint(
@@ -558,7 +569,7 @@ class AgentEngine:
         if routing_audit is not None:
             try:
                 await routing_audit.append(
-                    chat_id=message.chat_id,
+                    chat_id=session_key,
                     message_id=message.id,
                     source=source.value,
                     intent=pending.intent.value,
@@ -577,7 +588,7 @@ class AgentEngine:
                 )
         _log.info(
             "mode route chat=%s message=%s mode=%s reason_code=%s policy=%s revision=%d",
-            message.chat_id[:12],
+            session_key[:12],
             message.id[:12],
             decision.mode.value,
             decision.reason_code,
@@ -656,7 +667,7 @@ class AgentEngine:
             return
         try:
             await store.update_ambient(
-                chat_id=items[0].message.chat_id,
+                chat_id=self._session_key_for_message(items[0].message),
                 message_ids=tuple(item.message.id for item in items),
                 **values,
             )
@@ -804,6 +815,7 @@ class AgentEngine:
         if pending.origin is not AdmissionOrigin.USER_MESSAGE:
             return
         message = pending.message
+        session_key = self._session_key_for_message(message)
         event_log = getattr(self, "event_log", None)
         if event_log is not None:
             turn_kind = turn_kind or (
@@ -812,7 +824,7 @@ class AgentEngine:
                 else TurnKind.AI
             )
             await event_log.append_user_message(
-                chat_id=message.chat_id,
+                chat_id=session_key,
                 turn_id=turn_id or message.id,
                 message_id=message.id,
                 content=pending.prepared_content,
@@ -850,7 +862,7 @@ class AgentEngine:
             return
         try:
             await self._get_timeline().append_user_message(
-                chat_id=message.chat_id,
+                chat_id=session_key,
                 message_id=message.id,
                 content=pending.prepared_content,
                 sender_id=message.sender_id,
@@ -862,7 +874,7 @@ class AgentEngine:
         except Exception as exc:
             _log.warning(
                 "legacy timeline 写入失败 [%s..] message=%s: %s",
-                message.chat_id[:12],
+                session_key[:12],
                 message.id,
                 exc,
             )
@@ -1138,6 +1150,7 @@ class AgentEngine:
     ) -> Optional[ModelContextScope]:
         if not getattr(self, "model_context_enabled", False):
             return None
+        session_key = self._session_key_for_message(input_message)
         if pending.intent is InboundIntent.DIRECT_TASK:
             correlation_id = pending.message.task_correlation_id
             if not correlation_id or not getattr(self, "scheduler", None):
@@ -1145,14 +1158,14 @@ class AgentEngine:
             if any(
                 item.intent is not InboundIntent.DIRECT_TASK
                 or item.message.task_correlation_id != correlation_id
-                or item.message.chat_id != input_message.chat_id
+                or self._session_key_for_message(item.message) != session_key
                 or item.message.sender_id != pending.message.sender_id
                 for item in (pending, *batch)
             ):
                 return None
             if not await self._get_scheduler().allows_model_context_inheritance(
                 pending.message.id,
-                chat_id=input_message.chat_id,
+                chat_id=session_key,
                 principal_id=pending.message.sender_id,
                 task_correlation_id=correlation_id,
                 reply_to=input_message.id,
@@ -1160,7 +1173,7 @@ class AgentEngine:
             ):
                 return None
             return ModelContextScope.for_intent(
-                chat_id=input_message.chat_id,
+                chat_id=session_key,
                 principal_id=pending.message.sender_id,
                 intent=pending.intent,
                 task_correlation_id=correlation_id,
@@ -1169,13 +1182,13 @@ class AgentEngine:
             return None
         if any(
             item.intent is not InboundIntent.PRIVATE_CONVERSATION
-            or item.message.chat_id != input_message.chat_id
+            or self._session_key_for_message(item.message) != session_key
             or item.message.sender_id != input_message.sender_id
             for item in (pending, *batch)
         ):
             return None
         return ModelContextScope.for_intent(
-            chat_id=input_message.chat_id,
+            chat_id=session_key,
             principal_id=input_message.sender_id,
             intent=pending.intent,
         )
@@ -1307,7 +1320,7 @@ class AgentEngine:
         ):
             return
         scope = ModelContextScope.for_intent(
-            chat_id=pending.message.chat_id,
+            chat_id=self._session_key_for_message(pending.message),
             principal_id=pending.message.sender_id,
             intent=pending.intent,
             task_correlation_id=pending.message.task_correlation_id,
@@ -1319,7 +1332,7 @@ class AgentEngine:
         except Exception as exc:
             _log.warning(
                 "关闭 direct task 模型上下文失败 [%s..]: %s",
-                pending.message.chat_id[:12],
+                self._session_key_for_message(pending.message)[:12],
                 exc,
             )
 
@@ -1400,11 +1413,14 @@ class AgentEngine:
                 return None
 
             async def _transport(record: DeliveryRecord, content: str) -> object:
+                target = self.resolve_delivery_target(record.chat_id, is_group=True)
                 kwargs = {
-                    "chat_id": record.chat_id,
+                    "chat_id": (
+                        target.target_id if target is not None else record.chat_id
+                    ),
                     "content": content,
                     "message_id": record.reply_anchor_id,
-                    "is_group": True,
+                    "is_group": target.chat_type == "group" if target else True,
                 }
                 if allow_transport_retry:
                     kwargs["delivery_id"] = record.logical_delivery_id or record.key
@@ -1582,8 +1598,9 @@ class AgentEngine:
         store = getattr(self, "_task_state_store", None)
         if store is None:
             return
+        session_key = self._session_key_for_message(input_message)
         recovered = await store.claim_waiting_recoveries(
-            chat_id=input_message.chat_id,
+            chat_id=session_key,
             principal_id=input_message.sender_id,
             intent=intent.value,
         )
@@ -1591,7 +1608,7 @@ class AgentEngine:
             return
         if self._system_events is not None:
             self._system_events.enqueue(
-                session_key=input_message.chat_id,
+                session_key=session_key,
                 text=(
                     "A prior waiting turn was recovered after restart. Treat this "
                     "incoming message as a new trigger; do not replay prior tools "
@@ -1603,9 +1620,48 @@ class AgentEngine:
         _log.info(
             "recovered %d waiting turn(s) from new inbound chat=%s principal=%s",
             len(recovered),
-            input_message.chat_id[:12],
+            session_key[:12],
             input_message.sender_id[:12],
         )
+
+    def _session_key_for_message(self, message: InputMessage) -> str:
+        resolver = getattr(self, "session_identity_resolver", None)
+        if resolver is not None and getattr(resolver, "canonical_enabled", False):
+            return message.session_key or message.chat_id
+        return message.chat_id
+
+    def resolve_message_identity(self, message: InputMessage) -> InputMessage:
+        """Resolve an inbound message before commands or AI consume it."""
+        target = getattr(message, "delivery_target", None)
+        resolver = getattr(self, "session_identity_resolver", None)
+        if target is None or resolver is None:
+            if not getattr(resolver, "canonical_enabled", False):
+                message.session_key = message.chat_id
+            return message
+        resolved = resolver.resolve_inbound(target, legacy_key=message.chat_id)
+        message.session_key = resolved.session_key
+        catalog = getattr(self, "delivery_target_catalog", None)
+        if catalog is not None:
+            try:
+                catalog.observe(target, source="inbound")
+            except Exception as exc:
+                _log.warning("登记投递目标失败 [%s..]: %s", message.chat_id[:12], exc)
+        return message
+
+    def resolve_delivery_target(self, value: str, *, is_group: bool | None = None):
+        """Resolve a raw or canonical session reference to its channel target."""
+        resolver = getattr(self, "session_identity_resolver", None)
+        if not value or resolver is None:
+            return None
+        try:
+            return resolver.resolve_legacy(value, is_group=is_group).target
+        except (TypeError, ValueError):
+            return None
+
+    def _engagement_target_key(self, session_key: str, *, is_group: bool) -> str:
+        """Use the configured raw target only at the engagement policy boundary."""
+        target = self.resolve_delivery_target(session_key, is_group=is_group)
+        return target.target_id if target is not None else session_key
 
     # ── 消息分发 ──
 
@@ -1630,16 +1686,28 @@ class AgentEngine:
             self._pending_ids.add(input_message.id)
 
         chat_id = input_message.chat_id
+        target = getattr(input_message, "delivery_target", None)
+        resolver = getattr(self, "session_identity_resolver", None)
+        session_key = chat_id
+        try:
+            self.resolve_message_identity(input_message)
+            session_key = self._session_key_for_message(input_message)
+        except BaseException:
+            async with self._dedup_lock:
+                self._pending_ids.discard(input_message.id)
+            raise
         if input_message.is_group and self._group_target_observer is not None:
             observed = self._group_target_observer(chat_id)
             if inspect.isawaitable(observed):
                 await observed
         if self._workspace_manager:
-            self._workspace_manager.sandbox_dir(input_message.is_group, chat_id)
-        self.last_active_chat = chat_id
+            self._workspace_manager.sandbox_dir(input_message.is_group, session_key)
+        self.last_active_chat = session_key
         self.last_active_time = time.time()
 
         intent = _intent or self._classify_inbound_intent(input_message)
+        if session_key != input_message.chat_id:
+            input_message.session_key = session_key
         await self._recover_waiting_turns_for_inbound(input_message, intent)
         mode_routing = None
         if self.mode_routing_enabled and self.mode_router is not None:
@@ -1659,7 +1727,7 @@ class AgentEngine:
                     source=source,
                     intent=intent,
                     role=role,
-                    scheduler_revision=self._get_scheduler().revision(chat_id),
+                    scheduler_revision=self._get_scheduler().revision(session_key),
                 )
             ).to_metadata()
         needs_ai = intent is not InboundIntent.GROUP_AMBIENT
@@ -1674,7 +1742,7 @@ class AgentEngine:
                 intent=intent,
                 mode_routing=mode_routing,
             )
-            enqueued = await self._get_scheduler().enqueue(chat_id, pending)
+            enqueued = await self._get_scheduler().enqueue(session_key, pending)
         except BaseException:
             async with self._dedup_lock:
                 self._pending_ids.discard(input_message.id)
@@ -1696,11 +1764,18 @@ class AgentEngine:
         if not enqueued.accepted:
             if intent is not InboundIntent.GROUP_AMBIENT:
                 try:
+
+                    async def _transport(**kwargs):
+                        if target is not None:
+                            kwargs["chat_id"] = target.target_id
+                            kwargs["is_group"] = target.chat_type == "group"
+                        return await reply_callback(**kwargs)
+
                     receipt = await self._get_delivery_controller().deliver_text(
                         delivery_id=f"backpressure:{chat_id}:{input_message.id}",
-                        chat_id=chat_id,
+                        chat_id=session_key,
                         content="当前会话任务较多，请稍后重试。",
-                        callback=reply_callback,
+                        callback=_transport,
                         message_id=input_message.id,
                         is_group=input_message.is_group,
                         reason="inbox_backpressure",
@@ -1716,18 +1791,18 @@ class AgentEngine:
                     _log.warning("发送会话背压提示失败 [%s..]: %s", chat_id[:12], exc)
             return
         if enqueued.accepted:
-            self._consumer_callbacks[chat_id] = (
+            self._consumer_callbacks[session_key] = (
                 reply_callback,
                 get_user_nickname,
             )
             if self._get_group_engagement().config.group_ambient_mode == "active":
-                await self._recover_ambient_deliveries(chat_id, reply_callback)
+                await self._recover_ambient_deliveries(session_key, reply_callback)
                 await self._ensure_delivery_recovery_worker()
         _log.debug("消息已入 inbox [%s..]: %s", chat_id[:12], input_message.id)
         if enqueued.should_start_consumer:
             task = asyncio.create_task(
                 self._consumer(
-                    chat_id,
+                    session_key,
                     reply_callback,
                     get_user_nickname,
                     enqueued.consumer_token,
@@ -1780,7 +1855,7 @@ class AgentEngine:
     ) -> Optional[AdmittedMessage]:
         """Commit one leased inbound message to local history exactly once."""
         message = pending.message
-        chat_id = message.chat_id
+        chat_id = self._session_key_for_message(message)
         admission_key = (chat_id, message.id)
         admitted_ids = getattr(self, "_admitted_ids", OrderedDict())
         if admission_key not in admitted_ids:
@@ -1919,25 +1994,25 @@ class AgentEngine:
         )
 
     async def _rollback_admission(self, pending: PendingInbound) -> None:
-        admission_key = (pending.message.chat_id, pending.message.id)
+        chat_id = self._session_key_for_message(pending.message)
+        admission_key = (chat_id, pending.message.id)
         try:
             await self.context_manager.remove_message_if_async(
-                pending.message.chat_id, "user", pending.message.id
+                chat_id, "user", pending.message.id
             )
         finally:
             if getattr(self, "_admission_outbox", None):
-                await self._admission_outbox.cancel(
-                    pending.message.chat_id, pending.message.id
-                )
+                await self._admission_outbox.cancel(chat_id, pending.message.id)
             self._admitted_ids.pop(admission_key, None)
 
     def _build_side_effect_payload(self, pending: PendingInbound) -> dict:
         message = pending.message
         return {
-            "chat_id": message.chat_id,
+            "chat_id": self._session_key_for_message(message),
             "message_id": message.id,
             "content": pending.prepared_content,
             "sender_id": message.sender_id,
+            "is_group": message.is_group,
             "mentioned_ids": list(message.mentioned_ids),
             "timestamp": message.timestamp,
             "msg_type": str(message.msg_type),
@@ -2131,6 +2206,23 @@ class AgentEngine:
         resources = [
             ResourceMeta(**resource) for resource in payload.get("resources", [])
         ]
+        document = None
+        resolver = getattr(self, "session_identity_resolver", None)
+        if resolver is not None and payload.get("chat_id"):
+            try:
+                ref = resolver.resolve_legacy(
+                    payload["chat_id"],
+                    is_group=payload.get("is_group"),
+                )
+            except (TypeError, ValueError):
+                ref = None
+            if ref is not None and ref.hindsight_document_id:
+                aliases = resolver.recall_aliases(ref)
+                document = HindsightDocumentRef(
+                    document_id=ref.hindsight_document_id,
+                    canonical_chat_tag=aliases[0],
+                    legacy_chat_tags=aliases[1:],
+                )
         return await self.hindsight.add_message(
             session_id=payload["chat_id"],
             content=self._format_hindsight_content(
@@ -2146,6 +2238,7 @@ class AgentEngine:
             timestamp=payload.get("timestamp"),
             resources=resources,
             idempotency_key=payload.get("idempotency_key"),
+            document=document,
         )
 
     async def _run_learner_side_effect(self, payload: dict) -> bool:
@@ -2200,7 +2293,7 @@ class AgentEngine:
                 _log.warning(
                     "%s 准入副作用失败 [%s..]: %s",
                     effect_type,
-                    pending.message.chat_id[:12],
+                    self._session_key_for_message(pending.message)[:12],
                     exc,
                 )
             status_map = getattr(self, "_admission_side_effect_status", None)
@@ -2384,10 +2477,16 @@ class AgentEngine:
                             decision = None
                         else:
                             decision = await self._get_group_engagement().evaluate(
-                                chat_id, batch=work.items
+                                self._engagement_target_key(
+                                    chat_id,
+                                    is_group=work.items[0].message.is_group,
+                                ),
+                                batch=work.items,
                             )
+                            engagement_chat_id = decision.chat_id
                             reply_settings = get_group_reply_settings(
-                                self._get_group_engagement().config, chat_id
+                                self._get_group_engagement().config,
+                                engagement_chat_id,
                             )
                             if (
                                 reply_settings.trigger_mode == "reply_necessity"
@@ -2403,7 +2502,7 @@ class AgentEngine:
                                 necessity = gate.evaluate(
                                     ReplyNecessityInput(
                                         source="ambient",
-                                        chat_id=chat_id,
+                                        chat_id=engagement_chat_id,
                                         batch=work.items,
                                         pending_count=len(work.items),
                                         active_chat=True,
@@ -2581,11 +2680,19 @@ class AgentEngine:
                         exc_info=True,
                     )
                     try:
+
+                        async def _error_transport(**kwargs):
+                            target = getattr(message, "delivery_target", None)
+                            if target is not None:
+                                kwargs["chat_id"] = target.target_id
+                                kwargs["is_group"] = target.chat_type == "group"
+                            return await reply_callback(**kwargs)
+
                         receipt = await self._get_delivery_controller().deliver_text(
                             delivery_id=f"consumer-error:{chat_id}:{message.id}",
                             chat_id=chat_id,
                             content="抱歉，处理您的消息时出现了问题，请稍后再试。",
-                            callback=reply_callback,
+                            callback=_error_transport,
                             message_id=message.id,
                             is_group=message.is_group,
                         )
@@ -3085,7 +3192,7 @@ class AgentEngine:
         input_message = (
             current_batch[-1] if current_batch else current_pending
         ).message
-        chat_id = input_message.chat_id
+        chat_id = self._session_key_for_message(input_message)
         admitted_any = False
         final_delivered = False
         controller = self._get_delivery_controller()
@@ -3176,8 +3283,15 @@ class AgentEngine:
                 capabilities=capabilities,
             )
 
-        async def _tool_reply_callback(**kwargs):
+        async def _transport_reply(**kwargs):
+            target = getattr(input_message, "delivery_target", None)
+            if target is not None:
+                kwargs["chat_id"] = target.target_id
+                kwargs["is_group"] = target.chat_type == "group"
             return await reply_callback(**kwargs)
+
+        async def _tool_reply_callback(**kwargs):
+            return await _transport_reply(**kwargs)
 
         async def _final_reply_callback(**kwargs) -> None:
             nonlocal delivery_status, final_delivered
@@ -3192,7 +3306,7 @@ class AgentEngine:
             )
             if not delivery.should_deliver or record is None:
                 return
-            receipt = await reply_callback(**kwargs)
+            receipt = await _transport_reply(**kwargs)
             if isinstance(receipt, DeliveryReceipt):
                 delivery_status = receipt.status
                 settled = await controller.settle_receipt(
@@ -3233,6 +3347,11 @@ class AgentEngine:
                         sender_id=input_message.sender_id,
                         is_group=True,
                         reply_to=decision.reply_anchor_id or input_message.id,
+                        delivery_channel=(
+                            input_message.delivery_target.target_id
+                            if input_message.delivery_target is not None
+                            else chat_id
+                        ),
                         route_text=input_message.content,
                         prompt_factory=_build_prompt,
                         reply_callback=_final_reply_callback,
@@ -3374,7 +3493,7 @@ class AgentEngine:
                 "_process_message requires PendingInbound with explicit origin"
             )
         input_message = (batch[-1] if batch else pending).message
-        chat_id = input_message.chat_id
+        chat_id = self._session_key_for_message(input_message)
         is_group = input_message.is_group
         active_turn_id = scheduler_turn_id or input_message.id
         user_nickname = get_user_nickname(input_message.sender_id)
@@ -3609,6 +3728,15 @@ class AgentEngine:
             )
 
         delivery_sequence = 0
+        delivery_target = getattr(input_message, "delivery_target", None)
+        transport_chat_id = (
+            delivery_target.target_id if delivery_target is not None else chat_id
+        )
+        transport_is_group = (
+            delivery_target.chat_type == "group"
+            if delivery_target is not None
+            else is_group
+        )
 
         async def _deliver_reply(*args, **kwargs):
             nonlocal delivery_sequence
@@ -3626,10 +3754,10 @@ class AgentEngine:
             )
             try:
                 receipt = await reply_callback(
-                    chat_id=chat_id,
+                    chat_id=transport_chat_id,
                     content=content,
                     message_id=input_message.id,
-                    is_group=is_group,
+                    is_group=transport_is_group,
                 )
             except Exception:
                 receipt = DeliveryReceipt(
@@ -3658,6 +3786,7 @@ class AgentEngine:
                     sender_id=input_message.sender_id,
                     is_group=is_group,
                     reply_to=input_message.id,
+                    delivery_channel=transport_chat_id,
                     route_text=input_message.content,
                     prompt_factory=_build_prompt,
                     reply_callback=_deliver_reply,
@@ -3730,11 +3859,21 @@ class AgentEngine:
             return
         from core.tasks.wake_coalescer import INTENT_EVENT, SOURCE_TASK, request_wake
 
+        target = self.resolve_delivery_target(plan.chat_id)
+        delivery_target = (
+            target.target_id
+            if target is not None
+            else (
+                plan.chat_id
+                if getattr(self, "session_identity_resolver", None) is None
+                else ""
+            )
+        )
         request_wake(
             source=SOURCE_TASK,
             intent=INTENT_EVENT,
             session_key=plan.chat_id,
-            delivery_target=plan.chat_id,
+            delivery_target=delivery_target,
             work_plan_id=plan.id,
             reason=f"workplan:{plan.short_handle}:background-result",
         )
@@ -3793,12 +3932,13 @@ class AgentEngine:
         store = getattr(self, "work_plan_store", None)
         if store is None:
             raise RuntimeError("Chat-to-Agent handoff store is unavailable")
-        handoff_key = f"{message.chat_id}:{message.id}:request_agent"
+        session_key = self._session_key_for_message(message)
+        handoff_key = f"{session_key}:{message.id}:request_agent"
         accepted = await store.record_handoff(
             handoff_key=handoff_key,
             source_message_id=message.id,
             chat_turn_id=message.id,
-            chat_id=message.chat_id,
+            chat_id=session_key,
             sender_id=message.sender_id,
             task_summary=str(getattr(control, "task_summary", "")),
             reason=str(getattr(control, "reason", "")),
@@ -3815,7 +3955,7 @@ class AgentEngine:
                     handoff_key=handoff_key,
                     source_message_id=message.id,
                     chat_turn_id=message.id,
-                    chat_id=message.chat_id,
+                    chat_id=session_key,
                     sender_id=message.sender_id,
                     task_summary=str(getattr(control, "task_summary", "")),
                     reason=str(getattr(control, "reason", "")),
@@ -3830,7 +3970,7 @@ class AgentEngine:
             capability_profile="agent_full",
             reason_code="chat_handoff",
             policy_version="chat-handoff/v1",
-            scheduler_revision=self._get_scheduler().revision(message.chat_id),
+            scheduler_revision=self._get_scheduler().revision(session_key),
             work_plan_hint=(
                 pending.mode_routing.work_plan_hint if pending.mode_routing else None
             ),
@@ -4117,6 +4257,21 @@ class AgentEngine:
             _log.warning("reply_callback 未注入，无法投递 AI 回应")
             return result
 
+        resolver = getattr(self, "session_identity_resolver", None)
+        if resolver is not None and getattr(resolver, "canonical_enabled", False):
+            try:
+                session_ref = resolver.resolve_legacy(session_key)
+            except (TypeError, ValueError):
+                session_ref = None
+            if session_ref is not None:
+                session_key = session_ref.session_key
+                if not delivery_target and session_ref.target is not None:
+                    delivery_target = session_ref.target.target_id
+            if delivery_target.startswith("agent:"):
+                target_ref = self.resolve_delivery_target(delivery_target)
+                if target_ref is not None:
+                    delivery_target = target_ref.target_id
+
         is_group = (
             self.context_manager.get_chat_type(session_key)
             if self.context_manager
@@ -4181,6 +4336,7 @@ class AgentEngine:
                     sender_id=planner_sender_id,
                     is_group=is_group,
                     reply_to=msg.id,
+                    delivery_channel=delivery_target,
                     route_text=extra_prompt or "[系统事件]",
                     prompt_factory=_build_prompt,
                     reply_callback=_capture,

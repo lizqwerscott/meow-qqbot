@@ -49,13 +49,28 @@ class CostCommand:
 
         if args.strip():
             chat_id_arg = args.strip()
-            session = ct.get_session_stats(chat_id_arg)
+            lookup_key = chat_id_arg
+            resolver = getattr(self.agent_engine, "session_identity_resolver", None)
+            if resolver is not None:
+                try:
+                    lookup_key = resolver.resolve_legacy(
+                        chat_id_arg,
+                        is_group=(
+                            input_message.is_group
+                            if chat_id_arg == input_message.chat_id
+                            else None
+                        ),
+                    ).session_key
+                except (TypeError, ValueError):
+                    lookup_key = chat_id_arg
+            session = ct.get_session_stats(lookup_key)
             if session is None:
                 lines.append(f"\n未找到会话 `{chat_id_arg}`")
             else:
                 lines.extend(
                     [
-                        f"\n`{chat_id_arg}`",
+                        f"\n`{chat_id_arg}`"
+                        + (f" → `{lookup_key}`" if lookup_key != chat_id_arg else ""),
                         f"  调用: `{session.turn_count}` 次",
                         f"  输入: `{_fmt_tokens(session.prompt_tokens)}` (命中 {session.cache_hit_rate:.1%})",
                         f"  输出: `{_fmt_tokens(session.completion_tokens)}`",

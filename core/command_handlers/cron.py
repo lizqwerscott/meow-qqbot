@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from core.command_handlers.base import command, make_reply
 from core.message import InputMessage
+from core.session_identity import TargetFilters, TargetPrincipal
 
 _log = logging.getLogger(__name__)
 
@@ -24,10 +25,12 @@ class CronCommand:
         background_task_runner=None,
         task_manager=None,
         agent_engine=None,
+        delivery_target_catalog=None,
     ):
         self._cron_mgr = cron_job_manager
         self._runner = background_task_runner
         self._task_mgr = task_manager
+        self._target_catalog = delivery_target_catalog
 
     @staticmethod
     def _parse_flags(tokens: list[str]) -> tuple[dict[str, str], list[str]]:
@@ -46,6 +49,7 @@ class CronCommand:
                 "event",
                 "session",
                 "target",
+                "delivery-target",
                 "model",
                 "thinking",
                 "notify",
@@ -67,6 +71,28 @@ class CronCommand:
 
         parts = args.strip().split(maxsplit=1)
         subcmd = parts[0].lower() if parts else "list"
+
+        if subcmd in {"targets", "target", "list_targets", "list-targets"}:
+            if self._target_catalog is None:
+                return make_reply(input_message, "投递目标目录未启用。")
+            targets = self._target_catalog.list_visible(
+                TargetPrincipal(
+                    principal_id=input_message.sender_id,
+                    is_admin=True,
+                ),
+                TargetFilters(channel="qq"),
+                include_inactive=False,
+            )
+            if not targets:
+                return make_reply(input_message, "暂无已观察的投递目标。")
+            lines = ["**可用投递目标**"]
+            for known in targets:
+                target = known.target
+                lines.append(
+                    f"- `{target.channel}/{target.account_id}/{target.chat_type}` "
+                    f"`{target.target_id}` ({known.status})"
+                )
+            return make_reply(input_message, "\n".join(lines))
 
         if subcmd == "list":
             jobs = self._cron_mgr.list_jobs()
@@ -122,6 +148,7 @@ class CronCommand:
                     "  /cron create <name> at:<ISO8601> --event <text>                  # 一次性事件\n"
                     "  /cron create <name> <cron_expr> <prompt> --session <mode>        # 指定 session\n"
                     "  /cron create <name> <cron_expr> <prompt> --target <mode>         # 指定 wake 目标\n"
+                    "  /cron create <name> <cron_expr> <prompt> --delivery-target <id> # 投递到已观察目标\n"
                     "  /cron create <name> <cron_expr> <prompt> --model <m> --thinking <t>  # AI 参数\n"
                     "  /cron create <name> <cron_expr> <prompt> --notify off              # 静默执行不投递\n\n"
                     "兼容旧语法:\n"
@@ -215,13 +242,40 @@ class CronCommand:
             else:
                 payload_type = "message"
 
+            current_target = input_message.delivery_target
+            if current_target is not None and self._target_catalog is not None:
+                self._target_catalog.observe(current_target, source="cron_create")
+            selected_target = current_target
+            if "delivery-target" in flags:
+                if self._target_catalog is None:
+                    return make_reply(
+                        input_message, "投递目标目录未启用，无法选择跨目标投递。"
+                    )
+                if current_target is None:
+                    return make_reply(input_message, "当前消息没有可用的 QQ 投递目标。")
+                selected_target = self._target_catalog.resolve_for_cron(
+                    flags["delivery-target"],
+                    TargetPrincipal(
+                        principal_id=input_message.sender_id,
+                        is_admin=True,
+                    ),
+                    current_target,
+                )
+                if selected_target is None:
+                    return make_reply(
+                        input_message,
+                        "未找到唯一的已观察投递目标；请先用 `猫猫 cron targets` 查看目标。",
+                    )
+            if selected_target is None:
+                return make_reply(input_message, "当前消息没有可用的 QQ 投递目标。")
+
             # 构建创建参数
             kwargs = {
                 "name": name,
                 "cron_expression": cron_expr,
                 "prompt": prompt,
-                "delivery_channel": input_message.chat_id,
-                "is_group": input_message.is_group,
+                "delivery_channel": (selected_target.target_id),
+                "is_group": selected_target.chat_type == "group",
                 "session_mode": session_mode,
                 "session_target": session_target,
                 "custom_session_id": custom_session_id,

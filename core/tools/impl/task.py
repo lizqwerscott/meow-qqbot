@@ -5,6 +5,7 @@ from typing import Optional
 
 from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
+from core.tools.impl._delivery import resolve_transport_target
 
 _log = logging.getLogger(__name__)
 
@@ -165,12 +166,14 @@ def create_task_entries(deps: ToolDeps) -> list[ToolEntry]:
             auto_media_understanding = False
             media_refs = []
 
+        bot_engine = deps.bot_engine.value
+        delivery_channel, _ = resolve_transport_target(ctx, bot_engine)
         job = await cron_job_manager.create_job(
             name=name,
             cron_expression=cron_expression,
             prompt=prompt,
             at=at_ts,
-            delivery_channel=ctx.chat_id,
+            delivery_channel=delivery_channel,
             is_group=ctx.is_group,
             session_mode=session_mode,
             custom_session_id=custom_session_id,
