@@ -423,7 +423,12 @@ def _prompt_hindsight_document(session: dict[str, Any]) -> str | None:
 
 
 def plan(
-    data_dir: Path, run_id: str | None, audit_path: Path | None, output: Path | None
+    data_dir: Path,
+    run_id: str | None,
+    audit_path: Path | None,
+    output: Path | None,
+    *,
+    allow_orphaned_task_sessions: bool = False,
 ) -> dict[str, Any]:
     report = (
         json.loads(audit_path.read_text(encoding="utf-8"))
@@ -433,6 +438,7 @@ def plan(
     run_id = run_id or time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
     mappings = []
     blockers: list[dict[str, Any]] = []
+    orphaned_legacy_sessions: list[dict[str, Any]] = []
     task_job_hints = _load_task_job_hints(data_dir)
     for session in report["sessions"]:
         if session["kind"] == "internal":
@@ -457,14 +463,22 @@ def plan(
                 task_id = legacy_key.removeprefix("task:") or "unknown"
                 job_ids = task_job_hints.get(task_id, set())
                 if len(job_ids) != 1:
-                    blockers.append(
-                        {
-                            "kind": "task_job_binding_required",
-                            "legacy_key": legacy_key,
-                            "job_ids": sorted(job_ids),
-                            "reason": "task session requires exactly one owning cron job",
-                        }
-                    )
+                    blocker = {
+                        "kind": "task_job_binding_required",
+                        "legacy_key": legacy_key,
+                        "job_ids": sorted(job_ids),
+                        "reason": "task session requires exactly one owning cron job",
+                    }
+                    if allow_orphaned_task_sessions and not job_ids:
+                        orphaned_legacy_sessions.append(
+                            {
+                                **session,
+                                "retention": "legacy_read_only",
+                                "reason": "owning cron job record is unavailable",
+                            }
+                        )
+                        continue
+                    blockers.append(blocker)
                     canonical_key = build_internal_session_key(
                         "cron", "unbound", task_id
                     )
@@ -530,6 +544,8 @@ def plan(
         "source_report": str(audit_path) if audit_path else None,
         "mappings": mappings,
         "blockers": blockers,
+        "orphaned_legacy_sessions": orphaned_legacy_sessions,
+        "allow_orphaned_task_sessions": allow_orphaned_task_sessions,
         "state": "blocked" if blockers else "planned",
     }
     if output is None:
@@ -1398,6 +1414,11 @@ def main(argv: list[str] | None = None) -> int:
     plan_parser = subparsers.choices["plan"]
     plan_parser.add_argument("--run-id")
     plan_parser.add_argument("--audit", type=Path)
+    plan_parser.add_argument(
+        "--allow-orphaned-task-sessions",
+        action="store_true",
+        help="保留无法绑定 job_id 的 task session 为 legacy，只迁移可确认记录",
+    )
     for command in ("apply", "verify", "rollback"):
         subparser = subparsers.add_parser(command)
         subparser.add_argument("--manifest", type=Path, required=True)
@@ -1427,7 +1448,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if result["ok"] else 2
     if args.command == "plan":
         try:
-            manifest = plan(args.data_dir, args.run_id, args.audit, args.output)
+            manifest = plan(
+                args.data_dir,
+                args.run_id,
+                args.audit,
+                args.output,
+                allow_orphaned_task_sessions=args.allow_orphaned_task_sessions,
+            )
         except KeyboardInterrupt:
             print(
                 "plan cancelled; no executable manifest was produced",
@@ -1439,6 +1466,9 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "run_id": manifest["run_id"],
                     "mappings": len(manifest["mappings"]),
+                    "orphaned_legacy_sessions": len(
+                        manifest.get("orphaned_legacy_sessions", [])
+                    ),
                     "state": manifest["state"],
                     "blockers": len(manifest.get("blockers", [])),
                 },

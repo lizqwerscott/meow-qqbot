@@ -460,6 +460,35 @@ def test_migration_plan_matches_cron_runtime_keys(tmp_path: Path):
     assert not manifest["blockers"]
 
 
+def test_migration_plan_can_retain_orphaned_task_sessions_as_legacy(tmp_path: Path):
+    from scripts.migrate_session_identity import audit, plan
+
+    data_dir = tmp_path / "data"
+    (data_dir / "sessions").mkdir(parents=True)
+    (data_dir / "tasks").mkdir()
+    (data_dir / "sessions" / "task:old-task.jsonl").write_text(
+        json.dumps({"session_id": "task:old-task"}) + "\n"
+    )
+    (data_dir / "tasks" / "tasks.json").write_text(json.dumps([]))
+    audit_path = data_dir / "audit.json"
+    audit(data_dir, audit_path)
+
+    manifest = plan(
+        data_dir,
+        "run-orphaned",
+        audit_path,
+        data_dir / "manifest.json",
+        allow_orphaned_task_sessions=True,
+    )
+
+    assert manifest["state"] == "planned"
+    assert manifest["blockers"] == []
+    assert [item["legacy_key"] for item in manifest["orphaned_legacy_sessions"]] == [
+        "task:old-task"
+    ]
+    assert manifest["mappings"] == []
+
+
 def test_cutover_requires_verified_hindsight_plan(tmp_path: Path):
     from scripts.migrate_session_identity import mark_canonical_cutover
 
