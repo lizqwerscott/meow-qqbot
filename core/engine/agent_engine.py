@@ -90,6 +90,7 @@ from core.media.models import MediaTurnContext
 from core.message import InputMessage, MessageType, ResourceMeta
 from core.orchestration.background_task_runner import BackgroundTaskRunner
 from core.orchestration.work_plan_store import BackgroundTask, WorkPlanStatus
+from core.session_identity import DeliveryTarget
 from core.tasks.wake_coalescer import WakeTurnResult
 from core.tools.policy import filter_internal_control_tools
 from core.tools.tool_loop import ToolLoop
@@ -124,6 +125,7 @@ class _TurnRequest:
     reply_callback: Callable
     get_user_nickname: Optional[Callable[[str], str]] = None
     delivery_channel: str = ""
+    delivery_target: Optional[DeliveryTarget] = None
     reply_to_message_id: str = ""
     model_chain: Optional[list[str]] = None
     tier: Optional[str] = None
@@ -513,8 +515,13 @@ class AgentEngine:
         self, pending: PendingInbound, *, scheduler_revision: int
     ) -> PendingInbound:
         """Recompute a queued decision at claim time and validate its plan hint."""
-        if not getattr(self, "mode_routing_enabled", False) or self.mode_router is None:
+        webui_mode = getattr(pending.message, "session_mode", None)
+        if not (
+            getattr(self, "mode_routing_enabled", False)
+            and self.mode_router is not None
+        ) and webui_mode not in {"chat", "agent"}:
             return pending
+        mode_router = self.mode_router or ModeRouter()
         message = pending.message
         session_key = self._session_key_for_message(message)
         role = (
@@ -555,7 +562,7 @@ class AgentEngine:
             if pending.intent is InboundIntent.GROUP_AMBIENT
             else ModeRouteSource.USER
         )
-        decision = self.mode_router.route(
+        decision = mode_router.route(
             ModeRouteInput(
                 message=message,
                 source=source,
@@ -563,6 +570,7 @@ class AgentEngine:
                 role=role,
                 scheduler_revision=scheduler_revision,
                 active_work_plan=active_work_plan,
+                mode_floor=self._mode_floor_for_message(message),
             )
         )
         routing_audit = getattr(self, "routing_audit_store", None)
@@ -1663,6 +1671,14 @@ class AgentEngine:
         target = self.resolve_delivery_target(session_key, is_group=is_group)
         return target.target_id if target is not None else session_key
 
+    @staticmethod
+    def _mode_floor_for_message(message: InputMessage) -> PromptMode | None:
+        return (
+            PromptMode.AGENT
+            if getattr(message, "session_mode", None) == PromptMode.AGENT.value
+            else None
+        )
+
     # ── 消息分发 ──
 
     async def dispatch(
@@ -1710,7 +1726,11 @@ class AgentEngine:
             input_message.session_key = session_key
         await self._recover_waiting_turns_for_inbound(input_message, intent)
         mode_routing = None
-        if self.mode_routing_enabled and self.mode_router is not None:
+        webui_mode = getattr(input_message, "session_mode", None)
+        if (
+            self.mode_routing_enabled and self.mode_router is not None
+        ) or webui_mode in {"chat", "agent"}:
+            mode_router = self.mode_router or ModeRouter()
             source = _source or (
                 ModeRouteSource.AMBIENT
                 if intent is InboundIntent.GROUP_AMBIENT
@@ -1721,15 +1741,21 @@ class AgentEngine:
                 if self._permission_manager is not None
                 else "default"
             )
-            mode_routing = self.mode_router.route(
+            mode_routing = mode_router.route(
                 ModeRouteInput(
                     message=input_message,
                     source=source,
                     intent=intent,
                     role=role,
                     scheduler_revision=self._get_scheduler().revision(session_key),
+                    mode_floor=self._mode_floor_for_message(input_message),
                 )
             ).to_metadata()
+            if (
+                input_message.session_mode == PromptMode.CHAT.value
+                and mode_routing.mode == PromptMode.AGENT.value
+            ):
+                input_message.session_mode = PromptMode.AGENT.value
         needs_ai = intent is not InboundIntent.GROUP_AMBIENT
         if needs_ai and self.rule_router and self.model_registry:
             tier = self.rule_router.classify(input_message.content)
@@ -2996,6 +3022,7 @@ class AgentEngine:
                 sender_id=request.sender_id,
                 get_user_nickname=request.get_user_nickname,
                 delivery_channel=request.delivery_channel,
+                delivery_target=request.delivery_target,
                 reply_to_message_id=request.reply_to_message_id,
                 model_chain=model_chain,
                 binding_manager=self._session_binding,
@@ -3787,6 +3814,7 @@ class AgentEngine:
                     is_group=is_group,
                     reply_to=input_message.id,
                     delivery_channel=transport_chat_id,
+                    delivery_target=delivery_target,
                     route_text=input_message.content,
                     prompt_factory=_build_prompt,
                     reply_callback=_deliver_reply,
@@ -3965,6 +3993,7 @@ class AgentEngine:
                 routing_metrics.record_handoff(status="duplicate")
             _log.info("跳过重复 Chat-to-Agent handoff: %s", handoff_key)
             return
+        message.session_mode = PromptMode.AGENT.value
         agent_metadata = ModeRoutingMetadata(
             mode=PromptMode.AGENT.value,
             capability_profile="agent_full",

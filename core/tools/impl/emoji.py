@@ -4,6 +4,7 @@ import logging
 from qqbot_agent_sdk.constants import MEDIA_TYPE_IMAGE
 
 from core.engine.delivery_ledger import DeliveryReceipt
+from core.message import ResourceMeta
 from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
 from core.tools.impl._delivery import resolve_transport_target
@@ -57,8 +58,11 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
         emoji_manager = deps.emoji_manager
         media_uploader = deps.media_uploader.value
         bot_engine = deps.bot_engine.value
+        webui_delivery = bool(
+            ctx.delivery_target is not None and ctx.delivery_target.channel == "webui"
+        )
 
-        if emoji_manager is None or media_uploader is None:
+        if emoji_manager is None or (media_uploader is None and not webui_delivery):
             return ToolResult(
                 content=json.dumps(
                     {"success": False, "reason": "表情管理器或上传器未就绪"},
@@ -109,7 +113,8 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
             emoji_hash=emoji_hash,
             is_group=ctx.is_group,
             reply_to=effective_reply_to,
-            delivery_callback=None,
+            delivery_callback=ctx.reply_callback if webui_delivery else None,
+            webui_delivery=webui_delivery,
         )
 
         if success:
@@ -125,6 +130,16 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
                 ),
                 sent_emoji=True,
                 delivery_receipt=receipt,
+                delivery_resources=(
+                    {
+                        "resource_type": "emoji",
+                        "resource_id": emoji_hash,
+                        "mime_type": "image/*",
+                        "filename": file_name,
+                        "storage_status": "ready",
+                        "extra": {"preview_url": f"/static/emojis/{file_name}"},
+                    },
+                ),
             )
         else:
             _log.warning(f"表情发送失败 [{emoji_hash[:12]}..]: {error}")
@@ -149,6 +164,7 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
         is_group: bool,
         reply_to: str | None = None,
         delivery_callback=None,
+        webui_delivery: bool = False,
     ) -> tuple[bool, str, str, str, DeliveryReceipt | None]:
         record = emoji_manager.find_by_hash(emoji_hash)
         if not record:
@@ -169,35 +185,53 @@ def create_emoji_entries(deps: ToolDeps) -> list[ToolEntry]:
         chat_type = "group" if is_group else "c2c"
 
         try:
-            file_info = await media_uploader.upload(
-                chat_type=chat_type,
-                chat_id=chat_id,
-                source=str(local_path),
-                file_type=MEDIA_TYPE_IMAGE,
-                file_name=file_name,
-            )
-
-            if delivery_callback is not None:
+            if webui_delivery:
                 transport_result = await delivery_callback(
                     chat_id=chat_id,
                     content="",
                     message_id=reply_to or "",
                     is_group=is_group,
-                    media_file_info=file_info,
-                )
-            elif reply_to:
-                transport_result = await bot_engine.send_reply(
-                    chat_id=chat_id,
-                    is_group=is_group,
-                    message_id=reply_to,
-                    media_file_info=file_info,
+                    resources=[
+                        ResourceMeta(
+                            resource_type="emoji",
+                            resource_id=full_hash,
+                            mime_type="image/*",
+                            filename=file_name,
+                            storage_status="ready",
+                            extra={"preview_url": f"/static/emojis/{file_name}"},
+                        )
+                    ],
                 )
             else:
-                transport_result = await bot_engine.send_proactive(
+                file_info = await media_uploader.upload(
+                    chat_type=chat_type,
                     chat_id=chat_id,
-                    is_group=is_group,
-                    media_file_info=file_info,
+                    source=str(local_path),
+                    file_type=MEDIA_TYPE_IMAGE,
+                    file_name=file_name,
                 )
+
+                if delivery_callback is not None:
+                    transport_result = await delivery_callback(
+                        chat_id=chat_id,
+                        content="",
+                        message_id=reply_to or "",
+                        is_group=is_group,
+                        media_file_info=file_info,
+                    )
+                elif reply_to:
+                    transport_result = await bot_engine.send_reply(
+                        chat_id=chat_id,
+                        is_group=is_group,
+                        message_id=reply_to,
+                        media_file_info=file_info,
+                    )
+                else:
+                    transport_result = await bot_engine.send_proactive(
+                        chat_id=chat_id,
+                        is_group=is_group,
+                        media_file_info=file_info,
+                    )
             receipt = (
                 transport_result
                 if isinstance(transport_result, DeliveryReceipt)

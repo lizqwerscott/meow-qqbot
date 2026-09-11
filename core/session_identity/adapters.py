@@ -26,6 +26,19 @@ class InboundEnvelope:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class ApprovalPrompt:
+    """Channel-neutral approval prompt passed to a delivery adapter."""
+
+    session_key: str
+    title: str
+    description: str
+    command_preview: str = ""
+    cwd: str = ""
+    severity: str = "info"
+    timeout_sec: int = 120
+
+
 @runtime_checkable
 class ChannelAdapter(Protocol):
     channel: str
@@ -36,7 +49,11 @@ class ChannelAdapter(Protocol):
     async def resolve_target(self, envelope: InboundEnvelope) -> DeliveryTarget: ...
 
     async def send_message(
-        self, target: DeliveryTarget, content: str, *, reply_to: str = ""
+        self, target: DeliveryTarget, content: str, *, reply_to: str = "", **options
+    ) -> Any: ...
+
+    async def send_approval(
+        self, target: DeliveryTarget, prompt: ApprovalPrompt, *, reply_to: str = ""
     ) -> Any: ...
 
     async def validate_target(self, target: DeliveryTarget) -> DeliveryValidation: ...
@@ -85,6 +102,7 @@ class QQAdapter:
         parse_callback: AsyncCallback | None = None,
         target_callback: AsyncCallback | None = None,
         send_callback: AsyncCallback | None = None,
+        approval_callback: AsyncCallback | None = None,
         validate_callback: AsyncCallback | None = None,
         capabilities: ChannelCapabilities | None = None,
     ) -> None:
@@ -92,6 +110,7 @@ class QQAdapter:
         self._parse_callback = parse_callback
         self._target_callback = target_callback
         self._send_callback = send_callback
+        self._approval_callback = approval_callback
         self._validate_callback = validate_callback
         self._capabilities = capabilities or ChannelCapabilities(supports_media=True)
 
@@ -120,14 +139,26 @@ class QQAdapter:
         return result
 
     async def send_message(
-        self, target: DeliveryTarget, content: str, *, reply_to: str = ""
+        self, target: DeliveryTarget, content: str, *, reply_to: str = "", **options
     ) -> Any:
         require_delivery_target(target)
         if target.channel != self.channel or target.account_id != self.account_id:
             raise ValueError("target does not belong to this QQ adapter account")
         if self._send_callback is None:
             raise NotImplementedError("QQAdapter requires a send_callback")
-        result = self._send_callback(target, content, reply_to=reply_to)
+        options.pop("turn_id", None)
+        result = self._send_callback(target, content, reply_to=reply_to, **options)
+        return await result if inspect.isawaitable(result) else result
+
+    async def send_approval(
+        self, target: DeliveryTarget, prompt: ApprovalPrompt, *, reply_to: str = ""
+    ) -> Any:
+        require_delivery_target(target)
+        if target.channel != self.channel or target.account_id != self.account_id:
+            raise ValueError("target does not belong to this QQ adapter account")
+        if self._approval_callback is None:
+            raise NotImplementedError("QQAdapter requires an approval_callback")
+        result = self._approval_callback(target, prompt, reply_to=reply_to)
         return await result if inspect.isawaitable(result) else result
 
     async def validate_target(self, target: DeliveryTarget) -> DeliveryValidation:

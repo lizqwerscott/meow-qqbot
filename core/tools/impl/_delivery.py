@@ -16,6 +16,8 @@ _INTERNAL_PREFIXES = (
 
 
 def resolve_transport_target(ctx: ToolContext, bot_engine) -> tuple[str, bool]:
+    if ctx.delivery_target is not None:
+        return ctx.delivery_target.target_id, bool(ctx.internal_control)
     delivery_value = ctx.delivery_channel or ctx.chat_id
     is_background = bool(ctx.delivery_channel and ctx.internal_control)
     resolver = getattr(bot_engine, "resolve_delivery_target", None)

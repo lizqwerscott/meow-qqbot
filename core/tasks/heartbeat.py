@@ -18,7 +18,9 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import core.tasks.wake_coalescer as _coalescer
+from core.engine.conversation_delivery import ChannelDeliveryRouter, DeliveryRequest
 from core.engine.delivery_ledger import DeliveryReceipt
+from core.session_identity import DeliveryTarget
 
 _log = logging.getLogger(__name__)
 
@@ -152,6 +154,7 @@ class HeartbeatManager:
         wake_dispatcher: Any = None,  # 保留兼容，内部不再使用
         heartbeat_path: str = "",
         cooldown: Any = None,  # HeartbeatCooldown 实例（用于设置 next_due_ms）
+        delivery_router: ChannelDeliveryRouter | None = None,
     ):
         self._config = config
         self._cooldown = cooldown
@@ -160,6 +163,7 @@ class HeartbeatManager:
         self._isolated_session = config.get("isolated_session", True)
         self._admin_ids = admin_ids if isinstance(admin_ids, list) else []
         self._api = api_client
+        self._delivery_router = delivery_router
         self._context_manager = context_manager
         self._agent_engine = agent_engine
 
@@ -373,6 +377,19 @@ class HeartbeatManager:
         admin_id = self._admin_ids[0]
         content = f"[❤️ 心跳提醒]\n{text}"
         try:
+            if self._delivery_router is not None:
+                result = await self._delivery_router.deliver(
+                    DeliveryRequest(
+                        target=DeliveryTarget("qq", "default", "direct", admin_id),
+                        content=content,
+                    )
+                )
+                if isinstance(result, DeliveryReceipt):
+                    return result
+                return DeliveryReceipt(
+                    status="accepted" if result else "failed",
+                    logical_delivery_id=f"heartbeat:{admin_id}",
+                )
             response = await self._api.send_text(
                 "c2c", admin_id, content, reply_to=None
             )

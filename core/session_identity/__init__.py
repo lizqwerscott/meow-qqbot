@@ -1,6 +1,7 @@
 """Canonical conversation identities and channel delivery targets."""
 
 from .adapters import (
+    ApprovalPrompt,
     ChannelAdapter,
     ChannelCapabilities,
     ChannelRegistry,
@@ -27,6 +28,7 @@ __all__ = [
     "ChannelAdapter",
     "ChannelCapabilities",
     "ChannelRegistry",
+    "ApprovalPrompt",
     "ChatType",
     "ConversationRef",
     "DeliveryTarget",

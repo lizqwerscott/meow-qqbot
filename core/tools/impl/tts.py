@@ -5,6 +5,7 @@ from qqbot_agent_sdk.constants import MEDIA_TYPE_VOICE
 
 from core.ai.tts_service import TtsService
 from core.engine.delivery_ledger import DeliveryReceipt
+from core.message import ResourceMeta
 from core.tools._types import ToolContext, ToolEntry, ToolResult
 from core.tools.deps import ToolDeps
 from core.tools.impl._delivery import resolve_transport_target
@@ -67,8 +68,13 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
         tts_service = deps.tts_service.value
         media_uploader = deps.media_uploader.value
         bot_engine = deps.bot_engine.value
+        webui_delivery = bool(
+            ctx.delivery_target is not None and ctx.delivery_target.channel == "webui"
+        )
 
-        if not tts_service or not media_uploader or not bot_engine:
+        if not tts_service or (
+            not webui_delivery and (not media_uploader or not bot_engine)
+        ):
             return ToolResult(
                 content=json.dumps(
                     {"error": "TTS 语音服务或媒体上传器未就绪"},
@@ -151,39 +157,66 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
         chat_type = "group" if ctx.is_group else "c2c"
 
         try:
-            file_info = await media_uploader.upload(
-                chat_type=chat_type,
-                chat_id=effective_chat_id,
-                source=temp_path,
-                file_type=MEDIA_TYPE_VOICE,
-                file_name="tts.wav",
-            )
-        except Exception as e:
-            return ToolResult(
-                content=json.dumps(
-                    {"error": f"语音上传失败: {e}"},
-                    ensure_ascii=False,
+            if webui_delivery:
+                media_service = deps.media_service
+                store = getattr(media_service, "store", None)
+                if store is None:
+                    raise RuntimeError("WebUI media storage is unavailable")
+                await media_service.open()
+                record = await store.save(
+                    chat_id=ctx.chat_id,
+                    message_id=ctx.turn_id or ctx.reply_to,
+                    sender_id=ctx.sender_id,
+                    resource_type="voice",
+                    source_url="tts.wav",
+                    mime_type="audio/wav",
+                    filename="tts.wav",
+                    data=audio_bytes,
                 )
-            )
-
-        try:
-            if effective_reply_to:
-                transport_result = await bot_engine.send_reply(
+                transport_result = await ctx.reply_callback(
                     chat_id=effective_chat_id,
+                    content="",
+                    message_id=effective_reply_to or "",
                     is_group=ctx.is_group,
-                    message_id=effective_reply_to,
-                    media_file_info=file_info,
+                    resources=[
+                        ResourceMeta(
+                            resource_type="voice",
+                            resource_id=record.media_uri,
+                            media_id=record.media_id,
+                            media_uri=record.media_uri,
+                            storage_status="ready",
+                            hash=record.sha256,
+                            mime_type=record.mime_type,
+                            size=record.size,
+                            filename=record.filename,
+                        )
+                    ],
                 )
             else:
-                transport_result = await bot_engine.send_proactive(
+                file_info = await media_uploader.upload(
+                    chat_type=chat_type,
                     chat_id=effective_chat_id,
-                    is_group=ctx.is_group,
-                    media_file_info=file_info,
+                    source=temp_path,
+                    file_type=MEDIA_TYPE_VOICE,
+                    file_name="tts.wav",
                 )
+                if effective_reply_to:
+                    transport_result = await bot_engine.send_reply(
+                        chat_id=effective_chat_id,
+                        is_group=ctx.is_group,
+                        message_id=effective_reply_to,
+                        media_file_info=file_info,
+                    )
+                else:
+                    transport_result = await bot_engine.send_proactive(
+                        chat_id=effective_chat_id,
+                        is_group=ctx.is_group,
+                        media_file_info=file_info,
+                    )
         except Exception as e:
             return ToolResult(
                 content=json.dumps(
-                    {"error": f"发送语音失败: {e}"},
+                    {"error": f"语音投递失败: {e}"},
                     ensure_ascii=False,
                 )
             )
@@ -213,6 +246,23 @@ def create_tts_entries(deps: ToolDeps) -> list[ToolEntry]:
                 ensure_ascii=False,
             ),
             delivery_receipt=receipt,
+            delivery_resources=(
+                (
+                    {
+                        "resource_type": "voice",
+                        "resource_id": record.media_uri,
+                        "media_id": record.media_id,
+                        "media_uri": record.media_uri,
+                        "storage_status": "ready",
+                        "hash": record.sha256,
+                        "mime_type": record.mime_type,
+                        "size": record.size,
+                        "filename": record.filename,
+                    },
+                )
+                if webui_delivery
+                else ()
+            ),
         )
 
     return [

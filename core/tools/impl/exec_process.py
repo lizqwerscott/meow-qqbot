@@ -418,6 +418,7 @@ def create_exec_process_entries(deps: ToolDeps) -> list[ToolEntry]:
                             timeout=policy.approval_timeout or 300,
                             return_session_key=True,
                             session_key=approval_session_key or None,
+                            delivery_target=ctx.delivery_target,
                         )
                     except asyncio.CancelledError:
                         if approval_mgr and approval_session_key:

@@ -26,6 +26,7 @@ from core.engine.turn_capabilities import TurnCapabilities
 from core.engine.turn_protocol_history import TurnProtocolHistory
 from core.engine.turn_state import TurnPhase, TurnStateError
 from core.managers.session_manager import InboundIntent, InboxLease, PendingInbound
+from core.session_identity import DeliveryTarget
 from core.tools._types import ToolContext
 from core.tools.delivery_evidence import DeliveryEvidence
 from core.tools.impl import execute as execute_tool
@@ -94,6 +95,7 @@ class ToolLoop:
         sender_id: str = "",
         get_user_nickname: Optional[Callable[[str], str]] = None,
         delivery_channel: str = "",
+        delivery_target: Optional[DeliveryTarget] = None,
         reply_to_message_id: str = "",
         model_chain: Optional[List[str]] = None,
         binding_manager=None,
@@ -649,6 +651,7 @@ class ToolLoop:
                 sender_id=sender_id,
                 reply_callback=reply_callback,
                 delivery_channel=delivery_channel,
+                delivery_target=delivery_target,
                 reply_to_message_id=reply_to_message_id,
                 internal_control=internal_control,
                 turn_id=turn_id or reply_to,
@@ -719,6 +722,7 @@ class ToolLoop:
                             sender_id=ctx.sender_id,
                             reply_callback=tool_reply_callback,
                             delivery_channel=ctx.delivery_channel,
+                            delivery_target=ctx.delivery_target,
                             reply_to_message_id=ctx.reply_to_message_id,
                             internal_control=ctx.internal_control,
                             turn_id=ctx.turn_id,
@@ -783,6 +787,7 @@ class ToolLoop:
                                     else None
                                 ),
                                 content=str(kwargs.get("content", "")),
+                                resources=tuple(kwargs.get("resources") or ()),
                             )
                             return receipt
 
@@ -793,6 +798,7 @@ class ToolLoop:
                             sender_id=tool_ctx.sender_id,
                             reply_callback=deliver_tool_message,
                             delivery_channel=tool_ctx.delivery_channel,
+                            delivery_target=tool_ctx.delivery_target,
                             reply_to_message_id=tool_ctx.reply_to_message_id,
                             internal_control=tool_ctx.internal_control,
                             turn_id=tool_ctx.turn_id,
@@ -902,6 +908,7 @@ class ToolLoop:
                             preprepared_record,
                             receipt,
                             content=result.content,
+                            resources=result.delivery_resources,
                         )
                     elif (
                         delivery_controller is not None
@@ -917,7 +924,10 @@ class ToolLoop:
                             reply_anchor_id=reply_to,
                         )
                         await delivery_controller.settle_tool_delivery(
-                            record, result.delivery_receipt, content=result.content
+                            record,
+                            result.delivery_receipt,
+                            content=result.content,
+                            resources=result.delivery_resources,
                         )
                     if not await turn_is_active():
                         _log.info("turn 已终结，抑制工具结果提交: %s", protocol_turn_id)

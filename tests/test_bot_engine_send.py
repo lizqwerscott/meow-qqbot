@@ -8,8 +8,9 @@ from core.engine.client import (
     _is_passive_reply_limit_error,
     _ReplyDeliveryState,
 )
+from core.engine.conversation_delivery import ChannelDeliveryRouter
 from core.engine.delivery_ledger import DeliveryReceipt
-from core.session_identity import DeliveryTarget
+from core.session_identity import ChannelRegistry, DeliveryTarget, QQAdapter
 
 
 def make_engine(api):
@@ -37,6 +38,23 @@ def group_target():
 
 def direct_target():
     return DeliveryTarget("qq", "default", "direct", "user-1")
+
+
+@pytest.mark.asyncio
+async def test_send_reply_uses_registered_channel_delivery_adapter():
+    api = make_api()
+    engine = make_engine(api)
+    registry = ChannelRegistry()
+    registry.register(QQAdapter(send_callback=engine._send_target))
+    engine.channel_registry = registry
+    engine.delivery_router = ChannelDeliveryRouter(registry)
+
+    receipt = await engine.send_reply(
+        "user-1", "hello", message_id="message-1", is_group=False
+    )
+
+    assert receipt.status == "accepted"
+    api.send_text.assert_awaited_once()
 
 
 def test_passive_reply_limit_error_is_narrow():

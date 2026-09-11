@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 from core.command_handlers.base import command, make_reply
 from core.message import InputMessage
+from core.session_identity import ApprovalPrompt, DeliveryTarget
 
 _log = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ class ApprovalTestCommand:
         if self.api is None:
             return make_reply(input_message, "❌ api_client 未注入")
 
-        from qqbot_agent_sdk import ApprovalRequest, ApprovalSender, InlineKeyboard
+        from qqbot_agent_sdk import InlineKeyboard
         from qqbot_agent_sdk.dto import (
             KeyboardButton,
             KeyboardButtonAction,
@@ -40,7 +41,7 @@ class ApprovalTestCommand:
 
         # ── 1. 发送审批消息 ──
         session_key = f"approval_test_{int(time.time())}"
-        approval = ApprovalRequest(
+        approval = ApprovalPrompt(
             session_key=session_key,
             title="🔧 测试审批请求",
             description="这是一个测试审批流程，请点击下方按钮回复",
@@ -55,13 +56,15 @@ class ApprovalTestCommand:
             future = asyncio.get_running_loop().create_future()
             self.bot_engine.approval_manager._pending[session_key] = future
 
-        approval_sender = ApprovalSender(self.api, log_tag="ApprovalTest")
-        await approval_sender.send(
-            chat_type=chat_type,
-            chat_id=chat_id,
-            req=approval,
-            msg_id=input_message.id,
+        target = DeliveryTarget(
+            "qq",
+            "default",
+            "group" if input_message.is_group else "direct",
+            chat_id,
         )
+        if self.bot_engine is None:
+            return make_reply(input_message, "❌ bot_engine 未注入")
+        await self.bot_engine.send_approval(target, approval, reply_to=input_message.id)
 
         # ── 2. 发送自定义键盘 ──
         keyboard = InlineKeyboard(

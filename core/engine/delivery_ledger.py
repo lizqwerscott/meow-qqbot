@@ -776,6 +776,7 @@ class DeliveryController:
         receipt: DeliveryReceipt | None,
         *,
         content: str | None = None,
+        resources: tuple[dict, ...] = (),
     ) -> Optional[DeliveryRecord]:
         if receipt is None:
             settled = await self.ledger.settle(
@@ -796,13 +797,23 @@ class DeliveryController:
                 )
             if settled is not None and content is not None:
                 await self._append_accepted_timeline(
-                    record, content=content, delivery_kind="response"
+                    record,
+                    content=content,
+                    delivery_kind="response",
+                    resources=resources,
                 )
             return settled
-        return await self.settle_receipt(record, receipt, content=content)
+        return await self.settle_receipt(
+            record, receipt, content=content, resources=resources
+        )
 
     async def _append_accepted_timeline(
-        self, record: DeliveryRecord, *, content: str, delivery_kind: str
+        self,
+        record: DeliveryRecord,
+        *,
+        content: str,
+        delivery_kind: str,
+        resources: tuple[dict, ...] = (),
     ) -> None:
         if self.event_log is not None:
             try:
@@ -813,6 +824,7 @@ class DeliveryController:
                     content=content,
                     message_id=record.reply_anchor_id,
                     timestamp=record.updated_at,
+                    resources=resources,
                 )
             except EventLogInvariantError as exc:
                 try:
@@ -904,6 +916,7 @@ class DeliveryController:
         *,
         content: str | None = None,
         delivery_kind: str | None = "response",
+        resources: tuple[dict, ...] = (),
     ) -> Optional[DeliveryRecord]:
         """Persist receipt and project accepted content to the timeline."""
         status = {
@@ -943,7 +956,10 @@ class DeliveryController:
             and delivery_kind is not None
         ):
             await self._append_accepted_timeline(
-                record, content=content, delivery_kind=delivery_kind
+                record,
+                content=content,
+                delivery_kind=delivery_kind,
+                resources=resources,
             )
         return settled
 

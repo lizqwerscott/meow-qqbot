@@ -25,6 +25,10 @@ from qqbot_agent_sdk.media_loader import MediaUploader
 
 from core.ai.multimodal import MultimodalService
 from core.engine.agent_engine import AgentEngine
+from core.engine.conversation_delivery import (
+    ChannelDeliveryRouter,
+    DeliveryRequest,
+)
 from core.engine.delivery_ledger import DeliveryReceipt
 from core.engine.message_parser import MessageParser, MessageParserDeps
 from core.engine.router import Router
@@ -34,6 +38,7 @@ from core.managers.nickname_manager import NicknameManager
 from core.markdown_split import split_markdown
 from core.message import InputMessage
 from core.session_identity import (
+    ApprovalPrompt,
     ChannelRegistry,
     DeliveryTarget,
     DeliveryValidation,
@@ -157,8 +162,13 @@ class BotEngine:
         self.session_identity_resolver = session_identity_resolver
         if not self.channel_registry.list_accounts("qq"):
             self.channel_registry.register(
-                QQAdapter(account_id="default", send_callback=self._send_target)
+                QQAdapter(
+                    account_id="default",
+                    send_callback=self._send_target,
+                    approval_callback=self._send_approval,
+                )
             )
+        self.delivery_router = ChannelDeliveryRouter(self.channel_registry)
         self.parser = MessageParser(MessageParserDeps(emoji_manager=emoji_manager))
         self.command_manager: CommandManager = CommandManager(
             admin_id=admin_id,
@@ -178,18 +188,40 @@ class BotEngine:
         _log.info("BotEngine 已初始化")
 
     async def _send_target(
-        self, target: DeliveryTarget, content: str, *, reply_to: str = ""
+        self, target: DeliveryTarget, content: str, *, reply_to: str = "", **options
     ) -> Any:
         """Adapter callback: convert a target to QQ's raw transport arguments."""
         return await self._send(
             target,
             content,
             reply_to=reply_to or None,
+            **options,
         )
 
-    def _resolve_delivery_target(
-        self, value: str, *, is_group: bool
-    ) -> DeliveryTarget:
+    async def _send_approval(
+        self, target: DeliveryTarget, prompt: ApprovalPrompt, *, reply_to: str = ""
+    ) -> Any:
+        """QQ adapter callback containing the only QQ approval SDK knowledge."""
+        from qqbot_agent_sdk import ApprovalRequest, ApprovalSender
+
+        request = ApprovalRequest(
+            session_key=prompt.session_key,
+            title=prompt.title,
+            description=prompt.description,
+            command_preview=prompt.command_preview,
+            cwd=prompt.cwd,
+            severity=prompt.severity,
+            timeout_sec=prompt.timeout_sec,
+        )
+        sender = ApprovalSender(self.api, log_tag="Approval")
+        return await sender.send(
+            chat_type="group" if target.chat_type == "group" else "c2c",
+            chat_id=target.target_id,
+            req=request,
+            msg_id=reply_to or None,
+        )
+
+    def _resolve_delivery_target(self, value: str, *, is_group: bool) -> DeliveryTarget:
         resolver = getattr(self, "session_identity_resolver", None)
         if resolver is not None:
             try:
@@ -212,9 +244,7 @@ class BotEngine:
             )
         ):
             raise ValueError("internal session cannot be used as a delivery target")
-        return DeliveryTarget(
-            "qq", "default", "group" if is_group else "direct", value
-        )
+        return DeliveryTarget("qq", "default", "group" if is_group else "direct", value)
 
     async def validate_target(self, target: DeliveryTarget) -> DeliveryValidation:
         """Validate a delivery target through the registered channel adapter."""
@@ -225,11 +255,35 @@ class BotEngine:
         self, target: DeliveryTarget, content: str, *, reply_to: str = ""
     ) -> Any:
         """Send through a channel adapter; session keys are not accepted."""
-        adapter = self.channel_registry.for_target(target)
-        validation = await adapter.validate_target(target)
-        if not validation.ok:
-            raise ValueError(validation.reason or "delivery target rejected")
-        return await adapter.send_message(target, content, reply_to=reply_to)
+        return await self._deliver_via_adapter(
+            DeliveryRequest(target=target, content=content, reply_to=reply_to)
+        )
+
+    async def send_approval(
+        self, target: DeliveryTarget, prompt: ApprovalPrompt, *, reply_to: str = ""
+    ) -> Any:
+        """Send an approval prompt through the target channel adapter."""
+        router = getattr(self, "delivery_router", None)
+        if router is None:
+            registry = getattr(self, "channel_registry", None)
+            if registry is None:
+                raise RuntimeError("channel delivery router is not configured")
+            router = ChannelDeliveryRouter(registry)
+        return await router.deliver_approval(target, prompt, reply_to=reply_to)
+
+    async def _deliver_via_adapter(self, request: DeliveryRequest) -> Any:
+        router = getattr(self, "delivery_router", None)
+        if router is None:
+            registry = getattr(self, "channel_registry", None)
+            if registry is None:
+                return await self._send(
+                    request.target,
+                    request.content,
+                    reply_to=request.reply_to or None,
+                    **request.options,
+                )
+            router = ChannelDeliveryRouter(registry)
+        return await router.deliver(request)
 
     # ── 生命周期 ──
 
@@ -666,15 +720,19 @@ class BotEngine:
         state = self._get_reply_delivery_state(chat_id, message_id, is_group)
         try:
             target = self._resolve_delivery_target(chat_id, is_group=is_group)
-            await self._send(
-                target,
-                content,
-                reply_to=message_id,
-                media_file_info=media_file_info,
-                markdown=markdown,
-                keyboard=keyboard,
-                delivery_state=state,
-                delivery_id=logical_delivery_id,
+            await self._deliver_via_adapter(
+                DeliveryRequest(
+                    target=target,
+                    content=content,
+                    reply_to=message_id,
+                    options={
+                        "media_file_info": media_file_info,
+                        "markdown": markdown,
+                        "keyboard": keyboard,
+                        "delivery_state": state,
+                        "delivery_id": logical_delivery_id,
+                    },
+                )
             )
         except Exception as exc:
             return self._delivery_failure_receipt(logical_delivery_id, state, exc)
@@ -695,15 +753,19 @@ class BotEngine:
         state = _ReplyDeliveryState(mode="proactive", last_used=time.monotonic())
         try:
             target = self._resolve_delivery_target(chat_id, is_group=is_group)
-            await self._send(
-                target,
-                content,
-                reply_to=None,
-                media_file_info=media_file_info,
-                markdown=markdown,
-                keyboard=keyboard,
-                delivery_state=state,
-                delivery_id=logical_delivery_id,
+            await self._deliver_via_adapter(
+                DeliveryRequest(
+                    target=target,
+                    content=content,
+                    reply_to="",
+                    options={
+                        "media_file_info": media_file_info,
+                        "markdown": markdown,
+                        "keyboard": keyboard,
+                        "delivery_state": state,
+                        "delivery_id": logical_delivery_id,
+                    },
+                )
             )
         except Exception as exc:
             return self._delivery_failure_receipt(logical_delivery_id, state, exc)
@@ -727,15 +789,19 @@ class BotEngine:
             reply_to = message_id if message_id else None
             state = self._get_reply_delivery_state(chat_id, message_id, is_group)
             target = self._resolve_delivery_target(chat_id, is_group=is_group)
-            result = await self._send(
-                target,
-                content,
-                reply_to=reply_to,
-                media_file_info=media_file_info,
-                markdown=markdown,
-                keyboard=keyboard,
-                delivery_state=state,
-                delivery_id=logical_delivery_id,
+            result = await self._deliver_via_adapter(
+                DeliveryRequest(
+                    target=target,
+                    content=content,
+                    reply_to=reply_to or "",
+                    options={
+                        "media_file_info": media_file_info,
+                        "markdown": markdown,
+                        "keyboard": keyboard,
+                        "delivery_state": state,
+                        "delivery_id": logical_delivery_id,
+                    },
+                )
             )
             return self._delivery_success_receipt(logical_delivery_id, state)
         except Exception as e:

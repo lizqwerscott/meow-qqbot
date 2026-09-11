@@ -95,6 +95,7 @@ async def _approve_path_access(
             plan=plan,
             return_session_key=True,
             session_key=approval_session_key or None,
+            delivery_target=ctx.delivery_target,
         )
     except asyncio.CancelledError:
         if approval_session_key:

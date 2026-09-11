@@ -88,6 +88,7 @@ from core.tools.sub_agent_manager import SubAgentManager
 from core.web_search.config import WebFetchConfig, WebSearchConfig
 from core.web_search.service import WebService
 from core.webui import create_app, start_webui
+from core.webui.interaction import WebUiConversationGateway
 
 _log = logging.getLogger(__name__)
 _GATEWAY_FETCH_MAX_ATTEMPTS = 3
@@ -142,6 +143,7 @@ class ServiceGraph:
         self.session_identity_resolver = None
         self.channel_registry = ChannelRegistry()
         self.webui_task = None
+        self.webui_gateway = None
         self._services_started = False
         self.group_target_verifier = (
             group_target_verifier or ObservedGroupTargetVerifier()
@@ -1059,6 +1061,7 @@ class ServiceGraph:
             admin_ids=self.admin_ids,
             forward_to=list(approval_cfg.get("forward_to") or ()),
             delivery_controller=self.agent_engine._get_delivery_controller(),
+            delivery_router=self.bot_engine.delivery_router,
         )
         self.tool_deps.approval_manager.value = self.approval_manager
         self.bot_engine.approval_manager = self.approval_manager
@@ -1145,6 +1148,7 @@ class ServiceGraph:
                 wake_dispatcher=self.wake_dispatcher,
                 heartbeat_path=str(self.workspace_manager.heartbeat_path()),
                 cooldown=self._cooldown,
+                delivery_router=self.bot_engine.delivery_router,
             )
 
         # ── WakeCoalescer + WakeRunner + Delivery ──
@@ -1322,6 +1326,17 @@ class ServiceGraph:
         # ── WebUI ──
         webui_config = self.cfg.webui
         if webui_config.get("enabled", False):
+            self.webui_gateway = WebUiConversationGateway(
+                operator_id=str(webui_config.get("operator_id", "admin")),
+                route_callback=self.bot_engine.router.route,
+                get_user_nickname=self.nickname_manager.get,
+                event_log=self.agent_engine.event_log,
+                media_service=self.media_service,
+                channel_registry=self.channel_registry,
+                store_path=webui_config.get(
+                    "session_store", "data/webui_sessions.sqlite3"
+                ),
+            )
             webui_app = create_app(
                 managers={
                     "emoji_manager": self.emoji_manager,
@@ -1344,6 +1359,7 @@ class ServiceGraph:
                     "media_service": self.media_service,
                     "runtime_settings": self.runtime_settings,
                     "session_identity_resolver": self.session_identity_resolver,
+                    "webui_gateway": self.webui_gateway,
                 },
                 webui_config=webui_config,
             )

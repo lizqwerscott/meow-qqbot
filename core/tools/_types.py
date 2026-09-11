@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
+from core.session_identity import DeliveryTarget
+
 if TYPE_CHECKING:
     from core.engine.delivery_ledger import DeliveryReceipt
     from core.engine.turn_capabilities import TurnCapabilities
@@ -16,6 +18,7 @@ class ToolContext:
     sender_id: str
     reply_callback: Callable
     delivery_channel: str = ""
+    delivery_target: Optional[DeliveryTarget] = None
     reply_to_message_id: str = ""
     internal_control: bool = False
     turn_id: str = ""
@@ -36,6 +39,7 @@ class ToolResult:
     no_reply: bool = False
     delivery_receipt: Optional["DeliveryReceipt"] = None
     delivery_kind: str = ""
+    delivery_resources: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass

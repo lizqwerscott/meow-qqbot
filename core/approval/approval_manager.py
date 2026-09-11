@@ -15,7 +15,9 @@ from core.approval.exec_policy import (
     DECISION_DENY,
     ExecPolicy,
 )
+from core.engine.conversation_delivery import ChannelDeliveryRouter, DeliveryRequest
 from core.engine.delivery_ledger import DeliveryController, DeliveryReceipt
+from core.session_identity import ApprovalPrompt, DeliveryTarget
 
 _log = logging.getLogger(__name__)
 
@@ -48,11 +50,13 @@ class ApprovalManager:
         admin_ids: list[str],
         forward_to: list[str] = (),  # 2.3：审批卡转发目标（'c2c:<id>'/'group:<id>'）
         delivery_controller: DeliveryController | None = None,
+        delivery_router: ChannelDeliveryRouter | None = None,
     ):
         self._api = api_client
         self._admin_ids = set(admin_ids)
         self._forward_to = list(forward_to or ())
         self._delivery_controller = delivery_controller
+        self._delivery_router = delivery_router
         self._pending: dict[str, asyncio.Future] = {}
         # 审批对应的 canonical plan（openclaw 风格：批准后须比对，防执行内容漂移）
         self._pending_plans: dict[str, dict] = {}
@@ -348,6 +352,7 @@ class ApprovalManager:
         persist: bool = True,
         return_session_key: bool = False,
         session_key: str | None = None,
+        delivery_target: DeliveryTarget | None = None,
     ) -> str | tuple[str, str]:
         """发起审批。
 
@@ -361,6 +366,8 @@ class ApprovalManager:
                 命令传 False（对齐 openclaw：allow-always 不持久化 inline-eval）。
             return_session_key: True 时返回 (decision, session_key)，供调用方
                 执行前比对 plan。
+            delivery_target: 当前请求的渠道目标；管理员审批优先投递到该
+                direct 目标，避免 WebUI 请求被错误投递到 QQ。
         """
         if not self._admin_ids:
             return (DECISION_DENY, "") if return_session_key else DECISION_DENY
@@ -386,11 +393,10 @@ class ApprovalManager:
             "details": details,
             "created_at": time.time(),
             "expires_at": time.time() + timeout,
+            "delivery_target": delivery_target,
         }
 
-        from qqbot_agent_sdk import ApprovalRequest, ApprovalSender
-
-        req = ApprovalRequest(
+        prompt = ApprovalPrompt(
             session_key=session_key,
             title=f"🔐 {tool_name} 审批请求",
             description=f"原因: {reason}",
@@ -399,25 +405,61 @@ class ApprovalManager:
             severity="info",
             timeout_sec=timeout,
         )
+        sender = None
+        req = None
+        if self._delivery_router is None:
+            from qqbot_agent_sdk import ApprovalRequest, ApprovalSender
 
-        sender = ApprovalSender(self._api, log_tag="Approval")
+            req = ApprovalRequest(
+                session_key=prompt.session_key,
+                title=prompt.title,
+                description=prompt.description,
+                command_preview=prompt.command_preview,
+                cwd=prompt.cwd,
+                severity=prompt.severity,
+                timeout_sec=prompt.timeout_sec,
+            )
+            sender = ApprovalSender(self._api, log_tag="Approval")
         # 2.3 多目标转发：主目标（admin c2c）+ 配置的转发目标，同一 session_key；
         # 任一目标送达即视为可达（任一目标 resolve 都生效）。非法目标跳过。
-        targets = [("c2c", admin_id)]
+        primary_target = delivery_target
+        if primary_target is None or primary_target.chat_type != "direct":
+            primary_target = DeliveryTarget("qq", "default", "direct", admin_id)
+        targets = [primary_target]
         for t in self._forward_to:
             parsed = _parse_target(t)
             if parsed is None:
                 _log.warning("忽略非法审批转发目标: %r", t)
                 continue
-            targets.append(parsed)
+            chat_type, target_id = parsed
+            targets.append(
+                DeliveryTarget(
+                    "qq",
+                    "default",
+                    "group" if chat_type == "group" else "direct",
+                    target_id,
+                )
+            )
         sent = False
-        for chat_type, target_id in targets:
+        for target in targets:
+            chat_type = "group" if target.chat_type == "group" else "c2c"
+            target_id = target.target_id
 
             async def _send_card(**_kwargs):
                 try:
-                    accepted = await sender.send(
-                        chat_type=chat_type, chat_id=target_id, req=req
-                    )
+                    if self._delivery_router is not None:
+                        result = await self._delivery_router.deliver_approval(
+                            target, prompt
+                        )
+                        accepted = (
+                            result.status == "accepted"
+                            if isinstance(result, DeliveryReceipt)
+                            else bool(result)
+                        )
+                    else:
+                        accepted = await sender.send(
+                            chat_type=chat_type, chat_id=target_id, req=req
+                        )
                 except (
                     asyncio.TimeoutError,
                     TimeoutError,
@@ -455,6 +497,15 @@ class ApprovalManager:
                         timeline_delivery_kind=None,
                     )
                     accepted = receipt.status == "accepted"
+                elif self._delivery_router is not None:
+                    result = await self._delivery_router.deliver_approval(
+                        target, prompt
+                    )
+                    accepted = (
+                        result.status == "accepted"
+                        if isinstance(result, DeliveryReceipt)
+                        else bool(result)
+                    )
                 else:
                     accepted = bool(
                         await sender.send(
@@ -479,6 +530,7 @@ class ApprovalManager:
                 f"命令: {details[:120]}\n"
                 f"已按策略自动处理；如需重新审批请重新发起该命令。",
                 delivery_id=f"approval-fallback:{session_key}:unreachable",
+                delivery_target=primary_target,
             )
             return (
                 (self._apply_fallback(fallback, details), session_key)
@@ -545,11 +597,20 @@ class ApprovalManager:
         out.sort(key=lambda p: p["created_at"], reverse=True)
         return out
 
-    def _spawn_admin_notice(self, text: str, *, delivery_id: str = ""):
-        """向 admin c2c 异步补发一条文本通知（审批卡失败/超时兜底，2.3）。"""
+    def _spawn_admin_notice(
+        self,
+        text: str,
+        *,
+        delivery_id: str = "",
+        delivery_target: DeliveryTarget | None = None,
+    ):
+        """异步补发审批兜底通知到原始 direct target。"""
         if not self._admin_ids:
             return
         admin_id = next(iter(self._admin_ids))
+        target = delivery_target
+        if target is None or target.chat_type != "direct":
+            target = DeliveryTarget("qq", "default", "direct", admin_id)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -559,6 +620,20 @@ class ApprovalManager:
             try:
 
                 async def _transport(**_kwargs):
+                    if self._delivery_router is not None:
+                        result = await self._delivery_router.deliver(
+                            DeliveryRequest(
+                                target=target,
+                                content=text,
+                                options={"delivery_id": delivery_id},
+                            )
+                        )
+                        if isinstance(result, DeliveryReceipt):
+                            return result
+                        return DeliveryReceipt(
+                            status="accepted" if result else "failed",
+                            logical_delivery_id=delivery_id,
+                        )
                     try:
                         response = await self._api.send_text("c2c", admin_id, text)
                     except (
@@ -591,12 +666,15 @@ class ApprovalManager:
                 if self._delivery_controller is not None:
                     await self._delivery_controller.deliver_text(
                         delivery_id=delivery_id or f"approval-fallback:{admin_id}",
-                        chat_id=admin_id,
+                        chat_id=target.target_id,
                         content=text,
                         callback=_transport,
+                        is_group=target.chat_type == "group",
                         reason="approval_fallback",
                         timeline_delivery_kind=None,
                     )
+                elif self._delivery_router is not None:
+                    await _transport()
                 else:
                     await self._api.send_text("c2c", admin_id, text)
             except Exception as e:
@@ -657,7 +735,7 @@ class ApprovalManager:
 
     def _on_timeout(self, session_key: str, fallback: str = "deny", details: str = ""):
         future = self._pending.pop(session_key, None)
-        self._pending_info.pop(session_key, None)
+        pending_info = self._pending_info.pop(session_key, {})
         if future and not future.done():
             result = self._apply_fallback(fallback, details)
             future.set_result(result)
@@ -668,4 +746,5 @@ class ApprovalManager:
                 f"命令: {details[:120]}\n"
                 f"如需重新审批，请重新发起该命令。",
                 delivery_id=f"approval-fallback:{session_key}:timeout",
+                delivery_target=pending_info.get("delivery_target"),
             )
