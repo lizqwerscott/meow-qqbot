@@ -136,6 +136,8 @@ def _load_chat_type_hints(data_dir: Path) -> dict[str, set[str]]:
 
     def add_hint(chat_id: object, value: object) -> None:
         normalized = str(value).strip().lower()
+        if normalized in {"private", "c2c"}:
+            normalized = "direct"
         if normalized in {"group", "direct"}:
             hints.setdefault(str(chat_id), set()).add(normalized)
 
@@ -182,7 +184,7 @@ def _load_chat_type_hints(data_dir: Path) -> dict[str, set[str]]:
                 type_column = next(
                     (
                         column
-                        for column in ("chat_type", "conversation_type")
+                        for column in ("chat_type", "conversation_type", "session_kind")
                         if column in columns
                     ),
                     None,
@@ -429,6 +431,7 @@ def plan(
     output: Path | None,
     *,
     allow_orphaned_task_sessions: bool = False,
+    excluded_legacy_keys: list[str] | None = None,
 ) -> dict[str, Any]:
     report = (
         json.loads(audit_path.read_text(encoding="utf-8"))
@@ -439,10 +442,25 @@ def plan(
     mappings = []
     blockers: list[dict[str, Any]] = []
     orphaned_legacy_sessions: list[dict[str, Any]] = []
+    excluded_legacy_sessions: list[dict[str, Any]] = []
+    excluded_keys = {str(item) for item in (excluded_legacy_keys or []) if str(item)}
+    seen_excluded_keys: set[str] = set()
     task_job_hints = _load_task_job_hints(data_dir)
     for session in report["sessions"]:
+        legacy_key = str(session.get("legacy_key") or "")
+        if legacy_key in excluded_keys:
+            seen_excluded_keys.add(legacy_key)
+            excluded_legacy_sessions.append(
+                {
+                    "legacy_key": legacy_key,
+                    "kind": session.get("kind"),
+                    "chat_type": session.get("chat_type"),
+                    "sources": session.get("sources", []),
+                    "reason": "operator_confirmed_non_chat_residue",
+                }
+            )
+            continue
         if session["kind"] == "internal":
-            legacy_key = session["legacy_key"]
             if legacy_key.startswith("heartbeat:"):
                 canonical_key = build_internal_session_key(
                     "heartbeat", legacy_key.removeprefix("heartbeat:") or "events"
@@ -536,6 +554,14 @@ def plan(
                 "confirmed_at": time.time(),
             }
         )
+    unknown_exclusions = sorted(excluded_keys - seen_excluded_keys)
+    if unknown_exclusions:
+        blockers.append(
+            {
+                "kind": "unknown_excluded_session",
+                "legacy_keys": unknown_exclusions,
+            }
+        )
     manifest = {
         "schema_version": 2,
         "run_id": run_id,
@@ -545,6 +571,8 @@ def plan(
         "mappings": mappings,
         "blockers": blockers,
         "orphaned_legacy_sessions": orphaned_legacy_sessions,
+        "excluded_legacy_sessions": excluded_legacy_sessions,
+        "excluded_legacy_keys": sorted(excluded_keys),
         "allow_orphaned_task_sessions": allow_orphaned_task_sessions,
         "state": "blocked" if blockers else "planned",
     }
@@ -1419,6 +1447,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="保留无法绑定 job_id 的 task session 为 legacy，只迁移可确认记录",
     )
+    plan_parser.add_argument(
+        "--exclude-legacy-key",
+        action="append",
+        default=[],
+        help="显式将一个已确认的非聊天 legacy session 排除出本次迁移；可重复指定",
+    )
     for command in ("apply", "verify", "rollback"):
         subparser = subparsers.add_parser(command)
         subparser.add_argument("--manifest", type=Path, required=True)
@@ -1454,6 +1488,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.audit,
                 args.output,
                 allow_orphaned_task_sessions=args.allow_orphaned_task_sessions,
+                excluded_legacy_keys=args.exclude_legacy_key,
             )
         except KeyboardInterrupt:
             print(
@@ -1468,6 +1503,9 @@ def main(argv: list[str] | None = None) -> int:
                     "mappings": len(manifest["mappings"]),
                     "orphaned_legacy_sessions": len(
                         manifest.get("orphaned_legacy_sessions", [])
+                    ),
+                    "excluded_legacy_sessions": len(
+                        manifest.get("excluded_legacy_sessions", [])
                     ),
                     "state": manifest["state"],
                     "blockers": len(manifest.get("blockers", [])),

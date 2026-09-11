@@ -21,6 +21,13 @@ from core.session_identity import (
 )
 
 
+@pytest.fixture
+def no_running_bot_processes(monkeypatch):
+    from scripts import migrate_session_identity
+
+    monkeypatch.setattr(migrate_session_identity, "_running_bot_processes", lambda: [])
+
+
 def test_chat_key_round_trip_encodes_structural_delimiters():
     target = DeliveryTarget("qq", "default", "group", "abc:123/456")
     key = build_chat_session_key(target)
@@ -222,7 +229,9 @@ def test_resolver_rejects_ambiguous_legacy_key(tmp_path: Path):
     registry.close()
 
 
-def test_local_migration_apply_verify_and_rollback(tmp_path: Path):
+def test_local_migration_apply_verify_and_rollback(
+    tmp_path: Path, no_running_bot_processes
+):
     from scripts.migrate_session_identity import (
         apply_manifest,
         preflight,
@@ -313,7 +322,9 @@ def test_local_migration_apply_verify_and_rollback(tmp_path: Path):
     assert rolled_back_task["session_id"] == "123"
 
 
-def test_local_migration_preflight_blocks_active_work_and_receipts(tmp_path: Path):
+def test_local_migration_preflight_blocks_active_work_and_receipts(
+    tmp_path: Path, no_running_bot_processes
+):
     from scripts.migrate_session_identity import preflight
 
     data_dir = tmp_path / "data"
@@ -340,7 +351,9 @@ def test_local_migration_preflight_blocks_active_work_and_receipts(tmp_path: Pat
     }
 
 
-def test_local_migration_verify_detects_post_copy_row_mutation(tmp_path: Path):
+def test_local_migration_verify_detects_post_copy_row_mutation(
+    tmp_path: Path, no_running_bot_processes
+):
     from scripts.migrate_session_identity import apply_manifest, verify_manifest
 
     data_dir = tmp_path / "data"
@@ -401,6 +414,30 @@ def test_migration_audit_emits_group_and_direct_candidates_for_one_raw_id(
     connection.executemany(
         "INSERT INTO messages VALUES (?, ?, ?)",
         [("same", "group", "g"), ("same", "direct", "d")],
+    )
+    connection.commit()
+    connection.close()
+
+    report = audit(data_dir)
+
+    candidates = [item for item in report["sessions"] if item["legacy_key"] == "same"]
+    assert {item["chat_type"] for item in candidates} == {"group", "direct"}
+    assert all(item["manual_hindsight_binding_required"] for item in candidates)
+    assert all(item["manual_store_binding_required"] for item in candidates)
+    assert report["ambiguous_count"] == 2
+
+
+def test_migration_audit_maps_private_session_kind_to_direct(tmp_path: Path):
+    from scripts.migrate_session_identity import audit
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    database = data_dir / "events.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE events (chat_id TEXT, session_kind TEXT)")
+    connection.executemany(
+        "INSERT INTO events VALUES (?, ?)",
+        [("same", "group"), ("same", "private")],
     )
     connection.commit()
     connection.close()
@@ -489,6 +526,55 @@ def test_migration_plan_can_retain_orphaned_task_sessions_as_legacy(tmp_path: Pa
     assert manifest["mappings"] == []
 
 
+def test_migration_plan_records_explicitly_excluded_legacy_sessions(tmp_path: Path):
+    from scripts.migrate_session_identity import audit, plan
+
+    data_dir = tmp_path / "data"
+    (data_dir / "sessions").mkdir(parents=True)
+    (data_dir / "sessions" / "same-chat.jsonl").write_text(
+        json.dumps({"session_id": "same-chat"}) + "\n"
+    )
+    audit_path = data_dir / "audit.json"
+    audit(data_dir, audit_path)
+
+    manifest = plan(
+        data_dir,
+        "run-excluded",
+        audit_path,
+        data_dir / "manifest.json",
+        excluded_legacy_keys=["same-chat"],
+    )
+
+    assert manifest["state"] == "planned"
+    assert manifest["blockers"] == []
+    assert manifest["mappings"] == []
+    assert [item["legacy_key"] for item in manifest["excluded_legacy_sessions"]] == [
+        "same-chat"
+    ]
+
+
+def test_migration_plan_rejects_unknown_excluded_legacy_session(tmp_path: Path):
+    from scripts.migrate_session_identity import audit, plan
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    audit_path = data_dir / "audit.json"
+    audit(data_dir, audit_path)
+
+    manifest = plan(
+        data_dir,
+        "run-unknown-excluded",
+        audit_path,
+        data_dir / "manifest.json",
+        excluded_legacy_keys=["missing"],
+    )
+
+    assert manifest["state"] == "blocked"
+    assert manifest["blockers"] == [
+        {"kind": "unknown_excluded_session", "legacy_keys": ["missing"]}
+    ]
+
+
 def test_cutover_requires_verified_hindsight_plan(tmp_path: Path):
     from scripts.migrate_session_identity import mark_canonical_cutover
 
@@ -561,7 +647,7 @@ def test_migration_plan_blocks_unresolved_hindsight_binding(
 
 
 def test_local_migration_moves_jsonl_archives_and_verifies_workspace_tree(
-    tmp_path: Path,
+    tmp_path: Path, no_running_bot_processes
 ):
     from scripts.migrate_session_identity import (
         apply_manifest,
