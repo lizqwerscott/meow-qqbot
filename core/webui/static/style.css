@@ -468,6 +468,7 @@ tr:hover td {
 .conversation-panel-heading { align-items: center; background: linear-gradient(135deg, #fff, #f8faff); border-bottom: 1px solid #edf0f5; display: flex; justify-content: space-between; padding: 13px 20px; }
 .conversation-panel-heading span { color: var(--text-secondary); font-size: 12px; }
 .conversation-stream { padding: 8px 20px 22px; }
+.conversation-stream { overflow-anchor: none; }
 .conversation-load-older { display: flex; justify-content: center; padding: 8px 0 14px; }
 .conversation-load-older.is-hidden { display: none; }
 .conversation-load-older .btn { border-radius: 999px; font-size: 12px; }

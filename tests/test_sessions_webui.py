@@ -456,6 +456,37 @@ async def test_session_detail_renders_persisted_message_resources(tmp_path):
     assert "conversation-resource" in response.text
     assert "/media/image-1/content" in response.text
     assert "cat.png" in response.text
+    assert 'data-cursor-cutoff="' in response.text
+    assert 'data-cursor-before="1"' in response.text
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_session_detail_renders_oldest_to_newest_with_newest_at_bottom(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    for index in range(1, 4):
+        await event_log.append_user_message(
+            chat_id="ordered-chat",
+            turn_id=f"turn-{index}",
+            message_id=f"message-{index}",
+            content=f"消息 {index}",
+            timestamp=index,
+        )
+        await event_log.append_turn_terminal(
+            chat_id="ordered-chat", turn_id=f"turn-{index}", timestamp=index
+        )
+
+    app = create_app(
+        {"context_manager": _ContextManager(), "conversation_event_log": event_log},
+        {},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/sessions/ordered-chat?page_size=2")
+
+    assert response.status_code == 200
+    assert response.text.index("消息 2") < response.text.index("消息 3")
+    assert 'data-cursor-before="2"' in response.text
     await event_log.close()
 
 
@@ -516,9 +547,7 @@ async def test_session_detail_shows_turn_integrity_and_repair_revision(tmp_path)
             event_id="assistant:call-1",
             role="assistant",
             kind="assistant_tool_call",
-            tool_calls=(
-                {"id": "call-1", "function": {"name": "lookup"}},
-            ),
+            tool_calls=({"id": "call-1", "function": {"name": "lookup"}},),
         )
     )
     await event_log.append_turn_terminal(

@@ -889,6 +889,8 @@ async def session_detail(
 
     event_log = managers.get("conversation_event_log")
     history = []
+    cursor_cutoff = None
+    cursor_before = None
     if event_log is not None:
         turn_page = await event_log.snapshot_turn_page(
             chat_id,
@@ -906,6 +908,8 @@ async def session_detail(
             "total": turn_page.total_turns,
             "total_pages": turn_page.total_pages,
         }
+        cursor_cutoff = turn_page.cutoff_seq
+        cursor_before = turns[-1]["turn_sequence"] if turns else None
     else:
         history = await timeline.history(chat_id, max_events=100) if timeline else []
         if not history and timeline is not None:
@@ -1007,6 +1011,8 @@ async def session_detail(
             ),
             "protocol_count": protocol_count,
             "pagination": pagination,
+            "cursor_cutoff": cursor_cutoff,
+            "cursor_before": cursor_before,
         },
     )
 

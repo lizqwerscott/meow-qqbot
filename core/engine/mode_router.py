@@ -23,6 +23,7 @@ class ModeRouteSource(StrEnum):
 
 
 class ModeReasonCode(StrEnum):
+    SESSION_AGENT = "session_agent"
     WORK_PLAN_FOLLOW_UP = "work_plan_follow_up"
     DISCUSSION_ONLY = "discussion_only"
     EXPLICIT_WORK = "explicit_work"
@@ -67,6 +68,7 @@ class ModeRouteInput:
     role: str = "default"
     scheduler_revision: int = 0
     active_work_plan: ActiveWorkPlanHint | None = None
+    mode_floor: PromptMode | None = None
 
 
 @dataclass(frozen=True)
@@ -141,6 +143,19 @@ class ModeRouter:
                 reason_code=ModeReasonCode.WORK_PLAN_FOLLOW_UP,
                 capability_profile="agent_full",
                 work_plan_hint=work_plan.work_plan_id,
+            )
+
+        if (
+            request.mode_floor is PromptMode.AGENT
+            or getattr(message, "session_mode", None) == PromptMode.AGENT.value
+        ):
+            return self._decision(
+                request,
+                mode=PromptMode.AGENT,
+                confidence=1.0,
+                reason="the session is pinned to the Agent capability floor",
+                reason_code=ModeReasonCode.SESSION_AGENT,
+                capability_profile="agent_full",
             )
 
         text = (message.content or "").strip()

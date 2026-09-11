@@ -35,22 +35,27 @@ def csrf_input(request: Request) -> Markup:
 
 class CSRFMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
-        if request.method == "POST" and request.url.path != "/login":
+        if (
+            request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and request.url.path != "/login"
+        ):
             if not request.app.state.webui_config.get(
                 "token", ""
             ) and request.url.path.startswith("/settings/"):
                 return PlainTextResponse("Forbidden", status_code=403)
             if not request.app.state.webui_config.get("token", ""):
                 return await call_next(request)
-            try:
-                body = await request.body()
-                if len(body) > MAX_MUTATION_BODY_BYTES:
-                    return PlainTextResponse("Request too large", status_code=413)
-                form = await request.form()
-            except Exception:
-                return PlainTextResponse("Invalid form", status_code=403)
             cookie = request.cookies.get(COOKIE_NAME, "")
-            submitted = str(form.get(FORM_NAME, ""))
+            submitted = request.headers.get("X-CSRF-Token", "")
+            if not submitted:
+                try:
+                    body = await request.body()
+                    if len(body) > MAX_MUTATION_BODY_BYTES:
+                        return PlainTextResponse("Request too large", status_code=413)
+                    form = await request.form()
+                    submitted = str(form.get(FORM_NAME, ""))
+                except Exception:
+                    return PlainTextResponse("Invalid form", status_code=403)
             if (
                 not cookie
                 or not submitted

@@ -19,6 +19,7 @@ def message(
     sender_id: str = "user-1",
     chat_id: str = "chat-1",
     is_at_mention: bool = False,
+    session_mode: str | None = None,
 ) -> InputMessage:
     return InputMessage(
         id="message-1",
@@ -27,6 +28,7 @@ def message(
         content=content,
         is_group=is_group,
         is_at_mention=is_at_mention,
+        session_mode=session_mode,
     )
 
 
@@ -67,6 +69,16 @@ def test_discussion_only_constraint_overrides_work_verbs():
 
     assert decision.mode is PromptMode.CHAT
     assert decision.reason_code is ModeReasonCode.DISCUSSION_ONLY
+
+
+def test_agent_session_mode_is_a_non_downgradable_floor():
+    decision = ModeRouter().route(
+        ModeRouteInput(message("只解释这个问题", session_mode="agent"))
+    )
+
+    assert decision.mode is PromptMode.AGENT
+    assert decision.reason_code is ModeReasonCode.SESSION_AGENT
+    assert decision.capability_profile == "agent_full"
 
 
 def test_group_work_requires_an_explicit_wake():

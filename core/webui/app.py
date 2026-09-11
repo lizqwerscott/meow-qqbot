@@ -68,6 +68,7 @@ def _client_ip(request: Request, webui_config: dict) -> str:
 
 from core.webui.routers import (
     emojis,
+    interaction,
     learners,
     media,
     nicknames,
@@ -123,7 +124,9 @@ def create_app(managers: Dict[str, Any], webui_config: Dict[str, Any]) -> FastAP
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     # Auth middleware
-    token = webui_config.get("token", "")
+    token = str(webui_config.get("token", "") or "").strip()
+    if webui_config.get("enabled", False) and not token:
+        raise RuntimeError("WebUI requires a non-empty administrator token")
     if token:
         app.add_middleware(AuthMiddleware, token=token)
 
@@ -167,6 +170,7 @@ def create_app(managers: Dict[str, Any], webui_config: Dict[str, Any]) -> FastAP
 
     # Register routers
     app.include_router(status.router)
+    app.include_router(interaction.router)
     app.include_router(emojis.router)
     app.include_router(nicknames.router)
     app.include_router(sessions.router)

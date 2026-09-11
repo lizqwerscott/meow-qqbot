@@ -1,7 +1,7 @@
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from core.session_identity import DeliveryTarget, build_chat_session_key
 
@@ -61,6 +61,7 @@ class InputMessage:
     tier: Optional[str] = None
     resources: List[ResourceMeta] = field(default_factory=list)
     replied_resources: List[ResourceMeta] = field(default_factory=list)
+    session_mode: Literal["chat", "agent"] | None = None
 
     def __post_init__(self):
         if self.timestamp is None:

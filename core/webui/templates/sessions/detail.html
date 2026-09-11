@@ -23,8 +23,8 @@
 </div>
 
 <section class="conversation-panel">
-<div class="conversation-panel-heading"><strong>最近对话</strong><span>{{ pagination.total }} 个 Turn · 当前页 {{ pagination.page }}/{{ pagination.total_pages }}</span></div>
-<div class="conversation-stream" id="conversation-stream" data-session-stream data-chat-id="{{ chat_id }}" data-page="{{ pagination.page }}" data-total-pages="{{ pagination.total_pages }}" data-page-size="{{ pagination.page_size }}">
+<div class="conversation-panel-heading"><strong>最近对话</strong><span>{{ pagination.total }} 个 Turn · 向上滚动加载更早消息</span></div>
+<div class="conversation-stream" id="conversation-stream" data-session-stream data-chat-id="{{ chat_id }}" data-page="{{ pagination.page }}" data-total-pages="{{ pagination.total_pages }}" data-page-size="{{ pagination.page_size }}" data-cursor-cutoff="{{ cursor_cutoff or '' }}" data-cursor-before="{{ cursor_before or '' }}">
 <div class="conversation-load-older{% if pagination.page >= pagination.total_pages %} is-hidden{% endif %}" data-load-older-wrap>
     <button class="btn btn-ghost" type="button" data-load-older>↑ 加载更早消息</button>
 </div>
@@ -34,7 +34,7 @@
 </section>
 
 {% if pagination and pagination.total_pages > 1 %}
-<div class="conversation-pagination">
+<div class="conversation-pagination" data-cursor-pagination>
     {% if pagination.page < pagination.total_pages %}<a class="btn btn-primary" href="{{ request.url.path }}?page={{ pagination.page + 1 }}&page_size={{ pagination.page_size }}">查看更早的消息</a>{% endif %}
     <span>{{ pagination.page }} / {{ pagination.total_pages }} · 共 {{ pagination.total }} 个 Turn</span>
     {% if pagination.page > 1 %}<a class="btn" href="{{ request.url.path }}?page={{ pagination.page - 1 }}&page_size={{ pagination.page_size }}">回到更新的消息</a>{% endif %}

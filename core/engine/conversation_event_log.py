@@ -934,6 +934,7 @@ class ConversationEventLog:
         message_id: str = "",
         timestamp: float = 0.0,
         session_kind: str = "chat",
+        resources: Sequence[dict[str, Any]] = (),
     ) -> ConversationEvent:
         return await self.append_event(
             ConversationEvent(
@@ -946,6 +947,14 @@ class ConversationEventLog:
                 message_id=message_id,
                 timestamp=timestamp,
                 session_kind=session_kind,
+                resources=tuple(
+                    {
+                        key: resource.get(key, "")
+                        for key in self._RESOURCE_FIELDS
+                        if resource.get(key, "") not in ("", 0, 0.0, None)
+                    }
+                    for resource in resources
+                ),
             )
         )
 
@@ -2059,6 +2068,78 @@ class ConversationEventLog:
             page=page,
             page_size=page_size,
             total_turns=total,
+        )
+
+    async def snapshot_turn_cursor(
+        self,
+        chat_id: str,
+        *,
+        limit: int = 30,
+        before_turn_sequence: int | None = None,
+        cutoff_seq: int | None = None,
+        include_internal: bool = False,
+    ) -> tuple[ConversationTurnPage, bool, int | None]:
+        """Read a stable, older-than cursor window without page-number drift."""
+        limit = max(1, min(100, int(limit)))
+        conn = await self._ensure_open()
+        async with self._lock:
+            cutoff = int(
+                cutoff_seq
+                if cutoff_seq is not None
+                else conn.execute(
+                    "SELECT COALESCE(MAX(event_seq), 0) FROM conversation_events "
+                    "WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()[0]
+            )
+            conditions = ["turns.chat_id = ?"]
+            params: list[Any] = [chat_id, cutoff]
+            visible_conditions = (
+                "visible.chat_id = turns.chat_id "
+                "AND visible.turn_id = turns.turn_id "
+                "AND visible.event_seq <= ?"
+            )
+            if not include_internal:
+                visible_conditions += " AND visible.kind IN (?, ?)"
+                params.extend((EventKind.USER_MESSAGE, EventKind.ACCEPTED_DELIVERY))
+            conditions.append(
+                "EXISTS (SELECT 1 FROM conversation_events visible WHERE "
+                + visible_conditions
+                + ")"
+            )
+            if before_turn_sequence is not None:
+                conditions.append("turns.turn_sequence < ?")
+                params.append(int(before_turn_sequence))
+            rows = conn.execute(
+                "SELECT turns.* FROM conversation_turns turns WHERE "
+                + " AND ".join(conditions)
+                + " ORDER BY turns.turn_sequence DESC LIMIT ?",
+                (*params, limit + 1),
+            ).fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        turns = tuple(self._turn_from_row(row) for row in rows)
+        events = (
+            await self.snapshot_events(
+                chat_id,
+                upto_seq=cutoff,
+                include_internal=include_internal,
+                turn_ids=tuple(turn.turn_id for turn in turns),
+            )
+        ).events
+        next_before = turns[-1].turn_sequence if has_more and turns else None
+        return (
+            ConversationTurnPage(
+                chat_id=chat_id,
+                turns=turns,
+                events=events,
+                cutoff_seq=cutoff,
+                page=1,
+                page_size=limit,
+                total_turns=len(turns),
+            ),
+            has_more,
+            next_before,
         )
 
     @staticmethod
