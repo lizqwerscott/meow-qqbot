@@ -71,9 +71,27 @@ async def _turn_dtos(page, *, session_id: str, request: Request) -> list[dict]:
                     tool_names[call_id] = name
         for event, message in zip(events, card["events"]):
             timestamps.append(event.timestamp)
+            sender_id = str(message.get("sender_id") or event.sender_id or "")
             content = str(message.get("content") or "").strip()
+            reasoning = str(message.get("reasoning_content") or "").strip()
+            if reasoning:
+                blocks.append(
+                    {
+                        "type": "reasoning",
+                        "role": "assistant",
+                        "sender_id": sender_id,
+                        "text": reasoning,
+                    }
+                )
             if content and not (event.role == "tool" and event.tool_call_id):
-                blocks.append({"type": "text", "text": content, "role": event.role})
+                blocks.append(
+                    {
+                        "type": "text",
+                        "text": content,
+                        "role": event.role,
+                        "sender_id": sender_id,
+                    }
+                )
             for resource in message.get("resources") or ():
                 resource_view = dict(resource)
                 if "display_type" not in resource_view:
@@ -82,6 +100,7 @@ async def _turn_dtos(page, *, session_id: str, request: Request) -> list[dict]:
                     {
                         "type": resource_view["resource_type"] or "file",
                         "role": event.role,
+                        "sender_id": sender_id,
                         "resource": resource_view,
                     }
                 )
@@ -95,6 +114,7 @@ async def _turn_dtos(page, *, session_id: str, request: Request) -> list[dict]:
                     {
                         "type": "tool",
                         "role": event.role,
+                        "sender_id": sender_id,
                         "tool_calls": tool_calls,
                         "tool_call_id": (
                             first_call.get("id", "")
@@ -119,6 +139,7 @@ async def _turn_dtos(page, *, session_id: str, request: Request) -> list[dict]:
                     {
                         "type": "tool_result",
                         "role": event.role,
+                        "sender_id": sender_id,
                         "tool_call_id": event.tool_call_id,
                         "tool_name": event.tool_name
                         or tool_names.get(event.tool_call_id, ""),
@@ -183,6 +204,15 @@ async def list_external_chat_sessions(
     request: Request, limit: int = Query(100, ge=1, le=100)
 ):
     return (await _gateway(request).list_external_sessions(limit=limit)).to_dict()
+
+
+@router.get("/chat/sessions/{session_id}")
+async def get_chat_session(request: Request, session_id: str):
+    try:
+        session = await _gateway(request).resolve_history_session(session_id)
+    except KeyError as exc:
+        raise _not_found(exc) from exc
+    return {"session": session.to_dict()}
 
 
 @router.patch("/chat/sessions/{session_id}")

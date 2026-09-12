@@ -1,6 +1,6 @@
 import { css, html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
-import { compactChatSession, createChatSession, discardChatResource, listChatSessions, listExternalChatSessions, loadChatAudit, loadChatOptions, loadPendingChatApprovals, loadTurns, openChatEvents, renameChatSession, resolveChatApproval, submitChatTurn, uploadChatResource } from "../api/chat-api";
+import { compactChatSession, createChatSession, discardChatResource, listChatSessions, listExternalChatSessions, loadChatAudit, loadChatOptions, loadChatSession, loadPendingChatApprovals, loadTurns, openChatEvents, renameChatSession, resolveChatApproval, submitChatTurn, uploadChatResource } from "../api/chat-api";
 import type { ChatAuditEntry, ChatCompactionResult, ChatControlOption, ChatModelOption, ChatSession, ContentBlock, StreamEvent, Turn } from "../contracts/chat";
 import "./meow-transcript";
 import { createRequestId } from "./request-id";
@@ -63,7 +63,7 @@ export class MeowChatApp extends LitElement {
 
   static styles = css`
     :host { display: block; height: 100vh; color: #222738; background: #f7f8fc; font: 14px/1.5 Inter, system-ui, sans-serif; }
-    .layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); height: 100%; }
+    .layout { display: grid; grid-template-columns: 360px minmax(0, 1fr); height: 100%; }
     aside { overflow-y: auto; padding: 22px 14px; background: #fff; border-right: 1px solid #e9ebf2; }
     h1 { margin: 0 10px 24px; font-size: 19px; }
     .new-session-row { display: flex; gap: 6px; margin: 0 10px 16px; }
@@ -73,6 +73,7 @@ export class MeowChatApp extends LitElement {
     .session { display: block; width: 100%; border: 0; border-radius: 12px; padding: 11px 12px; color: inherit; background: transparent; text-align: left; cursor: pointer; }
     .session:hover, .session.active { background: #eef0ff; color: #4654c8; }
     .session-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .session-id { display: block; margin-top: 4px; color: #9aa2b4; font: 10px/1.35 ui-monospace, SFMono-Regular, monospace; overflow-wrap: anywhere; white-space: normal; word-break: break-all; }
     .session-mode { display: block; margin-top: 3px; color: #8b93a7; font-size: 12px; }
     .session-list-more { padding: 10px; color: #8b93a7; font-size: 12px; text-align: center; }
     .sidebar-section { margin: 20px 10px 7px; color: #8b93a7; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
@@ -132,7 +133,7 @@ export class MeowChatApp extends LitElement {
     textarea { flex: 1; min-height: 24px; max-height: 140px; resize: vertical; border: 0; outline: 0; padding: 8px 10px; color: inherit; background: transparent; font: inherit; }
     form button { align-self: flex-end; border: 0; border-radius: 12px; padding: 9px 16px; color: #fff; background: #5865f2; cursor: pointer; }
     form button:disabled { cursor: not-allowed; opacity: .5; }
-    @media (max-width: 720px) { .layout { grid-template-columns: 1fr; } aside { display: none; position: fixed; z-index: 10; inset: 0 auto 0 0; width: min(280px, 82vw); box-shadow: 12px 0 32px rgba(39, 48, 85, .18); } aside.open { display: block; } header { padding: 14px 18px; } .menu-toggle { display: inline-flex; } .composer-wrap { padding: 10px 12px 14px; } .header-controls { gap: 4px; } .mode-control { font-size: 0; } .mode-control select { font-size: 12px; } .audit-panel { right: 12px; } }
+    @media (max-width: 720px) { .layout { grid-template-columns: 1fr; } aside { display: none; position: fixed; z-index: 10; inset: 0 auto 0 0; width: min(360px, 82vw); box-shadow: 12px 0 32px rgba(39, 48, 85, .18); } aside.open { display: block; } header { padding: 14px 18px; } .menu-toggle { display: inline-flex; } .composer-wrap { padding: 10px 12px 14px; } .header-controls { gap: 4px; } .mode-control { font-size: 0; } .mode-control select { font-size: 12px; } .audit-panel { right: 12px; } }
   `;
 
   connectedCallback() { super.connectedCallback(); void this.loadSessions(); }
@@ -255,7 +256,7 @@ export class MeowChatApp extends LitElement {
       ${sessions.length === 0 && !this.error ? html`<div class="status">${empty}</div>` : ""}
       ${sessions.map((item) => html`
         <button class="session ${item.session_id === this.selectedSessionId ? "active" : ""}" ?disabled=${this.sending || this.uploading || this.removingUploads.size > 0} @click=${() => this.selectSession(item.session_id)}>
-          <span class="session-title">${item.title || "未命名会话"}</span><span class="session-mode">${item.read_only ? "只读 · " : ""}${item.mode}</span>
+              <span class="session-title">${item.title || "未命名会话"}</span><span class="session-id" title=${item.session_id}>${item.session_id}</span><span class="session-mode">${item.read_only ? "只读 · " : ""}${item.mode}</span>
         </button>
       `)}
     `;
@@ -264,15 +265,28 @@ export class MeowChatApp extends LitElement {
   private async loadSessions() {
     this.loading = true;
     try {
+      const requestedSessionId = this.requestedSessionId();
+      const requestedSession = requestedSessionId
+        ? await loadChatSession(requestedSessionId).catch(() => null)
+        : null;
       const [sessionPage, externalPage, options] = await Promise.all([listChatSessions(), listExternalChatSessions(), loadChatOptions()]);
-      this.sessions = [...sessionPage.items, ...externalPage.items];
+      this.sessions = mergeUniqueSessions(
+        [...sessionPage.items, ...externalPage.items],
+        requestedSession ? [requestedSession] : [],
+      );
       this.sessionsCursor = sessionPage.next_cursor;
       this.sessionsHasMore = sessionPage.has_more;
       this.modelOptions = options.model_groups;
       this.chatControls = options.controls;
-      if (this.sessions.length > 0) await this.selectSession(this.sessions[0].session_id);
+      const initialSession = requestedSession || this.sessions[0];
+      if (initialSession) await this.selectSession(initialSession.session_id);
     } catch (error) { this.error = error instanceof Error ? error.message : "无法加载会话"; }
     finally { this.loading = false; }
+  }
+
+  private requestedSessionId(): string {
+    if (typeof window === "undefined") return "";
+    return new URLSearchParams(window.location.search).get("session_id") || "";
   }
 
   private handleSidebarScroll = (event: Event) => {
@@ -316,6 +330,11 @@ export class MeowChatApp extends LitElement {
     this.discardDraftUploads(this.selectedSessionId, this.uploads);
     this.eventSource?.close(); this.eventSource = undefined; this.connected = false;
     this.selectedSessionId = sessionId; this.turns = []; this.cutoff = undefined; this.olderCursor = undefined; this.hasMore = false;
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.set("session_id", sessionId);
+      window.history.replaceState({}, "", url);
+    }
     this.sidebarOpen = false;
     const session = this.sessions.find((item) => item.session_id === sessionId);
     this.composerMode = session?.mode === "chat" ? "chat" : "agent";
@@ -396,8 +415,9 @@ export class MeowChatApp extends LitElement {
 
   private applyAccepted(event: StreamEvent) {
     const payload = event.payload;
-    const blocks = this.resourceBlocks(payload.resources, "user");
     const content = typeof payload.content === "string" ? payload.content : "";
+    const senderId = typeof payload.sender_id === "string" ? payload.sender_id : "";
+    const blocks = this.resourceBlocks(payload.resources, "user", senderId);
     const mode = payload.mode === "chat" ? "chat" : "agent";
     const modelGroup = typeof payload.model_group === "string" ? payload.model_group : "auto";
     const reasoningEffort = typeof payload.reasoning_effort === "string" ? payload.reasoning_effort : "provider";
@@ -408,7 +428,7 @@ export class MeowChatApp extends LitElement {
       ...this.retrySubmissions,
       [event.turn_id]: { content, resources, mode, modelGroup, reasoningEffort },
     };
-    if (content) blocks.unshift({ type: "text", role: "user", text: content });
+    if (content) blocks.unshift({ type: "text", role: "user", sender_id: senderId, text: content });
     this.upsertTurn(event, blocks, "running");
   }
 
@@ -506,21 +526,37 @@ export class MeowChatApp extends LitElement {
   }
 
   private applyMessage(event: StreamEvent, delta: boolean) {
-    const payload = event.payload; const content = typeof payload.content === "string" ? payload.content : ""; const resources = this.resourceBlocks(payload.resources, "assistant");
+    const payload = event.payload; const content = typeof payload.content === "string" ? payload.content : ""; const reasoning = typeof payload.reasoning_content === "string" ? payload.reasoning_content : ""; const resources = this.resourceBlocks(payload.resources, "assistant");
     const current = this.turns.find((turn) => turn.turn_id === event.turn_id);
-    if (!current) { this.upsertTurn(event, [...(content ? [{ type: "text", role: "assistant", text: content }] : []), ...resources], "running"); return; }
+    if (!current) { this.upsertTurn(event, [...(reasoning ? [{ type: "reasoning", role: "assistant", status: "running", text: reasoning }] : []), ...(content ? [{ type: "text", role: "assistant", text: content }] : []), ...resources], "running"); return; }
     let blocks = current.blocks;
-    if (!delta) blocks = [...blocks.filter((block) => block.role !== "assistant"), ...(content ? [{ type: "text", role: "assistant", text: content }] : []), ...resources];
+    if (!delta) blocks = [...blocks.filter((block) => block.role !== "assistant"), ...(reasoning ? [{ type: "reasoning", role: "assistant", status: "running", text: reasoning }] : []), ...(content ? [{ type: "text", role: "assistant", text: content }] : []), ...resources];
     else if (content) {
       const index = [...blocks].reverse().findIndex((block) => block.role === "assistant" && block.type === "text"); const targetIndex = index < 0 ? -1 : blocks.length - 1 - index;
       if (targetIndex < 0) blocks = [...blocks, { type: "text", role: "assistant", text: content }];
       else blocks = blocks.map((block, blockIndex) => blockIndex === targetIndex ? { ...block, text: `${block.text || ""}${content}` } : block);
       blocks = [...blocks, ...resources];
+    } else if (reasoning) {
+      const targetIndex = [...blocks].reverse().findIndex((block) => block.type === "reasoning" && block.role === "assistant");
+      if (targetIndex < 0) blocks = [...blocks, { type: "reasoning", role: "assistant", status: "running", text: reasoning }];
+      else {
+        const index = blocks.length - 1 - targetIndex;
+        blocks = blocks.map((block, blockIndex) => blockIndex === index ? { ...block, text: `${block.text || ""}${reasoning}` } : block);
+      }
+      blocks = [...blocks, ...resources];
     } else blocks = [...blocks, ...resources];
     this.turns = this.turns.map((turn) => turn.turn_id === event.turn_id ? { ...turn, blocks } : turn);
   }
 
-  private updateTurnStatus(event: StreamEvent, status: string) { this.turns = this.turns.map((turn) => turn.turn_id === event.turn_id ? { ...turn, status } : turn); }
+  private updateTurnStatus(event: StreamEvent, status: string) {
+    this.turns = this.turns.map((turn) => turn.turn_id === event.turn_id
+      ? {
+        ...turn,
+        status,
+        blocks: turn.blocks.map((block) => block.type === "reasoning" ? { ...block, status } : block),
+      }
+      : turn);
+  }
 
   private clearRetrySubmission(turnId: string) {
     if (!this.retrySubmissions[turnId]) return;
@@ -536,9 +572,9 @@ export class MeowChatApp extends LitElement {
     this.turns = [...this.turns, { turn_id: event.turn_id, turn_sequence: nextSequence, created_at: event.occurred_at, status, turn_kind: "ai", blocks, metadata: { live: true } }];
   }
 
-  private resourceBlocks(value: unknown, role: string): ContentBlock[] {
+  private resourceBlocks(value: unknown, role: string, senderId = ""): ContentBlock[] {
     if (!Array.isArray(value)) return [];
-    return value.filter((resource): resource is Record<string, unknown> => Boolean(resource && typeof resource === "object")).map((resource) => ({ type: String(resource.resource_type || "file"), role, resource }));
+    return value.filter((resource): resource is Record<string, unknown> => Boolean(resource && typeof resource === "object")).map((resource) => ({ type: String(resource.resource_type || "file"), role, sender_id: senderId, resource }));
   }
 
   private async reloadHistory(): Promise<boolean> {

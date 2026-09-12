@@ -26,11 +26,14 @@ export class MeowTranscript extends LitElement {
     :host { display: block; height: 100%; min-height: 0; }
     .history { height: 100%; box-sizing: border-box; overflow-y: auto; max-width: 860px; margin: 0 auto; padding: 32px 24px 120px; }
     .spacer { width: 1px; pointer-events: none; }
-    .turn { display: grid; gap: 12px; margin: 0 0 28px; }
-    .turn-meta { color: #8b93a7; font-size: 12px; text-align: center; }
+    .turn { display: grid; gap: 12px; margin: 0 0 28px; padding: 0 4px 20px; border-bottom: 1px solid #e9ebf2; }
+    .turn-meta { display: flex; align-items: center; justify-content: center; gap: 8px; color: #8b93a7; font-size: 12px; }
+    .turn-label { color: #596174; font-weight: 700; }
     .message { display: flex; }
     .message.user { justify-content: flex-end; }
     .bubble { max-width: min(720px, 86%); border-radius: 18px; padding: 12px 16px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .message-label { margin-bottom: 4px; color: #8b93a7; font-size: 11px; line-height: 1.2; }
+    .user .message-label { color: rgba(255,255,255,.78); }
     .user .bubble { color: #fff; background: #5865f2; border-bottom-right-radius: 5px; }
     .assistant .bubble, .tool .bubble { background: #fff; border: 1px solid #e5e8f0; border-bottom-left-radius: 5px; }
     .card { display: grid; gap: 6px; }
@@ -50,6 +53,10 @@ export class MeowTranscript extends LitElement {
     .tool-detail, .tool-result { max-height: 260px; overflow: auto; margin: 0; padding: 10px; border-radius: 8px; background: #fff; color: #515a70; font: 12px/1.5 ui-monospace, SFMono-Regular, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
     .tool-result { background: #292d3e; color: #f5f6fa; }
     .tool-note { color: #697389; font-size: 12px; }
+    .reasoning-card { max-width: min(720px, 86%); border: 1px solid #e5e8f0; background: #f8f9fc; color: #596174; }
+    .reasoning-card summary { display: flex; align-items: center; gap: 10px; cursor: pointer; font-weight: 600; }
+    .reasoning-summary { overflow: hidden; color: #8b93a7; font-size: 12px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+    .reasoning-body { margin-top: 8px; padding-top: 8px; border-top: 1px solid #e5e8f0; white-space: pre-wrap; }
     .empty, .loading { padding: 64px 20px; color: #8b93a7; text-align: center; }
     button { border: 0; border-radius: 999px; padding: 8px 14px; color: #4d5bd4; background: #eef0ff; cursor: pointer; }
   `;
@@ -161,7 +168,7 @@ export class MeowTranscript extends LitElement {
   private renderTurn(turn: Turn): TemplateResult {
     return html`
       <article class="turn" data-turn-id=${turn.turn_id}>
-        <div class="turn-meta">${this.formatTime(turn.created_at)} · ${turn.status}</div>
+        <div class="turn-meta"><span class="turn-label">第 ${turn.turn_sequence} 轮</span><span>${this.formatTime(turn.created_at)} · ${turn.status}</span></div>
         ${turn.blocks.map((block) => this.renderBlock(block))}
         ${this.retryableTurnIds.has(turn.turn_id)
           ? html`<button class="retry-action" @click=${() => this.retryTurn(turn.turn_id)}>↻ 重试此消息</button>`
@@ -172,8 +179,16 @@ export class MeowTranscript extends LitElement {
 
   private renderBlock(block: ContentBlock): TemplateResult {
     const role = block.role === "user" ? "user" : block.role === "tool" ? "tool" : "assistant";
+    const label = this.messageLabel(block);
     if (block.type === "text" && block.text) {
-      return html`<div class="message ${role}"><div class="bubble">${block.text}</div></div>`;
+      return html`<div class="message ${role}"><div class="bubble"><div class="message-label">${label}</div>${block.text}</div></div>`;
+    }
+    if (block.type === "reasoning" && block.text) {
+      const summary = block.text.split("\n").find((line) => line.trim()) || "思考内容";
+      return html`<div class="message assistant"><details class="bubble reasoning-card" ?open=${block.status === "running"}>
+        <summary><span class="message-label">思考过程</span><span class="reasoning-summary">${summary}</span></summary>
+        <div class="reasoning-body">${block.text}</div>
+      </details></div>`;
     }
     if (block.type === "card") {
       const metadata = block.metadata || {};
@@ -185,6 +200,7 @@ export class MeowTranscript extends LitElement {
         ? metadata.url
         : "";
       return html`<div class="message ${role}"><div class="bubble card">
+        <div class="message-label">${label}</div>
         <strong>${title}</strong>
         ${description ? html`<div>${description}</div>` : ""}
         ${url ? html`<a href=${url} target="_blank" rel="noreferrer">${url}</a>` : ""}
@@ -201,6 +217,7 @@ export class MeowTranscript extends LitElement {
       return html`
         <div class="message ${role}">
           <div class="bubble resource">
+            <div class="message-label">${label}</div>
             ${preview && (block.type === "image" || block.type === "emoji") ? html`<img src=${preview} alt=${filename} loading="lazy" />`
               : preview && (block.type === "voice" || block.type === "audio" || mimeType.startsWith("audio/")) ? html`<audio controls preload="metadata" src=${preview}></audio>`
               : preview && (block.type === "video" || mimeType.startsWith("video/")) ? html`<video controls preload="metadata" src=${preview}></video>`
@@ -242,9 +259,16 @@ export class MeowTranscript extends LitElement {
       </div></div>`;
     }
     if (block.text) {
-      return html`<div class="message ${role}"><div class="bubble">${block.text}</div></div>`;
+      return html`<div class="message ${role}"><div class="bubble"><div class="message-label">${label}</div>${block.text}</div></div>`;
     }
     return html``;
+  }
+
+  private messageLabel(block: ContentBlock): string {
+    if (block.role === "user") return block.sender_id ? `用户 · ${block.sender_id}` : "用户";
+    if (block.role === "tool") return block.tool_name ? `工具 · ${block.tool_name}` : "工具";
+    if (block.role === "system") return "系统";
+    return "助手";
   }
 
   private toolName(block: ContentBlock): string {

@@ -196,4 +196,29 @@ describe("meow-transcript", () => {
     expect(transcript.shadowRoot?.querySelector(".tool-detail")?.textContent).toContain("emoji-1");
     expect(transcript.shadowRoot?.querySelector(".tool-result")?.textContent).toContain("success");
   });
+
+  it("labels each turn and participant and collapses reasoning by default", async () => {
+    const transcript = document.createElement("meow-transcript") as HTMLElement & {
+      turns: Turn[];
+      loading: boolean;
+    };
+    transcript.turns = [{
+      ...turns[0],
+      turn_sequence: 7,
+      blocks: [
+        { type: "text", role: "user", sender_id: "user-42", text: "你好" },
+        { type: "reasoning", role: "assistant", text: "先思考一下" },
+        { type: "text", role: "assistant", text: "你好，我是助手" },
+      ],
+    }];
+    transcript.loading = false;
+    document.body.append(transcript);
+    await (transcript as unknown as { updateComplete: Promise<unknown> }).updateComplete;
+
+    expect(transcript.shadowRoot?.querySelector(".turn-label")?.textContent).toContain("第 7 轮");
+    expect(transcript.shadowRoot?.querySelector(".user .message-label")?.textContent).toContain("user-42");
+    expect(transcript.shadowRoot?.querySelector(".assistant .bubble:not(.reasoning-card) .message-label")?.textContent).toContain("助手");
+    expect(transcript.shadowRoot?.querySelector(".reasoning-card")).not.toBeNull();
+    expect(transcript.shadowRoot?.querySelector(".reasoning-card")?.hasAttribute("open")).toBe(false);
+  });
 });

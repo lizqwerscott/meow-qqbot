@@ -149,6 +149,14 @@ a:hover {
     -webkit-overflow-scrolling: touch;
 }
 
+.session-id {
+    display: inline-block;
+    min-width: 320px;
+    max-width: 620px;
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+
 table {
     width: 100%;
     border-collapse: collapse;

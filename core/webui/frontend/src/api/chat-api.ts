@@ -1,5 +1,5 @@
 import type { ChatAuditEntry, ChatCompactionResult, ChatOptions, ChatSession, ChatSessionPage, StreamEvent, TurnPage } from "../contracts/chat";
-import { isChatAuditEntry, isChatModelOption, isChatSessionPage, isTurnPage } from "../contracts/chat";
+import { isChatAuditEntry, isChatModelOption, isChatSession, isChatSessionPage, isTurnPage } from "../contracts/chat";
 
 let csrfToken = "";
 
@@ -114,6 +114,14 @@ export async function listExternalChatSessions(limit = 100): Promise<ChatSession
   const payload = await getJson<unknown>(`/api/chat/external-sessions?limit=${limit}`);
   if (!isChatSessionPage(payload)) throw new Error("服务端返回了无效的外部会话列表");
   return payload;
+}
+
+export async function loadChatSession(sessionId: string): Promise<ChatSession> {
+  const payload = await getJson<{ session?: unknown }>(
+    `/api/chat/sessions/${encodeURIComponent(sessionId)}`,
+  );
+  if (!isChatSession(payload.session)) throw new Error("服务端返回了无效的会话");
+  return payload.session;
 }
 
 export async function createChatSession(

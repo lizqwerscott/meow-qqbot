@@ -430,6 +430,7 @@ class WebUiConversationGateway:
             payload={
                 "request_id": request_id,
                 "message_id": turn_id,
+                "sender_id": self.operator_id,
                 "content": content,
                 "mode": session.mode,
                 "model_group": model_group or "auto",

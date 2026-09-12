@@ -33,7 +33,7 @@
     <tbody>
         {% for s in sessions %}
         <tr>
-            <td><code>{{ s.chat_id[:12] }}..</code></td>
+            <td><code class="session-id" title="{{ s.chat_id }}">{{ s.chat_id }}</code></td>
             <td>{{ s.archive_count }}</td>
             <td>{{ s.latest_archive }}</td>
             <td>
@@ -43,6 +43,7 @@
             <td>
                 <a href="/sessions/archived/{{ s.chat_id }}" class="btn btn-sm">查看</a>
                 <a href="/sessions/{{ s.chat_id }}" class="btn btn-sm">活跃会话</a>
+                <a href="/chat?session_id={{ s.chat_id|urlencode }}" class="btn btn-sm">✨ 聊天工作台</a>
             </td>
         </tr>
         {% else %}

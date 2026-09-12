@@ -42,7 +42,7 @@
     <tbody>
         {% for s in sessions %}
         <tr>
-            <td><code>{{ s.chat_id[:12] }}..</code></td>
+            <td><code class="session-id" title="{{ s.chat_id }}">{{ s.chat_id }}</code></td>
             <td>
                 {% if s.session_kind == 'group' %}群聊
                 {% elif s.session_kind == 'private' %}私聊
@@ -62,6 +62,7 @@
             </td>
             <td>
                 <a href="/sessions/{{ s.chat_id }}" class="btn btn-sm">查看</a>
+                <a href="/chat?session_id={{ s.chat_id|urlencode }}" class="btn btn-sm">✨ 聊天工作台</a>
                 {% if s.protocol_count > 0 %}
                 <a href="/sessions/{{ s.chat_id }}/protocol" class="btn btn-sm">协议</a>
                 {% endif %}

@@ -8,7 +8,13 @@ import pytest
 
 from core.approval.approval_manager import ApprovalManager
 from core.engine.conversation_delivery import ChannelDeliveryRouter, DeliveryRequest
-from core.engine.conversation_event_log import ConversationEventLog, TurnStatus
+from core.engine.conversation_event_log import (
+    ConversationEvent,
+    ConversationEventLog,
+    EventKind,
+    TurnKind,
+    TurnStatus,
+)
 from core.engine.tool_events import ToolLifecycleEvent
 from core.media.store import MediaStore
 from core.session_identity import (
@@ -1101,9 +1107,12 @@ async def test_webui_interaction_api_exposes_structured_turns(tmp_path):
         assert submitted.status_code == 200
         await asyncio.sleep(0.05)
         history = await client.get(f"/api/sessions/{session_id}/turns?limit=10")
+        direct_session = await client.get(f"/api/chat/sessions/{session_id}")
 
     assert created.status_code == 200
     assert history.status_code == 200
+    assert direct_session.status_code == 200
+    assert direct_session.json()["session"]["session_id"] == session_id
     body = history.json()
     assert body["unstable_cursor"] is False
     assert body["items"][0]["blocks"]
@@ -1113,6 +1122,81 @@ async def test_webui_interaction_api_exposes_structured_turns(tmp_path):
         "问题",
         "答案",
     }
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_webui_turn_projection_preserves_sender_and_reasoning_blocks(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    gateway = WebUiConversationGateway(
+        operator_id="admin",
+        route_callback=lambda **_kwargs: None,
+        get_user_nickname=lambda _user_id: "admin",
+        event_log=event_log,
+        store_path=str(tmp_path / "webui.sqlite3"),
+    )
+    session = await gateway.create_session(mode="agent")
+    await event_log.append_user_message(
+        chat_id=session.session_key,
+        turn_id="turn-projection",
+        message_id="message-projection",
+        content="来自外部用户",
+        sender_id="user-42",
+    )
+    await event_log.append_event(
+        ConversationEvent(
+            chat_id=session.session_key,
+            turn_id="turn-projection",
+            event_id="assistant:projection",
+            role="assistant",
+            kind=EventKind.ASSISTANT_TOOL_CALL,
+            content="",
+            reasoning_content="先检查现有状态",
+            tool_calls=(
+                {
+                    "id": "call-projection",
+                    "type": "function",
+                    "function": {"name": "inspect", "arguments": "{}"},
+                },
+            ),
+        ),
+        turn_kind=TurnKind.AI,
+    )
+    await event_log.append_event(
+        ConversationEvent(
+            chat_id=session.session_key,
+            turn_id="turn-projection",
+            event_id="tool:projection",
+            role="tool",
+            kind=EventKind.TOOL_RESULT,
+            content="检查完成",
+            tool_call_id="call-projection",
+            tool_name="inspect",
+        ),
+        turn_kind=TurnKind.AI,
+    )
+    await event_log.append_turn_terminal(
+        chat_id=session.session_key,
+        turn_id="turn-projection",
+        status=TurnStatus.COMPLETED,
+    )
+    app = create_app(
+        {"webui_gateway": gateway, "conversation_event_log": event_log}, {}
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(f"/api/sessions/{session.session_id}/turns")
+
+    assert response.status_code == 200
+    blocks = response.json()["items"][0]["blocks"]
+    assert {block["sender_id"] for block in blocks if block["role"] == "user"} == {
+        "user-42"
+    }
+    assert any(
+        block["type"] == "reasoning" and block["text"] == "先检查现有状态"
+        for block in blocks
+    )
+    assert any(block["type"] == "tool" for block in blocks)
     await event_log.close()
 
 

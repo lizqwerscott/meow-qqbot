@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   compactChatSession: vi.fn(),
   createChatSession: vi.fn(),
   discardChatResource: vi.fn(),
+  loadChatSession: vi.fn(),
   listChatSessions: vi.fn(),
   listExternalChatSessions: vi.fn(),
   loadChatAudit: vi.fn(),
@@ -82,6 +83,7 @@ function makeEvent(type: string, sequence: number, payload: Record<string, unkno
 beforeEach(() => {
   mocks.listChatSessions.mockResolvedValue({ items: [session], has_more: false, next_cursor: null });
   mocks.listExternalChatSessions.mockResolvedValue({ items: [], has_more: false, next_cursor: null });
+  mocks.loadChatSession.mockResolvedValue(session);
   mocks.loadChatOptions.mockResolvedValue(options);
   mocks.loadTurns.mockResolvedValue(emptyTurnPage);
   mocks.loadPendingChatApprovals.mockResolvedValue([]);
@@ -176,5 +178,20 @@ describe("meow-chat-app", () => {
     mode!.dispatchEvent(new Event("change", { bubbles: true }));
     await (app as unknown as { updateComplete: Promise<unknown> }).updateComplete;
     expect(mode?.value).toBe("agent");
+  });
+
+  it("opens the session requested by the workbench URL", async () => {
+    const secondSession = { ...session, session_id: "agent:main:qq:default:group:123456789012345678901234567890", title: "第二个会话" };
+    mocks.listChatSessions.mockResolvedValue({ items: [session, secondSession], has_more: false, next_cursor: null });
+    mocks.loadChatSession.mockResolvedValue(secondSession);
+    window.history.replaceState({}, "", `/chat?session_id=${secondSession.session_id}`);
+
+    const app = document.createElement("meow-chat-app");
+    document.body.append(app);
+    await settle(app);
+
+    expect(mocks.loadTurns).toHaveBeenLastCalledWith(secondSession.session_id);
+    expect(app.shadowRoot?.querySelector("header strong")?.textContent).toContain("第二个会话");
+    expect(app.shadowRoot?.querySelector(".session.active .session-id")?.textContent).toContain(secondSession.session_id);
   });
 });

@@ -145,7 +145,8 @@ async def test_sessions_protocol_view_and_kind_filter(tmp_path):
 @pytest.mark.asyncio
 async def test_session_list_paginates_sessions(tmp_path):
     event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
-    for chat_id in ("chat-a", "chat-b"):
+    long_chat_id = "agent:main:qq:default:group:123456789012345678901234567890"
+    for chat_id in (long_chat_id, "chat-b"):
         await event_log.append_user_message(
             chat_id=chat_id,
             turn_id=f"turn-{chat_id}",
@@ -162,7 +163,9 @@ async def test_session_list_paginates_sessions(tmp_path):
 
     assert response.status_code == 200
     assert "共 2 个会话" in response.text
-    assert ("chat-a" in response.text) != ("chat-b" in response.text)
+    assert long_chat_id in response.text
+    assert "聊天工作台" in response.text
+    assert "/chat?session_id=" in response.text
     await event_log.close()
 
 

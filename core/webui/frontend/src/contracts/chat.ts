@@ -39,6 +39,7 @@ export type ChatOptions = {
 export type ContentBlock = {
   type: string;
   role?: string;
+  sender_id?: string;
   text?: string;
   resource?: Record<string, unknown>;
   tool_calls?: unknown[];
