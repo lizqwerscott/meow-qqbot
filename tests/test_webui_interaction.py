@@ -132,7 +132,48 @@ async def test_webui_gateway_is_idempotent_and_never_uses_qq(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_webui_gateway_projects_tool_lifecycle_events_without_tool_details(tmp_path):
+async def test_webui_can_browse_external_channel_sessions_read_only(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await event_log.append_user_message(
+        chat_id="qq-private-42",
+        turn_id="qq-turn-1",
+        message_id="qq-message-1",
+        content="来自 QQ",
+        session_kind="private",
+    )
+    await event_log.append_accepted_delivery(
+        chat_id="qq-private-42",
+        turn_id="qq-turn-1",
+        delivery_id="qq-delivery-1",
+        content="QQ 回复",
+        session_kind="private",
+    )
+    await event_log.append_turn_terminal(
+        chat_id="qq-private-42", turn_id="qq-turn-1", status=TurnStatus.COMPLETED
+    )
+    gateway = WebUiConversationGateway(
+        operator_id="admin",
+        route_callback=lambda **_kwargs: None,
+        get_user_nickname=lambda _user_id: "admin",
+        event_log=event_log,
+        store_path=str(tmp_path / "webui.sqlite3"),
+    )
+    page = await gateway.list_external_sessions()
+
+    assert len(page.items) == 1
+    assert page.items[0].session_id == "qq-private-42"
+    assert page.items[0].read_only is True
+    with pytest.raises(KeyError):
+        gateway.get_session("qq-private-42")
+    history_session = await gateway.resolve_history_session("qq-private-42")
+    assert history_session.session_key == "qq-private-42"
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_webui_gateway_projects_tool_lifecycle_events_without_tool_details(
+    tmp_path,
+):
     async def route(*, input_message, tool_event_callback, **_kwargs):
         await tool_event_callback(
             ToolLifecycleEvent(
@@ -175,6 +216,51 @@ async def test_webui_gateway_projects_tool_lifecycle_events_without_tool_details
     ]
     assert lifecycle[0].payload["metadata"] == {"reason": "started"}
     assert all(event.turn_id == events[1].turn_id for event in lifecycle)
+
+
+@pytest.mark.asyncio
+async def test_webui_gateway_projects_tool_arguments_and_result_for_live_cards(
+    tmp_path,
+):
+    async def route(*, input_message, tool_event_callback, **_kwargs):
+        await tool_event_callback(
+            ToolLifecycleEvent(
+                event_type="tool.updated",
+                session_id=input_message.chat_id,
+                turn_id=input_message.id,
+                tool_call_id="call-emoji",
+                tool_name="send_emoji",
+                status="running",
+                metadata={"arguments": {"emoji_hash": "abc123", "reason": "开心"}},
+            )
+        )
+        await tool_event_callback(
+            ToolLifecycleEvent(
+                event_type="tool.finished",
+                session_id=input_message.chat_id,
+                turn_id=input_message.id,
+                tool_call_id="call-emoji",
+                tool_name="send_emoji",
+                status="completed",
+                metadata={"result": '{"success": true}'},
+            )
+        )
+
+    gateway = WebUiConversationGateway(
+        operator_id="admin",
+        route_callback=route,
+        get_user_nickname=lambda _user_id: "admin",
+        store_path=str(tmp_path / "webui.sqlite3"),
+    )
+    session = await gateway.create_session()
+    await gateway.submit(session.session_id, content="send", request_id="tool-details")
+    await asyncio.sleep(0.05)
+
+    events = list(gateway.hub._events[session.session_id])
+    updated = next(event for event in events if event.event_type == "tool.updated")
+    finished = next(event for event in events if event.event_type == "tool.finished")
+    assert updated.payload["arguments"] == {"emoji_hash": "abc123", "reason": "开心"}
+    assert finished.payload["result"] == '{"success": true}'
 
 
 @pytest.mark.asyncio
@@ -911,6 +997,32 @@ async def test_webui_delivery_starts_a_new_message_each_turn():
         "message.created",
         "message.created",
     ]
+
+
+@pytest.mark.asyncio
+async def test_webui_delivery_exposes_emoji_preview_in_live_resource_event():
+    from core.webui.interaction.delivery import WebUiDeliveryAdapter
+    from core.webui.interaction.events import EventHub
+
+    hub = EventHub()
+    adapter = WebUiDeliveryAdapter(session_id="s1", hub=hub)
+    await adapter.deliver(
+        turn_id="t1",
+        content="",
+        resources=[
+            {
+                "resource_type": "emoji",
+                "resource_id": "emoji-hash",
+                "filename": "emoji-hash.png",
+                "extra": {"preview_url": "/static/emojis/emoji-hash.png"},
+            }
+        ],
+    )
+
+    resource = hub._events["s1"][0].payload["resources"][0]
+    assert resource["resource_id"] == "emoji-hash"
+    assert resource["preview_url"] == "/static/emojis/emoji-hash.png"
+    assert resource["is_image"] is True
 
 
 @pytest.mark.asyncio

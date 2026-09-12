@@ -998,6 +998,7 @@ class ToolLoop:
                         tc.name,
                         "running",
                         tool_started_at,
+                        metadata={"arguments": args},
                     )
                     result = await execute_tool(tc.name, args, tool_ctx, self._perm)
                     if (
@@ -1058,7 +1059,14 @@ class ToolLoop:
                             content=result.content,
                             resources=result.delivery_resources,
                         )
-                    await finish_tool_event("completed")
+                    await finish_tool_event(
+                        "completed",
+                        metadata={
+                            "arguments": args,
+                            "result": result.content,
+                            "resources": result.delivery_resources,
+                        },
+                    )
                     if not await turn_is_active():
                         _log.info("turn 已终结，抑制工具结果提交: %s", protocol_turn_id)
                         continue

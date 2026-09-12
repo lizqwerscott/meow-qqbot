@@ -57,10 +57,22 @@ async def _turn_dtos(page, *, session_id: str, request: Request) -> list[dict]:
         events = events_by_turn.get(turn.turn_id, [])
         blocks = []
         timestamps = []
+        tool_names: dict[str, str] = {}
+        for event in events:
+            for call in event.tool_calls:
+                function = call.get("function") if isinstance(call, dict) else None
+                call_id = str(call.get("id") or "") if isinstance(call, dict) else ""
+                name = (
+                    str(function.get("name") or "")
+                    if isinstance(function, dict)
+                    else ""
+                )
+                if call_id and name:
+                    tool_names[call_id] = name
         for event, message in zip(events, card["events"]):
             timestamps.append(event.timestamp)
             content = str(message.get("content") or "").strip()
-            if content:
+            if content and not (event.role == "tool" and event.tool_call_id):
                 blocks.append({"type": "text", "text": content, "role": event.role})
             for resource in message.get("resources") or ():
                 resource_view = dict(resource)
@@ -74,11 +86,32 @@ async def _turn_dtos(page, *, session_id: str, request: Request) -> list[dict]:
                     }
                 )
             if message.get("tool_calls"):
+                tool_calls = message["tool_calls"]
+                first_call = tool_calls[0] if tool_calls else {}
+                function = (
+                    first_call.get("function") if isinstance(first_call, dict) else {}
+                )
                 blocks.append(
                     {
                         "type": "tool",
                         "role": event.role,
-                        "tool_calls": message["tool_calls"],
+                        "tool_calls": tool_calls,
+                        "tool_call_id": (
+                            first_call.get("id", "")
+                            if isinstance(first_call, dict)
+                            else ""
+                        ),
+                        "tool_name": (
+                            function.get("name", "")
+                            if isinstance(function, dict)
+                            else ""
+                        ),
+                        "arguments": (
+                            function.get("arguments", "")
+                            if isinstance(function, dict)
+                            else ""
+                        ),
+                        "status": "called",
                     }
                 )
             if event.role == "tool" and event.tool_call_id:
@@ -87,6 +120,10 @@ async def _turn_dtos(page, *, session_id: str, request: Request) -> list[dict]:
                         "type": "tool_result",
                         "role": event.role,
                         "tool_call_id": event.tool_call_id,
+                        "tool_name": event.tool_name
+                        or tool_names.get(event.tool_call_id, ""),
+                        "status": "completed",
+                        "result": content,
                         "text": content,
                     }
                 )
@@ -139,6 +176,13 @@ async def list_chat_sessions(
 @router.get("/chat/options")
 async def chat_options(request: Request):
     return _gateway(request).chat_options()
+
+
+@router.get("/chat/external-sessions")
+async def list_external_chat_sessions(
+    request: Request, limit: int = Query(100, ge=1, le=100)
+):
+    return (await _gateway(request).list_external_sessions(limit=limit)).to_dict()
 
 
 @router.patch("/chat/sessions/{session_id}")
@@ -347,7 +391,9 @@ async def session_turns(
     gateway = request.app.state.managers.get("webui_gateway")
     if gateway is not None:
         try:
-            storage_session_id = gateway.get_session(session_id).session_key
+            storage_session_id = (
+                await gateway.resolve_history_session(session_id)
+            ).session_key
         except KeyError as exc:
             raise _not_found(exc) from exc
         except ValueError as exc:

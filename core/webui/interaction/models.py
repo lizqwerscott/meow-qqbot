@@ -15,6 +15,8 @@ class WebUiSession:
     mode: str
     created_at: float
     updated_at: float
+    read_only: bool = False
+    channel: str = "webui"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

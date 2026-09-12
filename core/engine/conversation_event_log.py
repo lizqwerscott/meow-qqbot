@@ -2415,11 +2415,28 @@ class ConversationEventLog:
             "invalid_reasons": invalid_reasons,
         }
 
-    async def chat_ids(self) -> list[str]:
+    async def chat_ids(
+        self, *, visible_only: bool = False, session_kinds: Sequence[str] = ()
+    ) -> list[str]:
         conn = await self._ensure_open()
         async with self._lock:
+            conditions = []
+            params: list[Any] = []
+            if visible_only:
+                conditions.append("kind IN (?, ?)")
+                params.extend((EventKind.USER_MESSAGE, EventKind.ACCEPTED_DELIVERY))
+            kinds = tuple(str(kind) for kind in session_kinds if str(kind))
+            if kinds:
+                conditions.append(
+                    "session_kind IN (" + ", ".join("?" for _ in kinds) + ")"
+                )
+                params.extend(kinds)
+            where = " WHERE " + " AND ".join(conditions) if conditions else ""
             rows = conn.execute(
-                "SELECT DISTINCT chat_id FROM conversation_events ORDER BY chat_id"
+                "SELECT DISTINCT chat_id FROM conversation_events"
+                + where
+                + " ORDER BY chat_id",
+                params,
             ).fetchall()
         return [str(row[0]) for row in rows]
 

@@ -116,8 +116,59 @@ class WebUiConversationGateway:
         await self._cleanup_draft_uploads()
         return self._store.list_page(self.operator_id, limit=limit, cursor=cursor)
 
+    async def list_external_sessions(self, *, limit: int = 100) -> WebUiSessionPage:
+        if self._event_log is None:
+            return WebUiSessionPage((), False)
+        webui_sessions = self._store.list(self.operator_id)
+        known_keys = {session.session_key for session in webui_sessions}
+        chat_ids = await self._event_log.chat_ids(
+            visible_only=True, session_kinds=("chat", "group", "private")
+        )
+        external = []
+        for chat_id in chat_ids:
+            if (
+                not chat_id
+                or chat_id in known_keys
+                or "/" in chat_id
+                or "\x00" in chat_id
+                or chat_id.startswith(("task:", "cron:", "heartbeat:", "work-plan:"))
+            ):
+                continue
+            summary = await self._event_log.session_summary(chat_id)
+            parts = chat_id.split(":")
+            channel = (
+                parts[2] if len(parts) == 6 and parts[0] == "agent" else "external"
+            )
+            last_activity = float(summary.get("last_activity") or 0)
+            external.append(
+                WebUiSession(
+                    session_id=chat_id,
+                    session_key=chat_id,
+                    operator_id=self.operator_id,
+                    title=f"{channel} · {chat_id[-32:]}",
+                    mode="readonly",
+                    created_at=last_activity,
+                    updated_at=last_activity,
+                    read_only=True,
+                    channel=channel,
+                )
+            )
+        external.sort(
+            key=lambda session: (session.updated_at, session.session_id), reverse=True
+        )
+        return WebUiSessionPage(tuple(external[: max(1, min(int(limit), 100))]), False)
+
     def get_session(self, session_id: str) -> WebUiSession:
         return self._require_session(session_id)
+
+    async def resolve_history_session(self, session_id: str) -> WebUiSession:
+        try:
+            return self._require_session(session_id)
+        except KeyError:
+            for session in (await self.list_external_sessions(limit=100)).items:
+                if session.session_id == session_id:
+                    return session
+            raise
 
     def model_options(self) -> list[dict[str, object]]:
         registry = self._model_registry
@@ -514,6 +565,19 @@ class WebUiConversationGateway:
                 value = event.metadata.get(key)
                 if isinstance(value, (str, bool, int, float)):
                     safe_metadata[key] = value
+            arguments = event.metadata.get("arguments")
+            if isinstance(arguments, dict):
+                safe_metadata["arguments"] = arguments
+            result = event.metadata.get("result")
+            if isinstance(result, str):
+                safe_metadata["result"] = result[:4000]
+            resources = event.metadata.get("resources")
+            if isinstance(resources, (list, tuple)):
+                safe_metadata["resources"] = [
+                    dict(resource)
+                    for resource in resources
+                    if isinstance(resource, dict)
+                ][:10]
             await self._hub.publish(
                 session.session_id,
                 event.event_type,
@@ -525,6 +589,9 @@ class WebUiConversationGateway:
                     "elapsed_ms": event.elapsed_ms,
                     "attempt": event.attempt,
                     "metadata": safe_metadata,
+                    "arguments": safe_metadata.get("arguments"),
+                    "result": safe_metadata.get("result"),
+                    "resources": safe_metadata.get("resources"),
                 },
             )
 
