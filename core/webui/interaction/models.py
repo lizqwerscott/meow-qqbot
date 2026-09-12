@@ -21,6 +21,20 @@ class WebUiSession:
 
 
 @dataclass(frozen=True, slots=True)
+class WebUiSessionPage:
+    items: tuple[WebUiSession, ...]
+    has_more: bool
+    next_cursor: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "items": [session.to_dict() for session in self.items],
+            "has_more": self.has_more,
+            "next_cursor": self.next_cursor,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class SubmissionReceipt:
     session_id: str
     turn_id: str

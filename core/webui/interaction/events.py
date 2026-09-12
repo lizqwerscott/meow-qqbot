@@ -54,6 +54,15 @@ class EventHub:
         async with self._condition:
             return any(event.turn_id == turn_id for event in self._events[session_id])
 
+    async def has_turn_event_type(
+        self, session_id: str, turn_id: str, event_type: str
+    ) -> bool:
+        async with self._condition:
+            return any(
+                event.turn_id == turn_id and event.event_type == event_type
+                for event in self._events[session_id]
+            )
+
     async def stream(
         self, session_id: str, *, after_event_id: str = ""
     ) -> AsyncIterator[StreamEvent | None]:
@@ -66,7 +75,9 @@ class EventHub:
                 events = self._events[session_id]
                 if not initialized:
                     initialized = True
-                    if after_event_id:
+                    if after_event_id == "__tail__":
+                        last_sequence = self._sequences[session_id]
+                    elif after_event_id:
                         positions = [
                             index
                             for index, event in enumerate(events)
@@ -81,7 +92,12 @@ class EventHub:
                                     event_type="resync_required",
                                     sequence=self._sequences[session_id],
                                     occurred_at=time.time(),
-                                    payload={"reason": "event_not_available"},
+                                    payload={
+                                        "reason": "event_not_available",
+                                        "latest_event_id": (
+                                            events[-1].event_id if events else ""
+                                        ),
+                                    },
                                 )
                             )
                             last_sequence = self._sequences[session_id]

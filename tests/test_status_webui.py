@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
+import core.webui.app as webui_app
 from core.webui.app import create_app
 
 
@@ -54,4 +55,26 @@ async def test_status_page_uses_ledger_archive_index():
         response = await client.get("/status")
 
     assert response.status_code == 200
-    assert '>2<' in response.text
+    assert ">2<" in response.text
+
+
+@pytest.mark.asyncio
+async def test_chat_workbench_is_admin_only_and_serves_built_frontend(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "index.html").write_text(
+        "<meow-chat-app></meow-chat-app>", encoding="utf-8"
+    )
+    monkeypatch.setattr(webui_app, "_CHAT_BUILD_DIR", tmp_path)
+    app = create_app({}, {"token": "secret"})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        unauthenticated = await client.get("/chat")
+        authenticated = await client.get(
+            "/chat", headers={"Authorization": "Bearer secret"}
+        )
+
+    assert unauthenticated.status_code == 303
+    assert unauthenticated.headers["location"] == "/login"
+    assert authenticated.status_code == 200
+    assert authenticated.text == "<meow-chat-app></meow-chat-app>"

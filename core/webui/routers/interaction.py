@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
+from core.webui.csrf import csrf_token
 from core.webui.routers.sessions import (
     _attach_resource_views,
     _redact_message,
@@ -14,6 +15,11 @@ from core.webui.routers.sessions import (
 )
 
 router = APIRouter(prefix="/api", tags=["chat"])
+
+
+@router.get("/csrf")
+async def get_csrf_token(request: Request):
+    return {"token": csrf_token(request)}
 
 
 def _gateway(request: Request):
@@ -118,9 +124,21 @@ async def create_chat_session(request: Request):
 
 
 @router.get("/chat/sessions")
-async def list_chat_sessions(request: Request):
-    sessions = await _gateway(request).list_sessions()
-    return {"items": [session.to_dict() for session in sessions]}
+async def list_chat_sessions(
+    request: Request,
+    limit: int = Query(50, ge=1, le=100),
+    cursor: str = Query(""),
+):
+    try:
+        page = await _gateway(request).list_sessions(limit=limit, cursor=cursor)
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+    return page.to_dict()
+
+
+@router.get("/chat/options")
+async def chat_options(request: Request):
+    return _gateway(request).chat_options()
 
 
 @router.patch("/chat/sessions/{session_id}")
@@ -128,6 +146,8 @@ async def rename_chat_session(request: Request, session_id: str):
     gateway = _gateway(request)
     try:
         body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("request body must be an object")
         session = await gateway.rename_session(session_id, body.get("title", ""))
     except KeyError as exc:
         raise _not_found(exc) from exc
@@ -149,6 +169,8 @@ async def submit_chat_turn(request: Request, session_id: str):
             resources=body.get("resources", ()),
             request_id=body.get("request_id", ""),
             mode=body.get("mode"),
+            model_group=body.get("model_group"),
+            reasoning_effort=body.get("reasoning_effort"),
         )
     except KeyError as exc:
         raise _not_found(exc) from exc
@@ -157,8 +179,119 @@ async def submit_chat_turn(request: Request, session_id: str):
     return {"receipt": receipt.to_dict()}
 
 
+@router.post("/chat/sessions/{session_id}/compact")
+async def compact_chat_session(request: Request, session_id: str):
+    gateway = _gateway(request)
+    try:
+        result = await gateway.compact_session(session_id)
+    except KeyError as exc:
+        raise _not_found(exc) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"result": result}
+
+
+@router.post("/chat/sessions/{session_id}/uploads")
+async def upload_chat_resource(
+    request: Request,
+    session_id: str,
+    file: UploadFile = File(...),
+):
+    gateway = _gateway(request)
+    chunks = []
+    total = 0
+    try:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 25 * 1024 * 1024:
+                raise ValueError("file exceeds the 25 MiB upload limit")
+            chunks.append(chunk)
+        resource = await gateway.upload_resource(
+            session_id,
+            filename=file.filename or "file",
+            mime_type=file.content_type or "application/octet-stream",
+            data=b"".join(chunks),
+        )
+    except KeyError as exc:
+        raise _not_found(exc) from exc
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+    finally:
+        await file.close()
+    return {"resource": resource}
+
+
+@router.delete("/chat/sessions/{session_id}/uploads")
+async def discard_chat_resource(request: Request, session_id: str):
+    gateway = _gateway(request)
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("request body must be an object")
+        await gateway.discard_upload(
+            session_id,
+            media_uri=str(body.get("media_uri") or ""),
+            upload_id=str(body.get("upload_id") or ""),
+        )
+    except KeyError as exc:
+        raise _not_found(exc) from exc
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+    return {"discarded": True}
+
+
+@router.get("/chat/sessions/{session_id}/audit")
+async def session_audit(request: Request, session_id: str, limit: int = 50):
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
+    gateway = _gateway(request)
+    try:
+        items = gateway.list_audit(session_id, limit=limit)
+    except KeyError as exc:
+        raise _not_found(exc) from exc
+    return {"items": items}
+
+
+@router.get("/chat/sessions/{session_id}/approvals")
+async def session_pending_approvals(request: Request, session_id: str):
+    gateway = _gateway(request)
+    try:
+        items = gateway.list_pending_approvals(session_id)
+    except KeyError as exc:
+        raise _not_found(exc) from exc
+    return {"items": items}
+
+
+@router.post("/chat/approvals/resolve")
+async def resolve_chat_approval(request: Request):
+    gateway = _gateway(request)
+    manager = request.app.state.managers.get("approval_manager")
+    if manager is None or not callable(getattr(manager, "resolve_webui", None)):
+        raise HTTPException(status_code=503, detail="approval unavailable")
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise _bad_request(ValueError("request body must be an object"))
+    session_key = str(body.get("session_key") or "").strip()
+    decision = str(body.get("decision") or "").strip().lower()
+    if not session_key or len(session_key) > 512:
+        raise _bad_request(ValueError("invalid approval session_key"))
+    if decision not in {"allow-once", "allow-always", "deny"}:
+        raise _bad_request(ValueError("invalid approval decision"))
+    if not manager.resolve_webui(session_key, decision, gateway.operator_id):
+        raise HTTPException(status_code=404, detail="approval not found or expired")
+    return {"resolved": True, "decision": decision}
+
+
 @router.get("/chat/sessions/{session_id}/events")
-async def chat_events(request: Request, session_id: str, after_event_id: str = ""):
+async def chat_events(
+    request: Request,
+    session_id: str,
+    after_event_id: str = "",
+    replay: bool = True,
+):
     try:
         gateway = _gateway(request)
         gateway.get_session(session_id)
@@ -166,6 +299,10 @@ async def chat_events(request: Request, session_id: str, after_event_id: str = "
         raise _not_found(exc) from exc
     except ValueError as exc:
         raise _bad_request(exc) from exc
+
+    after_event_id = after_event_id or request.headers.get("last-event-id", "")
+    if not after_event_id and not replay:
+        after_event_id = "__tail__"
 
     async def generate():
         async for event in gateway.hub.stream(

@@ -1059,6 +1059,7 @@ class ServiceGraph:
         self.approval_manager = ApprovalManager(
             api_client=self.bot_engine.api,
             admin_ids=self.admin_ids,
+            webui_admin_ids=[str((self.cfg.webui or {}).get("operator_id", "admin"))],
             forward_to=list(approval_cfg.get("forward_to") or ()),
             delivery_controller=self.agent_engine._get_delivery_controller(),
             delivery_router=self.bot_engine.delivery_router,
@@ -1332,6 +1333,9 @@ class ServiceGraph:
                 get_user_nickname=self.nickname_manager.get,
                 event_log=self.agent_engine.event_log,
                 media_service=self.media_service,
+                model_registry=self.model_registry,
+                context_compact_callback=self.agent_engine.compact_model_context,
+                approval_pending_callback=self.approval_manager.list_webui_pending,
                 channel_registry=self.channel_registry,
                 store_path=webui_config.get(
                     "session_store", "data/webui_sessions.sqlite3"
@@ -1354,6 +1358,7 @@ class ServiceGraph:
                     "protocol_history": self.agent_engine.protocol_history,
                     "cost_tracker": self.cost_tracker,
                     "agent_engine": self.agent_engine,
+                    "approval_manager": self.approval_manager,
                     "learning_orchestrator": self.learning_orchestrator,
                     "archive_manager": self.archive_manager,
                     "media_service": self.media_service,

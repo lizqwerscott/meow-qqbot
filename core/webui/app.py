@@ -83,6 +83,7 @@ _log = logging.getLogger(__name__)
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _STATIC_DIR = Path(__file__).parent / "static"
+_CHAT_BUILD_DIR = _STATIC_DIR / "chat"
 
 
 def _format_timestamp(ts: float) -> str:
@@ -167,6 +168,17 @@ def create_app(managers: Dict[str, Any], webui_config: Dict[str, Any]) -> FastAP
     @app.get("/", include_in_schema=False)
     async def root():
         return RedirectResponse(url="/status")
+
+    @app.get("/chat", include_in_schema=False)
+    @app.get("/chat/", include_in_schema=False)
+    async def chat_workbench():
+        index = _CHAT_BUILD_DIR / "index.html"
+        if not index.is_file():
+            raise HTTPException(
+                status_code=503,
+                detail="聊天工作台尚未构建，请运行 pnpm --dir core/webui/frontend build",
+            )
+        return HTMLResponse(index.read_text(encoding="utf-8"))
 
     # Register routers
     app.include_router(status.router)

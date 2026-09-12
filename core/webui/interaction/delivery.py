@@ -37,10 +37,29 @@ class WebUiDeliveryAdapter:
         session_id = session_id or self._session_id
         if not session_id:
             raise ValueError("WebUI delivery requires a session_id")
+        delivery_event = str(kwargs.pop("delivery_event", "") or "")
         delivery_key = (session_id, turn_id)
         delivery_index = self._delivery_indices.get(delivery_key, 0) + 1
         self._delivery_indices[delivery_key] = delivery_index
         content = str(kwargs.get("content") or "")
+        if delivery_event == "delivery.backpressure":
+            await self._hub.publish(
+                session_id,
+                "delivery.backpressure",
+                turn_id=turn_id,
+                payload={"message": content, "retryable": True},
+            )
+            await self._hub.publish(
+                session_id,
+                "turn.failed",
+                turn_id=turn_id,
+                payload={"error": "backpressure", "retryable": True},
+            )
+            return DeliveryReceipt(
+                status="accepted",
+                logical_delivery_id=f"webui:{turn_id}:backpressure",
+                platform_message_id=f"webui-backpressure-{uuid4().hex}",
+            )
         event_type = "message.created" if delivery_index == 1 else "message.delta"
         resources = []
         for resource in kwargs.get("resources") or ():
