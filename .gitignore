@@ -30,6 +30,10 @@ docs/chat-*.md
 # 自动生成的锁文件
 skills-lock.json
 
+# WebUI 前端依赖
+core/webui/frontend/node_modules/
+.pnpm-store/
+
 
 # 参考/工具目录（不进入版本控制）
 # 参考/工具/技能目录（不进入版本控制）
