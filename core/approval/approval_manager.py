@@ -15,6 +15,7 @@ from core.approval.exec_policy import (
     DECISION_DENY,
     ExecPolicy,
 )
+from core.approval.pending_store import PendingApprovalStore
 from core.engine.conversation_delivery import ChannelDeliveryRouter, DeliveryRequest
 from core.engine.delivery_ledger import DeliveryController, DeliveryReceipt
 from core.session_identity import ApprovalPrompt, DeliveryTarget
@@ -51,9 +52,14 @@ class ApprovalManager:
         forward_to: list[str] = (),  # 2.3：审批卡转发目标（'c2c:<id>'/'group:<id>'）
         delivery_controller: DeliveryController | None = None,
         delivery_router: ChannelDeliveryRouter | None = None,
+        webui_admin_ids: list[str] = (),
+        pending_path: str | None = None,
     ):
         self._api = api_client
         self._admin_ids = set(admin_ids)
+        self._webui_admin_ids = {
+            str(item).strip().lower() for item in webui_admin_ids if str(item).strip()
+        }
         self._forward_to = list(forward_to or ())
         self._delivery_controller = delivery_controller
         self._delivery_router = delivery_router
@@ -62,6 +68,18 @@ class ApprovalManager:
         self._pending_plans: dict[str, dict] = {}
         # 2.3：待审批元信息（审批列表/超时通知用）
         self._pending_info: dict[str, dict] = {}
+        self._recovered_pending: set[str] = set()
+        self._pending_store = PendingApprovalStore(
+            pending_path
+            or str(Path(WHITELIST_PATH).with_name("pending_approvals.json"))
+        )
+        for session_key, info in self._pending_store.records().items():
+            if info["expires_at"] > time.time():
+                info["recovery_state"] = "recovered"
+                self._pending_info[session_key] = info
+                self._recovered_pending.add(session_key)
+            else:
+                self._pending_store.remove(session_key)
         # 2.4：allowlist 使用计数 dirty 标记 + 延迟落盘任务
         self._uses_dirty = False
         self._save_task_active = False
@@ -377,7 +395,7 @@ class ApprovalManager:
         session_key = session_key or (
             f"approval:{chat_id}:{tool_name}:{uuid.uuid4().hex[:8]}"
         )
-        if session_key in self._pending:
+        if session_key in self._pending or session_key in self._recovered_pending:
             _log.warning("审批 session key 已存在，拒绝覆盖: %s..", session_key[:20])
             return (DECISION_DENY, "") if return_session_key else DECISION_DENY
         future = asyncio.get_running_loop().create_future()
@@ -391,10 +409,22 @@ class ApprovalManager:
         self._pending_info[session_key] = {
             "tool_name": tool_name,
             "details": details,
+            "reason": reason,
             "created_at": time.time(),
             "expires_at": time.time() + timeout,
             "delivery_target": delivery_target,
+            "cwd": (plan or {}).get("cwd", "") if plan else "",
+            "timeout_sec": timeout,
+            "recovery_state": "live",
         }
+        try:
+            self._pending_store.put(session_key, self._pending_info[session_key], plan)
+        except (OSError, TypeError, ValueError):
+            self._pending.pop(session_key, None)
+            self._pending_info.pop(session_key, None)
+            self._pending_plans.pop(session_key, None)
+            _log.exception("审批状态持久化失败: session_key=%s..", session_key[:20])
+            return (DECISION_DENY, "") if return_session_key else DECISION_DENY
 
         prompt = ApprovalPrompt(
             session_key=session_key,
@@ -523,6 +553,7 @@ class ApprovalManager:
             self._pending.pop(session_key, None)
             self._pending_plans.pop(session_key, None)
             self._pending_info.pop(session_key, None)
+            self._pending_store.remove(session_key)
             _log.warning("审批消息发送失败: session_key=%s..", session_key[:20])
             # 2.3 失败兜底：文本通知 admin（卡片未送达也可人工处理）
             self._spawn_admin_notice(
@@ -558,13 +589,17 @@ class ApprovalManager:
             if result not in ALLOW_DECISIONS:
                 # 未放行：plan 由调用方 take_pending_plan 读取；非 allow 直接清理
                 self._pending_plans.pop(session_key, None)
+            self._pending.pop(session_key, None)
+            self._recovered_pending.discard(session_key)
             self._pending_info.pop(session_key, None)
+            self._pending_store.remove(session_key)
             return (result, session_key) if return_session_key else result
         except asyncio.CancelledError:
             timeout_handle.cancel()
             self._pending.pop(session_key, None)
             self._pending_plans.pop(session_key, None)
             self._pending_info.pop(session_key, None)
+            self._pending_store.remove(session_key)
             raise
 
     def take_pending_plan(self, session_key: str) -> dict | None:
@@ -580,10 +615,12 @@ class ApprovalManager:
         """
         now = time.time()
         out: list[dict] = []
-        for key, future in self._pending.items():
-            if future.done():
+        for key, info in self._pending_info.items():
+            future = self._pending.get(key)
+            if future is None and key not in self._recovered_pending:
                 continue
-            info = self._pending_info.get(key, {})
+            if future is not None and future.done():
+                continue
             expires = info.get("expires_at", 0)
             out.append(
                 {
@@ -592,9 +629,55 @@ class ApprovalManager:
                     "details": info.get("details", ""),
                     "created_at": info.get("created_at", 0),
                     "remaining_secs": (max(0, int(expires - now)) if expires else None),
+                    "recovery_state": info.get("recovery_state", "live"),
                 }
             )
         out.sort(key=lambda p: p["created_at"], reverse=True)
+        return out
+
+    def list_webui_pending(self, operator_id: str, session_id: str = "") -> list[dict]:
+        """Return actionable approval cards for one authenticated WebUI operator."""
+        operator_id = str(operator_id).strip().lower()
+        if operator_id not in self._webui_admin_ids:
+            return []
+        session_id = str(session_id or "")
+        now = time.time()
+        out: list[dict] = []
+        for session_key, info in self._pending_info.items():
+            future = self._pending.get(session_key)
+            if future is None and session_key not in self._recovered_pending:
+                continue
+            if future is not None and future.done():
+                continue
+            target = info.get("delivery_target")
+            if (
+                target is None
+                or target.channel != "webui"
+                or target.account_id != operator_id
+                or (session_id and target.target_id != session_id)
+            ):
+                continue
+            expires_at = float(info.get("expires_at") or 0)
+            remaining = max(0, int(expires_at - now)) if expires_at else None
+            if remaining == 0:
+                continue
+            tool_name = str(info.get("tool_name") or "tool")
+            out.append(
+                {
+                    "session_key": session_key,
+                    "title": f"🔐 {tool_name} 审批请求",
+                    "description": f"原因: {str(info.get('reason') or '')}",
+                    "command_preview": str(info.get("details") or ""),
+                    "cwd": str(info.get("cwd") or ""),
+                    "severity": "info",
+                    "timeout_sec": int(info.get("timeout_sec") or 120),
+                    "remaining_secs": remaining,
+                    "created_at": float(info.get("created_at") or 0),
+                    "recovery_state": info.get("recovery_state", "live"),
+                    "actionable": info.get("recovery_state", "live") == "live",
+                }
+            )
+        out.sort(key=lambda item: item["created_at"], reverse=True)
         return out
 
     def _spawn_admin_notice(
@@ -705,25 +788,33 @@ class ApprovalManager:
             return DECISION_ALLOW if satisfied else DECISION_DENY
         return DECISION_DENY
 
-    def resolve(self, session_key: str, decision: str, approver_id: str) -> bool:
-        if approver_id not in self._admin_ids:
-            _log.warning("非管理员 %s.. 试图审批，忽略", approver_id[:16])
-            return False
-        future = self._pending.pop(session_key, None)
-        if future is None:
-            # 2.3 文本命令兜底：支持唯一前缀匹配（卡片不展示完整 session key；
-            # 支持尾部 uuid 片段，如 approval:chat:exec:abc12345 → abc）
-            matches = [
-                k
-                for k in self._pending
-                if k.startswith(session_key)
-                or (":" in k and k.rsplit(":", 1)[1].startswith(session_key))
-            ]
-            if len(matches) == 1:
-                session_key = matches[0]
-                future = self._pending.pop(session_key, None)
+    def _pending_key(self, session_key: str) -> str | None:
+        pending_keys = set(self._pending) | self._recovered_pending
+        if session_key in pending_keys:
+            return session_key
+        matches = [
+            key
+            for key in pending_keys
+            if key.startswith(session_key)
+            or (":" in key and key.rsplit(":", 1)[1].startswith(session_key))
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _resolve_pending(self, session_key: str, decision: str) -> bool:
+        resolved_key = self._pending_key(session_key)
+        if resolved_key in self._recovered_pending:
+            if decision != DECISION_DENY:
+                return False
+            self._recovered_pending.discard(resolved_key)
+            self._pending_info.pop(resolved_key, None)
+            self._pending_store.remove(resolved_key)
+            _log.info("已清理重启后中断的审批: session_key=%s..", resolved_key[:20])
+            return True
+        future = self._pending.pop(resolved_key, None) if resolved_key else None
+        if resolved_key:
+            session_key = resolved_key
         self._pending_info.pop(session_key, None)
-        # plan 保留：由调用方 take_pending_plan 在比对后清理
+        self._pending_store.remove(session_key)
         if future and not future.done():
             future.set_result(decision)
             _log.info(
@@ -733,9 +824,36 @@ class ApprovalManager:
         _log.warning("审批 future 不存在或已完成: %s..", session_key[:20])
         return False
 
+    def resolve(self, session_key: str, decision: str, approver_id: str) -> bool:
+        if approver_id not in self._admin_ids:
+            _log.warning("非管理员 %s.. 试图审批，忽略", approver_id[:16])
+            return False
+        return self._resolve_pending(session_key, decision)
+
+    def resolve_webui(self, session_key: str, decision: str, operator_id: str) -> bool:
+        """Resolve an approval from an authenticated WebUI administrator session."""
+        operator_id = str(operator_id).strip().lower()
+        if operator_id not in self._webui_admin_ids:
+            _log.warning("非 WebUI 管理员 %s.. 试图审批，忽略", operator_id[:16])
+            return False
+        resolved_key = self._pending_key(session_key)
+        if not resolved_key:
+            return False
+        target = self._pending_info.get(resolved_key, {}).get("delivery_target")
+        if (
+            target is None
+            or target.channel != "webui"
+            or target.account_id != operator_id
+        ):
+            _log.warning("WebUI 审批目标不匹配: %s..", resolved_key[:20])
+            return False
+        return self._resolve_pending(resolved_key, decision)
+
     def _on_timeout(self, session_key: str, fallback: str = "deny", details: str = ""):
         future = self._pending.pop(session_key, None)
         pending_info = self._pending_info.pop(session_key, {})
+        self._recovered_pending.discard(session_key)
+        self._pending_store.remove(session_key)
         if future and not future.done():
             result = self._apply_fallback(fallback, details)
             future.set_result(result)

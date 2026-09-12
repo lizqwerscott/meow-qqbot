@@ -11,6 +11,7 @@ from core.approval.approval_manager import (
     ApprovalManager,
     _parse_target,
 )
+from core.session_identity import DeliveryTarget
 
 # ── fixtures ──
 
@@ -121,6 +122,74 @@ async def test_resolve_admin_approves(am):
     am._pending[session_key] = future
     assert am.resolve(session_key, "allow", "admin_001") is True
     assert future.result() == "allow"
+
+
+@pytest.mark.asyncio
+async def test_resolve_webui_requires_registered_operator(tmp_whitelist):
+    manager = ApprovalManager(
+        api_client=MagicMock(),
+        admin_ids=["qq-admin"],
+        webui_admin_ids=["web-admin"],
+    )
+    future = asyncio.get_running_loop().create_future()
+    manager._pending["approval:webui:abc"] = future
+    manager._pending_info["approval:webui:abc"] = {
+        "delivery_target": DeliveryTarget("webui", "web-admin", "direct", "s-1")
+    }
+
+    assert manager.resolve_webui("approval:webui:abc", "deny", "other") is False
+    assert manager.resolve_webui("approval:webui:abc", "deny", "web-admin") is True
+    assert future.result() == "deny"
+
+
+@pytest.mark.asyncio
+async def test_pending_approval_survives_restart_as_non_actionable_recovery(
+    tmp_whitelist, tmp_path
+):
+    pending_path = tmp_path / "pending_approvals.json"
+    manager = ApprovalManager(
+        api_client=MagicMock(),
+        admin_ids=["web-admin"],
+        webui_admin_ids=["web-admin"],
+        pending_path=str(pending_path),
+    )
+    with patch("qqbot_agent_sdk.ApprovalSender") as sender:
+        sender.return_value.send = AsyncMock(return_value=True)
+        request = asyncio.create_task(
+            manager.request_approval(
+                "agent:main:webui:admin:direct:s-1",
+                "exec",
+                "需要审批",
+                details="echo safe",
+                timeout=60,
+                plan={"command": "echo safe", "cwd": "/tmp"},
+                delivery_target=DeliveryTarget("webui", "web-admin", "direct", "s-1"),
+            )
+        )
+        await asyncio.sleep(0)
+        assert manager._pending
+
+        restored = ApprovalManager(
+            api_client=MagicMock(),
+            admin_ids=["web-admin"],
+            webui_admin_ids=["web-admin"],
+            pending_path=str(pending_path),
+        )
+        pending = restored.list_webui_pending("web-admin", "s-1")
+        assert len(pending) == 1
+        assert pending[0]["recovery_state"] == "recovered"
+        assert pending[0]["actionable"] is False
+        key = pending[0]["session_key"]
+        assert restored._pending_store.records()[key]["plan"] == {
+            "command": "echo safe",
+            "cwd": "/tmp",
+        }
+        assert restored.resolve_webui(key, "allow-once", "web-admin") is False
+        assert restored.resolve_webui(key, "deny", "web-admin") is True
+
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
 
 
 @pytest.mark.asyncio
