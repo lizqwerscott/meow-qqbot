@@ -24,11 +24,13 @@ export class MeowTranscript extends LitElement {
 
   static styles = css`
     :host { display: block; height: 100%; min-height: 0; }
-    .history { height: 100%; box-sizing: border-box; overflow-y: auto; max-width: 860px; margin: 0 auto; padding: 32px 24px 120px; }
+    .history { height: 100%; box-sizing: border-box; overflow-y: auto; max-width: 960px; margin: 0 auto; padding: 32px 32px 120px; }
     .spacer { width: 1px; pointer-events: none; }
-    .turn { display: grid; gap: 12px; margin: 0 0 28px; padding: 0 4px 20px; border-bottom: 1px solid #e9ebf2; }
-    .turn-meta { display: flex; align-items: center; justify-content: center; gap: 8px; color: #8b93a7; font-size: 12px; }
+    .turn { display: grid; gap: 14px; margin: 0 0 30px; padding: 0 8px 24px; border-bottom: 1px solid #e9ebf2; }
+    .turn-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #a0a7b6; font-size: 11px; }
     .turn-label { color: #596174; font-weight: 700; }
+    .turn-stream { display: grid; gap: 8px; position: relative; }
+    .turn-stream::before { position: absolute; top: 12px; bottom: 12px; left: 9px; width: 1px; background: #e8ebf2; content: ""; }
     .message { display: flex; }
     .message.user { justify-content: flex-end; }
     .bubble { max-width: min(720px, 86%); border-radius: 18px; padding: 12px 16px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -38,25 +40,40 @@ export class MeowTranscript extends LitElement {
     .assistant .bubble, .tool .bubble { background: #fff; border: 1px solid #e5e8f0; border-bottom-left-radius: 5px; }
     .card { display: grid; gap: 6px; }
     .card a { color: #4d5bd4; overflow-wrap: anywhere; text-decoration: none; }
+    .trajectory-item { position: relative; z-index: 1; padding-left: 28px; }
+    .trajectory-step { max-width: min(820px, 100%); border: 1px solid #e5e8f0; border-radius: 10px; background: #f8f9fc; color: #596174; }
+    .trajectory-step summary { display: flex; align-items: center; gap: 9px; min-height: 38px; padding: 0 12px; cursor: pointer; list-style: none; }
+    .trajectory-step summary::-webkit-details-marker { display: none; }
+    .step-marker { display: inline-grid; flex: 0 0 18px; place-items: center; width: 18px; height: 18px; border-radius: 5px; color: #667085; background: #e7eaf1; font-size: 11px; }
+    .step-kind { color: #596174; font-size: 12px; font-weight: 700; }
+    .step-name { color: #737c90; font-size: 11px; }
+    .step-summary { overflow: hidden; flex: 1; color: #7b8498; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+    .step-status { color: #8b93a7; font-size: 11px; white-space: nowrap; }
+    .step-status.running { color: #4d63cf; }
+    .step-status.failed, .step-status.blocked { color: #b14a4a; }
+    .step-body { display: grid; gap: 8px; margin: 0 12px 12px; padding-top: 10px; border-top: 1px solid #e5e8f0; }
+    .step-resources { display: grid; gap: 8px; }
+    .tool-detail, .tool-result { max-height: 260px; overflow: auto; margin: 0; padding: 10px; border-radius: 8px; background: #fff; color: #515a70; font: 12px/1.5 ui-monospace, SFMono-Regular, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .tool-result { background: #292d3e; color: #f5f6fa; }
+    .tool-note { color: #697389; font-size: 12px; }
+    .reasoning-card { background: #fbfbfd; }
+    .reasoning-summary { overflow: hidden; flex: 1; color: #8b93a7; font-size: 12px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+    .reasoning-body { white-space: pre-wrap; }
+    .attachment { display: grid; gap: 8px; max-width: min(620px, 86%); border: 1px solid #e1e5ee; border-radius: 13px; padding: 9px; color: #596174; background: #fff; font-size: 13px; }
+    .user .attachment { border-color: #cbd2ff; background: #f1f3ff; }
+    .attachment-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .attachment-icon { display: grid; flex: 0 0 30px; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: #eef0f7; font-size: 16px; }
+    .attachment-name { overflow: hidden; flex: 1; text-overflow: ellipsis; white-space: nowrap; }
+    .attachment-meta { color: #8b93a7; font-size: 11px; }
+    .attachment img { display: block; max-width: 100%; max-height: 420px; border-radius: 9px; object-fit: contain; }
+    .attachment audio, .attachment video { display: block; max-width: 100%; }
+    .attachment a { color: #4d5bd4; text-decoration: none; }
+    .attachment-download { justify-self: start; border-radius: 7px; padding: 5px 8px; background: #eef0ff; font-size: 12px; }
     .approval { border-color: #e8c98b; background: #fffaf0; }
     .approval pre { max-width: 100%; overflow-x: auto; margin: 8px 0; padding: 8px; border-radius: 8px; background: #292d3e; color: #f5f6fa; white-space: pre-wrap; }
     .approval-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
     .approval-actions button { padding: 6px 10px; }
     .retry-action { margin-top: 8px; }
-    .resource { border: 1px dashed #cbd2e1; color: #596174; font-size: 13px; }
-    .resource img { display: block; max-width: min(520px, 100%); max-height: 420px; border-radius: 12px; object-fit: contain; }
-    .resource audio, .resource video { display: block; max-width: min(520px, 100%); }
-    .resource a { color: #4d5bd4; text-decoration: none; }
-    .tool-card { display: grid; gap: 8px; max-width: min(720px, 86%); border-color: #dfe3ed; background: #f8f9fc; }
-    .tool-card summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; cursor: pointer; font-weight: 600; }
-    .tool-card summary small { color: #7b8498; font-weight: 500; }
-    .tool-detail, .tool-result { max-height: 260px; overflow: auto; margin: 0; padding: 10px; border-radius: 8px; background: #fff; color: #515a70; font: 12px/1.5 ui-monospace, SFMono-Regular, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-    .tool-result { background: #292d3e; color: #f5f6fa; }
-    .tool-note { color: #697389; font-size: 12px; }
-    .reasoning-card { max-width: min(720px, 86%); border: 1px solid #e5e8f0; background: #f8f9fc; color: #596174; }
-    .reasoning-card summary { display: flex; align-items: center; gap: 10px; cursor: pointer; font-weight: 600; }
-    .reasoning-summary { overflow: hidden; color: #8b93a7; font-size: 12px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
-    .reasoning-body { margin-top: 8px; padding-top: 8px; border-top: 1px solid #e5e8f0; white-space: pre-wrap; }
     .empty, .loading { padding: 64px 20px; color: #8b93a7; text-align: center; }
     button { border: 0; border-radius: 999px; padding: 8px 14px; color: #4d5bd4; background: #eef0ff; cursor: pointer; }
   `;
@@ -169,12 +186,35 @@ export class MeowTranscript extends LitElement {
     return html`
       <article class="turn" data-turn-id=${turn.turn_id}>
         <div class="turn-meta"><span class="turn-label">第 ${turn.turn_sequence} 轮</span><span>${this.formatTime(turn.created_at)} · ${turn.status}</span></div>
-        ${turn.blocks.map((block) => this.renderBlock(block))}
+        <div class="turn-stream">${this.renderTurnBlocks(turn.blocks)}</div>
         ${this.retryableTurnIds.has(turn.turn_id)
           ? html`<button class="retry-action" @click=${() => this.retryTurn(turn.turn_id)}>↻ 重试此消息</button>`
           : ""}
       </article>
     `;
+  }
+
+  private renderTurnBlocks(blocks: ContentBlock[]): TemplateResult[] {
+    const results = new Map<string, ContentBlock>();
+    for (const block of blocks) {
+      if (block.type === "tool_result" && block.tool_call_id) {
+        results.set(block.tool_call_id, block);
+      }
+    }
+    const consumedResults = new Set<string>();
+    return blocks.flatMap((block) => {
+      if (block.type === "tool_result" && block.tool_call_id) {
+        if (consumedResults.has(block.tool_call_id)) return [];
+        return results.get(block.tool_call_id) === block ? [this.renderToolStep(block)] : [];
+      }
+      if (block.type === "tool") {
+        const toolCallId = block.tool_call_id || this.toolCallId(block);
+        const result = toolCallId ? results.get(toolCallId) : undefined;
+        if (result) consumedResults.add(toolCallId);
+        return [this.renderToolStep(block, result)];
+      }
+      return [this.renderBlock(block)];
+    });
   }
 
   private renderBlock(block: ContentBlock): TemplateResult {
@@ -185,9 +225,10 @@ export class MeowTranscript extends LitElement {
     }
     if (block.type === "reasoning" && block.text) {
       const summary = block.text.split("\n").find((line) => line.trim()) || "思考内容";
-      return html`<div class="message assistant"><details class="bubble reasoning-card" ?open=${block.status === "running"}>
-        <summary><span class="message-label">思考过程</span><span class="reasoning-summary">${summary}</span></summary>
-        <div class="reasoning-body">${block.text}</div>
+      const status = block.status || "completed";
+      return html`<div class="trajectory-item"><details class="trajectory-step reasoning-card" ?open=${status === "running" || status === "started"}>
+        <summary><span class="step-marker">✦</span><span class="step-kind">Think</span><span class="reasoning-summary">${summary}</span><span class="step-status ${status}">${this.toolStatus(status)}</span></summary>
+        <div class="step-body reasoning-body">${block.text}</div>
       </details></div>`;
     }
     if (block.type === "card") {
@@ -207,37 +248,10 @@ export class MeowTranscript extends LitElement {
       </div></div>`;
     }
     if (block.resource) {
-      const resource = block.resource;
-      const mediaId = typeof resource.media_id === "string" ? resource.media_id : "";
-      const fallbackUrl = mediaId ? `/media/${encodeURIComponent(mediaId)}/content` : "";
-      const preview = typeof resource.preview_url === "string" && resource.preview_url ? resource.preview_url : fallbackUrl;
-      const download = typeof resource.download_url === "string" && resource.download_url ? resource.download_url : (fallbackUrl ? `${fallbackUrl}?download=true` : "");
-      const mimeType = typeof resource.mime_type === "string" ? resource.mime_type : "";
-      const filename = typeof resource.filename === "string" ? resource.filename : block.type;
-      return html`
-        <div class="message ${role}">
-          <div class="bubble resource">
-            <div class="message-label">${label}</div>
-            ${preview && (block.type === "image" || block.type === "emoji") ? html`<img src=${preview} alt=${filename} loading="lazy" />`
-              : preview && (block.type === "voice" || block.type === "audio" || mimeType.startsWith("audio/")) ? html`<audio controls preload="metadata" src=${preview}></audio>`
-              : preview && (block.type === "video" || mimeType.startsWith("video/")) ? html`<video controls preload="metadata" src=${preview}></video>`
-              : download ? html`📎 <a href=${download} download=${filename}>${filename}</a>`
-              : html`📎 ${filename}`}
-          </div>
-        </div>
-      `;
+      return this.renderResource(block, role, label);
     }
     if (block.type === "tool" || block.type === "tool_result") {
-      const toolName = block.tool_name || this.toolName(block);
-      const status = block.status || (block.type === "tool_result" ? "completed" : "running");
-      const argumentsText = this.formatToolValue(block.arguments);
-      const result = block.result || (block.type === "tool_result" ? block.text || "" : "");
-      return html`<div class="message tool"><details class="bubble tool-card" ?open=${status === "running" || status === "started"}>
-        <summary><span>${toolName}</span><small>${this.toolStatus(status)}</small></summary>
-        ${argumentsText ? html`<pre class="tool-detail">${argumentsText}</pre>` : ""}
-        ${result ? html`<pre class="tool-result">${result}</pre>` : ""}
-        ${block.text && !result ? html`<div class="tool-note">${block.text}</div>` : ""}
-      </details></div>`;
+      return this.renderToolStep(block);
     }
     if (block.type === "approval" && block.approval) {
       const approval = block.approval;
@@ -246,7 +260,7 @@ export class MeowTranscript extends LitElement {
       const description = typeof approval.description === "string" ? approval.description : "";
       const command = typeof approval.command_preview === "string" ? approval.command_preview : "";
       const recovered = approval.recovery_state === "recovered";
-      return html`<div class="message tool"><div class="bubble approval">
+      return html`<div class="trajectory-item"><div class="bubble approval">
         <strong>${title}</strong>
         ${description ? html`<div>${description}</div>` : ""}
         ${command ? html`<pre>${command}</pre>` : ""}
@@ -262,6 +276,50 @@ export class MeowTranscript extends LitElement {
       return html`<div class="message ${role}"><div class="bubble"><div class="message-label">${label}</div>${block.text}</div></div>`;
     }
     return html``;
+  }
+
+  private renderToolStep(block: ContentBlock, toolResult?: ContentBlock): TemplateResult {
+    const toolName = block.tool_name || this.toolName(block);
+    const resultStatus = toolResult?.status && toolResult.status !== "called" ? toolResult.status : "completed";
+    const status = toolResult ? resultStatus : block.status || "running";
+    const argumentsText = this.formatToolValue(block.arguments);
+    const result = toolResult?.result || toolResult?.text || block.result || (block.type === "tool_result" ? block.text || "" : "");
+    const summary = this.toolSummary(block);
+    const resources = Array.isArray(block.resources) ? block.resources : [];
+    return html`<div class="trajectory-item"><details class="trajectory-step tool-card" ?open=${status === "running" || status === "started" || status === "failed" || status === "blocked"}>
+      <summary><span class="step-marker">${this.toolIcon(toolName)}</span><span class="step-kind">${this.toolKind(toolName)}</span><span class="step-name">${toolName}</span><span class="step-summary">${summary}</span><span class="step-status ${status}">${this.toolStatus(status)}</span></summary>
+      <div class="step-body">
+        ${argumentsText ? html`<pre class="tool-detail">${argumentsText}</pre>` : ""}
+        ${result ? html`<pre class="tool-result">${result}</pre>` : ""}
+        ${block.text && !result && block.type !== "tool_result" ? html`<div class="tool-note">${block.text}</div>` : ""}
+        ${resources.length ? html`<div class="step-resources">${resources.map((resource) => this.renderResource({ type: String(resource.resource_type || "file"), role: "tool", resource }, "tool", toolName))}</div>` : ""}
+      </div>
+    </details></div>`;
+  }
+
+  private renderResource(block: ContentBlock, role: string, label: string): TemplateResult {
+    const resource = block.resource || {};
+    const mediaId = typeof resource.media_id === "string" ? resource.media_id : "";
+    const fallbackUrl = mediaId ? `/media/${encodeURIComponent(mediaId)}/content` : "";
+    const preview = typeof resource.preview_url === "string" && resource.preview_url ? resource.preview_url : fallbackUrl;
+    const download = typeof resource.download_url === "string" && resource.download_url ? resource.download_url : (fallbackUrl ? `${fallbackUrl}?download=true` : "");
+    const mimeType = typeof resource.mime_type === "string" ? resource.mime_type : "";
+    const filename = typeof resource.filename === "string" && resource.filename ? resource.filename : block.type;
+    const resourceType = typeof resource.resource_type === "string" ? resource.resource_type : block.type;
+    const isImage = resource.is_image === true || resourceType === "image" || resourceType === "emoji" || mimeType.startsWith("image/");
+    const isAudio = resource.is_audio === true || resourceType === "voice" || resourceType === "audio" || mimeType.startsWith("audio/");
+    const isVideo = resource.is_video === true || resourceType === "video" || mimeType.startsWith("video/");
+    const size = typeof resource.size === "number" ? this.formatBytes(resource.size) : "";
+    const meta = [mimeType, size].filter(Boolean).join(" · ");
+    const icon = isImage ? "▧" : isAudio ? "♫" : isVideo ? "▶" : "📎";
+    return html`<div class="message ${role}"><div class="attachment">
+      <div class="attachment-head"><span class="attachment-icon">${icon}</span><strong class="attachment-name" title=${filename}>${filename}</strong>${meta ? html`<span class="attachment-meta">${meta}</span>` : ""}</div>
+      ${preview && isImage ? html`<a href=${download || preview} target="_blank" rel="noreferrer"><img src=${preview} alt=${filename} loading="lazy" /></a>`
+        : preview && isAudio ? html`<audio controls preload="metadata" src=${preview}></audio>`
+        : preview && isVideo ? html`<video controls preload="metadata" src=${preview}></video>`
+        : ""}
+      ${download ? html`<a class="attachment-download" href=${download} download=${filename}>下载附件</a>` : html`<span class="attachment-meta">${label}</span>`}
+    </div></div>`;
   }
 
   private messageLabel(block: ContentBlock): string {
@@ -284,6 +342,46 @@ export class MeowTranscript extends LitElement {
     return "工具调用";
   }
 
+  private toolCallId(block: ContentBlock): string {
+    const first = Array.isArray(block.tool_calls) ? block.tool_calls[0] : undefined;
+    return first && typeof first === "object" && typeof (first as Record<string, unknown>).id === "string"
+      ? String((first as Record<string, unknown>).id)
+      : "";
+  }
+
+  private toolArguments(block: ContentBlock): Record<string, unknown> {
+    if (block.arguments && typeof block.arguments === "object") return block.arguments as Record<string, unknown>;
+    if (typeof block.arguments === "string") {
+      try {
+        const parsed = JSON.parse(block.arguments);
+        return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+      } catch { return {}; }
+    }
+    return {};
+  }
+
+  private toolKind(name: string): string {
+    if (name.includes("command") || name === "bash" || name === "exec") return "Bash";
+    if (name.includes("read")) return "Read";
+    if (name.includes("write") || name.includes("edit") || name.includes("patch")) return "Edit";
+    if (name.includes("search") || name.includes("grep")) return "Search";
+    return "Tool";
+  }
+
+  private toolIcon(name: string): string {
+    const kind = this.toolKind(name);
+    return kind === "Bash" ? ">_" : kind === "Read" ? "▤" : kind === "Edit" ? "✎" : kind === "Search" ? "⌕" : "⚙";
+  }
+
+  private toolSummary(block: ContentBlock): string {
+    const argumentsValue = this.toolArguments(block);
+    const candidate = ["description", "command", "path", "file_path", "query", "url", "emoji_hash"]
+      .map((key) => argumentsValue[key])
+      .find((value) => typeof value === "string" && value.trim());
+    if (typeof candidate === "string") return candidate.trim().replace(/\s+/g, " ").slice(0, 160);
+    return block.tool_name || this.toolName(block);
+  }
+
   private formatToolValue(value: unknown): string {
     if (value === undefined || value === null || value === "") return "";
     if (typeof value === "string") {
@@ -302,6 +400,13 @@ export class MeowTranscript extends LitElement {
 
   private toolStatus(status: string): string {
     return ({ started: "准备中", running: "执行中", completed: "已完成", failed: "失败", blocked: "已阻止", cancelled: "已取消", called: "已调用" } as Record<string, string>)[status] || status;
+  }
+
+  private formatBytes(size: number): string {
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    if (size < 1024 * 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
   }
 
   private resolveApproval(sessionKey: string, decision: "allow-once" | "allow-always" | "deny") {

@@ -197,6 +197,68 @@ describe("meow-transcript", () => {
     expect(transcript.shadowRoot?.querySelector(".tool-result")?.textContent).toContain("success");
   });
 
+  it("merges a tool result into the matching trajectory step", async () => {
+    const transcript = document.createElement("meow-transcript") as HTMLElement & {
+      turns: Turn[];
+      loading: boolean;
+    };
+    transcript.turns = [{
+      ...turns[0],
+      blocks: [
+        {
+          type: "tool",
+          role: "assistant",
+          tool_call_id: "call-1",
+          tool_name: "execute_command",
+          arguments: { command: "ls" },
+          status: "called",
+          resources: [{ resource_type: "image", filename: "result.png", preview_url: "/result.png", mime_type: "image/png" }],
+        },
+        {
+          type: "tool_result",
+          role: "tool",
+          tool_call_id: "call-1",
+          tool_name: "execute_command",
+          status: "completed",
+          text: "README.md",
+        },
+      ],
+    }];
+    transcript.loading = false;
+    document.body.append(transcript);
+    await (transcript as unknown as { updateComplete: Promise<unknown> }).updateComplete;
+
+    expect(transcript.shadowRoot?.querySelectorAll(".tool-card").length).toBe(1);
+    expect(transcript.shadowRoot?.querySelector(".step-name")?.textContent).toContain("execute_command");
+    expect(transcript.shadowRoot?.querySelector(".tool-result")?.textContent).toContain("README.md");
+    expect(transcript.shadowRoot?.querySelector(".step-resources img")?.getAttribute("src")).toBe("/result.png");
+  });
+
+  it("renders image, audio, video, and file attachments", async () => {
+    const transcript = document.createElement("meow-transcript") as HTMLElement & {
+      turns: Turn[];
+      loading: boolean;
+    };
+    transcript.turns = [{
+      ...turns[0],
+      blocks: [
+        { type: "image", role: "user", resource: { resource_type: "image", filename: "photo.png", preview_url: "/photo.png", download_url: "/photo.png?download=true", mime_type: "image/png" } },
+        { type: "voice", role: "assistant", resource: { resource_type: "voice", filename: "voice.mp3", preview_url: "/voice.mp3", mime_type: "audio/mpeg" } },
+        { type: "video", role: "assistant", resource: { resource_type: "video", filename: "clip.mp4", preview_url: "/clip.mp4", mime_type: "video/mp4" } },
+        { type: "file", role: "assistant", resource: { resource_type: "file", filename: "report.pdf", download_url: "/report.pdf?download=true", mime_type: "application/pdf" } },
+      ],
+    }];
+    transcript.loading = false;
+    document.body.append(transcript);
+    await (transcript as unknown as { updateComplete: Promise<unknown> }).updateComplete;
+
+    expect(transcript.shadowRoot?.querySelector("img")?.getAttribute("src")).toBe("/photo.png");
+    expect(transcript.shadowRoot?.querySelector("audio")?.getAttribute("src")).toBe("/voice.mp3");
+    expect(transcript.shadowRoot?.querySelector("video")?.getAttribute("src")).toBe("/clip.mp4");
+    expect(transcript.shadowRoot?.querySelector(".attachment-download")?.textContent).toContain("下载附件");
+    expect(transcript.shadowRoot?.textContent).toContain("report.pdf");
+  });
+
   it("labels each turn and participant and collapses reasoning by default", async () => {
     const transcript = document.createElement("meow-transcript") as HTMLElement & {
       turns: Turn[];
