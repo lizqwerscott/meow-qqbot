@@ -451,6 +451,55 @@ class PromptHistoryProjection:
                             and not existing_hidden_ids.intersection(retained)
                             and newly_hidden.issubset(existing_visible_ids)
                         )
+                        persisted_transition = False
+                        previous_operation_id = str(watermark["operation_id"] or "")
+                        if previous_operation_id:
+                            previous_operation = conn.execute(
+                                "SELECT source_hash, hidden_ids, retained_ids "
+                                "FROM prompt_archive_operations "
+                                "WHERE operation_id = ?",
+                                (previous_operation_id,),
+                            ).fetchone()
+                            if previous_operation is not None:
+                                try:
+                                    previous_hidden = json.loads(
+                                        previous_operation["hidden_ids"] or "[]"
+                                    )
+                                    previous_retained = json.loads(
+                                        previous_operation["retained_ids"] or "[]"
+                                    )
+                                except (TypeError, json.JSONDecodeError) as exc:
+                                    raise RuntimeError(
+                                        "persisted archive operation visibility is invalid"
+                                    ) from exc
+                                if (
+                                    not isinstance(previous_hidden, list)
+                                    or not isinstance(previous_retained, list)
+                                    or not all(
+                                        isinstance(item, str)
+                                        for item in (
+                                            *previous_hidden,
+                                            *previous_retained,
+                                        )
+                                    )
+                                ):
+                                    raise RuntimeError(
+                                        "persisted archive operation visibility is invalid"
+                                    )
+                                previous_hidden_ids = set(previous_hidden)
+                                previous_retained_ids = set(previous_retained)
+                                previous_membership = (
+                                    previous_hidden_ids | previous_retained_ids
+                                )
+                                persisted_transition = (
+                                    str(previous_operation["source_hash"] or "")
+                                    == str(watermark["source_hash"] or "")
+                                    and previous_hidden_ids.issubset(set(hidden))
+                                    and not previous_hidden_ids.intersection(retained)
+                                    and set(hidden) | set(retained)
+                                    == previous_membership
+                                )
+                        monotonic_archive = monotonic_archive or persisted_transition
                         if not monotonic_archive:
                             raise RuntimeError(
                                 "archive projection membership changed at watermark"
