@@ -3,6 +3,7 @@ import { customElement, state } from "lit/decorators.js";
 import { compactChatSession, createChatSession, discardChatResource, listChatSessions, loadChatAudit, loadChatOptions, loadPendingChatApprovals, loadTurns, openChatEvents, renameChatSession, resolveChatApproval, submitChatTurn, uploadChatResource } from "../api/chat-api";
 import type { ChatAuditEntry, ChatCompactionResult, ChatControlOption, ChatModelOption, ChatSession, ContentBlock, StreamEvent, Turn } from "../contracts/chat";
 import "./meow-transcript";
+import { createRequestId } from "./request-id";
 import { mergeUniqueSessions } from "./transcript-state";
 
 type OlderScroll = { scrollHeight: number; scrollTop: number };
@@ -464,7 +465,7 @@ export class MeowChatApp extends LitElement {
       await submitChatTurn(
         this.selectedSessionId,
         submission.content,
-        `webui-retry-${crypto.randomUUID()}`,
+        createRequestId("webui-retry"),
         submission.mode,
         submission.resources,
         submission.modelGroup,
@@ -835,7 +836,7 @@ export class MeowChatApp extends LitElement {
   private async submitTurn(event: Event) {
     event.preventDefault(); const content = this.composerText.trim(); if ((!content && !this.uploads.length) || !this.selectedSessionId || this.sending || this.uploading || this.removingUploads.size > 0) return;
     this.sending = true; this.error = "";
-    try { await submitChatTurn(this.selectedSessionId, content, `webui-${crypto.randomUUID()}`, this.composerMode, this.uploads, this.modelGroup, this.reasoningEffort); this.composerText = ""; this.uploads = []; this.followingTail = true; this.scrollAfterRender(); }
+    try { await submitChatTurn(this.selectedSessionId, content, createRequestId("webui"), this.composerMode, this.uploads, this.modelGroup, this.reasoningEffort); this.composerText = ""; this.uploads = []; this.followingTail = true; this.scrollAfterRender(); }
     catch (error) { this.error = error instanceof Error ? error.message : "消息发送失败"; }
     finally { this.sending = false; }
   }
