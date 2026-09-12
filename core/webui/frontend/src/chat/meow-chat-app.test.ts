@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   createChatSession: vi.fn(),
   discardChatResource: vi.fn(),
   listChatSessions: vi.fn(),
+  listExternalChatSessions: vi.fn(),
   loadChatAudit: vi.fn(),
   loadChatOptions: vi.fn(),
   loadPendingChatApprovals: vi.fn(),
@@ -80,6 +81,7 @@ function makeEvent(type: string, sequence: number, payload: Record<string, unkno
 
 beforeEach(() => {
   mocks.listChatSessions.mockResolvedValue({ items: [session], has_more: false, next_cursor: null });
+  mocks.listExternalChatSessions.mockResolvedValue({ items: [], has_more: false, next_cursor: null });
   mocks.loadChatOptions.mockResolvedValue(options);
   mocks.loadTurns.mockResolvedValue(emptyTurnPage);
   mocks.loadPendingChatApprovals.mockResolvedValue([]);

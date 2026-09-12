@@ -110,6 +110,12 @@ export async function loadChatOptions(): Promise<ChatOptions> {
   };
 }
 
+export async function listExternalChatSessions(limit = 100): Promise<ChatSessionPage> {
+  const payload = await getJson<unknown>(`/api/chat/external-sessions?limit=${limit}`);
+  if (!isChatSessionPage(payload)) throw new Error("服务端返回了无效的外部会话列表");
+  return payload;
+}
+
 export async function createChatSession(
   title = "新会话",
   mode: "agent" | "chat" = "agent",

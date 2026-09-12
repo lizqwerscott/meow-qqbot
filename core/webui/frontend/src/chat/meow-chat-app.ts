@@ -1,6 +1,6 @@
 import { css, html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
-import { compactChatSession, createChatSession, discardChatResource, listChatSessions, loadChatAudit, loadChatOptions, loadPendingChatApprovals, loadTurns, openChatEvents, renameChatSession, resolveChatApproval, submitChatTurn, uploadChatResource } from "../api/chat-api";
+import { compactChatSession, createChatSession, discardChatResource, listChatSessions, listExternalChatSessions, loadChatAudit, loadChatOptions, loadPendingChatApprovals, loadTurns, openChatEvents, renameChatSession, resolveChatApproval, submitChatTurn, uploadChatResource } from "../api/chat-api";
 import type { ChatAuditEntry, ChatCompactionResult, ChatControlOption, ChatModelOption, ChatSession, ContentBlock, StreamEvent, Turn } from "../contracts/chat";
 import "./meow-transcript";
 import { createRequestId } from "./request-id";
@@ -116,6 +116,7 @@ export class MeowChatApp extends LitElement {
     meow-transcript { min-height: 0; }
     .error { margin: 24px; padding: 14px 16px; border: 1px solid #f0b9b9; border-radius: 12px; color: #9b3838; background: #fff5f5; }
     .empty { display: grid; place-items: center; height: 100%; color: #8b93a7; }
+    .readonly-notice { padding: 14px 24px 20px; color: #6f7890; background: #f7f8fc; font-size: 12px; text-align: center; }
     .composer-wrap { position: relative; padding: 12px 24px 20px; background: linear-gradient(transparent, #f7f8fc 18%); }
     .unread { position: absolute; left: 50%; top: -14px; transform: translateX(-50%); border: 0; border-radius: 999px; padding: 6px 12px; color: #4654c8; background: #eef0ff; box-shadow: 0 4px 16px rgba(63, 76, 170, .15); cursor: pointer; }
     form { display: flex; flex-direction: column; gap: 8px; max-width: 860px; margin: 0 auto; padding: 8px; border: 1px solid #dfe3ed; border-radius: 18px; background: #fff; box-shadow: 0 8px 24px rgba(39, 48, 85, .06); }
@@ -155,13 +156,8 @@ export class MeowChatApp extends LitElement {
               <option value="agent">Agent</option><option value="chat">Chat</option>
             </select>
           </div>
-          <div class="sidebar-section">WebUI 会话</div>
-          ${this.sessions.length === 0 && !this.error ? html`<div class="status">暂无 WebUI 会话</div>` : ""}
-          ${this.sessions.map((item) => html`
-            <button class="session ${item.session_id === this.selectedSessionId ? "active" : ""}" ?disabled=${this.sending || this.uploading || this.removingUploads.size > 0} @click=${() => this.selectSession(item.session_id)}>
-              <span class="session-title">${item.title || "未命名会话"}</span><span class="session-mode">${item.mode}</span>
-            </button>
-          `)}
+          ${this.renderSessionSection("WebUI 会话", this.sessions.filter((item) => !item.read_only), "暂无 WebUI 会话")}
+          ${this.renderSessionSection("外部渠道（只读）", this.sessions.filter((item) => item.read_only), "暂无外部渠道消息")}
           ${this.sessionsHasMore ? html`<div class="session-list-more">${this.sessionsLoadingMore ? "正在加载更多…" : "继续下滑加载更多"}</div>` : ""}
           <div class="sidebar-section">会话记录</div>
           <nav class="sidebar-links" aria-label="会话记录">
@@ -189,12 +185,12 @@ export class MeowChatApp extends LitElement {
                 ? html`<input class="title-input" .value=${this.titleDraft} @input=${this.updateTitleDraft} @keydown=${this.handleTitleKeydown} aria-label="会话标题" />
                     <button class="title-action" @click=${this.saveTitle}>保存</button>
                     <button class="title-action secondary" @click=${this.cancelTitleEdit}>取消</button>`
-                : html`<strong>${session?.title || "聊天工作台"}</strong>${session ? html`<button class="edit-title" @click=${this.beginTitleEdit} aria-label="修改会话标题">✎</button>` : ""}`}
+                : html`<strong>${session?.title || "聊天工作台"}</strong>${session && !session.read_only ? html`<button class="edit-title" @click=${this.beginTitleEdit} aria-label="修改会话标题">✎</button>` : ""}`}
             </div>
             <div class="header-controls">
-              ${session ? html`<button class="settings-toggle" @click=${this.toggleSettings} aria-expanded=${String(this.settingsOpen)}>设置</button>` : ""}
-              ${session ? html`<button class="audit-toggle" @click=${this.toggleAudit} aria-expanded=${String(this.auditOpen)}>审计</button>` : ""}
-              <span class="status ${this.connected ? "connected" : "disconnected"}">${session ? (this.connected ? "● 实时连接" : "○ 正在连接") : "只读预览"}</span>
+              ${session && !session.read_only ? html`<button class="settings-toggle" @click=${this.toggleSettings} aria-expanded=${String(this.settingsOpen)}>设置</button>` : ""}
+              ${session && !session.read_only ? html`<button class="audit-toggle" @click=${this.toggleAudit} aria-expanded=${String(this.auditOpen)}>审计</button>` : ""}
+              <span class="status ${this.connected ? "connected" : "disconnected"}">${session?.read_only ? "只读预览" : session ? (this.connected ? "● 实时连接" : "○ 正在连接") : "只读预览"}</span>
             </div>
             ${session && this.settingsOpen ? html`<section class="settings-panel" aria-label="聊天设置">
               <h2 class="settings-heading">本次会话设置</h2>
@@ -228,7 +224,7 @@ export class MeowChatApp extends LitElement {
           ${this.compactionNotice ? html`<div class="notice">${this.compactionNotice}</div>` : ""}
           ${this.error ? html`<div class="error">${this.error}</div>` : session ? html`
             <meow-transcript .turns=${this.turns} .retryableTurnIds=${new Set(Object.keys(this.retrySubmissions))} .loading=${this.loading} .hasMore=${this.hasMore} @load-older=${this.loadOlder} @tail-change=${this.updateTail} @approval-decision=${this.resolveApproval} @retry-turn=${this.retryTurn}></meow-transcript>
-            <div class="composer-wrap">
+            ${session.read_only ? html`<div class="readonly-notice">只读查看 ${session.channel || "外部渠道"} 会话，发送入口已关闭。</div>` : html`<div class="composer-wrap">
               ${this.unread > 0 ? html`<button class="unread" @click=${this.returnToTail}>${this.unread} 条新消息</button>` : ""}
               <form @submit=${this.submitTurn}>
                 ${this.uploads.length ? html`<div class="upload-list" aria-label="待发送附件">
@@ -246,18 +242,30 @@ export class MeowChatApp extends LitElement {
                   </div>
                 </div>
               </form>
-            </div>
+            </div>`}
           ` : html`<div class="empty">选择一个 WebUI 会话开始查看</div>`}
         </main>
       </div>
     `;
   }
 
+  private renderSessionSection(title: string, sessions: ChatSession[], empty: string) {
+    return html`
+      <div class="sidebar-section">${title}</div>
+      ${sessions.length === 0 && !this.error ? html`<div class="status">${empty}</div>` : ""}
+      ${sessions.map((item) => html`
+        <button class="session ${item.session_id === this.selectedSessionId ? "active" : ""}" ?disabled=${this.sending || this.uploading || this.removingUploads.size > 0} @click=${() => this.selectSession(item.session_id)}>
+          <span class="session-title">${item.title || "未命名会话"}</span><span class="session-mode">${item.read_only ? "只读 · " : ""}${item.mode}</span>
+        </button>
+      `)}
+    `;
+  }
+
   private async loadSessions() {
     this.loading = true;
     try {
-      const [sessionPage, options] = await Promise.all([listChatSessions(), loadChatOptions()]);
-      this.sessions = sessionPage.items;
+      const [sessionPage, externalPage, options] = await Promise.all([listChatSessions(), listExternalChatSessions(), loadChatOptions()]);
+      this.sessions = [...sessionPage.items, ...externalPage.items];
       this.sessionsCursor = sessionPage.next_cursor;
       this.sessionsHasMore = sessionPage.has_more;
       this.modelOptions = options.model_groups;
@@ -317,11 +325,12 @@ export class MeowChatApp extends LitElement {
     this.auditOpen = false; this.auditLoading = false; this.auditEntries = []; this.auditError = ""; this.settingsOpen = false;
     this.compacting = false; this.compactionNotice = "";
     this.unread = 0; this.followingTail = true; this.lastEventId = ""; this.latestSequence = 0; this.loading = true; this.error = ""; this.uploads = []; this.removingUploads = new Set(); this.retrySubmissions = {}; this.retryingTurnId = "";
-    this.hydrating = true; this.pendingEvents = []; this.openEvents(sessionId);
+    this.hydrating = true; this.pendingEvents = [];
+    if (!session?.read_only) this.openEvents(sessionId);
     try {
       const page = await loadTurns(sessionId);
       this.turns = page.items; this.cutoff = page.cutoff_sequence; this.olderCursor = page.next_before_turn_sequence ?? undefined; this.hasMore = page.has_more;
-      await this.loadPendingApprovals(sessionId);
+      if (!session?.read_only) await this.loadPendingApprovals(sessionId);
       this.hydrating = false;
       for (const event of this.pendingEvents.splice(0)) this.handleStreamEvent(event);
       await this.updateComplete; this.transcript()?.scrollToBottom?.();
@@ -418,18 +427,33 @@ export class MeowChatApp extends LitElement {
     const status = typeof payload.status === "string"
       ? payload.status
       : event.type.replace("tool.", "");
+    const current = this.turns.find((turn) => turn.turn_id === event.turn_id);
+    const previous = current?.blocks.find(
+      (item) => item.type === "tool" && item.tool_call_id === toolCallId,
+    );
+    const metadata = typeof payload.metadata === "object" && payload.metadata
+      ? payload.metadata as Record<string, unknown>
+      : {};
+    const argumentsValue = payload.arguments ?? metadata.arguments ?? previous?.arguments;
+    const result = typeof payload.result === "string"
+      ? payload.result
+      : previous?.result || (typeof metadata.result === "string" ? metadata.result : "");
+    const resources = Array.isArray(payload.resources) && payload.resources.length
+      ? payload.resources.filter((resource): resource is Record<string, unknown> => Boolean(resource && typeof resource === "object"))
+      : previous?.resources;
     const text = `${toolName} · ${status}`;
     const block: ContentBlock = {
       type: "tool",
       role: "tool",
       text,
       tool_call_id: toolCallId,
+      tool_name: toolName,
+      arguments: argumentsValue,
+      result,
+      resources,
       status,
-      metadata: typeof payload.metadata === "object" && payload.metadata
-        ? payload.metadata as Record<string, unknown>
-        : {},
+      metadata: { ...(previous?.metadata || {}), ...metadata },
     };
-    const current = this.turns.find((turn) => turn.turn_id === event.turn_id);
     if (!current) {
       this.upsertTurn(event, [block], "running");
       return;
@@ -484,7 +508,7 @@ export class MeowChatApp extends LitElement {
   private applyMessage(event: StreamEvent, delta: boolean) {
     const payload = event.payload; const content = typeof payload.content === "string" ? payload.content : ""; const resources = this.resourceBlocks(payload.resources, "assistant");
     const current = this.turns.find((turn) => turn.turn_id === event.turn_id);
-    if (!current) { this.upsertTurn(event, [{ type: "text", role: "assistant", text: content }, ...resources], "running"); return; }
+    if (!current) { this.upsertTurn(event, [...(content ? [{ type: "text", role: "assistant", text: content }] : []), ...resources], "running"); return; }
     let blocks = current.blocks;
     if (!delta) blocks = [...blocks.filter((block) => block.role !== "assistant"), ...(content ? [{ type: "text", role: "assistant", text: content }] : []), ...resources];
     else if (content) {

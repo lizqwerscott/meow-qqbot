@@ -44,6 +44,12 @@ export class MeowTranscript extends LitElement {
     .resource img { display: block; max-width: min(520px, 100%); max-height: 420px; border-radius: 12px; object-fit: contain; }
     .resource audio, .resource video { display: block; max-width: min(520px, 100%); }
     .resource a { color: #4d5bd4; text-decoration: none; }
+    .tool-card { display: grid; gap: 8px; max-width: min(720px, 86%); border-color: #dfe3ed; background: #f8f9fc; }
+    .tool-card summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; cursor: pointer; font-weight: 600; }
+    .tool-card summary small { color: #7b8498; font-weight: 500; }
+    .tool-detail, .tool-result { max-height: 260px; overflow: auto; margin: 0; padding: 10px; border-radius: 8px; background: #fff; color: #515a70; font: 12px/1.5 ui-monospace, SFMono-Regular, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .tool-result { background: #292d3e; color: #f5f6fa; }
+    .tool-note { color: #697389; font-size: 12px; }
     .empty, .loading { padding: 64px 20px; color: #8b93a7; text-align: center; }
     button { border: 0; border-radius: 999px; padding: 8px 14px; color: #4d5bd4; background: #eef0ff; cursor: pointer; }
   `;
@@ -205,7 +211,16 @@ export class MeowTranscript extends LitElement {
       `;
     }
     if (block.type === "tool" || block.type === "tool_result") {
-      return html`<div class="message tool"><div class="bubble">工具事件${block.text ? `：${block.text}` : ""}</div></div>`;
+      const toolName = block.tool_name || this.toolName(block);
+      const status = block.status || (block.type === "tool_result" ? "completed" : "running");
+      const argumentsText = this.formatToolValue(block.arguments);
+      const result = block.result || (block.type === "tool_result" ? block.text || "" : "");
+      return html`<div class="message tool"><details class="bubble tool-card" ?open=${status === "running" || status === "started"}>
+        <summary><span>${toolName}</span><small>${this.toolStatus(status)}</small></summary>
+        ${argumentsText ? html`<pre class="tool-detail">${argumentsText}</pre>` : ""}
+        ${result ? html`<pre class="tool-result">${result}</pre>` : ""}
+        ${block.text && !result ? html`<div class="tool-note">${block.text}</div>` : ""}
+      </details></div>`;
     }
     if (block.type === "approval" && block.approval) {
       const approval = block.approval;
@@ -230,6 +245,39 @@ export class MeowTranscript extends LitElement {
       return html`<div class="message ${role}"><div class="bubble">${block.text}</div></div>`;
     }
     return html``;
+  }
+
+  private toolName(block: ContentBlock): string {
+    const calls = Array.isArray(block.tool_calls) ? block.tool_calls : [];
+    const first = calls[0];
+    if (first && typeof first === "object") {
+      const functionValue = (first as Record<string, unknown>).function;
+      if (functionValue && typeof functionValue === "object") {
+        const name = (functionValue as Record<string, unknown>).name;
+        if (typeof name === "string" && name) return name;
+      }
+    }
+    return "工具调用";
+  }
+
+  private formatToolValue(value: unknown): string {
+    if (value === undefined || value === null || value === "") return "";
+    if (typeof value === "string") {
+      try {
+        return JSON.stringify(JSON.parse(value), null, 2);
+      } catch {
+        return value;
+      }
+    }
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
+  }
+
+  private toolStatus(status: string): string {
+    return ({ started: "准备中", running: "执行中", completed: "已完成", failed: "失败", blocked: "已阻止", cancelled: "已取消", called: "已调用" } as Record<string, string>)[status] || status;
   }
 
   private resolveApproval(sessionKey: string, decision: "allow-once" | "allow-always" | "deny") {

@@ -4,6 +4,8 @@ export type ChatSession = {
   mode: string;
   created_at: number;
   updated_at: number;
+  read_only?: boolean;
+  channel?: string;
 };
 
 export type ChatSessionPage = {
@@ -41,6 +43,10 @@ export type ContentBlock = {
   resource?: Record<string, unknown>;
   tool_calls?: unknown[];
   tool_call_id?: string;
+  tool_name?: string;
+  arguments?: unknown;
+  result?: string;
+  resources?: Record<string, unknown>[];
   status?: string;
   metadata?: Record<string, unknown>;
   approval?: Record<string, unknown>;

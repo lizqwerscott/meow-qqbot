@@ -171,4 +171,29 @@ describe("meow-transcript", () => {
     );
     expect(transcript.shadowRoot?.textContent).toContain("原始通知");
   });
+
+  it("renders tool arguments and result in an expandable card", async () => {
+    const transcript = document.createElement("meow-transcript") as HTMLElement & {
+      turns: Turn[];
+      loading: boolean;
+    };
+    transcript.turns = [{
+      ...turns[0],
+      blocks: [{
+        type: "tool",
+        role: "tool",
+        tool_name: "send_emoji",
+        status: "completed",
+        arguments: { emoji_hash: "emoji-1" },
+        result: '{"success":true}',
+      }],
+    }];
+    transcript.loading = false;
+    document.body.append(transcript);
+    await (transcript as unknown as { updateComplete: Promise<unknown> }).updateComplete;
+
+    expect(transcript.shadowRoot?.querySelector(".tool-card")?.textContent).toContain("send_emoji");
+    expect(transcript.shadowRoot?.querySelector(".tool-detail")?.textContent).toContain("emoji-1");
+    expect(transcript.shadowRoot?.querySelector(".tool-result")?.textContent).toContain("success");
+  });
 });
