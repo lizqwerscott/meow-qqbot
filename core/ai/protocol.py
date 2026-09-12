@@ -357,6 +357,7 @@ class LLMService(Protocol):
         temperature: float | None = None,
         max_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> tuple[str | None, dict[str, Any] | None]: ...
 
     async def chat_completion_with_tools(
@@ -366,6 +367,7 @@ class LLMService(Protocol):
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> tuple[AssistantMessage | None, dict[str, Any] | None]: ...
 
     async def chat_completion_stream(
@@ -376,6 +378,7 @@ class LLMService(Protocol):
         temperature: float | None = None,
         max_tokens: int | None = None,
         callbacks: StreamCallbacks | None = None,
+        reasoning_effort: str | None = None,
     ) -> tuple[AssistantMessage | None, dict[str, Any] | None]: ...
 
     async def close(self) -> None: ...

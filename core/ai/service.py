@@ -111,10 +111,14 @@ class AIService:
         temperature: float | None = None,
         max_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> tuple[str | None, dict[str, Any] | None]:
         model_to_use = model or self.model
         max_tokens_to_use = max_tokens if max_tokens is not None else self.max_tokens
-        is_reasoning = self._is_reasoning_model(model_to_use)
+        effective_reasoning_effort = self._resolve_reasoning_effort(reasoning_effort)
+        is_reasoning = reasoning_effort != "none" and self._is_reasoning_model(
+            model_to_use
+        )
 
         try:
             kwargs: dict[str, Any] = {
@@ -123,19 +127,19 @@ class AIService:
                 "max_tokens": max_tokens_to_use,
             }
 
-            if not (is_reasoning or self.reasoning_effort):
+            if not (is_reasoning or effective_reasoning_effort):
                 temperature_to_use = (
                     temperature if temperature is not None else self.temperature
                 )
                 kwargs["temperature"] = temperature_to_use
 
-            if self.reasoning_effort:
-                kwargs["reasoning_effort"] = self.reasoning_effort
+            if effective_reasoning_effort:
+                kwargs["reasoning_effort"] = effective_reasoning_effort
 
             if response_format:
                 kwargs["response_format"] = response_format
 
-            extra_body = self._build_extra_body()
+            extra_body = self._build_extra_body(effective_reasoning_effort)
             if extra_body:
                 kwargs["extra_body"] = extra_body
 
@@ -156,6 +160,16 @@ class AIService:
     def _is_reasoning_model(self, model: str) -> bool:
         return any(k in model for k in ("o1", "o3", "deepseek", "reasoning"))
 
+    def supports_reasoning_effort(self, model: str | None = None) -> bool:
+        return bool(self.reasoning_effort) or self._is_reasoning_model(
+            model or self.model
+        )
+
+    def _resolve_reasoning_effort(self, override: str | None) -> str | None:
+        if override == "none":
+            return None
+        return override if override is not None else self.reasoning_effort
+
     async def chat_completion_stream(
         self,
         messages: Iterable[ChatCompletionMessageParam],
@@ -164,6 +178,7 @@ class AIService:
         temperature: float | None = None,
         max_tokens: int | None = None,
         callbacks: StreamCallbacks | None = None,
+        reasoning_effort: str | None = None,
     ) -> tuple[AssistantMessage | None, dict[str, Any] | None]:
         """流式版 chat_completion_with_tools（chat-completions SSE）。
 
@@ -173,7 +188,10 @@ class AIService:
         """
         model_to_use = model or self.model
         max_tokens_to_use = max_tokens if max_tokens is not None else self.max_tokens
-        is_reasoning = self._is_reasoning_model(model_to_use)
+        effective_reasoning_effort = self._resolve_reasoning_effort(reasoning_effort)
+        is_reasoning = reasoning_effort != "none" and self._is_reasoning_model(
+            model_to_use
+        )
 
         # 状态放 try 外：create() 早期抛异常时，降级重试仍复用同一 generation 管理器
         state = StreamState(callbacks)
@@ -190,16 +208,16 @@ class AIService:
                 "stream_options": {"include_usage": True},
             }
 
-            if not (is_reasoning or self.reasoning_effort):
+            if not (is_reasoning or effective_reasoning_effort):
                 temperature_to_use = (
                     temperature if temperature is not None else self.temperature
                 )
                 kwargs["temperature"] = temperature_to_use
 
-            if self.reasoning_effort:
-                kwargs["reasoning_effort"] = self.reasoning_effort
+            if effective_reasoning_effort:
+                kwargs["reasoning_effort"] = effective_reasoning_effort
 
-            extra_body = self._build_extra_body()
+            extra_body = self._build_extra_body(effective_reasoning_effort)
             if extra_body:
                 kwargs["extra_body"] = extra_body
 
@@ -258,8 +276,10 @@ class AIService:
             # 转发状态决定回退（零转发）或终止（已转发部分文本，避免双回复）。
             raise StreamAbortedError(f"流式响应中断: {e}") from e
 
-    def _build_extra_body(self) -> dict[str, Any] | None:
-        if self.reasoning_effort:
+    def _build_extra_body(
+        self, reasoning_effort: str | None = None
+    ) -> dict[str, Any] | None:
+        if reasoning_effort:
             return {"thinking": {"type": "enabled"}}
         return None
 
@@ -270,6 +290,7 @@ class AIService:
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> tuple[AssistantMessage | None, dict[str, Any] | None]:
         """带工具调用的一次性对话，返回统一协议对象 AssistantMessage。
 
@@ -278,7 +299,10 @@ class AIService:
         """
         model_to_use = model or self.model
         max_tokens_to_use = max_tokens if max_tokens is not None else self.max_tokens
-        is_reasoning = self._is_reasoning_model(model_to_use)
+        effective_reasoning_effort = self._resolve_reasoning_effort(reasoning_effort)
+        is_reasoning = reasoning_effort != "none" and self._is_reasoning_model(
+            model_to_use
+        )
 
         try:
             # 最终防线：清理孤立的 tool_calls，防止重启恢复后历史不完整导致 API 400
@@ -291,7 +315,7 @@ class AIService:
                 "max_tokens": max_tokens_to_use,
             }
 
-            if is_reasoning or self.reasoning_effort:
+            if is_reasoning or effective_reasoning_effort:
                 pass
             else:
                 temperature_to_use = (
@@ -299,10 +323,10 @@ class AIService:
                 )
                 kwargs["temperature"] = temperature_to_use
 
-            if self.reasoning_effort:
-                kwargs["reasoning_effort"] = self.reasoning_effort
+            if effective_reasoning_effort:
+                kwargs["reasoning_effort"] = effective_reasoning_effort
 
-            extra_body = self._build_extra_body()
+            extra_body = self._build_extra_body(effective_reasoning_effort)
             if extra_body:
                 kwargs["extra_body"] = extra_body
 

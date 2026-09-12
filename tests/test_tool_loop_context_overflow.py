@@ -161,3 +161,89 @@ async def test_tool_loop_propagates_turn_kind_to_protocol_events(monkeypatch, tm
     turn = (await event_log.snapshot_turns("chat", include_internal=True)).turns[0]
     assert turn.turn_kind is TurnKind.SYSTEM
     await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_emits_redacted_lifecycle_events(monkeypatch):
+    class FakeAI:
+        model = "test"
+
+        def __init__(self):
+            self.responses = iter(
+                [
+                    AssistantMessage(
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "name": "inspect",
+                                "arguments": '{"path":"/secret/file"}',
+                            }
+                        ]
+                    ),
+                    AssistantMessage(content="done"),
+                ]
+            )
+
+        async def chat_completion_with_tools(self, *, messages, tools):
+            response = next(self.responses)
+            if response.tool_calls and isinstance(response.tool_calls[0], dict):
+                from core.ai.protocol import AssistantToolCall
+
+                response.tool_calls = [AssistantToolCall(**response.tool_calls[0])]
+            return response, None
+
+    class FakeContext:
+        async def add_assistant_message_async(self, *args, **kwargs):
+            return None
+
+        async def add_tool_result_async(self, *args, **kwargs):
+            return None
+
+    async def fake_execute(name, args, tool_context, permission_manager):
+        assert args["path"] == "/secret/file"
+        return ToolResult(content="secret result")
+
+    monkeypatch.setattr("core.tools.tool_loop.execute_tool", fake_execute)
+    ctx = SimpleNamespace(
+        ai=SimpleNamespace(
+            ai_service=FakeAI(),
+            max_tool_rounds=3,
+            model_registry=None,
+            stream_reply=False,
+        ),
+        mgmt=SimpleNamespace(
+            permission_manager=None,
+            cost_tracker=None,
+            context_manager=FakeContext(),
+        ),
+        memory=SimpleNamespace(hindsight_memory=None),
+    )
+    events = []
+
+    async def on_tool_event(event):
+        events.append(event)
+
+    async def reply_callback(**kwargs):
+        return None
+
+    await ToolLoop(ctx).run(
+        messages=[{"role": "user", "content": "run"}],
+        tools=[],
+        chat_id="chat",
+        is_group=False,
+        reply_to="turn-1",
+        reply_callback=reply_callback,
+        turn_id="turn-1",
+        tool_event_callback=on_tool_event,
+    )
+
+    assert [(event.event_type, event.status) for event in events] == [
+        ("tool.started", "started"),
+        ("tool.updated", "running"),
+        ("tool.finished", "completed"),
+    ]
+    assert events[0].session_id == "chat"
+    assert events[0].turn_id == "turn-1"
+    assert events[0].tool_call_id == "call-1"
+    assert events[0].metadata == {}
+    assert all("secret" not in str(event.metadata) for event in events)

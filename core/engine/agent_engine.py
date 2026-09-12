@@ -56,6 +56,7 @@ from core.engine.mode_router import (
 from core.engine.model_context_transcript import (
     ModelContextInvariantError,
     ModelContextScope,
+    ModelContextScopeKind,
     ModelContextTranscript,
 )
 from core.engine.prompt_builder import PromptBuilder, PromptBuildResult
@@ -66,6 +67,7 @@ from core.engine.protocol_projection import ProtocolProjection
 from core.engine.reply_necessity import ReplyNecessityGate, ReplyNecessityInput
 from core.engine.routing_audit import RoutingAuditStore
 from core.engine.routing_metrics import RoutingMetrics
+from core.engine.tool_events import ToolEventCallback
 from core.engine.turn_capabilities import TurnCapabilities
 from core.engine.turn_planner import (
     PlannerRequest,
@@ -162,6 +164,8 @@ class _TurnRequest:
     planner_plan_id: str = ""
     consumer_evidence_callback: Optional[Callable[[str], Awaitable[None]]] = None
     provider_start_callback: Optional[Callable[[], Awaitable[bool]]] = None
+    tool_event_callback: Optional[ToolEventCallback] = None
+    reasoning_effort: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -411,7 +415,9 @@ class AgentEngine:
 
         # ── 消费者管理 ──
         self._consumer_tasks: Set[asyncio.Task] = set()
-        self._consumer_callbacks: dict[str, tuple[Callable, Callable]] = {}
+        self._consumer_callbacks: dict[
+            str, tuple[Callable, Callable, Optional[ToolEventCallback]]
+        ] = {}
 
         # ── 工具依赖容器（由 bootstrap 注入） ──
         self._deps = None
@@ -1258,6 +1264,91 @@ class AgentEngine:
             )
             return None
 
+    async def compact_model_context(
+        self,
+        *,
+        chat_id: str,
+        principal_id: str,
+        user_nickname: str = "",
+    ) -> dict[str, object]:
+        """Force a safe model-context compaction for an existing conversation."""
+        no_op = {
+            "changed": False,
+            "tier": 0,
+            "operation": "none",
+            "before_tokens": 0,
+            "after_tokens": 0,
+            "saved_tokens": 0,
+            "reason": "no_scope",
+            "scope_count": 0,
+        }
+        if not self.model_context_write_enabled:
+            no_op["reason"] = "disabled"
+            return no_op
+
+        transcript = self._get_model_context()
+        scopes = await transcript.scopes_for_chat(chat_id)
+        scope = next(
+            (
+                item
+                for item in scopes
+                if item.principal_id == principal_id
+                and item.kind is ModelContextScopeKind.PRIVATE_CONVERSATION
+            ),
+            None,
+        )
+        if scope is None:
+            return no_op
+
+        input_message = InputMessage(
+            id=f"webui-compaction-{uuid4().hex}",
+            sender_id=principal_id,
+            chat_id=chat_id,
+            session_key=chat_id,
+            content="",
+            is_group=False,
+            session_mode="agent",
+        )
+        result = await self.prompt_builder.build(
+            chat_id=chat_id,
+            is_group=False,
+            user_nickname=user_nickname,
+            sender_id=principal_id,
+            input_message=input_message,
+            turn_id=input_message.id,
+            cost_tracker=self.cost_tracker,
+            timeline_snapshot=await self._get_prompt_timeline_snapshot(
+                chat_id, current_turn_id=input_message.id
+            ),
+            model_context_scope=scope,
+            model_context_identity=self._model_context_identity(input_message),
+            model_context_provider_identity=self._provider_identity(self.ai_service),
+            model_context_provider_service=self.ai_service,
+            force_model_context_compaction=True,
+            preserve_model_context_generation=True,
+        )
+        compression = getattr(result, "model_context_compaction", None)
+        if compression is None:
+            current_scope = await transcript.current_scope(scope)
+            stats = await transcript.stats(current_scope)
+            return {
+                **no_op,
+                "before_tokens": stats.estimated_tokens,
+                "after_tokens": stats.estimated_tokens,
+                "reason": "unavailable",
+                "scope_count": 1,
+            }
+        return {
+            "changed": bool(compression.changed),
+            "tier": int(compression.tier),
+            "operation": str(compression.operation),
+            "before_tokens": int(compression.before_tokens),
+            "after_tokens": int(compression.after_tokens),
+            "saved_tokens": int(compression.saved_tokens),
+            "reason": str(compression.reason or ""),
+            "scope_count": 1,
+        }
+
     async def _materialize_model_context(
         self,
         scope: Optional[ModelContextScope],
@@ -1689,6 +1780,7 @@ class AgentEngine:
         *,
         _source: ModeRouteSource | None = None,
         _intent: InboundIntent | None = None,
+        tool_event_callback: Optional[ToolEventCallback] = None,
     ) -> None:
         await self._process_admission_outbox()
         await self._ensure_outbox_worker()
@@ -1758,9 +1850,12 @@ class AgentEngine:
                 input_message.session_mode = PromptMode.AGENT.value
         needs_ai = intent is not InboundIntent.GROUP_AMBIENT
         if needs_ai and self.rule_router and self.model_registry:
-            tier = self.rule_router.classify(input_message.content)
-            input_message.tier = tier
-            input_message.model_chain = self.model_registry.get_chain(tier) or None
+            if input_message.tier is None:
+                input_message.tier = self.rule_router.classify(input_message.content)
+            if input_message.model_chain is None:
+                input_message.model_chain = (
+                    self.model_registry.get_chain(input_message.tier) or None
+                )
 
         try:
             pending = await self._prepare_pending_inbound(
@@ -1795,6 +1890,8 @@ class AgentEngine:
                         if target is not None:
                             kwargs["chat_id"] = target.target_id
                             kwargs["is_group"] = target.chat_type == "group"
+                            if target.channel == "webui":
+                                kwargs["delivery_event"] = "delivery.backpressure"
                         return await reply_callback(**kwargs)
 
                     receipt = await self._get_delivery_controller().deliver_text(
@@ -1820,6 +1917,7 @@ class AgentEngine:
             self._consumer_callbacks[session_key] = (
                 reply_callback,
                 get_user_nickname,
+                tool_event_callback,
             )
             if self._get_group_engagement().config.group_ambient_mode == "active":
                 await self._recover_ambient_deliveries(session_key, reply_callback)
@@ -1832,6 +1930,7 @@ class AgentEngine:
                     reply_callback,
                     get_user_nickname,
                     enqueued.consumer_token,
+                    tool_event_callback,
                 )
             )
             self._consumer_tasks.add(task)
@@ -2187,13 +2286,18 @@ class AgentEngine:
             set(self._consumer_callbacks)
         )
         for chat_id, consumer_token in claims:
-            reply_callback, get_user_nickname = self._consumer_callbacks[chat_id]
+            (
+                reply_callback,
+                get_user_nickname,
+                tool_event_callback,
+            ) = self._consumer_callbacks[chat_id]
             task = asyncio.create_task(
                 self._consumer(
                     chat_id,
                     reply_callback,
                     get_user_nickname,
                     consumer_token,
+                    tool_event_callback,
                 )
             )
             self._consumer_tasks.add(task)
@@ -2373,6 +2477,7 @@ class AgentEngine:
         reply_callback: Callable,
         get_user_nickname: Callable[[str], str],
         consumer_token: int,
+        tool_event_callback: Optional[ToolEventCallback] = None,
     ) -> None:
         try:
             while True:
@@ -2411,6 +2516,7 @@ class AgentEngine:
                                 get_user_nickname,
                                 batch=followups,
                                 scheduler_turn_id=scheduler_turn_id,
+                                tool_event_callback=tool_event_callback,
                             )
 
                         planner_result = await _run_planner_batch(batch)
@@ -2744,6 +2850,7 @@ class AgentEngine:
                         reply_callback,
                         get_user_nickname,
                         replacement_token,
+                        tool_event_callback,
                     )
                 )
                 self._consumer_tasks.add(task)
@@ -3025,6 +3132,7 @@ class AgentEngine:
                 delivery_target=request.delivery_target,
                 reply_to_message_id=request.reply_to_message_id,
                 model_chain=model_chain,
+                reasoning_effort=request.reasoning_effort,
                 binding_manager=self._session_binding,
                 tier=tier,
                 stream_callback=request.stream_callback,
@@ -3101,6 +3209,7 @@ class AgentEngine:
                 consumer_evidence_callback=request.consumer_evidence_callback,
                 provider_start_callback=request.provider_start_callback,
                 provider_attempt_callback=_record_provider_attempt,
+                tool_event_callback=request.tool_event_callback,
                 event_log=getattr(self, "event_log", None),
             )
             if request.timeout is not None:
@@ -3387,6 +3496,7 @@ class AgentEngine:
                         get_user_nickname=get_user_nickname,
                         model_chain=input_message.model_chain,
                         tier=input_message.tier,
+                        reasoning_effort=input_message.reasoning_effort,
                         rollback_message_id=current_pending.message.id,
                         steering_enabled=False,
                         capabilities=capabilities,
@@ -3514,6 +3624,7 @@ class AgentEngine:
         batch: tuple[PendingInbound, ...] = (),
         already_admitted: bool = False,
         scheduler_turn_id: str | None = None,
+        tool_event_callback: Optional[ToolEventCallback] = None,
     ) -> PlannerResult | None:
         if not isinstance(pending, PendingInbound):
             raise TypeError(
@@ -3821,6 +3932,7 @@ class AgentEngine:
                     get_user_nickname=get_user_nickname,
                     model_chain=input_message.model_chain,
                     tier=input_message.tier,
+                    reasoning_effort=input_message.reasoning_effort,
                     rollback_message_id=input_message.id,
                     stream_callback=_stream_deliver,
                     steering_enabled=True,
@@ -3829,6 +3941,7 @@ class AgentEngine:
                     steering_admission_callback=_admit_steering,
                     rollback_after_prompt_failure_only=True,
                     capabilities=capabilities,
+                    tool_event_callback=tool_event_callback,
                     planner_control_callback=_handle_planner_control,
                     turn_id=scheduler_turn_id or input_message.id,
                     model_context_commit_callback=(

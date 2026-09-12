@@ -37,6 +37,7 @@ class Router:
         input_message: InputMessage,
         reply_callback: Callable,
         get_user_nickname: Callable[[str], str],
+        tool_event_callback: Optional[Callable] = None,
     ) -> None:
         """
         分发消息。
@@ -120,4 +121,5 @@ class Router:
             input_message=input_message,
             reply_callback=reply_callback,
             get_user_nickname=get_user_nickname,
+            tool_event_callback=tool_event_callback,
         )

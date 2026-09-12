@@ -321,16 +321,113 @@ class MediaStore:
         record, _ = await self.authorize_with_reason(chat_id, media_uri, image_only)
         return record
 
+    @staticmethod
+    def _media_id_from_uri(media_uri: str) -> str:
+        prefix = "media://inbound/"
+        if not media_uri.startswith(prefix):
+            return ""
+        media_id = media_uri.removeprefix(prefix)
+        return media_id if media_id and "/" not in media_id else ""
+
+    async def move_message_reference(
+        self,
+        *,
+        chat_id: str,
+        source_message_id: str,
+        target_message_id: str,
+        media_uri: str,
+    ) -> bool:
+        """Move one authorized media reference without deleting shared media."""
+        media_id = self._media_id_from_uri(media_uri)
+        if (
+            self._conn is None
+            or not media_id
+            or not source_message_id
+            or not target_message_id
+        ):
+            return False
+        async with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM media_messages WHERE chat_id=? AND message_id=? "
+                "AND media_id=?",
+                (chat_id, source_message_id, media_id),
+            ).fetchone()
+            if row is None:
+                return False
+            existing = self._conn.execute(
+                "SELECT 1 FROM media_messages WHERE chat_id=? AND message_id=? "
+                "AND media_id=?",
+                (chat_id, target_message_id, media_id),
+            ).fetchone()
+            if existing is not None:
+                self._conn.execute(
+                    "DELETE FROM media_messages WHERE chat_id=? AND message_id=? "
+                    "AND media_id=?",
+                    (chat_id, source_message_id, media_id),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE media_messages SET message_id=?, created_at=? "
+                    "WHERE chat_id=? AND message_id=? AND media_id=?",
+                    (
+                        target_message_id,
+                        time.time(),
+                        chat_id,
+                        source_message_id,
+                        media_id,
+                    ),
+                )
+            self._conn.commit()
+            return True
+
+    async def remove_message_reference(
+        self, *, chat_id: str, message_id: str, media_uri: str
+    ) -> bool:
+        """Remove a single reference and delete the object only when unreferenced."""
+        media_id = self._media_id_from_uri(media_uri)
+        if self._conn is None or not media_id or not message_id:
+            return False
+        async with self._lock:
+            deleted = self._conn.execute(
+                "DELETE FROM media_messages WHERE chat_id=? AND message_id=? "
+                "AND media_id=?",
+                (chat_id, message_id, media_id),
+            ).rowcount
+            if not deleted:
+                return False
+            self._delete_unreferenced_object_sync(media_id)
+            self._conn.commit()
+            return True
+
+    async def cleanup_message_references(
+        self, *, message_id_prefix: str, older_than: float
+    ) -> int:
+        """Release stale references with a controlled message-id namespace."""
+        if self._conn is None or not message_id_prefix:
+            return 0
+        async with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT media_id FROM media_messages WHERE message_id LIKE ? "
+                "AND created_at < ?",
+                (f"{message_id_prefix}%", older_than),
+            ).fetchall()
+            deleted = self._conn.execute(
+                "DELETE FROM media_messages WHERE message_id LIKE ? AND created_at < ?",
+                (f"{message_id_prefix}%", older_than),
+            ).rowcount
+            for row in rows:
+                self._delete_unreferenced_object_sync(str(row["media_id"]))
+            self._conn.commit()
+            return deleted
+
     async def authorize_with_reason(
         self, chat_id: str, media_uri: str, image_only: bool = False
     ) -> tuple[MediaRecord | None, str]:
         if self._conn is None:
             return None, "MEDIA_NOT_AVAILABLE"
-        if not media_uri.startswith(
-            "media://inbound/"
-        ) or "/" in media_uri.removeprefix("media://inbound/"):
+        media_id = self._media_id_from_uri(media_uri)
+        if not media_id:
             return None, "INVALID_MEDIA_URI"
-        media_id = media_uri.removeprefix("media://inbound/")
         async with self._lock:
             row = self._conn.execute(
                 "SELECT o.*, m.message_id, m.chat_id, m.sender_id, m.resource_type, "
@@ -581,6 +678,23 @@ class MediaStore:
             self._source_path(path).unlink(missing_ok=True)
         except OSError:
             return False
+        return True
+
+    def _delete_unreferenced_object_sync(self, media_id: str) -> bool:
+        conn = self._conn
+        if conn is None:
+            return False
+        if conn.execute(
+            "SELECT 1 FROM media_messages WHERE media_id=? LIMIT 1", (media_id,)
+        ).fetchone():
+            return False
+        row = conn.execute(
+            "SELECT local_path FROM media_objects WHERE media_id=?", (media_id,)
+        ).fetchone()
+        if row is None or not self._remove_media_files(Path(row["local_path"])):
+            return False
+        conn.execute("DELETE FROM media_transcripts WHERE media_id=?", (media_id,))
+        conn.execute("DELETE FROM media_objects WHERE media_id=?", (media_id,))
         return True
 
     async def delete_media(self, media_id: str) -> bool:

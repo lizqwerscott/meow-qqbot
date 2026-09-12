@@ -135,6 +135,34 @@ class ModelRegistry:
         """获取组的模型链。"""
         return list(self._groups.get(group_name, []))
 
+    def list_group_options(self) -> list[dict[str, object]]:
+        """Return safe, user-facing model-group choices without provider secrets."""
+        return [
+            {
+                "id": group_name,
+                "label": group_name,
+                "model_count": len(self._groups[group_name]),
+            }
+            for group_name in sorted(self._groups)
+        ]
+
+    def has_group(self, group_name: str) -> bool:
+        return group_name in self._groups
+
+    def list_reasoning_effort_options(
+        self, model_chain: Optional[List[str]] = None
+    ) -> list[str]:
+        """Return safe per-turn reasoning levels supported by selected models."""
+        names = model_chain or list(self._services)
+        for name in names:
+            service = self._services.get(name)
+            if service is None:
+                continue
+            supports = getattr(service, "supports_reasoning_effort", None)
+            if callable(supports) and supports():
+                return ["none", "low", "medium", "high"]
+        return []
+
     def configure_tiers(self, tier_config: dict):
         """配置分档 → 组名映射。
 

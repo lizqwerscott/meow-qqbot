@@ -54,6 +54,7 @@ class PromptBuildResult:
     degraded_reason: str = ""
     summary_dates: tuple[str, ...] = ()
     summary_count: int = 0
+    model_context_compaction: Any = None
 
     def __iter__(self):
         yield self.messages
@@ -200,6 +201,7 @@ class PromptBuilder:
         model_context_provider_identity: Optional[str] = None,
         model_context_provider_service: Any = None,
         force_model_context_compaction: bool = False,
+        preserve_model_context_generation: bool = False,
         delivery_contract: Optional[DeliveryPromptContract] = None,
         media_context: Optional[BatchMediaContext] = None,
         mode: PromptMode | None = None,
@@ -228,6 +230,7 @@ class PromptBuilder:
             else timeline_snapshot
         )
         model_context_fallback_reason = ""
+        model_context_compaction = None
 
         # ── 1. 防御：清理 legacy context 中孤立的 tool_calls ──
         cleaned = await self.context_manager.remove_orphaned_tool_calls_async(chat_id)
@@ -330,13 +333,20 @@ class PromptBuilder:
             ).hexdigest()
             try:
                 if self.model_context_write_enabled:
-                    model_context_scope = (
-                        await self.model_context_transcript.ensure_generation(
-                            model_context_scope,
-                            fingerprint,
-                            provider_identity=model_context_provider_identity,
+                    if preserve_model_context_generation:
+                        model_context_scope = (
+                            await self.model_context_transcript.current_scope(
+                                model_context_scope
+                            )
                         )
-                    )
+                    else:
+                        model_context_scope = (
+                            await self.model_context_transcript.ensure_generation(
+                                model_context_scope,
+                                fingerprint,
+                                provider_identity=model_context_provider_identity,
+                            )
+                        )
                 else:
                     compatible = (
                         await self.model_context_transcript.generation_compatible(
@@ -420,6 +430,7 @@ class PromptBuilder:
                         summary_factory=_summary_factory,
                         force=force_model_context_compaction,
                     )
+                    model_context_compaction = compression
                     model_context_scope = compression.scope
                     model_context_snapshot = compression.snapshot
                 elif (
@@ -622,6 +633,7 @@ class PromptBuilder:
             ),
             summary_dates=summary_dates,
             summary_count=summary_count,
+            model_context_compaction=model_context_compaction,
         )
 
     @staticmethod

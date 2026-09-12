@@ -300,6 +300,9 @@ class DeepSeekResponsesService:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
 
+    def supports_reasoning_effort(self, model: str | None = None) -> bool:
+        return True
+
     # ── 请求组装 ──
 
     def _build_kwargs(
@@ -311,9 +314,19 @@ class DeepSeekResponsesService:
         max_tokens: int | None,
         response_format: dict[str, Any] | None = None,
         stream: bool = False,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
+        effective_reasoning_effort = (
+            None
+            if reasoning_effort == "none"
+            else (
+                reasoning_effort
+                if reasoning_effort is not None
+                else self.reasoning_effort
+            )
+        )
         instructions, items = _messages_to_input(
-            messages, thinking_mode=bool(self.reasoning_effort)
+            messages, thinking_mode=bool(effective_reasoning_effort)
         )
         kwargs: dict[str, Any] = {"model": model, "stream": stream}
         if items:
@@ -324,8 +337,8 @@ class DeepSeekResponsesService:
         max_output = max_tokens if max_tokens is not None else self.max_tokens
         kwargs["max_output_tokens"] = max_output
 
-        if self.reasoning_effort:
-            kwargs["reasoning"] = {"effort": self.reasoning_effort}
+        if effective_reasoning_effort:
+            kwargs["reasoning"] = {"effort": effective_reasoning_effort}
         else:
             # DeepSeek 文档：temperature 思考模式下不生效（不报错）；非思考模式总是传。
             kwargs["temperature"] = (
@@ -351,13 +364,20 @@ class DeepSeekResponsesService:
         temperature: float | None = None,
         max_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> tuple[str | None, dict[str, Any] | None]:
         model_to_use = model or self.model
         try:
             msgs = list(messages)
             ensure_messages_consistent(msgs)
             kwargs = self._build_kwargs(
-                msgs, None, model_to_use, temperature, max_tokens, response_format
+                msgs,
+                None,
+                model_to_use,
+                temperature,
+                max_tokens,
+                response_format,
+                reasoning_effort=reasoning_effort,
             )
             response = await self.client.responses.create(**kwargs)
             usage = _normalize_usage(getattr(response, "usage", None))
@@ -378,13 +398,19 @@ class DeepSeekResponsesService:
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> tuple[AssistantMessage | None, dict[str, Any] | None]:
         model_to_use = model or self.model
         try:
             msgs = list(messages)
             ensure_messages_consistent(msgs)
             kwargs = self._build_kwargs(
-                msgs, tools, model_to_use, temperature, max_tokens
+                msgs,
+                tools,
+                model_to_use,
+                temperature,
+                max_tokens,
+                reasoning_effort=reasoning_effort,
             )
             response = await self.client.responses.create(**kwargs)
             usage = _normalize_usage(getattr(response, "usage", None))
@@ -405,6 +431,7 @@ class DeepSeekResponsesService:
         temperature: float | None = None,
         max_tokens: int | None = None,
         callbacks: StreamCallbacks | None = None,
+        reasoning_effort: str | None = None,
     ) -> tuple[AssistantMessage | None, dict[str, Any] | None]:
         """流式：SSE 事件聚合，返回的 AssistantMessage 与非流式一致。
 
@@ -424,7 +451,13 @@ class DeepSeekResponsesService:
             msgs = list(messages)
             ensure_messages_consistent(msgs)
             kwargs = self._build_kwargs(
-                msgs, tools, model_to_use, temperature, max_tokens, stream=True
+                msgs,
+                tools,
+                model_to_use,
+                temperature,
+                max_tokens,
+                stream=True,
+                reasoning_effort=reasoning_effort,
             )
 
             stream = await self.client.responses.create(**kwargs)

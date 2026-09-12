@@ -62,6 +62,7 @@ class InputMessage:
     resources: List[ResourceMeta] = field(default_factory=list)
     replied_resources: List[ResourceMeta] = field(default_factory=list)
     session_mode: Literal["chat", "agent"] | None = None
+    reasoning_effort: Optional[str] = None
 
     def __post_init__(self):
         if self.timestamp is None:

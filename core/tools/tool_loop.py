@@ -7,9 +7,11 @@
 """
 
 import asyncio
+import inspect
 import itertools
 import json
 import logging
+import time
 from typing import Any, Awaitable, Callable, List, Optional
 
 from core.ai.fallback_runner import FallbackRunner
@@ -22,6 +24,7 @@ from core.engine.conversation_event_log import (
     TurnKind,
 )
 from core.engine.delivery_ledger import DeliveryController, DeliveryReceipt
+from core.engine.tool_events import ToolEventCallback, ToolLifecycleEvent
 from core.engine.turn_capabilities import TurnCapabilities
 from core.engine.turn_protocol_history import TurnProtocolHistory
 from core.engine.turn_state import TurnPhase, TurnStateError
@@ -148,8 +151,10 @@ class ToolLoop:
         provider_attempt_callback: Optional[
             Callable[[str, int, list[dict]], Awaitable[None]]
         ] = None,
+        tool_event_callback: Optional[ToolEventCallback] = None,
         event_log: Optional[ConversationEventLog] = None,
         turn_kind: TurnKind | str = TurnKind.UNKNOWN,
+        reasoning_effort: Optional[str] = None,
     ) -> tuple[bool, bool]:
         """执行工具调用循环。
 
@@ -197,6 +202,43 @@ class ToolLoop:
             if routing_metrics is not None:
                 routing_metrics.record_tool_rejection(
                     tool_name=tool_name, reason=reason
+                )
+
+        async def emit_tool_event(
+            event_type: str,
+            tool_call_id: str,
+            tool_name: str,
+            status: str,
+            started_at: float,
+            *,
+            metadata: Optional[dict[str, Any]] = None,
+        ) -> None:
+            if tool_event_callback is None:
+                return
+            event = ToolLifecycleEvent(
+                event_type=event_type,
+                session_id=chat_id,
+                turn_id=protocol_turn_id,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                status=status,
+                elapsed_ms=(
+                    None
+                    if event_type == "tool.started"
+                    else max(0, round((time.monotonic() - started_at) * 1000))
+                ),
+                metadata=dict(metadata or {}),
+            )
+            try:
+                await tool_event_callback(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _log.warning(
+                    "工具生命周期事件回调失败 [%s/%s]",
+                    tool_name,
+                    event_type,
+                    exc_info=True,
                 )
 
         async def record_protocol_tool(
@@ -262,6 +304,18 @@ class ToolLoop:
         # ── 预解析模型链：FallbackRunner 统一编排（支持 session 绑定） ──
         runner = None
         if model_chain and self._model_registry:
+            if reasoning_effort and reasoning_effort != "none":
+                supported_chain = []
+                for model_name in model_chain:
+                    service = self._model_registry.get(model_name)
+                    supports_override = getattr(
+                        service, "supports_reasoning_effort", None
+                    )
+                    if service is not None and (
+                        not callable(supports_override) or supports_override()
+                    ):
+                        supported_chain.append(model_name)
+                model_chain = supported_chain
             runner = FallbackRunner(self._model_registry, model_chain)
             ok = await runner.try_acquire_with_binding(binding_manager, chat_id, tier)
             if not ok:
@@ -351,21 +405,43 @@ class ToolLoop:
                             provider_attempt_number,
                             list(messages),
                         )
+                    provider_kwargs = {
+                        "messages": list(messages),
+                        "tools": tools,
+                    }
+                    if reasoning_effort:
+                        supports_override = getattr(
+                            svc, "supports_reasoning_effort", None
+                        )
+                        if not callable(supports_override) or supports_override():
+                            method = (
+                                svc.chat_completion_stream
+                                if self._stream_reply
+                                else svc.chat_completion_with_tools
+                            )
+                            try:
+                                parameters = inspect.signature(method).parameters
+                            except (TypeError, ValueError):
+                                parameters = {}
+                            if "reasoning_effort" in parameters or any(
+                                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                                for parameter in parameters.values()
+                            ):
+                                provider_kwargs["reasoning_effort"] = reasoning_effort
+
                     # 协议已声明 chat_completion_stream，直接调用（不防御式探测）
                     if self._stream_reply:
                         # Capability-governed turns buffer provider output until the
                         # completed response is classified. Legacy callers retain
                         # their existing immediate stream behavior during migration.
                         cb = delivery.callbacks if stream_callback is not None else None
+                        provider_kwargs["callbacks"] = cb
                         message, usage = await svc.chat_completion_stream(
-                            messages=list(messages),
-                            tools=tools,
-                            callbacks=cb,
+                            **provider_kwargs,
                         )
                     else:
                         message, usage = await svc.chat_completion_with_tools(
-                            messages=list(messages),
-                            tools=tools,
+                            **provider_kwargs,
                         )
                 except asyncio.CancelledError:
                     raise
@@ -668,6 +744,32 @@ class ToolLoop:
             )
 
             for tc in tool_calls:
+                tool_started_at = time.monotonic()
+                tool_finished = False
+
+                async def finish_tool_event(
+                    status: str, *, metadata: Optional[dict[str, Any]] = None
+                ) -> None:
+                    nonlocal tool_finished
+                    if tool_finished:
+                        return
+                    tool_finished = True
+                    await emit_tool_event(
+                        "tool.finished",
+                        tc.id,
+                        tc.name,
+                        status,
+                        tool_started_at,
+                        metadata=metadata,
+                    )
+
+                await emit_tool_event(
+                    "tool.started",
+                    tc.id,
+                    tc.name,
+                    "started",
+                    tool_started_at,
+                )
                 preprepared_record = None
                 preprepared_content = ""
                 try:
@@ -676,6 +778,10 @@ class ToolLoop:
                     _log.warning(
                         "工具参数解析失败: %s",
                         tc.arguments,
+                    )
+                    await finish_tool_event(
+                        "failed",
+                        metadata={"reason": "invalid_arguments"},
                     )
                     content = json.dumps({"error": "参数解析失败"})
                     messages.append(
@@ -703,6 +809,10 @@ class ToolLoop:
 
                 try:
                     if not await turn_is_active():
+                        await finish_tool_event(
+                            "blocked",
+                            metadata={"reason": "turn_not_active"},
+                        )
                         content = json.dumps(
                             {"error": "TURN_NOT_ACTIVE: 当前 turn 已终结"},
                             ensure_ascii=False,
@@ -817,6 +927,10 @@ class ToolLoop:
                         reply_to=tool_ctx.reply_to,
                     ):
                         await record_tool_rejection(tc.name, "context")
+                        await finish_tool_event(
+                            "blocked",
+                            metadata={"reason": "context"},
+                        )
                         content = json.dumps(
                             {"error": "工具上下文不匹配当前 turn capability"},
                             ensure_ascii=False,
@@ -831,6 +945,10 @@ class ToolLoop:
                         tc.name
                     ):
                         await record_tool_rejection(tc.name, "tool")
+                        await finish_tool_event(
+                            "blocked",
+                            metadata={"reason": "tool_capability"},
+                        )
                         content = json.dumps(
                             {"error": f"工具不在当前 turn capability 内: {tc.name}"},
                             ensure_ascii=False,
@@ -845,6 +963,10 @@ class ToolLoop:
                         tc.name, args
                     ):
                         await record_tool_rejection(tc.name, "arguments")
+                        await finish_tool_event(
+                            "blocked",
+                            metadata={"reason": "argument_capability"},
+                        )
                         content = json.dumps(
                             {"error": "工具参数不在当前 turn capability 内"},
                             ensure_ascii=False,
@@ -870,6 +992,13 @@ class ToolLoop:
                                     reply_anchor_id=reply_to,
                                 )
                             )
+                    await emit_tool_event(
+                        "tool.updated",
+                        tc.id,
+                        tc.name,
+                        "running",
+                        tool_started_at,
+                    )
                     result = await execute_tool(tc.name, args, tool_ctx, self._perm)
                     if (
                         tc.name == "work_plan"
@@ -929,6 +1058,7 @@ class ToolLoop:
                             content=result.content,
                             resources=result.delivery_resources,
                         )
+                    await finish_tool_event("completed")
                     if not await turn_is_active():
                         _log.info("turn 已终结，抑制工具结果提交: %s", protocol_turn_id)
                         continue
@@ -951,8 +1081,13 @@ class ToolLoop:
                     if result.no_reply:
                         suppress_reply = True
                 except asyncio.CancelledError:
+                    await finish_tool_event("cancelled")
                     raise
                 except Exception as e:
+                    await finish_tool_event(
+                        "failed",
+                        metadata={"reason": "execution_exception"},
+                    )
                     if (
                         preprepared_record is not None
                         and delivery_controller is not None
