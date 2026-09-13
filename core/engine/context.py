@@ -55,6 +55,7 @@ class MgmtContext:
     session_identity_registry: Any = None
     session_identity_resolver: Any = None
     delivery_target_catalog: Any = None
+    identity_manager: Any = None
 
 
 @dataclass

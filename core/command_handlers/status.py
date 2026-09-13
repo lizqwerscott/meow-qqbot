@@ -33,9 +33,12 @@ def _hindsight_status_line(health: dict) -> str:
     description="查看系统状态（管理员专用）",
 )
 class StatusCommand:
-    def __init__(self, agent_engine: AgentEngine, approval_manager=None):
+    def __init__(
+        self, agent_engine: AgentEngine, approval_manager=None, channel_info_provider=None
+    ):
         self.agent_engine = agent_engine
         self.approval_manager = approval_manager  # 2.4：审批白名单状态行
+        self.channel_info_provider = channel_info_provider
 
     @staticmethod
     def _plugin_count() -> int:
@@ -146,6 +149,20 @@ class StatusCommand:
                     f"- 总费用: **¥{cost.get('total_cost', 0):.4f}**",
                 ]
 
+            channel_info_lines = []
+            cache_status = getattr(self.channel_info_provider, "cache_status", None)
+            if callable(cache_status):
+                entries = cache_status()
+                stale_count = sum(1 for entry in entries if entry.get("stale"))
+                error_count = sum(
+                    1 for entry in entries if entry.get("last_error_reason")
+                )
+                channel_info_lines = [
+                    "",
+                    "**渠道信息缓存**",
+                    f"- 条目: `{len(entries)}`，stale: `{stale_count}`，错误: `{error_count}`",
+                ]
+
             status_text = [
                 "**系统状态**",
                 f"`{time.strftime('%Y-%m-%d %H:%M:%S')}`",
@@ -168,6 +185,7 @@ class StatusCommand:
                 *engagement_lines,
                 *history_lines,
                 *projection_lines,
+                *channel_info_lines,
                 "",
                 "**记忆系统**",
                 f"- Hindsight: {_hindsight_status_line(hindsight_health)}",

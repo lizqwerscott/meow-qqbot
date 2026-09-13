@@ -10,32 +10,25 @@ _log = logging.getLogger(__name__)
 def create_user_entries(deps: ToolDeps) -> list[ToolEntry]:
 
     async def _search_user(args: dict, ctx: ToolContext) -> ToolResult:
-        nm = deps.nickname_manager
-        if nm is None:
-            return ToolResult(
-                content=json.dumps({"error": "昵称管理器未就绪"}, ensure_ascii=False)
-            )
-
         query = (args.get("query") or "").strip().lower()
         if not query:
             return ToolResult(
                 content=json.dumps({"error": "搜索关键词为空"}, ensure_ascii=False)
             )
-
-        matches = []
-        for uid, aliases in nm.iter_users():
-            if uid == deps.bot_id:
-                continue
-            score = 0
-            if query == uid.lower():
-                score = 10
-            elif any(query == a.lower() for a in aliases):
-                score = 9
-            elif any(query in a.lower() for a in aliases):
-                score = 5
-            if score > 0:
-                matches.append((score, uid, aliases[-1] if aliases else uid))
-
+        identity_manager = getattr(deps, "identity_manager", None)
+        target = ctx.delivery_target
+        if identity_manager is None or target is None:
+            return ToolResult(
+                content=json.dumps({"error": "身份管理器未就绪"}, ensure_ascii=False)
+            )
+        if target.chat_type != "group":
+            return ToolResult(
+                content=json.dumps(
+                    {"error": "用户搜索仅限群聊"},
+                    ensure_ascii=False,
+                )
+            )
+        matches = identity_manager.search(target, query, limit=10)
         if not matches:
             return ToolResult(
                 content=json.dumps(
@@ -43,9 +36,16 @@ def create_user_entries(deps: ToolDeps) -> list[ToolEntry]:
                     ensure_ascii=False,
                 )
             )
-
-        matches.sort(key=lambda x: -x[0])
-        result = [{"user_id": uid, "nickname": name} for _, uid, name in matches[:10]]
+        result = [
+            {
+                "identity_ref": ref.identity_ref,
+                "person_ref": ref.person_ref or None,
+                "current_name": ref.chat_name or ref.current_name,
+                "historical_names": list(ref.historical_names),
+                "scope": ref.scope,
+            }
+            for ref in matches
+        ]
         return ToolResult(content=json.dumps(result, ensure_ascii=False))
 
     SEARCH_USER_PARAMS = {
@@ -63,7 +63,7 @@ def create_user_entries(deps: ToolDeps) -> list[ToolEntry]:
         ToolEntry(
             name="search_user",
             section="user",
-            description="根据昵称或昵称的一部分模糊搜索群里的用户。输入昵称的一部分（如'小'）即可找到所有匹配的人。返回用户的ID和昵称，获取到用户ID后你可以在回复中使用 <qqbot-at-user id=\"xxx\" /> 来@该用户。",
+            description="在当前群范围内根据当前或历史昵称模糊搜索用户。返回匿名 identity_ref、统一人物引用和名字；同名时返回全部候选，不返回真实平台 ID。",
             parameters=SEARCH_USER_PARAMS,
             handler=_search_user,
         ),

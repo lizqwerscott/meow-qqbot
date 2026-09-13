@@ -44,6 +44,7 @@ from core.managers.context_manager import ChatContextManager
 from core.managers.context_store import MemoryContextStore, SQLiteContextStore
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager
+from core.managers.identity_manager import IdentityManager
 from core.managers.nickname_manager import NicknameManager
 from core.managers.permission_manager import PermissionManager
 from core.managers.template_manager import TemplateManager
@@ -93,6 +94,8 @@ from core.webui.interaction import WebUiConversationGateway
 _log = logging.getLogger(__name__)
 _GATEWAY_FETCH_MAX_ATTEMPTS = 3
 _GATEWAY_FETCH_RETRY_DELAYS = (1, 2)
+_CHANNEL_HEALTH_MAX_ATTEMPTS = 3
+_CHANNEL_HEALTH_RETRY_DELAYS = (1, 2)
 
 
 def _is_retryable_gateway_error(exc: BaseException) -> bool:
@@ -141,10 +144,14 @@ class ServiceGraph:
         self.session_identity_registry = None
         self.delivery_target_catalog = None
         self.session_identity_resolver = None
+        self.identity_manager = None
         self.channel_registry = ChannelRegistry()
         self.webui_task = None
         self.webui_gateway = None
         self._services_started = False
+        self._shutdown_event = asyncio.Event()
+        self._shutdown_lock = asyncio.Lock()
+        self._shutdown_complete = False
         self.group_target_verifier = (
             group_target_verifier or ObservedGroupTargetVerifier()
         )
@@ -274,6 +281,14 @@ class ServiceGraph:
         self.delivery_target_catalog = DeliveryTargetCatalog(
             "data/delivery_targets.sqlite3"
         )
+        self.identity_manager = IdentityManager("data/identity.sqlite3")
+        migration = self.identity_manager.migrate_legacy_nicknames()
+        if migration["manual"] or migration["auto"]:
+            _log.info(
+                "旧昵称已迁移到身份库: manual=%d auto=%d",
+                migration["manual"],
+                migration["auto"],
+            )
         identity_config = getattr(self.cfg, "session_identity", {}) or {}
         self.session_identity_resolver = SessionIdentityResolver(
             self.session_identity_registry,
@@ -714,6 +729,7 @@ class ServiceGraph:
                 session_identity_registry=self.session_identity_registry,
                 session_identity_resolver=self.session_identity_resolver,
                 delivery_target_catalog=self.delivery_target_catalog,
+                identity_manager=self.identity_manager,
             ),
             bg=BgContext(
                 task_manager=self.task_manager,
@@ -833,6 +849,7 @@ class ServiceGraph:
         self.tool_deps = ToolDeps(
             emoji_manager=self.emoji_manager,
             nickname_manager=self.nickname_manager,
+            identity_manager=self.identity_manager,
             skill_managers=self.skill_managers,
             hindsight=self.hindsight_memory,
             learning_orchestrator=self.learning_orchestrator,
@@ -967,7 +984,18 @@ class ServiceGraph:
             media_service=self.media_service,
             channel_registry=getattr(self, "channel_registry", None),
             session_identity_resolver=self.session_identity_resolver,
+            identity_manager=self.identity_manager,
+            runtime_shutdown_callback=self._stop_after_runtime_channel_failure,
         )
+
+    async def _stop_after_runtime_channel_failure(self) -> None:
+        if self._shutdown_event.is_set():
+            return
+        _log.error("运行时渠道账号健康检查连续失败，停止服务")
+        await self.stop()
+
+    async def wait_until_stopped(self) -> None:
+        await self._shutdown_event.wait()
 
     async def _deliver_pending_task_recovery(self) -> None:
         if not self.task_manager or not self.background_task_runner:
@@ -1308,6 +1336,7 @@ class ServiceGraph:
             tts_service=self.tts_service,
             delivery_controller=self.agent_engine._get_delivery_controller(),
             approval_manager=self.approval_manager,
+            channel_info_provider=self.bot_engine.channel_info_provider,
             media_service=self.media_service,
             delivery_target_catalog=self.delivery_target_catalog,
         )
@@ -1345,6 +1374,8 @@ class ServiceGraph:
                 managers={
                     "emoji_manager": self.emoji_manager,
                     "nickname_manager": self.nickname_manager,
+                    "identity_manager": self.identity_manager,
+                    "channel_info_provider": self.bot_engine.channel_info_provider,
                     "context_manager": self.context_manager,
                     "conversation_timeline": self.agent_engine.timeline,
                     "conversation_event_log": self.agent_engine.event_log,
@@ -1406,6 +1437,7 @@ class ServiceGraph:
                 )
         await self.check_hindsight_health()
         await self.media_service.open()
+        await self._check_channel_info_health_with_retry()
 
         gateway_url = await self._get_gateway_url_with_retry()
         loop = asyncio.get_running_loop()
@@ -1427,6 +1459,32 @@ class ServiceGraph:
             self._start_task_cleanup()
 
         self._start_context_cleanup()
+
+    async def _check_channel_info_health_with_retry(self) -> None:
+        provider = getattr(self.bot_engine, "channel_info_provider", None)
+        check_health = getattr(provider, "check_health", None)
+        if not callable(check_health):
+            return
+        for attempt in range(1, _CHANNEL_HEALTH_MAX_ATTEMPTS + 1):
+            try:
+                actor = await check_health()
+                _log.info("QQ 账号健康检查通过: %s", actor.username or "当前机器人")
+                return
+            except Exception as exc:
+                if (
+                    not _is_retryable_gateway_error(exc)
+                    or attempt == _CHANNEL_HEALTH_MAX_ATTEMPTS
+                ):
+                    _log.error("QQ 账号健康检查失败，阻断启动: %s", type(exc).__name__)
+                    raise
+                delay = _CHANNEL_HEALTH_RETRY_DELAYS[attempt - 1]
+                _log.warning(
+                    "QQ 账号健康检查暂时失败，将在 %ss 后重试 attempt=%d/%d",
+                    delay,
+                    attempt,
+                    _CHANNEL_HEALTH_MAX_ATTEMPTS,
+                )
+                await asyncio.sleep(delay)
 
     async def _get_gateway_url_with_retry(self) -> str:
         """Fetch the QQ gateway URL, retrying only transient transport failures."""
@@ -1535,6 +1593,22 @@ class ServiceGraph:
             )
 
     async def stop(self):
+        if not hasattr(self, "_shutdown_lock"):
+            self._shutdown_lock = asyncio.Lock()
+        if not hasattr(self, "_shutdown_event"):
+            self._shutdown_event = asyncio.Event()
+        if not hasattr(self, "_shutdown_complete"):
+            self._shutdown_complete = False
+        async with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            self._shutdown_event.set()
+            try:
+                await self._stop_impl()
+            finally:
+                self._shutdown_complete = True
+
+    async def _stop_impl(self):
         """优雅关闭；单个步骤失败不阻断其他资源清理。"""
         process_registry = getattr(self, "process_registry", None)
         if process_registry:
@@ -1595,3 +1669,8 @@ class ServiceGraph:
             await self._safe_cleanup(
                 "session_identity_registry", session_identity_registry.close
             )
+
+        identity_manager = getattr(self, "identity_manager", None)
+        self.identity_manager = None
+        if identity_manager is not None:
+            await self._safe_cleanup("identity_manager", identity_manager.close)

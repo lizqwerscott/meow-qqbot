@@ -111,6 +111,28 @@
     {% endif %}
 </div>
 
+{% if stats.channel_info_cache %}
+<div class="card">
+    <h2>📡 渠道信息缓存</h2>
+    <div class="table-wrap">
+    <table>
+        <thead><tr><th>范围</th><th>目标指纹</th><th>状态</th><th>最近获取</th><th>错误分类</th></tr></thead>
+        <tbody>
+        {% for item in stats.channel_info_cache %}
+        <tr>
+            <td>{{ item.scope }}</td>
+            <td><code>{{ item.target_fingerprint }}</code></td>
+            <td>{% if item.stale %}<span class="badge warning">stale</span>{% else %}<span class="badge success">fresh</span>{% endif %}</td>
+            <td>{{ item.fetched_at|format_timestamp }}</td>
+            <td>{{ item.last_error_reason or "—" }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+{% endif %}
+
 <div class="card">
     <h2>🧩 媒体 Provider</h2>
     {% for capability, providers in stats.media_provider_status.items() %}

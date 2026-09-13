@@ -56,6 +56,9 @@ async def status_page(request: Request):
     stats["media_provider_status"] = (
         media_service.provider_status() if media_service else {}
     )
+    channel_info_provider = managers.get("channel_info_provider")
+    cache_status = getattr(channel_info_provider, "cache_status", None)
+    stats["channel_info_cache"] = cache_status() if callable(cache_status) else []
 
     return templates.TemplateResponse(
         request,

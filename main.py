@@ -60,7 +60,7 @@ async def main() -> None:
         return
 
     try:
-        await asyncio.Event().wait()
+        await services.wait_until_stopped()
     finally:
         await services.stop()
 

@@ -151,6 +151,7 @@ class PromptBuilder:
         self._has_sub_agents = ctx.sub.sub_agent_manager is not None
         self._perm = ctx.mgmt.permission_manager
         self._workspace_manager = ctx.mgmt.workspace_manager
+        self._identity_manager = getattr(ctx.mgmt, "identity_manager", None)
         self._archive_manager = ctx.mgmt.archive_manager
         self._system_events = ctx.mgmt.system_events
         self._tts_service = None
@@ -180,6 +181,7 @@ class PromptBuilder:
             perm=self._perm,
             admin_ids=self._admin_ids,
             nm=self._nm,
+            identity_manager=self._identity_manager,
             bot_id=self._bot_id,
             emoji_manager=self.emoji_manager,
         )
@@ -248,6 +250,8 @@ class PromptBuilder:
             )
         else:
             has_users = False
+        if is_group and self._identity_manager is not None:
+            has_users = True
 
         role = self._perm.get_user_role(sender_id) if self._perm else None
         tools_to_use: Optional[List[dict]] = (
@@ -464,10 +468,18 @@ class PromptBuilder:
             bounded_history_event_ids.update(model_context_snapshot.source_event_ids)
         if model_context_snapshot is not None:
             history = self._model_context_history(
-                model_context_snapshot, timeline_events, current_turn_id=turn_id or ""
+                model_context_snapshot,
+                timeline_events,
+                current_turn_id=turn_id or "",
+                identity_manager=self._identity_manager,
+                delivery_target=input_message.delivery_target,
             )
         else:
-            history = self._timeline_history(timeline_events)
+            history = self._timeline_history(
+                timeline_events,
+                identity_manager=self._identity_manager,
+                delivery_target=input_message.delivery_target,
+            )
         if protocol_snapshot:
             history.extend(event.to_wire() for event in protocol_snapshot)
 
@@ -490,6 +502,7 @@ class PromptBuilder:
             has_emojis=has_emojis,
             has_users=has_users,
             covered_event_ids=tuple(sorted(bounded_history_event_ids)),
+            recent_events=timeline_events,
         )
         if dynamic_text:
             messages.append(
@@ -723,8 +736,35 @@ class PromptBuilder:
         timeline_snapshot: Sequence["TimelineEvent"],
         *,
         current_turn_id: str = "",
+        identity_manager=None,
+        delivery_target=None,
     ) -> List[dict]:
-        history = model_context_snapshot.to_wire()
+        history = []
+        for event in model_context_snapshot.events:
+            message = event.to_wire()
+            if (
+                event.role == "user"
+                and identity_manager is not None
+                and delivery_target is not None
+            ):
+                ensure_ref = getattr(identity_manager, "ensure_legacy_ref", None)
+                identity_ref = (
+                    ensure_ref(delivery_target, event.sender_id)
+                    if callable(ensure_ref)
+                    else identity_manager.get_ref(delivery_target, event.sender_id)
+                )
+                name = identity_ref.identity_ref if identity_ref else "未知身份"
+                timestamp = time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(event.timestamp)
+                )
+                content_text = identity_manager.project_text(
+                    delivery_target, event.content
+                )
+                message = {
+                    "role": "user",
+                    "content": f"[{name} 在 {timestamp}]: {content_text}",
+                }
+            history.append(message)
         if model_context_snapshot.events:
             inherited_event_ids = model_context_snapshot.source_event_ids
             if current_turn_id:
@@ -743,12 +783,21 @@ class PromptBuilder:
                 )
         else:
             current_events = tuple(timeline_snapshot)
-        history.extend(cls._timeline_history(current_events))
+        history.extend(
+            cls._timeline_history(
+                current_events,
+                identity_manager=identity_manager,
+                delivery_target=delivery_target,
+            )
+        )
         return history
 
     @staticmethod
     def _timeline_history(
         timeline_snapshot: Sequence["TimelineEvent"],
+        *,
+        identity_manager=None,
+        delivery_target=None,
     ) -> List[dict]:
         """Build visible prompt history from a frozen timeline snapshot.
 
@@ -762,13 +811,32 @@ class PromptBuilder:
             if event.role not in {"user", "assistant"} or not event.content:
                 continue
             if event.role == "user":
-                name = event.sender_id or "未知"
+                identity_ref = None
+                if identity_manager is not None and delivery_target is not None:
+                    ensure_ref = getattr(identity_manager, "ensure_legacy_ref", None)
+                    identity_ref = (
+                        ensure_ref(delivery_target, event.sender_id)
+                        if callable(ensure_ref)
+                        else identity_manager.get_ref(delivery_target, event.sender_id)
+                    )
+                name = (
+                    identity_ref.identity_ref
+                    if identity_ref
+                    else (
+                        "未知身份"
+                        if identity_manager is not None
+                        else (event.sender_id or "未知")
+                    )
+                )
                 timestamp = time.strftime(
                     "%Y-%m-%d %H:%M:%S", time.localtime(event.timestamp)
                 )
-                content = (
-                    f"[{name} 在 {timestamp}]: {strip_content_prefix(event.content)}"
-                )
+                content_text = strip_content_prefix(event.content)
+                if identity_manager is not None and delivery_target is not None:
+                    content_text = identity_manager.project_text(
+                        delivery_target, content_text
+                    )
+                content = f"[{name} 在 {timestamp}]: {content_text}"
             else:
                 content = event.content
             history.append({"role": event.role, "content": content})

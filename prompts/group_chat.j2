@@ -25,8 +25,9 @@
 {% endif %}
 
 {% if has_users %}
-你可以使用 search_user 工具来搜索聊天中的其他用户，获取对方的 ID 后，在回复中使用 <qqbot-at-user id="用户ID" /> 格式来@该用户。
-例如：<qqbot-at-user id="abc123" /> 你好呀~
+你可以使用 search_user 工具来搜索聊天中的其他用户。工具返回的是匿名 identity_ref，
+需要 @ 某人时使用 <qqbot-at-user id="identity_ref" /> 格式，发送层会在当前群内安全转换为 QQ @。
+例如：<qqbot-at-user id="member_7f3a12ab" /> 你好呀~
 {% endif %}
 
 {% if memory_system_desc %}

@@ -6,6 +6,7 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
 
+from .channel_info import ChannelInfoProvider, ChannelInfoSnapshot
 from .identity import DeliveryTarget, DeliveryValidation, require_delivery_target
 
 
@@ -58,6 +59,14 @@ class ChannelAdapter(Protocol):
 
     async def validate_target(self, target: DeliveryTarget) -> DeliveryValidation: ...
 
+    async def get_info(
+        self,
+        target: DeliveryTarget | None = None,
+        *,
+        subject_id: str | None = None,
+        refresh: bool = False,
+    ) -> ChannelInfoSnapshot: ...
+
     def capabilities(self) -> ChannelCapabilities: ...
 
 
@@ -104,6 +113,7 @@ class QQAdapter:
         send_callback: AsyncCallback | None = None,
         approval_callback: AsyncCallback | None = None,
         validate_callback: AsyncCallback | None = None,
+        info_provider: ChannelInfoProvider | None = None,
         capabilities: ChannelCapabilities | None = None,
     ) -> None:
         self.account_id = account_id
@@ -112,6 +122,7 @@ class QQAdapter:
         self._send_callback = send_callback
         self._approval_callback = approval_callback
         self._validate_callback = validate_callback
+        self.info_provider = info_provider
         self._capabilities = capabilities or ChannelCapabilities(supports_media=True)
 
     async def parse_inbound(self, payload: object) -> InboundEnvelope:
@@ -176,3 +187,18 @@ class QQAdapter:
 
     def capabilities(self) -> ChannelCapabilities:
         return self._capabilities
+
+    async def get_info(
+        self,
+        target: DeliveryTarget | None = None,
+        *,
+        subject_id: str | None = None,
+        refresh: bool = False,
+    ) -> ChannelInfoSnapshot:
+        if self.info_provider is None:
+            return ChannelInfoSnapshot.unavailable("provider_unavailable")
+        return await self.info_provider.get_info(
+            target,
+            subject_id=subject_id,
+            refresh=refresh,
+        )

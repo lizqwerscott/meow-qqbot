@@ -9,6 +9,14 @@ from .adapters import (
     QQAdapter,
 )
 from .catalog import DeliveryTargetCatalog, KnownTarget, TargetFilters, TargetPrincipal
+from .channel_info import (
+    ChannelActorInfo,
+    ChannelChatInfo,
+    ChannelInfoProvider,
+    ChannelInfoSnapshot,
+    ChannelMembershipInfo,
+    QQChannelInfoProvider,
+)
 from .identity import (
     ChatType,
     ConversationRef,
@@ -26,7 +34,12 @@ from .resolver import SessionIdentityResolver
 
 __all__ = [
     "ChannelAdapter",
+    "ChannelActorInfo",
+    "ChannelChatInfo",
     "ChannelCapabilities",
+    "ChannelInfoProvider",
+    "ChannelInfoSnapshot",
+    "ChannelMembershipInfo",
     "ChannelRegistry",
     "ApprovalPrompt",
     "ChatType",
@@ -39,6 +52,7 @@ __all__ = [
     "TargetFilters",
     "TargetPrincipal",
     "QQAdapter",
+    "QQChannelInfoProvider",
     "SessionIdentityRegistry",
     "SessionIdentityResolver",
     "SessionKind",

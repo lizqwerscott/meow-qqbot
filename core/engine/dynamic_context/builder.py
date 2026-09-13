@@ -33,6 +33,7 @@ class DynamicContextBuilder:
         perm,
         admin_ids,
         nm,
+        identity_manager=None,
         bot_id: str,
         emoji_manager,
     ) -> None:
@@ -41,12 +42,13 @@ class DynamicContextBuilder:
             search_top_k=search_top_k,
             learners=learners,
             archive_manager=archive_manager,
+            identity_manager=identity_manager,
         )
         self._sys_evt = SystemEventBlockBuilder(system_events)
         self._skill = SkillBlockBuilder(skill_managers)
         self._time = TimeBlockBuilder()
         self._workspace = WorkspaceBlockBuilder(workspace_manager, perm, admin_ids)
-        self._social = SocialBlockBuilder(nm, bot_id)
+        self._social = SocialBlockBuilder(nm, bot_id, identity_manager)
         self._emoji = EmojiBlockBuilder(emoji_manager)
 
     @property
@@ -63,6 +65,7 @@ class DynamicContextBuilder:
         has_emojis: bool,
         has_users: bool,
         covered_event_ids=(),
+        recent_events=(),
     ) -> Optional[str]:
         parts: List[str] = []
 
@@ -117,6 +120,8 @@ class DynamicContextBuilder:
             is_group=is_group,
             has_users=has_users,
             max_users=30,
+            input_message=input_message,
+            recent_events=recent_events,
         )
         if txt:
             parts.append(txt)

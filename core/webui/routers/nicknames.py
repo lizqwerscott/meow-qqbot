@@ -76,6 +76,9 @@ async def nickname_add_manual(
     if nm:
         nm.nicknames = dict(manual)
         await nm.save_auto()
+    identity_manager = request.app.state.managers.get("identity_manager")
+    if identity_manager:
+        identity_manager.set_channel_alias(user_id, nickname)
 
     return _make_flash_redirect("/nicknames", "success", f"已添加/更新昵称: {nickname}")
 
@@ -89,6 +92,10 @@ async def nickname_delete_manual(request: Request, user_id: str):
     nm = request.app.state.managers.get("nickname_manager")
     if nm:
         nm.nicknames = dict(manual)
+
+    identity_manager = request.app.state.managers.get("identity_manager")
+    if identity_manager:
+        identity_manager.remove_channel_alias(user_id)
 
     return _make_flash_redirect("/nicknames", "success", "已删除")
 

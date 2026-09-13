@@ -84,7 +84,7 @@ class HindsightMemory:
         chat_tags: Optional[List[str]] = None,
     ) -> bool:
         """保留一条消息到记忆库，并返回是否成功提交。同一 session 共享 document_id 持续追加。
-        content 已由调用方（agent_engine）预格式化，格式为 [ID(别名)]: 消息正文。
+        content 已由调用方（agent_engine）预格式化，模型可见部分使用匿名 identity_ref。
         """
         if idempotency_key:
             async with self._idempotency_lock:

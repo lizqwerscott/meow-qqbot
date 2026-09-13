@@ -63,6 +63,11 @@ class InputMessage:
     replied_resources: List[ResourceMeta] = field(default_factory=list)
     session_mode: Literal["chat", "agent"] | None = None
     reasoning_effort: Optional[str] = None
+    channel_info: Any = None
+    identity_ref: str = ""
+    person_ref: str = ""
+    mentioned_identity_refs: Dict[str, str] = field(default_factory=dict)
+    replied_identity_ref: str = ""
 
     def __post_init__(self):
         if self.timestamp is None:

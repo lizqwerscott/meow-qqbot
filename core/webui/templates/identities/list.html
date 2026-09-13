@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}身份管理 - 猫猫管理{% endblock %}
+{% set nav_active = "identities" %}
+
+{% block content %}
+<h2 style="margin-bottom:20px">🪪 身份与统一人物</h2>
+
+<div class="card">
+    <h2>已知群聊</h2>
+    {% if chats %}
+    <div class="table-wrap"><table>
+        <thead><tr><th>群指纹</th><th>渠道</th><th>观察成员</th><th>消息数</th><th>最近观察</th></tr></thead>
+        <tbody>{% for chat in chats %}
+            <tr><td><code>{{ chat.chat_fingerprint }}</code></td><td>{{ chat.channel }}/{{ chat.account_id }}</td><td>{{ chat.member_count }}</td><td>{{ chat.message_count }}</td><td>{{ chat.last_seen|format_timestamp }}</td></tr>
+        {% endfor %}</tbody>
+    </table></div>
+    {% else %}<p style="color:var(--text-secondary)">暂无已知群聊</p>{% endif %}
+</div>
+
+<div class="card">
+    <h2>创建统一人物</h2>
+    <form method="post" action="/identities/person" style="display:flex;gap:8px">
+        {{ csrf_input(request) }}
+        <input type="text" name="display_name" placeholder="统一人物名称" required style="flex:1">
+        <button type="submit" class="btn btn-primary">创建</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>已创建人物</h2>
+    {% if persons %}
+    <div class="table-wrap"><table>
+        <thead><tr><th>人物引用</th><th>名称</th><th>创建时间</th></tr></thead>
+        <tbody>{% for person in persons %}
+            <tr><td><code>{{ person.person_ref }}</code></td><td>{{ person.display_name }}</td><td>{{ person.created_at|format_timestamp }}</td></tr>
+        {% endfor %}</tbody>
+    </table></div>
+    {% else %}<p style="color:var(--text-secondary)">暂无统一人物</p>{% endif %}
+</div>
+
+<div class="card">
+    <h2>已观察的群聊身份</h2>
+    {% if members %}
+    <div class="table-wrap"><table>
+        <thead><tr><th>身份引用</th><th>群指纹</th><th>当前称呼</th><th>历史名字</th><th>活跃度</th><th>统一人物</th></tr></thead>
+        <tbody>{% for member in members %}
+            <tr>
+                <td><code>{{ member.identity_ref }}</code></td>
+                <td><code>{{ member.chat_fingerprint }}</code></td>
+                <td>{{ member.current_chat_name or member.current_name }}</td>
+                <td>{{ member.historical_names|join('、') }}</td>
+                <td>消息 {{ member.message_count }} / @ {{ member.mention_count }} / 引用 {{ member.reply_count }}</td>
+                <td>
+                    {% if member.person_ref %}<code>{{ member.person_ref }}</code>{% else %}未关联{% endif %}
+                    <form method="post" action="/identities/link" style="display:flex;gap:4px;margin-top:4px">
+                        {{ csrf_input(request) }}
+                        <input type="hidden" name="identity_ref" value="{{ member.identity_ref }}">
+                        <input type="text" name="person_ref" placeholder="person_xxxx" required style="width:120px">
+                        <button type="submit" class="btn btn-sm btn-primary">关联</button>
+                    </form>
+                    <form method="post" action="/identities/alias" style="display:flex;gap:4px;margin-top:4px">
+                        {{ csrf_input(request) }}
+                        <input type="hidden" name="identity_ref" value="{{ member.identity_ref }}">
+                        <input type="hidden" name="chat_id" value="{{ member.chat_id }}">
+                        <input type="text" name="alias" placeholder="群内称呼" required style="width:120px">
+                        <button type="submit" class="btn btn-sm">改称呼</button>
+                    </form>
+                </td>
+            </tr>
+        {% endfor %}</tbody>
+    </table></div>
+    {% else %}<p style="color:var(--text-secondary)">暂无已观察身份</p>{% endif %}
+</div>
+
+<div class="card">
+    <h2>待确认关联</h2>
+    <form method="post" action="/identities/suggestions/generate" style="margin-bottom:12px">
+        {{ csrf_input(request) }}
+        <button type="submit" class="btn btn-primary">按名称生成候选</button>
+    </form>
+    {% if suggestions %}
+    <div class="table-wrap"><table>
+        <thead><tr><th>身份</th><th>候选身份</th><th>原因</th><th>操作</th></tr></thead>
+        <tbody>{% for suggestion in suggestions %}
+            <tr>
+                <td><code>{{ suggestion.identity_ref }}</code></td>
+                <td><code>{{ suggestion.candidate_identity_ref }}</code></td>
+                <td>{{ suggestion.reason }}</td>
+                <td>
+                    <form method="post" action="/identities/suggestions/{{ suggestion.suggestion_id }}/resolve" style="display:flex;gap:4px">
+                        {{ csrf_input(request) }}
+                        <button type="submit" name="decision" value="accept" class="btn btn-sm btn-primary">确认</button>
+                        <button type="submit" name="decision" value="reject" class="btn btn-sm">拒绝</button>
+                    </form>
+                </td>
+            </tr>
+        {% endfor %}</tbody>
+    </table></div>
+    {% else %}<p style="color:var(--text-secondary)">暂无待确认建议</p>{% endif %}
+</div>
+{% endblock %}

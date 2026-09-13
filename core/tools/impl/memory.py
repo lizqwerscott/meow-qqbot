@@ -8,6 +8,26 @@ from core.tools.deps import ToolDeps
 _log = logging.getLogger(__name__)
 
 
+def _project_memory_text(deps: ToolDeps, ctx: ToolContext, text: str) -> str:
+    identity_manager = getattr(deps, "identity_manager", None)
+    target = getattr(ctx, "delivery_target", None)
+    if identity_manager is None or target is None:
+        return str(text)
+    if ctx.sender_id:
+        identity_manager.ensure_legacy_ref(target, ctx.sender_id)
+    return identity_manager.project_text(target, str(text))
+
+
+def _current_identity_ref(deps: ToolDeps, ctx: ToolContext) -> str:
+    identity_manager = getattr(deps, "identity_manager", None)
+    target = getattr(ctx, "delivery_target", None)
+    if identity_manager is not None and target is not None and ctx.sender_id:
+        ref = identity_manager.ensure_legacy_ref(target, ctx.sender_id)
+        if ref is not None:
+            return ref.identity_ref
+    return "当前用户"
+
+
 def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
 
     async def _search_memory(args: dict, ctx: ToolContext) -> ToolResult:
@@ -65,11 +85,13 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
                 pd = p.get("profile_data", {})
                 if isinstance(pd, dict):
                     for k, v in pd.items():
-                        lines.append(f"- [{k}]: {str(v)[:200]}")
+                        value = _project_memory_text(deps, ctx, str(v))
+                        lines.append(f"- [{k}]: {value[:200]}")
         if episodes:
             for e in episodes[:5]:
                 content = e.get("summary", "") or e.get("episode", "")
                 if content:
+                    content = _project_memory_text(deps, ctx, content)
                     lines.append(f"- {content[:200]}")
         if len(lines) == 1:
             lines.append("（未找到相关记忆）")
@@ -100,7 +122,9 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
                 profile_dict = json.loads(profile_data_str)
                 if isinstance(profile_dict, dict) and profile_dict:
                     facts = "；".join(f"{k}是{v}" for k, v in profile_dict.items())
-                    profile_msg = f"[这是关于我（{ctx.sender_id}）的自我介绍，请记住这些信息] {facts}"
+                    facts = _project_memory_text(deps, ctx, facts)
+                    sender_ref = _current_identity_ref(deps, ctx)
+                    profile_msg = f"[这是关于我（{sender_ref}）的自我介绍，请记住这些信息] {facts}"
                     await hindsight.add_message(
                         session_id=ctx.chat_id,
                         sender_id=ctx.sender_id,
@@ -115,6 +139,7 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
                 )
 
         if summary:
+            summary = _project_memory_text(deps, ctx, summary)
             await hindsight.add_message(
                 session_id=ctx.chat_id,
                 sender_id=ctx.sender_id,
@@ -230,13 +255,15 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
                         pd = p.get("profile_data", {})
                         if isinstance(pd, dict):
                             for k, v in pd.items():
-                                lines.append(f"- {k}: {v}")
+                                value = _project_memory_text(deps, ctx, str(v))
+                                lines.append(f"- {k}: {value}")
 
             if episodes:
                 lines.append(f"【{role_labels.get(role, '')}】")
                 for e in episodes[:5]:
                     content = e.get("summary", "") or e.get("episode", "")
                     if content:
+                        content = _project_memory_text(deps, ctx, content)
                         dedup_key = content[:100]
                         if dedup_key not in seen:
                             seen.add(dedup_key)
@@ -279,6 +306,7 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
         for episode in result.get("episodes", [])[:5]:
             content = episode.get("summary", "") or episode.get("episode", "")
             if content:
+                content = _project_memory_text(deps, ctx, content)
                 lines.append(f"- {content[:200]}")
         if len(lines) == 1:
             lines.append("（未找到相关共同记忆）")
@@ -302,6 +330,29 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
                 )
 
     def _resolve_person(raw: str, ctx: ToolContext) -> Tuple[Optional[str], str]:
+        identity_manager = getattr(deps, "identity_manager", None)
+        target = getattr(ctx, "delivery_target", None)
+        raw_lower = raw.strip().casefold()
+        if identity_manager is not None and target is not None:
+            current = identity_manager.get_ref(target, ctx.sender_id)
+            if raw_lower in {"我", "自己", "myself", ctx.sender_id.casefold()}:
+                if current is not None:
+                    return ctx.sender_id, current.identity_ref
+                return ctx.sender_id, "当前用户"
+            if not raw_lower:
+                return None, ""
+            matches = identity_manager.search(target, raw, limit=10)
+            if len(matches) == 1:
+                ref = matches[0]
+                return (
+                    identity_manager.actor_for(target, ref.identity_ref),
+                    ref.identity_ref,
+                )
+            if len(matches) > 1:
+                names = "、".join(ref.identity_ref for ref in matches)
+                return None, f"找到多个匹配「{raw}」的匿名身份: {names}"
+            return None, ""
+
         nm = deps.nickname_manager
         if nm is None:
             return None, ""

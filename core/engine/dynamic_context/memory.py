@@ -40,11 +40,13 @@ class MemoryBlockBuilder:
         search_top_k: int,
         learners,
         archive_manager,
+        identity_manager=None,
     ) -> None:
         self.hindsight = hindsight
         self._search_top_k = search_top_k
         self.learners = learners
         self._archive_manager = archive_manager
+        self._identity_manager = identity_manager
 
     async def build(
         self,
@@ -69,7 +71,7 @@ class MemoryBlockBuilder:
                     message_text=input_message.content,
                 )
                 if learning_ctx:
-                    parts.append(learning_ctx)
+                    parts.append(self._project_for_prompt(input_message, learning_ctx))
             except Exception as e:
                 _log.warning("学习上下文注入失败 [%s..]: %s", chat_id[:12], e)
 
@@ -90,6 +92,7 @@ class MemoryBlockBuilder:
                 _log.warning("归档摘要注入失败 [%s..]: %s", chat_id[:12], e)
                 summary_text = None
             if summary_text:
+                summary_text = self._project_for_prompt(input_message, summary_text)
                 original_len = len(summary_text)
                 if max_archive_chars > 0 and original_len > max_archive_chars:
                     summary_text = summary_text[:max_archive_chars] + "\n...(截断)"
@@ -145,7 +148,8 @@ class MemoryBlockBuilder:
                         for k, v in pd.items():
                             if isinstance(v, str) and _is_dirty(v):
                                 continue
-                            parts.append(f"- [{k}]: {str(v)[:150]}")
+                            value = self._project_for_prompt(input_message, str(v))
+                            parts.append(f"- [{k}]: {value[:150]}")
 
             if episodes:
                 count = 0
@@ -157,6 +161,7 @@ class MemoryBlockBuilder:
                         continue
                     if _is_dirty(summary):
                         continue
+                    summary = self._project_for_prompt(input_message, summary)
                     parts.append(f"- {summary[:150]}")
                     count += 1
 
@@ -173,3 +178,13 @@ class MemoryBlockBuilder:
         except Exception as e:
             _log.warning(f"自动记忆注入失败: {e!r}")
             return ""
+
+    def _project_for_prompt(self, input_message: InputMessage, text: str) -> str:
+        target = getattr(input_message, "delivery_target", None)
+        if self._identity_manager is None or target is None:
+            return text
+        sender_id = str(getattr(input_message, "sender_id", "") or "")
+        ensure_ref = getattr(self._identity_manager, "ensure_legacy_ref", None)
+        if sender_id and callable(ensure_ref):
+            ensure_ref(target, sender_id)
+        return self._identity_manager.project_text(target, text)

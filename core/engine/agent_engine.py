@@ -218,6 +218,7 @@ class AgentEngine:
         self.model_registry = ctx.ai.model_registry
 
         self._nm = ctx.prompt.nickname_manager
+        self._identity_manager = getattr(ctx.mgmt, "identity_manager", None)
         self.emoji_manager = ctx.prompt.emoji_manager
         self.media_uploader = None
         self.multimodal_service = ctx.ai.multimodal_service
@@ -937,6 +938,14 @@ class AgentEngine:
         history = await get_history(chat_id)
         if not history:
             return 0
+        identity_manager = getattr(self, "_identity_manager", None)
+        get_chat_type = getattr(self.context_manager, "get_chat_type", None)
+        is_group = get_chat_type(chat_id) if callable(get_chat_type) else None
+        if identity_manager is not None and is_group is not None:
+            target = self.resolve_delivery_target(chat_id, is_group=bool(is_group))
+            observe_history = getattr(identity_manager, "observe_legacy_history", None)
+            if target is not None and callable(observe_history):
+                observe_history(target, history)
         event_log = self._get_event_log()
         repair = getattr(event_log, "repair_from_legacy_history", None)
         if repair is None:
@@ -1954,12 +1963,22 @@ class AgentEngine:
         if media_refs:
             content += "\n[媒体引用: " + ", ".join(media_refs) + "]"
         if input_message.replied_content:
+            reply_author = self._anonymous_actor_ref(
+                input_message,
+                input_message.replied_author_id,
+                fallback=input_message.replied_author,
+                known_ref=input_message.replied_identity_ref,
+            )
             prefix = (
-                f"[正在回复 {input_message.replied_author}: {input_message.replied_content}]"
-                if input_message.replied_author
+                f"[正在回复 {reply_author}: {input_message.replied_content}]"
+                if reply_author
                 else f"[正在回复: {input_message.replied_content}]"
             )
             content = f"{prefix}\n{content}" if content else prefix
+        identity_manager = getattr(self, "_identity_manager", None)
+        target = getattr(input_message, "delivery_target", None)
+        if identity_manager is not None and target is not None:
+            content = identity_manager.project_text(target, content)
         return PendingInbound(
             input_message,
             content,
@@ -2018,7 +2037,12 @@ class AgentEngine:
                         payload,
                         effect_types=effect_types,
                     )
-                nickname = get_user_nickname(message.sender_id) or message.sender_id
+                nickname = self._anonymous_actor_ref(
+                    message,
+                    message.sender_id,
+                    fallback=get_user_nickname(message.sender_id),
+                    known_ref=message.identity_ref,
+                )
                 await self.context_manager.record_chat_type(chat_id, message.is_group)
                 committed = (
                     await self.context_manager.add_user_message_async(
@@ -2106,7 +2130,12 @@ class AgentEngine:
             finally:
                 if has_outbox_effects:
                     self._admission_in_progress.discard(admission_key)
-        nickname = get_user_nickname(message.sender_id) or message.sender_id
+        nickname = self._anonymous_actor_ref(
+            message,
+            message.sender_id,
+            fallback=get_user_nickname(message.sender_id),
+            known_ref=message.identity_ref,
+        )
         timestamp = time.strftime(
             "%Y-%m-%d %H:%M:%S", time.localtime(message.timestamp)
         )
@@ -2117,6 +2146,23 @@ class AgentEngine:
                 "content": f"[{nickname} 在 {timestamp}]: {pending.prepared_content}",
             },
         )
+
+    def _anonymous_actor_ref(
+        self,
+        message: InputMessage,
+        actor_id: str,
+        *,
+        fallback: str = "",
+        known_ref: str = "",
+    ) -> str:
+        if known_ref:
+            return known_ref
+        identity_manager = getattr(self, "_identity_manager", None)
+        target = getattr(message, "delivery_target", None)
+        if identity_manager is not None and target is not None:
+            ref = identity_manager.ensure_legacy_ref(target, actor_id)
+            return ref.identity_ref if ref else "未知身份"
+        return fallback or actor_id or "未知"
 
     async def _rollback_admission(self, pending: PendingInbound) -> None:
         chat_id = self._session_key_for_message(pending.message)
@@ -2132,11 +2178,16 @@ class AgentEngine:
 
     def _build_side_effect_payload(self, pending: PendingInbound) -> dict:
         message = pending.message
+        target = getattr(message, "delivery_target", None)
         return {
             "chat_id": self._session_key_for_message(message),
             "message_id": message.id,
             "content": pending.prepared_content,
             "sender_id": message.sender_id,
+            "identity_ref": message.identity_ref,
+            "mentioned_identity_refs": dict(message.mentioned_identity_refs),
+            "replied_identity_ref": message.replied_identity_ref,
+            "delivery_target": list(target.catalog_key) if target else None,
             "is_group": message.is_group,
             "mentioned_ids": list(message.mentioned_ids),
             "timestamp": message.timestamp,
@@ -2337,6 +2388,7 @@ class AgentEngine:
             ResourceMeta(**resource) for resource in payload.get("resources", [])
         ]
         document = None
+        target = None
         resolver = getattr(self, "session_identity_resolver", None)
         if resolver is not None and payload.get("chat_id"):
             try:
@@ -2347,12 +2399,44 @@ class AgentEngine:
             except (TypeError, ValueError):
                 ref = None
             if ref is not None and ref.hindsight_document_id:
+                target = ref.target
                 aliases = resolver.recall_aliases(ref)
                 document = HindsightDocumentRef(
                     document_id=ref.hindsight_document_id,
                     canonical_chat_tag=aliases[0],
                     legacy_chat_tags=aliases[1:],
                 )
+        if target is None:
+            target_data = payload.get("delivery_target")
+            if isinstance(target_data, (list, tuple)) and len(target_data) == 4:
+                try:
+                    target = DeliveryTarget(
+                        channel=target_data[0],
+                        account_id=target_data[1],
+                        chat_type=target_data[2],
+                        target_id=target_data[3],
+                    )
+                except (TypeError, ValueError):
+                    target = None
+        identity_ref = str(payload.get("identity_ref") or "")
+        mentioned_identity_refs = {
+            str(actor_id): str(identity)
+            for actor_id, identity in (
+                payload.get("mentioned_identity_refs") or {}
+            ).items()
+            if actor_id and identity
+        }
+        identity_manager = getattr(self, "_identity_manager", None)
+        if identity_manager is not None and target is not None:
+            if not identity_ref:
+                ref = identity_manager.ensure_legacy_ref(target, payload["sender_id"])
+                identity_ref = ref.identity_ref if ref else ""
+            for actor_id in payload.get("mentioned_ids", []):
+                if actor_id in mentioned_identity_refs:
+                    continue
+                ref = identity_manager.ensure_legacy_ref(target, actor_id)
+                if ref:
+                    mentioned_identity_refs[actor_id] = ref.identity_ref
         return await self.hindsight.add_message(
             session_id=payload["chat_id"],
             content=self._format_hindsight_content(
@@ -2360,6 +2444,8 @@ class AgentEngine:
                 payload["sender_id"],
                 payload.get("mentioned_ids", []),
                 nm=getattr(self, "_nm", None),
+                identity_ref=identity_ref,
+                mentioned_identity_refs=mentioned_identity_refs,
             ),
             sender_id=payload["sender_id"],
             context=self.hindsight.msg_type_to_context(
@@ -2455,17 +2541,33 @@ class AgentEngine:
 
     @staticmethod
     def _format_hindsight_content(
-        content: str, sender_id: str, mentioned_ids: list, nm=None
+        content: str,
+        sender_id: str,
+        mentioned_ids: list,
+        nm=None,
+        *,
+        identity_ref: str = "",
+        mentioned_identity_refs: dict[str, str] | None = None,
     ) -> str:
-        """将 ID 格式的消息格式化为 Hindsight 的 [ID(别名)] 格式。"""
-        aliases = nm.get_aliases(sender_id) if nm else []
-        alias_str = "，".join(aliases) if aliases else sender_id
-        prefix = f"[{sender_id}({alias_str})]: "
+        """将消息格式化为 Hindsight 的匿名身份格式。"""
+        mentioned_identity_refs = mentioned_identity_refs or {}
+        if identity_ref:
+            prefix = f"[{identity_ref}]: "
+        else:
+            aliases = nm.get_aliases(sender_id) if nm else []
+            alias_str = "，".join(aliases) if aliases else "未知身份"
+            prefix = f"[{alias_str}]: "
 
         for uid in mentioned_ids:
-            u_aliases = nm.get_aliases(uid) if nm else []
-            u_name = u_aliases[-1] if u_aliases else uid
-            content = content.replace(f"@{uid}", f"@{uid}({u_name})")
+            target_ref = mentioned_identity_refs.get(str(uid))
+            if target_ref:
+                content = content.replace(f"@{uid}", f"@{target_ref}")
+            elif identity_ref:
+                content = content.replace(f"@{uid}", "@未知身份")
+            else:
+                u_aliases = nm.get_aliases(uid) if nm else []
+                u_name = u_aliases[-1] if u_aliases else "未知身份"
+                content = content.replace(f"@{uid}", f"@{u_name}")
 
         return prefix + content
 

@@ -8,7 +8,9 @@ from core.engine.model_context_transcript import (
     ModelContextSnapshot,
 )
 from core.engine.prompt_builder import PromptBuilder
+from core.managers.identity_manager import IdentityManager
 from core.message import InputMessage
+from core.session_identity import DeliveryTarget
 
 
 @pytest.mark.asyncio
@@ -202,3 +204,69 @@ def test_timeline_history_removes_legacy_nested_display_prefixes():
     assert PromptBuilder._timeline_history(snapshot) == [
         {"role": "user", "content": "[用户 在 1970-01-01 08:00:01]: 原始内容"}
     ]
+
+
+def test_timeline_history_backfills_legacy_sender_without_exposing_platform_id(
+    tmp_path,
+):
+    manager = IdentityManager(tmp_path / "identity.sqlite3")
+    target = DeliveryTarget("qq", "default", "group", "g1")
+    snapshot = (
+        TimelineEvent(
+            chat_id="g1",
+            seq=1,
+            event_id="user:m1",
+            role="user",
+            content="@actor-1 你好",
+            message_id="m1",
+            sender_id="actor-1",
+            timestamp=1_700_000_000,
+        ),
+    )
+
+    projected = PromptBuilder._timeline_history(
+        snapshot,
+        identity_manager=manager,
+        delivery_target=target,
+    )
+
+    identity_ref = manager.get_ref(target, "actor-1").identity_ref
+    assert projected == [
+        {
+            "role": "user",
+            "content": f"[{identity_ref} 在 2023-11-15 06:13:20]: @{identity_ref} 你好",
+        }
+    ]
+    assert "actor-1" not in projected[0]["content"]
+
+
+def test_model_context_history_projects_legacy_identity_content(tmp_path):
+    manager = IdentityManager(tmp_path / "identity.sqlite3")
+    target = DeliveryTarget("qq", "default", "group", "g1")
+    ref = manager.observe(target, "actor-1", "小明")
+    snapshot = ModelContextSnapshot(
+        scope=ModelContextScope(chat_id="g1", principal_id="actor-1"),
+        events=(
+            ModelContextEvent(
+                scope=ModelContextScope(chat_id="g1", principal_id="actor-1"),
+                seq=1,
+                event_id="model:old",
+                role="user",
+                content="旧消息",
+                sender_id="actor-1",
+                timestamp=1_767_225_600,
+            ),
+        ),
+    )
+
+    history = PromptBuilder._model_context_history(
+        snapshot,
+        (),
+        identity_manager=manager,
+        delivery_target=target,
+    )
+
+    assert history[0]["content"] == (
+        f"[{ref.identity_ref} 在 2026-01-01 08:00:00]: 旧消息"
+    )
+    assert "actor-1" not in history[0]["content"]

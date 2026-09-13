@@ -15,6 +15,7 @@ from core.managers.context_store import (
 )
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager, is_custom_emoji
+from core.managers.identity_manager import ChannelUserRef, IdentityManager
 from core.managers.nickname_manager import NicknameManager
 from core.managers.session_manager import SessionTaskManager
 from core.managers.template_manager import TemplateManager
@@ -33,6 +34,8 @@ __all__ = [
     "EmojiManager",
     "is_custom_emoji",
     "NicknameManager",
+    "ChannelUserRef",
+    "IdentityManager",
     "SessionTaskManager",
     "TemplateManager",
 ]

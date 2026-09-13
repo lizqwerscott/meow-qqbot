@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
+import inspect
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional
@@ -43,6 +45,7 @@ from core.session_identity import (
     DeliveryTarget,
     DeliveryValidation,
     QQAdapter,
+    QQChannelInfoProvider,
 )
 
 _log = logging.getLogger(__name__)
@@ -137,6 +140,9 @@ class BotEngine:
         media_service=None,
         channel_registry: Optional[ChannelRegistry] = None,
         session_identity_resolver=None,
+        identity_manager=None,
+        channel_info_db_path: str = "data/channel_info.sqlite3",
+        runtime_shutdown_callback=None,
     ):
         self._app_id = app_id
         self._client_secret = client_secret
@@ -160,14 +166,28 @@ class BotEngine:
         self.media_service = media_service
         self.channel_registry = channel_registry or ChannelRegistry()
         self.session_identity_resolver = session_identity_resolver
+        self.identity_manager = identity_manager
+        self._runtime_shutdown_callback = runtime_shutdown_callback
+        self._consecutive_account_info_failures = 0
+        self._runtime_shutdown_started = False
+        self.channel_info_provider = QQChannelInfoProvider(
+            self.api,
+            account_id="default",
+            db_path=channel_info_db_path,
+        )
         if not self.channel_registry.list_accounts("qq"):
             self.channel_registry.register(
                 QQAdapter(
                     account_id="default",
                     send_callback=self._send_target,
                     approval_callback=self._send_approval,
+                    info_provider=self.channel_info_provider,
                 )
             )
+        else:
+            registered = self.channel_registry.get("qq", "default")
+            if isinstance(registered, QQAdapter) and registered.info_provider is None:
+                registered.info_provider = self.channel_info_provider
         self.delivery_router = ChannelDeliveryRouter(self.channel_registry)
         self.parser = MessageParser(MessageParserDeps(emoji_manager=emoji_manager))
         self.command_manager: CommandManager = CommandManager(
@@ -400,6 +420,11 @@ class BotEngine:
         await cleanup("AgentEngine 停止", self.agent_engine.stop)
         if self.ws:
             await cleanup("WebSocket 停止", self.ws.async_stop)
+        provider_close = getattr(
+            getattr(self, "channel_info_provider", None), "close", None
+        )
+        if callable(provider_close):
+            await cleanup("渠道信息缓存关闭", lambda: asyncio.to_thread(provider_close))
         await cleanup("HTTP client 关闭", self._http_client.aclose)
 
     # ── 事件处理 ──
@@ -413,12 +438,55 @@ class BotEngine:
             f"[{parsed.chat_scope}][({event_type})] {parsed.sender_id}: {parsed.content}"
         )
 
-        # 采集昵称（副作用）
-        await self.nickname_manager.collect(parsed.author_id, parsed.author_username)
-        for uid, name in parsed.mention_entries:
-            await self.nickname_manager.collect(uid, name)
-        for uid, name in parsed.reply_author_entries:
-            await self.nickname_manager.collect(uid, name)
+        if self.identity_manager is None:
+            await self.nickname_manager.collect(parsed.author_id, parsed.author_username)
+            for uid, name in parsed.mention_entries:
+                await self.nickname_manager.collect(uid, name)
+            for uid, name in parsed.reply_author_entries:
+                await self.nickname_manager.collect(uid, name)
+
+        target = DeliveryTarget(
+            channel="qq",
+            account_id="default",
+            chat_type="group" if parsed.chat_scope == "group" else "direct",
+            target_id=parsed.chat_id,
+        )
+        identity_ref = None
+        mentioned_identity_refs = {}
+        replied_identity_ref = ""
+        if self.identity_manager is not None:
+            try:
+                actor_id = parsed.author_id or parsed.sender_id
+                if actor_id:
+                    identity_ref = self.identity_manager.observe(
+                        target, actor_id, parsed.author_username
+                    )
+                for user_id, username in parsed.mention_entries:
+                    observed = self.identity_manager.observe(
+                        target, user_id, username, mentioned=True
+                    )
+                    mentioned_identity_refs[user_id] = observed.identity_ref
+                for user_id, username in parsed.reply_author_entries:
+                    if user_id:
+                        observed = self.identity_manager.observe(
+                            target, user_id, username, replied=True
+                        )
+                        if user_id == parsed.replied_author_id:
+                            replied_identity_ref = observed.identity_ref
+            except Exception as exc:
+                _log.warning("身份观察失败 [%s..]: %s", parsed.chat_id[:12], type(exc).__name__)
+
+        adapter = self.channel_registry.for_target(target)
+        get_info = getattr(adapter, "get_info", None)
+        try:
+            channel_info = (
+                await get_info(target) if callable(get_info) else None
+            )
+        except Exception as exc:
+            _log.warning("渠道信息读取失败 [%s..]: %s", parsed.chat_id[:12], type(exc).__name__)
+            channel_info = None
+
+        self._record_account_info_health(channel_info)
 
         input_message = InputMessage(
             id=parsed.id,
@@ -426,12 +494,7 @@ class BotEngine:
             chat_id=parsed.chat_id,
             content=parsed.content,
             is_group=(parsed.chat_scope == "group"),
-            delivery_target=DeliveryTarget(
-                channel="qq",
-                account_id="default",
-                chat_type="group" if parsed.chat_scope == "group" else "direct",
-                target_id=parsed.chat_id,
-            ),
+            delivery_target=target,
             is_at_mention=parsed.is_at_mention,
             bot_id=self._bot_id,
             mentioned_ids=parsed.mentioned_ids,
@@ -443,6 +506,11 @@ class BotEngine:
             msg_type=parsed.msg_type,
             resources=parsed.resources,
             replied_resources=parsed.replied_resources,
+            channel_info=channel_info,
+            identity_ref=identity_ref.identity_ref if identity_ref else "",
+            person_ref=identity_ref.person_ref if identity_ref else "",
+            mentioned_identity_refs=mentioned_identity_refs,
+            replied_identity_ref=replied_identity_ref,
         )
 
         resolver = getattr(self.agent_engine, "resolve_message_identity", None)
@@ -459,6 +527,24 @@ class BotEngine:
             reply_callback=self._send_reply,
             get_user_nickname=self.nickname_manager.get,
         )
+
+    def _record_account_info_health(self, snapshot) -> None:
+        if snapshot is not None and getattr(snapshot, "self_info", None) is not None:
+            self._consecutive_account_info_failures = 0
+            return
+        if snapshot is None or getattr(snapshot, "self_info", None) is None:
+            self._consecutive_account_info_failures += 1
+        if self._consecutive_account_info_failures < 3:
+            return
+        if self._runtime_shutdown_started:
+            return
+        self._runtime_shutdown_started = True
+        _log.error("QQ 账号信息连续失败 3 次，准备停止服务")
+        callback = self._runtime_shutdown_callback
+        if callback is not None:
+            result = callback()
+            if inspect.isawaitable(result):
+                asyncio.create_task(result)
 
     # ── 交互事件（按钮点击） ──
 
@@ -524,6 +610,7 @@ class BotEngine:
     ) -> Dict[str, Any]:
         if not isinstance(target, DeliveryTarget):
             raise TypeError("BotEngine._send requires a DeliveryTarget")
+        content = self._project_outbound_mentions(target, content)
         chat_id = target.target_id
         is_group = target.chat_type == "group"
         chat_type = "group" if is_group else "c2c"
@@ -681,6 +768,32 @@ class BotEngine:
             if i < len(chunks) - 1:
                 await asyncio.sleep(0.3)
         return last_result
+
+    def _project_outbound_mentions(self, target: DeliveryTarget, content: str) -> str:
+        manager = getattr(self, "identity_manager", None)
+        if manager is None or target.chat_type != "group":
+            return content
+
+        pattern = re.compile(r'<qqbot-at-user\s+id=["\']([^"\']+)["\']\s*/?>')
+
+        def replace_tag(match: re.Match[str]) -> str:
+            identity_ref = match.group(1).strip()
+            actor_id = manager.resolve_identity(target, identity_ref)
+            if not actor_id:
+                _log.warning(
+                    "identity_resolution_failed target=%s identity_ref=%s",
+                    target.target_id[:12],
+                    identity_ref,
+                )
+                return ""
+            return f"<@{actor_id}>"
+
+        projected = pattern.sub(replace_tag, content)
+        for identity_ref in set(re.findall(r"member_[0-9a-f]{8}", projected)):
+            actor_id = manager.resolve_identity(target, identity_ref)
+            if actor_id:
+                projected = projected.replace(f"@{identity_ref}", f"<@{actor_id}>")
+        return projected
 
     def _get_reply_delivery_state(
         self, chat_id: str, message_id: str, is_group: bool
