@@ -42,6 +42,8 @@ export type ContentBlock = {
   sender_id?: string;
   identity_ref?: string;
   sender_display_name?: string;
+  identity_person_ref?: string;
+  identity_unknown?: boolean;
   text?: string;
   resource?: Record<string, unknown>;
   tool_calls?: unknown[];

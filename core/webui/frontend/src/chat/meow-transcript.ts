@@ -36,6 +36,8 @@ export class MeowTranscript extends LitElement {
     .bubble { max-width: min(720px, 86%); border-radius: 18px; padding: 12px 16px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
     .message-label { margin-bottom: 4px; color: #8b93a7; font-size: 11px; line-height: 1.2; }
     .user .message-label { color: rgba(255,255,255,.78); }
+    .message-label .identity-link { color: inherit; text-decoration: underline dotted; text-underline-offset: 2px; }
+    .message-label .identity-link:hover { text-decoration: underline; }
     .user .bubble { color: #fff; background: #5865f2; border-bottom-right-radius: 5px; }
     .assistant .bubble, .tool .bubble { background: #fff; border: 1px solid #e5e8f0; border-bottom-left-radius: 5px; }
     .card { display: grid; gap: 6px; }
@@ -297,7 +299,7 @@ export class MeowTranscript extends LitElement {
     </details></div>`;
   }
 
-  private renderResource(block: ContentBlock, role: string, label: string): TemplateResult {
+  private renderResource(block: ContentBlock, role: string, label: string | TemplateResult): TemplateResult {
     const resource = block.resource || {};
     const mediaId = typeof resource.media_id === "string" ? resource.media_id : "";
     const fallbackUrl = mediaId ? `/media/${encodeURIComponent(mediaId)}/content` : "";
@@ -322,12 +324,18 @@ export class MeowTranscript extends LitElement {
     </div></div>`;
   }
 
-  private messageLabel(block: ContentBlock): string {
+  private messageLabel(block: ContentBlock): string | TemplateResult {
     if (block.role === "user") {
-      const identity = [block.sender_display_name, block.identity_ref]
-        .filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index)
-        .join(" · ");
-      return identity ? `用户 · ${identity}` : block.sender_id ? `用户 · ${block.sender_id}` : "用户";
+      const identityRef = typeof block.identity_ref === "string" ? block.identity_ref : "";
+      if (identityRef) {
+        const name = block.sender_display_name || identityRef;
+        const personRef = typeof block.identity_person_ref === "string" ? block.identity_person_ref : "";
+        const hint = [`身份 ${identityRef}`, personRef ? `统一人物 ${personRef}` : ""].filter(Boolean).join(" · ");
+        const href = `/identities?ref=${encodeURIComponent(identityRef)}`;
+        return html`用户 · <a class="identity-link" href=${href} target="_blank" rel="noreferrer" title=${hint}>${name}</a>`;
+      }
+      if (block.identity_unknown) return "用户 · 未知成员";
+      return block.sender_id ? `用户 · ${block.sender_id}` : "用户";
     }
     if (block.role === "tool") return block.tool_name ? `工具 · ${block.tool_name}` : "工具";
     if (block.role === "system") return "系统";

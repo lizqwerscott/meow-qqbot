@@ -183,6 +183,8 @@ async def test_workbench_history_projects_current_identity_for_canonical_chat(tm
     target = DeliveryTarget("qq", "default", "group", "group-42")
     identity_manager = IdentityManager(tmp_path / "identities.sqlite3")
     identity = identity_manager.observe(target, "actor-7", "小明")
+    person_ref = identity_manager.create_person("大明")
+    identity_manager.link_person(identity.identity_ref, person_ref, "test")
     chat_id = "agent:main:qq:default:group:group-42"
     await event_log.append_user_message(
         chat_id=chat_id,
@@ -216,6 +218,90 @@ async def test_workbench_history_projects_current_identity_for_canonical_chat(tm
     assert block["sender_id"] == "actor-7"
     assert block["identity_ref"] == identity.identity_ref
     assert block["sender_display_name"] == "小明"
+    assert block["identity_person_ref"] == person_ref
+    identity_manager.close()
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_workbench_history_flags_unknown_channel_senders(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    identity_manager = IdentityManager(tmp_path / "identities.sqlite3")
+    chat_id = "agent:main:qq:default:group:group-42"
+    await event_log.append_user_message(
+        chat_id=chat_id,
+        turn_id="turn-1",
+        message_id="message-1",
+        content="来自更早的历史",
+        sender_id="actor-404",
+        session_kind="group",
+    )
+    gateway = WebUiConversationGateway(
+        operator_id="admin",
+        route_callback=lambda **_kwargs: None,
+        get_user_nickname=lambda _user_id: "admin",
+        event_log=event_log,
+        store_path=str(tmp_path / "webui.sqlite3"),
+    )
+    app = create_app(
+        {
+            "conversation_event_log": event_log,
+            "identity_manager": identity_manager,
+            "webui_gateway": gateway,
+        },
+        {},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(f"/api/sessions/{chat_id}/turns")
+
+    assert response.status_code == 200
+    block = response.json()["items"][0]["blocks"][0]
+    assert block["sender_id"] == "actor-404"
+    assert block["identity_unknown"] is True
+    assert "identity_ref" not in block
+    assert "sender_display_name" not in block
+    identity_manager.close()
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_workbench_history_keeps_webui_operator_sender_id(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    identity_manager = IdentityManager(tmp_path / "identities.sqlite3")
+    chat_id = "agent:main:webui:admin:direct:s-1"
+    await event_log.append_user_message(
+        chat_id=chat_id,
+        turn_id="turn-1",
+        message_id="message-1",
+        content="工作台里的一轮",
+        sender_id="admin",
+        session_kind="private",
+    )
+    gateway = WebUiConversationGateway(
+        operator_id="admin",
+        route_callback=lambda **_kwargs: None,
+        get_user_nickname=lambda _user_id: "admin",
+        event_log=event_log,
+        store_path=str(tmp_path / "webui.sqlite3"),
+    )
+    app = create_app(
+        {
+            "conversation_event_log": event_log,
+            "identity_manager": identity_manager,
+            "webui_gateway": gateway,
+        },
+        {},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(f"/api/sessions/{chat_id}/turns")
+
+    assert response.status_code == 200
+    block = response.json()["items"][0]["blocks"][0]
+    assert block["sender_id"] == "admin"
+    assert "identity_unknown" not in block
+    assert "identity_ref" not in block
     identity_manager.close()
     await event_log.close()
 

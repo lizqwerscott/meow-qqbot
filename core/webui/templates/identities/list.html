@@ -5,6 +5,18 @@
 {% block content %}
 <h2 style="margin-bottom:20px">🪪 身份与统一人物</h2>
 
+{% if highlight_ref %}
+<div class="card" id="identity-focus">
+    <h2>定位身份</h2>
+    {% if members %}
+    <p>已定位 <code>{{ highlight_ref }}</code>{% if highlight_person_ref %}，统一人物 <code>{{ highlight_person_ref }}</code>{% endif %}。</p>
+    {% else %}
+    <p>身份库中未找到 <code>{{ highlight_ref }}</code>。</p>
+    {% endif %}
+    <a class="btn btn-sm" href="/identities">显示全部身份</a>
+</div>
+{% endif %}
+
 <div class="card">
     <h2>已知群聊</h2>
     {% if chats %}
@@ -32,7 +44,7 @@
     <div class="table-wrap"><table>
         <thead><tr><th>人物引用</th><th>名称</th><th>创建时间</th></tr></thead>
         <tbody>{% for person in persons %}
-            <tr><td><code>{{ person.person_ref }}</code></td><td>{{ person.display_name }}</td><td>{{ person.created_at|format_timestamp }}</td></tr>
+            <tr id="person-{{ person.person_ref }}"{% if person.person_ref == highlight_person_ref %} class="row-focus"{% endif %}><td><code>{{ person.person_ref }}</code></td><td>{{ person.display_name }}</td><td>{{ person.created_at|format_timestamp }}</td></tr>
         {% endfor %}</tbody>
     </table></div>
     {% else %}<p style="color:var(--text-secondary)">暂无统一人物</p>{% endif %}
@@ -44,8 +56,8 @@
     <div class="table-wrap"><table>
         <thead><tr><th>身份引用</th><th>群指纹</th><th>当前称呼</th><th>历史名字</th><th>活跃度</th><th>统一人物</th></tr></thead>
         <tbody>{% for member in members %}
-            <tr>
-                <td><code>{{ member.identity_ref }}</code></td>
+            <tr id="identity-{{ member.identity_ref }}"{% if highlight_ref %} class="row-focus"{% endif %}>
+                <td><a href="/identities?ref={{ member.identity_ref }}"><code>{{ member.identity_ref }}</code></a></td>
                 <td><code>{{ member.chat_fingerprint }}</code></td>
                 <td>{{ member.current_chat_name or member.current_name }}</td>
                 <td>{{ member.historical_names|join('、') }}</td>

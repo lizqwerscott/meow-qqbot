@@ -183,6 +183,15 @@ tr:hover td {
     background: #f8f9fa;
 }
 
+tr.row-focus td,
+tr.row-focus:hover td {
+    background: rgba(88, 101, 242, 0.1);
+}
+
+tr.row-focus td:first-child {
+    box-shadow: inset 3px 0 0 var(--accent);
+}
+
 /* ── Buttons ── */
 
 .btn {

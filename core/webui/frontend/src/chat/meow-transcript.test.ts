@@ -284,7 +284,7 @@ describe("meow-transcript", () => {
     expect(transcript.shadowRoot?.querySelector(".reasoning-card")?.hasAttribute("open")).toBe(false);
   });
 
-  it("prefers the current identity projection over a platform sender ID", async () => {
+  it("renders the recognized identity name as a link to the identity page", async () => {
     const transcript = document.createElement("meow-transcript") as HTMLElement & {
       turns: Turn[];
       loading: boolean;
@@ -297,6 +297,7 @@ describe("meow-transcript", () => {
         sender_id: "actor-7",
         sender_display_name: "小明",
         identity_ref: "member_12345678",
+        identity_person_ref: "person_abcd",
         text: "你好",
       }],
     }];
@@ -304,9 +305,37 @@ describe("meow-transcript", () => {
     document.body.append(transcript);
     await (transcript as unknown as { updateComplete: Promise<unknown> }).updateComplete;
 
-    const label = transcript.shadowRoot?.querySelector(".user .message-label")?.textContent;
-    expect(label).toContain("小明");
-    expect(label).toContain("member_12345678");
-    expect(label).not.toContain("actor-7");
+    const label = transcript.shadowRoot?.querySelector(".user .message-label");
+    expect(label?.textContent).toBe("用户 · 小明");
+    const link = label?.querySelector("a.identity-link");
+    expect(link?.getAttribute("href")).toBe("/identities?ref=member_12345678");
+    expect(link?.getAttribute("target")).toBe("_blank");
+    expect(link?.getAttribute("title")).toBe("身份 member_12345678 · 统一人物 person_abcd");
+    expect(label?.textContent).not.toContain("actor-7");
+    expect(label?.textContent).not.toContain("member_12345678");
+  });
+
+  it("hides the platform sender id when the identity store has no record", async () => {
+    const transcript = document.createElement("meow-transcript") as HTMLElement & {
+      turns: Turn[];
+      loading: boolean;
+    };
+    transcript.turns = [{
+      ...turns[0],
+      blocks: [{
+        type: "text",
+        role: "user",
+        sender_id: "actor-9",
+        identity_unknown: true,
+        text: "你好",
+      }],
+    }];
+    transcript.loading = false;
+    document.body.append(transcript);
+    await (transcript as unknown as { updateComplete: Promise<unknown> }).updateComplete;
+
+    const label = transcript.shadowRoot?.querySelector(".user .message-label");
+    expect(label?.textContent).toBe("用户 · 未知成员");
+    expect(transcript.shadowRoot?.innerHTML).not.toContain("actor-9");
   });
 });

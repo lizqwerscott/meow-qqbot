@@ -38,35 +38,51 @@ def _not_found(exc: KeyError) -> HTTPException:
     return HTTPException(status_code=404, detail=f"session not found: {exc.args[0]}")
 
 
-def _history_identity(request: Request, chat_id: str, sender_id: str) -> dict[str, str]:
-    """Return the current safe identity projection for a historical user event."""
+def _history_target(request: Request, chat_id: str):
+    """Resolve a stored chat id to its delivery target, canonical key first."""
+    try:
+        return parse_chat_session_key(chat_id)
+    except (TypeError, ValueError):
+        resolver = request.app.state.managers.get("session_identity_resolver")
+        if resolver is None:
+            return None
+        try:
+            return resolver.resolve_legacy(chat_id).target
+        except (TypeError, ValueError):
+            return None
+
+
+def _history_identity(
+    request: Request, chat_id: str, sender_id: str
+) -> dict[str, object]:
+    """Return the safe identity projection for a historical user event.
+
+    Channel senders missing from the identity store are flagged with
+    ``identity_unknown`` so the UI can avoid leaking the raw platform actor id.
+    WebUI conversations keep their operator id: it is a local account, not a
+    platform identity.
+    """
     if not sender_id:
         return {}
     identity_manager = request.app.state.managers.get("identity_manager")
     if identity_manager is None:
         return {}
-    try:
-        target = parse_chat_session_key(chat_id)
-    except (TypeError, ValueError):
-        resolver = request.app.state.managers.get("session_identity_resolver")
-        if resolver is None:
-            return {}
-        try:
-            target = resolver.resolve_legacy(chat_id).target
-        except (TypeError, ValueError):
-            return {}
-    if target is None:
+    target = _history_target(request, chat_id)
+    if target is None or target.channel == "webui":
         return {}
     get_ref = getattr(identity_manager, "get_ref", None)
     if not callable(get_ref):
         return {}
     ref = get_ref(target, sender_id)
     if ref is None:
-        return {}
-    return {
+        return {"identity_unknown": True}
+    identity: dict[str, object] = {
         "identity_ref": ref.identity_ref,
         "sender_display_name": ref.chat_name or ref.current_name or ref.identity_ref,
     }
+    if ref.person_ref:
+        identity["identity_person_ref"] = ref.person_ref
+    return identity
 
 
 async def _turn_dtos(page, *, session_id: str, request: Request) -> list[dict]:

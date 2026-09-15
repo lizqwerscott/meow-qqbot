@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.status import HTTP_303_SEE_OTHER
 
@@ -15,18 +15,36 @@ def _redirect(category: str, message: str) -> RedirectResponse:
 
 
 @router.get("/identities", response_class=HTMLResponse)
-async def identity_list(request: Request):
+async def identity_list(request: Request, ref: str = Query("")):
     manager = request.app.state.managers.get("identity_manager")
+    highlight_ref = ref.strip()[:120]
+    highlight_person_ref = ""
     chats = []
     suggestions = []
     if manager is None:
         rows = []
         persons = []
     else:
-        rows = manager.list_members()
+        members = manager.list_members()
         persons = manager.list_persons()
         chats = manager.list_chats()
         suggestions = manager.list_suggestions()
+        if highlight_ref:
+            highlight_person_ref = next(
+                (
+                    str(member.get("person_ref") or "")
+                    for member in members
+                    if member.get("identity_ref") == highlight_ref
+                ),
+                "",
+            )
+            rows = [
+                member
+                for member in members
+                if member.get("identity_ref") == highlight_ref
+            ]
+        else:
+            rows = members
     return request.app.state.templates.TemplateResponse(
         request,
         "identities/list.html",
@@ -36,6 +54,8 @@ async def identity_list(request: Request):
             "persons": persons,
             "chats": chats,
             "suggestions": suggestions,
+            "highlight_ref": highlight_ref,
+            "highlight_person_ref": highlight_person_ref,
         },
     )
 
