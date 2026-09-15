@@ -30,7 +30,8 @@
 <table>
     <thead>
         <tr>
-            <th>会话 ID</th>
+            <th>会话</th>
+            <th>渠道</th>
             <th>类型</th>
             <th>消息数</th>
             <th>最后活动</th>
@@ -42,7 +43,11 @@
     <tbody>
         {% for s in sessions %}
         <tr>
-            <td><code class="session-id" title="{{ s.chat_id }}">{{ s.chat_id }}</code></td>
+            <td>
+                {% if s.group_name %}<strong>{{ s.group_name }}</strong><br>{% endif %}
+                <code class="session-id" title="{{ s.chat_id }}">{{ s.chat_id }}</code>
+            </td>
+            <td>{{ s.channel_name or '历史会话' }}{% if s.account_id %}<div style="color:var(--text-secondary);margin-top:4px">{{ s.account_id }}</div>{% endif %}</td>
             <td>
                 {% if s.session_kind == 'group' %}群聊
                 {% elif s.session_kind == 'private' %}私聊
@@ -73,7 +78,7 @@
             </td>
         </tr>
         {% else %}
-        <tr><td colspan="7" style="text-align:center;color:var(--text-secondary)">无活跃会话</td></tr>
+        <tr><td colspan="8" style="text-align:center;color:var(--text-secondary)">无活跃会话</td></tr>
         {% endfor %}
     </tbody>
 </table>

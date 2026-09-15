@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}群聊与渠道 - 猫猫管理{% endblock %}
+{% set nav_active = "channels" %}
+
+{% block content %}
+<h2 style="margin-bottom:20px">💬 群聊与渠道</h2>
+<p style="color:var(--text-secondary);margin-top:-12px;margin-bottom:20px">展示本地缓存的群资料和已观察的消息统计；打开此页不会请求 QQ。</p>
+
+<div class="card">
+    {% if groups %}
+    <div class="table-wrap"><table>
+        <thead><tr><th>群聊</th><th>渠道</th><th>群指纹</th><th>成员</th><th>消息</th><th>缓存状态</th><th>最近观察</th></tr></thead>
+        <tbody>{% for group in groups %}
+            <tr>
+                <td>
+                    <strong>{{ group.title or '未命名群聊' }}</strong>
+                    {% if group.description %}<div style="color:var(--text-secondary);margin-top:4px">{{ group.description }}</div>{% endif %}
+                </td>
+                <td>{{ group.channel_name }}<div style="color:var(--text-secondary);margin-top:4px">{{ group.account_id }}</div></td>
+                <td><code>{{ group.chat_fingerprint }}</code></td>
+                <td>平台 {{ group.platform_member_count if group.platform_member_count is not none else '—' }}<div style="color:var(--text-secondary);margin-top:4px">已观察 {{ group.observed_member_count }}</div></td>
+                <td>{{ group.message_count }}</td>
+                <td>{% if group.last_error_reason %}<span class="badge danger">{{ group.last_error_reason }}</span>{% elif group.fetched_at %}<span class="badge {% if group.stale %}warning{% else %}success{% endif %}">{% if group.stale %}已过期{% else %}有效{% endif %}</span>{% else %}<span class="badge">未缓存</span>{% endif %}</td>
+                <td>{{ group.last_observed_at|format_timestamp if group.last_observed_at else '—' }}</td>
+            </tr>
+        {% endfor %}</tbody>
+    </table></div>
+    {% else %}<p style="color:var(--text-secondary)">暂无已缓存或已观察的群聊。机器人收到群消息后会自动建立资料缓存。</p>{% endif %}
+</div>
+{% endblock %}

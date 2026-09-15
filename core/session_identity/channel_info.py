@@ -203,6 +203,64 @@ class QQChannelInfoProvider:
             for row in rows
         ]
 
+    def list_cached_chats(self, *, limit: int = 500) -> list[dict[str, Any]]:
+        """Return cached group metadata for local administrative views.
+
+        This reads the local cache only and never refreshes QQ data.
+        """
+        now = time.time()
+        rows = self._conn.execute(
+            """
+            SELECT channel, account_id, target_id, payload, fetched_at,
+                   expires_at, last_error_reason
+            FROM channel_info_cache
+            WHERE scope = 'chat'
+            ORDER BY fetched_at DESC
+            LIMIT ?
+            """,
+            (max(1, min(limit, 2000)),),
+        ).fetchall()
+        cached_chats = []
+        for row in rows:
+            channel = str(row["channel"])
+            account_id = str(row["account_id"])
+            target_id = str(row["target_id"])
+            reason = str(row["last_error_reason"] or "")
+            title = ""
+            description = ""
+            member_count = None
+            if not reason:
+                try:
+                    payload = json.loads(row["payload"])
+                    if not isinstance(payload, dict):
+                        raise ValueError("cache payload is not an object")
+                    chat_info = self._parse_chat(
+                        payload,
+                        DeliveryTarget(channel, account_id, "group", target_id),
+                    )
+                    title = _safe_text(chat_info.title, 120)
+                    description = _safe_text(chat_info.description, 240)
+                    member_count = chat_info.member_count
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    reason = REASON_CACHE_CORRUPT
+            cached_chats.append(
+                {
+                    "channel": channel,
+                    "channel_name": "QQ" if channel == self.channel else channel,
+                    "account_id": account_id,
+                    "target_id": target_id,
+                    "target_fingerprint": _target_fingerprint("chat", target_id),
+                    "title": title,
+                    "description": description,
+                    "member_count": member_count,
+                    "fetched_at": float(row["fetched_at"]),
+                    "expires_at": float(row["expires_at"]),
+                    "stale": float(row["expires_at"]) <= now,
+                    "last_error_reason": reason,
+                }
+            )
+        return cached_chats
+
     async def check_health(self) -> ChannelActorInfo:
         data = await self.api_client.request("GET", "/users/@me", timeout=self.timeout)
         return self._parse_actor(data, require_id=True, is_bot=True)

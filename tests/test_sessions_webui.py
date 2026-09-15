@@ -15,6 +15,7 @@ from core.session_identity import (
     DeliveryTarget,
     SessionIdentityRegistry,
     SessionIdentityResolver,
+    build_chat_session_key,
 )
 from core.webui.app import create_app
 from core.webui.routers.sessions import _redact_message, _validate_chat_id
@@ -166,6 +167,60 @@ async def test_session_list_paginates_sessions(tmp_path):
     assert long_chat_id in response.text
     assert "聊天工作台" in response.text
     assert "/chat?session_id=" in response.text
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_session_list_distinguishes_same_group_id_across_channels(tmp_path):
+    class ChannelInfoProvider:
+        def list_cached_chats(self):
+            return [
+                {
+                    "channel": "qq",
+                    "channel_name": "QQ",
+                    "account_id": "default",
+                    "target_id": "shared-group",
+                    "title": "QQ 技术群",
+                },
+                {
+                    "channel": "discord",
+                    "channel_name": "Discord",
+                    "account_id": "default",
+                    "target_id": "shared-group",
+                    "title": "Discord 技术群",
+                },
+            ]
+
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    for target in (
+        DeliveryTarget("qq", "default", "group", "shared-group"),
+        DeliveryTarget("discord", "default", "group", "shared-group"),
+    ):
+        chat_id = build_chat_session_key(target)
+        await event_log.append_user_message(
+            chat_id=chat_id,
+            turn_id=f"turn-{target.channel}",
+            message_id=f"message-{target.channel}",
+            content=target.channel,
+        )
+
+    app = create_app(
+        {
+            "context_manager": _ContextManager(),
+            "conversation_event_log": event_log,
+            "channel_info_provider": ChannelInfoProvider(),
+        },
+        {},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/sessions")
+
+    assert response.status_code == 200
+    assert "QQ 技术群" in response.text
+    assert "Discord 技术群" in response.text
+    assert ">QQ<" in response.text
+    assert ">Discord<" in response.text
     await event_log.close()
 
 

@@ -15,6 +15,7 @@ from core.engine.history_projection import (
     visible_legacy_history,
 )
 from core.managers.chat_message import strip_content_prefix
+from core.webui.group_directory import GroupDirectory
 
 _log = logging.getLogger(__name__)
 
@@ -223,7 +224,6 @@ async def session_list(
     context_manager = managers.get("context_manager")
     protocol_history = managers.get("protocol_history")
     event_log = managers.get("conversation_event_log")
-
     if event_log is not None:
         all_chat_ids = []
         try:
@@ -254,6 +254,11 @@ async def session_list(
                 pass
     if q:
         all_chat_ids = [cid for cid in all_chat_ids if q.lower() in cid.lower()]
+
+    session_descriptions = GroupDirectory(
+        identity_manager=managers.get("identity_manager"),
+        channel_info_provider=managers.get("channel_info_provider"),
+    ).describe_sessions(all_chat_ids)
 
     archive_index = managers.get("archive_index")
     if archive_index is not None:
@@ -363,6 +368,7 @@ async def session_list(
             summary = None
 
         session_kind = _session_kind(cid, context_manager)
+        session_description = session_descriptions.get(cid, {})
         if kind != "all" and session_kind != kind:
             continue
         if summary is None:
@@ -377,6 +383,7 @@ async def session_list(
                         (protocol_summary or {}).get("message_count", 0)
                     ),
                     "archived_count": archived_counts.get(cid, 0),
+                    **session_description,
                 }
             )
         else:
@@ -394,6 +401,7 @@ async def session_list(
                         (protocol_summary or {}).get("message_count", 0)
                     ),
                     "archived_count": archived_counts.get(cid, 0),
+                    **session_description,
                 }
             )
 
@@ -410,6 +418,7 @@ async def session_list(
             "kind": kind,
             "total_archived": len(archived_counts),
             "pagination": pagination,
+            "session_descriptions": session_descriptions,
         },
     )
 
@@ -443,6 +452,12 @@ async def archived_list(
             visible_sessions, _ = await archive_index.chat_summaries_for_webui(
                 query=q or "", limit=page_size, offset=(current_page - 1) * page_size
             )
+        descriptions = GroupDirectory(
+            identity_manager=managers.get("identity_manager"),
+            channel_info_provider=managers.get("channel_info_provider"),
+        ).describe_sessions([item["chat_id"] for item in visible_sessions])
+        for item in visible_sessions:
+            item.update(descriptions.get(item["chat_id"], {}))
         return templates.TemplateResponse(
             request,
             "sessions/archived_list.html",
@@ -460,6 +475,10 @@ async def archived_list(
         all_archived_ids = [cid for cid in all_archived_ids if q.lower() in cid.lower()]
 
     sessions = []
+    session_descriptions = GroupDirectory(
+        identity_manager=managers.get("identity_manager"),
+        channel_info_provider=managers.get("channel_info_provider"),
+    ).describe_sessions(all_archived_ids)
     for cid in all_archived_ids:
         if archive_index is not None:
             batches = [
@@ -481,6 +500,7 @@ async def archived_list(
                         int(batch.get("event_count", 0)) for batch in batches
                     ),
                     "ledger_archive": True,
+                    **session_descriptions.get(cid, {}),
                 }
             )
             continue
@@ -498,6 +518,7 @@ async def archived_list(
                 ),
                 "total_size": sum(f["size"] for f in files),
                 "ledger_archive": False,
+                **session_descriptions.get(cid, {}),
             }
         )
 

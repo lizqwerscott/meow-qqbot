@@ -67,6 +67,7 @@ def _client_ip(request: Request, webui_config: dict) -> str:
 
 
 from core.webui.routers import (
+    channels,
     emojis,
     identities,
     interaction,
@@ -183,6 +184,7 @@ def create_app(managers: Dict[str, Any], webui_config: Dict[str, Any]) -> FastAP
 
     # Register routers
     app.include_router(status.router)
+    app.include_router(channels.router)
     app.include_router(interaction.router)
     app.include_router(emojis.router)
     app.include_router(nicknames.router)
