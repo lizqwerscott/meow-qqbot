@@ -242,7 +242,7 @@ class ApprovalManager:
         """落盘未保存的使用计数（进程正常关闭时调用）。
 
         10s 防抖窗口内的最后一次计数在关闭时强制落盘，避免丢失
-        （对齐 nickname_manager.flush_save 的关闭模式）。幂等：无 dirty 不写。
+        （对齐关闭时 flush 的模式）。幂等：无 dirty 不写。
         """
         self._flush_uses()
 

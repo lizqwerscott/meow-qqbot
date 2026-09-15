@@ -29,7 +29,6 @@ class AIContext:
 @dataclass
 class PromptContext:
     template_manager: Any
-    nickname_manager: Any = None
     emoji_manager: Any = None
     skill_managers: Any = None
     learning_orchestrator: Any = None

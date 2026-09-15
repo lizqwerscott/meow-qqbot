@@ -66,17 +66,36 @@ class ChannelInfoSnapshot:
     fetched_at: float = 0.0
     stale: bool = False
     schema_version: int = 1
+    channel: str = ""
+    channel_name: str = ""
+    account_id: str = ""
 
     @classmethod
-    def unavailable(cls, *reasons: str) -> "ChannelInfoSnapshot":
-        return cls(unavailable_reasons=tuple(dict.fromkeys(reasons)))
+    def unavailable(
+        cls,
+        *reasons: str,
+        channel: str = "",
+        channel_name: str = "",
+        account_id: str = "",
+    ) -> "ChannelInfoSnapshot":
+        return cls(
+            channel=channel,
+            channel_name=channel_name,
+            account_id=account_id,
+            unavailable_reasons=tuple(dict.fromkeys(reasons)),
+        )
 
-    def prompt_summary(self) -> dict[str, Any]:
+    def prompt_summary(self, *, include_runtime_status: bool = True) -> dict[str, Any]:
         """Return a bounded, platform-ID-free prompt projection."""
         result: dict[str, Any] = {
             "availability": self.availability,
-            "stale": self.stale,
         }
+        if self.channel:
+            result["channel"] = self.channel
+        if self.channel_name:
+            result["channel_name"] = _safe_text(self.channel_name, 80)
+        if include_runtime_status:
+            result["stale"] = self.stale
         if self.self_info:
             result["bot"] = {
                 "display_name": _safe_text(self.self_info.display_name, 80),
@@ -165,13 +184,11 @@ class QQChannelInfoProvider:
 
     def cache_status(self) -> list[dict[str, Any]]:
         now = time.time()
-        rows = self._conn.execute(
-            """
+        rows = self._conn.execute("""
             SELECT scope, target_id, fetched_at, expires_at, last_error_reason
             FROM channel_info_cache
             ORDER BY scope, target_id
-            """
-        ).fetchall()
+            """).fetchall()
         return [
             {
                 "scope": str(row["scope"]),
@@ -200,7 +217,12 @@ class QQChannelInfoProvider:
         if target is not None and (
             target.channel != self.channel or target.account_id != self.account_id
         ):
-            return ChannelInfoSnapshot.unavailable(REASON_CAPABILITY_UNAVAILABLE)
+            return ChannelInfoSnapshot.unavailable(
+                REASON_CAPABILITY_UNAVAILABLE,
+                channel=self.channel,
+                channel_name="QQ",
+                account_id=self.account_id,
+            )
 
         self_info, self_stale, self_reasons = await self._get_component(
             scope="account",
@@ -254,6 +276,9 @@ class QQChannelInfoProvider:
             else "partial" if available else "unavailable"
         )
         return ChannelInfoSnapshot(
+            channel=self.channel,
+            channel_name="QQ",
+            account_id=self.account_id,
             self_info=self_info,
             chat_info=chat_info,
             self_membership=self_membership,
@@ -279,6 +304,8 @@ class QQChannelInfoProvider:
         async with lock:
             now = time.time()
             cached, cache_reason = self._read_cache(scope, target_id)
+            if cached and cached.last_error_reason and cached.expires_at > now:
+                return None, False, (cached.last_error_reason,)
             if cached and not refresh and cached.expires_at > now:
                 if cached.last_error_reason and not cached.payload:
                     return None, False, (cached.last_error_reason,)

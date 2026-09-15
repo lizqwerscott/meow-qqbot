@@ -32,7 +32,6 @@ class DynamicContextBuilder:
         workspace_manager,
         perm,
         admin_ids,
-        nm,
         identity_manager=None,
         bot_id: str,
         emoji_manager,
@@ -48,12 +47,38 @@ class DynamicContextBuilder:
         self._skill = SkillBlockBuilder(skill_managers)
         self._time = TimeBlockBuilder()
         self._workspace = WorkspaceBlockBuilder(workspace_manager, perm, admin_ids)
-        self._social = SocialBlockBuilder(nm, bot_id, identity_manager)
+        self._social = SocialBlockBuilder(bot_id, identity_manager)
         self._emoji = EmojiBlockBuilder(emoji_manager)
 
     @property
     def memory_builder(self) -> MemoryBlockBuilder:
         return self._memory
+
+    async def build_stable_social(
+        self,
+        *,
+        chat_id: str,
+        is_group: bool,
+        has_users: bool,
+        input_message: InputMessage,
+        recent_events=(),
+    ) -> Optional[str]:
+        return await self._social.build_stable(
+            chat_id=chat_id,
+            is_group=is_group,
+            has_users=has_users,
+            max_users=30,
+            input_message=input_message,
+            recent_events=recent_events,
+        )
+
+    async def build_current_social(
+        self, *, input_message: InputMessage, is_group: bool
+    ) -> Optional[str]:
+        return await self._social.build_current(
+            input_message=input_message,
+            is_group=is_group,
+        )
 
     async def build(
         self,
@@ -66,6 +91,7 @@ class DynamicContextBuilder:
         has_users: bool,
         covered_event_ids=(),
         recent_events=(),
+        include_social: bool = True,
     ) -> Optional[str]:
         parts: List[str] = []
 
@@ -114,17 +140,17 @@ class DynamicContextBuilder:
         if txt:
             parts.append(txt)
 
-        # 社交上下文（Bot ID + 群友列表）
-        txt = await self._social.build(
-            chat_id=chat_id,
-            is_group=is_group,
-            has_users=has_users,
-            max_users=30,
-            input_message=input_message,
-            recent_events=recent_events,
-        )
-        if txt:
-            parts.append(txt)
+        if include_social:
+            txt = await self._social.build(
+                chat_id=chat_id,
+                is_group=is_group,
+                has_users=has_users,
+                max_users=30,
+                input_message=input_message,
+                recent_events=recent_events,
+            )
+            if txt:
+                parts.append(txt)
 
         if not parts:
             return None

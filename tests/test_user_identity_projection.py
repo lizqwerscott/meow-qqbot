@@ -1,5 +1,4 @@
 import json
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -35,8 +34,7 @@ async def test_search_user_returns_identity_refs_without_platform_ids(tmp_path):
 @pytest.mark.asyncio
 async def test_search_user_does_not_fallback_to_raw_ids(tmp_path):
     target = DeliveryTarget("qq", "default", "direct", "u1")
-    nickname_manager = SimpleNamespace(iter_users=lambda: iter([("actor-1", ["小明"])]))
-    deps = ToolDeps(nickname_manager=nickname_manager)
+    deps = ToolDeps()
     context = ToolContext(
         chat_id="u1",
         is_group=False,

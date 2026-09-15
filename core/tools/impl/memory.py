@@ -353,54 +353,7 @@ def create_memory_entries(deps: ToolDeps) -> list[ToolEntry]:
                 return None, f"找到多个匹配「{raw}」的匿名身份: {names}"
             return None, ""
 
-        nm = deps.nickname_manager
-        if nm is None:
-            return None, ""
-
-        raw_lower = raw.strip().lower()
-        if not raw_lower:
-            return None, ""
-
-        sender_aliases = nm.get_aliases(ctx.sender_id)
-        sender_display = sender_aliases[0] if sender_aliases else ctx.sender_id
-
-        if raw_lower in ("我", "自己", "myself"):
-            return ctx.sender_id, "当前用户"
-        if raw_lower == ctx.sender_id.lower():
-            return ctx.sender_id, sender_display
-        if any(raw_lower == a.lower() for a in sender_aliases):
-            return ctx.sender_id, sender_display
-
-        if not ctx.is_group:
-            return None, ""
-
-        best_score = 0
-        best_candidates = []
-
-        for uid, aliases in nm.iter_users():
-            score = 0
-            if raw_lower == uid.lower():
-                score = 10
-            elif any(raw_lower == a.lower() for a in aliases):
-                score = 8
-            elif any(raw_lower in a.lower() for a in aliases):
-                score = 3
-            elif raw_lower in uid.lower():
-                score = 1
-
-            if score > best_score:
-                best_score = score
-                best_candidates = [(uid, aliases[-1] if aliases else uid)]
-            elif score == best_score and score > 0:
-                best_candidates.append((uid, aliases[-1] if aliases else uid))
-
-        if not best_candidates:
-            return None, ""
-        if len(best_candidates) == 1:
-            return best_candidates[0]
-
-        names = "、".join(f"「{n}」({u[:12]}..)" for u, n in best_candidates)
-        return None, f"找到多个匹配「{raw}」的用户: {names}"
+        return None, ""
 
     _SEARCH_FIELDS = {
         "query": {

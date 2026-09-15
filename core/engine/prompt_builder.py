@@ -140,7 +140,6 @@ class PromptBuilder:
         self.context_manager = ctx.mgmt.context_manager
         self.ai_service = ctx.ai.ai_service
         self._bot_id = ctx.sys.bot_id
-        self._nm = ctx.prompt.nickname_manager
         self.emoji_manager = ctx.prompt.emoji_manager
         self._skill_managers = ctx.prompt.skill_managers
         self.hindsight = ctx.memory.hindsight_memory
@@ -180,7 +179,6 @@ class PromptBuilder:
             workspace_manager=self._workspace_manager,
             perm=self._perm,
             admin_ids=self._admin_ids,
-            nm=self._nm,
             identity_manager=self._identity_manager,
             bot_id=self._bot_id,
             emoji_manager=self.emoji_manager,
@@ -244,14 +242,7 @@ class PromptBuilder:
             self.emoji_manager is not None and self.emoji_manager.count_emojis() > 0
         )
         has_tts = bool(self._tts_service)
-        if is_group and self._nm:
-            has_users = any(k != self._bot_id for k in self._nm.nicknames) or any(
-                k != self._bot_id for k in self._nm.auto_nicknames
-            )
-        else:
-            has_users = False
-        if is_group and self._identity_manager is not None:
-            has_users = True
+        has_users = is_group and self._identity_manager is not None
 
         role = self._perm.get_user_role(sender_id) if self._perm else None
         tools_to_use: Optional[List[dict]] = (
@@ -491,7 +482,23 @@ class PromptBuilder:
                     "content": delivery_contract.render(tools_to_use),
                 }
             )
+        stable_social_text = await self._dynamic_ctx_builder.build_stable_social(
+            chat_id=chat_id,
+            is_group=is_group,
+            has_users=has_users,
+            input_message=input_message,
+            recent_events=timeline_events,
+        )
+        if stable_social_text:
+            messages.append({"role": "system", "content": stable_social_text})
         messages.extend(history)
+
+        current_social_text = await self._dynamic_ctx_builder.build_current_social(
+            input_message=input_message,
+            is_group=is_group,
+        )
+        if current_social_text:
+            messages.append({"role": "system", "content": current_social_text})
 
         # ── 5. 动态上下文（委托给 DynamicContextBuilder） ──
         dynamic_text = await self._dynamic_ctx_builder.build(
@@ -503,6 +510,7 @@ class PromptBuilder:
             has_users=has_users,
             covered_event_ids=tuple(sorted(bounded_history_event_ids)),
             recent_events=timeline_events,
+            include_social=False,
         )
         if dynamic_text:
             messages.append(

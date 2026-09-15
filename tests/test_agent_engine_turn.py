@@ -718,7 +718,6 @@ def make_engine(tool_loop, *, rule_router=None, model_registry=None):
     engine._archive_manager = None
     engine.hindsight = None
     engine.learners = None
-    engine._nm = None
     engine._admitted_ids = __import__("collections").OrderedDict()
     engine._admitted_side_effect_ids = set()
     engine._processed_ids = __import__("collections").OrderedDict()

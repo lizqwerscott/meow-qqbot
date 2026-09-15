@@ -217,7 +217,6 @@ class AgentEngine:
         self.rule_router = ctx.ai.rule_router
         self.model_registry = ctx.ai.model_registry
 
-        self._nm = ctx.prompt.nickname_manager
         self._identity_manager = getattr(ctx.mgmt, "identity_manager", None)
         self.emoji_manager = ctx.prompt.emoji_manager
         self.media_uploader = None
@@ -2443,7 +2442,6 @@ class AgentEngine:
                 payload["content"],
                 payload["sender_id"],
                 payload.get("mentioned_ids", []),
-                nm=getattr(self, "_nm", None),
                 identity_ref=identity_ref,
                 mentioned_identity_refs=mentioned_identity_refs,
             ),
@@ -2544,7 +2542,6 @@ class AgentEngine:
         content: str,
         sender_id: str,
         mentioned_ids: list,
-        nm=None,
         *,
         identity_ref: str = "",
         mentioned_identity_refs: dict[str, str] | None = None,
@@ -2554,9 +2551,7 @@ class AgentEngine:
         if identity_ref:
             prefix = f"[{identity_ref}]: "
         else:
-            aliases = nm.get_aliases(sender_id) if nm else []
-            alias_str = "，".join(aliases) if aliases else "未知身份"
-            prefix = f"[{alias_str}]: "
+            prefix = "[未知身份]: "
 
         for uid in mentioned_ids:
             target_ref = mentioned_identity_refs.get(str(uid))
@@ -2565,9 +2560,7 @@ class AgentEngine:
             elif identity_ref:
                 content = content.replace(f"@{uid}", "@未知身份")
             else:
-                u_aliases = nm.get_aliases(uid) if nm else []
-                u_name = u_aliases[-1] if u_aliases else "未知身份"
-                content = content.replace(f"@{uid}", f"@{u_name}")
+                content = content.replace(f"@{uid}", "@未知身份")
 
         return prefix + content
 

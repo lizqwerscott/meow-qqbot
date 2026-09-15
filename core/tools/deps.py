@@ -14,7 +14,6 @@ from core.tools.ref import Ref
 class ToolDeps:
     # ── Static deps (set once, never change) ──
     emoji_manager: Any = None
-    nickname_manager: Any = None
     identity_manager: Any = None
     skill_managers: Any = None
     hindsight: Any = None

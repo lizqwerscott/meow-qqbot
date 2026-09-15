@@ -36,7 +36,6 @@ from core.engine.message_parser import MessageParser, MessageParserDeps
 from core.engine.router import Router
 from core.managers.command_manager import CommandManager
 from core.managers.emoji_manager import EmojiManager
-from core.managers.nickname_manager import NicknameManager
 from core.markdown_split import split_markdown
 from core.message import InputMessage
 from core.session_identity import (
@@ -121,7 +120,7 @@ class BotEngine:
 
     AI 编排、会话管理、工具执行由 AgentEngine 负责。
     消息路由/命令分发由 Router 负责。
-    昵称管理由 NicknameManager 负责。
+    用户身份和昵称由 IdentityManager 负责。
     命令处理器在 core/command_handlers/ 中各独立文件实现。
     """
 
@@ -133,7 +132,6 @@ class BotEngine:
         agent_engine: AgentEngine,
         router: Router,
         admin_id: List[str],
-        nickname_manager: NicknameManager,
         emoji_manager: Optional[EmojiManager] = None,
         multimodal_service: Optional[MultimodalService] = None,
         permission_manager=None,
@@ -159,7 +157,6 @@ class BotEngine:
         self.admin_id: List[str] = admin_id
 
         # BotEngine 自有组件
-        self.nickname_manager = nickname_manager
         self.emoji_manager = emoji_manager
         self.multimodal_service = multimodal_service
         self.permission_manager = permission_manager
@@ -337,8 +334,6 @@ class BotEngine:
             self._bot_name = ready.user.username or "机器人"
         _log.info(f"机器人「{self._bot_name}」on_ready!")
 
-        self.nickname_manager.load_all()
-
         # 初始化多模态（如尚未由外部注入）
         if self.multimodal_service is None:
             # 如果外部没有传入，尝试创建一个（兼容旧配置）
@@ -409,8 +404,6 @@ class BotEngine:
             except Exception as exc:
                 _log.warning("BotEngine %s 失败: %s", label, type(exc).__name__)
 
-        await cleanup("昵称保存", self.nickname_manager.flush_save)
-        await cleanup("自动昵称保存", self.nickname_manager.save_auto)
         # 审批白名单使用计数落盘（防抖窗口内最后一次，避免关机丢失）
         if self.approval_manager is not None:
             try:
@@ -437,13 +430,6 @@ class BotEngine:
         _log.info(
             f"[{parsed.chat_scope}][({event_type})] {parsed.sender_id}: {parsed.content}"
         )
-
-        if self.identity_manager is None:
-            await self.nickname_manager.collect(parsed.author_id, parsed.author_username)
-            for uid, name in parsed.mention_entries:
-                await self.nickname_manager.collect(uid, name)
-            for uid, name in parsed.reply_author_entries:
-                await self.nickname_manager.collect(uid, name)
 
         target = DeliveryTarget(
             channel="qq",
@@ -474,16 +460,18 @@ class BotEngine:
                         if user_id == parsed.replied_author_id:
                             replied_identity_ref = observed.identity_ref
             except Exception as exc:
-                _log.warning("身份观察失败 [%s..]: %s", parsed.chat_id[:12], type(exc).__name__)
+                _log.warning(
+                    "身份观察失败 [%s..]: %s", parsed.chat_id[:12], type(exc).__name__
+                )
 
         adapter = self.channel_registry.for_target(target)
         get_info = getattr(adapter, "get_info", None)
         try:
-            channel_info = (
-                await get_info(target) if callable(get_info) else None
-            )
+            channel_info = await get_info(target) if callable(get_info) else None
         except Exception as exc:
-            _log.warning("渠道信息读取失败 [%s..]: %s", parsed.chat_id[:12], type(exc).__name__)
+            _log.warning(
+                "渠道信息读取失败 [%s..]: %s", parsed.chat_id[:12], type(exc).__name__
+            )
             channel_info = None
 
         self._record_account_info_health(channel_info)
@@ -525,8 +513,15 @@ class BotEngine:
         await self.router.route(
             input_message=input_message,
             reply_callback=self._send_reply,
-            get_user_nickname=self.nickname_manager.get,
+            get_user_nickname=self._get_user_display_name,
         )
+
+    def _get_user_display_name(self, user_id: str) -> str:
+        if self.identity_manager is not None:
+            get_name = getattr(self.identity_manager, "get_channel_name", None)
+            if callable(get_name):
+                return get_name(user_id, channel="qq", account_id="default")
+        return str(user_id or "")
 
     def _record_account_info_health(self, snapshot) -> None:
         if snapshot is not None and getattr(snapshot, "self_info", None) is not None:

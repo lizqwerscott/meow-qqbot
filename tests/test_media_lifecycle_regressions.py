@@ -51,15 +51,11 @@ async def test_service_graph_does_not_retry_non_transport_gateway_failure():
 
 
 @pytest.mark.asyncio
-async def test_bot_engine_stop_continues_after_nickname_failure(monkeypatch):
+async def test_bot_engine_stop_closes_runtime_resources(monkeypatch):
     from core.engine.client import BotEngine
 
     engine = BotEngine.__new__(BotEngine)
     events = []
-
-    async def fail_nickname():
-        events.append("nickname")
-        raise RuntimeError("nickname failed")
 
     async def stop_agent():
         events.append("agent")
@@ -70,10 +66,6 @@ async def test_bot_engine_stop_continues_after_nickname_failure(monkeypatch):
     async def close_http():
         events.append("http")
 
-    engine.nickname_manager = SimpleNamespace(
-        flush_save=fail_nickname,
-        save_auto=lambda: events.append("auto") or asyncio.sleep(0),
-    )
     engine.approval_manager = None
     engine.agent_engine = SimpleNamespace(stop=stop_agent)
     engine.ws = SimpleNamespace(async_stop=stop_ws)
@@ -81,7 +73,7 @@ async def test_bot_engine_stop_continues_after_nickname_failure(monkeypatch):
 
     await engine.stop()
 
-    assert events == ["nickname", "auto", "agent", "ws", "http"]
+    assert events == ["agent", "ws", "http"]
 
     import main as main_module
 

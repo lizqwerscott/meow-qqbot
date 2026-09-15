@@ -23,6 +23,23 @@ def test_identity_ref_is_stable_and_chat_aliases_are_isolated(tmp_path):
     assert manager.list_members()[0]["identity_ref"] == first.identity_ref
 
 
+def test_channel_alias_management_uses_identity_store(tmp_path):
+    manager = IdentityManager(tmp_path / "identity.sqlite3")
+
+    manager.observe(DeliveryTarget("qq", "default", "group", "g1"), "actor-1", "自动名")
+    manager.set_channel_alias("actor-1", "手动名")
+    aliases = manager.list_channel_aliases()
+
+    assert aliases["manual"] == {"actor-1": "手动名"}
+    assert aliases["auto"]["actor-1"]["aliases"] == ["自动名"]
+    assert manager.get_channel_name("actor-1") == "手动名"
+
+    assert manager.promote_channel_alias("actor-1") is True
+    aliases = manager.list_channel_aliases()
+    assert aliases["manual"] == {"actor-1": "自动名"}
+    assert aliases["auto"] == {}
+
+
 def test_project_recent_sorts_by_activity_and_keeps_forced_users(tmp_path):
     manager = IdentityManager(tmp_path / "identity.sqlite3")
     target = DeliveryTarget("qq", "default", "group", "g1")
@@ -44,7 +61,7 @@ def test_project_recent_sorts_by_activity_and_keeps_forced_users(tmp_path):
     ]
 
     block = __import__("asyncio").run(
-        SocialBlockBuilder(None, "bot", manager).build(
+        SocialBlockBuilder("bot", manager).build(
             chat_id="g1",
             is_group=True,
             has_users=True,
@@ -57,6 +74,62 @@ def test_project_recent_sorts_by_activity_and_keeps_forced_users(tmp_path):
     assert "identity_ref:" in block
     assert "actor-1" not in block
     assert "actor-2" not in block
+
+
+def test_project_roster_freezes_order_until_refresh(tmp_path):
+    manager = IdentityManager(tmp_path / "identity.sqlite3")
+    target = DeliveryTarget("qq", "default", "group", "g1")
+    manager.observe(target, "actor-1", "甲")
+    manager.observe(target, "actor-2", "乙")
+
+    first = manager.project_roster(target, {"actor-1": 10.0, "actor-2": 1.0})
+    second = manager.project_roster(target, {"actor-1": 1.0, "actor-2": 10.0})
+    refreshed = manager.project_roster(
+        target, {"actor-1": 1.0, "actor-2": 10.0}, refresh=True
+    )
+
+    assert [ref.identity_ref for ref in second] == [ref.identity_ref for ref in first]
+    assert [ref.identity_ref for ref in refreshed] != [
+        ref.identity_ref for ref in first
+    ]
+
+
+def test_social_projection_separates_stable_roster_and_current_identities(tmp_path):
+    import asyncio
+
+    manager = IdentityManager(tmp_path / "identity.sqlite3")
+    target = DeliveryTarget("qq", "default", "group", "g1")
+    stable = manager.observe(target, "actor-1", "甲")
+    current = manager.observe(target, "actor-2", "乙")
+    message = InputMessage(
+        id="m",
+        sender_id="actor-2",
+        chat_id="g1",
+        content="hello",
+        is_group=True,
+        delivery_target=target,
+    )
+    builder = SocialBlockBuilder("bot", manager)
+
+    stable_text = asyncio.run(
+        builder.build_stable(
+            chat_id="g1",
+            is_group=True,
+            has_users=True,
+            input_message=message,
+            recent_events=[
+                SimpleNamespace(role="user", sender_id="actor-1", timestamp=1e20)
+            ],
+        )
+    )
+    current_text = asyncio.run(
+        builder.build_current(input_message=message, is_group=True)
+    )
+
+    assert stable.identity_ref in stable_text
+    assert current.identity_ref in current_text
+    assert "【稳定群身份映射】" in stable_text
+    assert "【本轮相关身份】" in current_text
 
 
 def test_project_text_replaces_only_current_chat_mentions(tmp_path):
@@ -251,7 +324,6 @@ async def test_hindsight_side_effect_persists_anonymous_content(tmp_path):
     add_message = AsyncMock(return_value=True)
     engine = AgentEngine.__new__(AgentEngine)
     engine._identity_manager = manager
-    engine._nm = None
     engine.session_identity_resolver = None
     engine.hindsight = SimpleNamespace(
         add_message=add_message,
@@ -404,7 +476,6 @@ async def test_bot_engine_inbound_path_mounts_identity_and_channel_info(tmp_path
 
     engine = BotEngine.__new__(BotEngine)
     engine.parser = SimpleNamespace(parse=parse)
-    engine.nickname_manager = SimpleNamespace(get=lambda user_id: user_id)
     engine.identity_manager = manager
     engine.channel_registry = Registry()
     engine.agent_engine = SimpleNamespace(resolve_message_identity=lambda message: None)

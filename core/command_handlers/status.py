@@ -34,11 +34,16 @@ def _hindsight_status_line(health: dict) -> str:
 )
 class StatusCommand:
     def __init__(
-        self, agent_engine: AgentEngine, approval_manager=None, channel_info_provider=None
+        self,
+        agent_engine: AgentEngine,
+        approval_manager=None,
+        channel_info_provider=None,
+        identity_manager=None,
     ):
         self.agent_engine = agent_engine
         self.approval_manager = approval_manager  # 2.4：审批白名单状态行
         self.channel_info_provider = channel_info_provider
+        self.identity_manager = identity_manager
 
     @staticmethod
     def _plugin_count() -> int:
@@ -162,6 +167,32 @@ class StatusCommand:
                     "**渠道信息缓存**",
                     f"- 条目: `{len(entries)}`，stale: `{stale_count}`，错误: `{error_count}`",
                 ]
+                option = args.strip().split()[0] if args.strip() else ""
+                if option in {"刷新", "refresh"}:
+                    target = getattr(input_message, "delivery_target", None)
+                    get_info = getattr(self.channel_info_provider, "get_info", None)
+                    if target is not None and callable(get_info):
+                        snapshot = await get_info(target, refresh=True)
+                        reasons = "、".join(snapshot.unavailable_reasons) or "无"
+                        channel_info_lines.extend(
+                            [
+                                f"- 当前目标刷新: `{snapshot.availability}`，stale=`{snapshot.stale}`",
+                                f"- 原因: `{reasons}`",
+                            ]
+                        )
+                elif option in {"全部", "all"}:
+                    list_chats = getattr(self.identity_manager, "list_chats", None)
+                    if callable(list_chats):
+                        chats = list_chats()
+                        channel_info_lines.append(f"- 已知群: `{len(chats)}` 个")
+                        for chat in chats:
+                            channel_info_lines.append(
+                                "  - "
+                                f"{chat.get('channel')}/{chat.get('account_id')} "
+                                f"群指纹=`{chat.get('chat_fingerprint')}` "
+                                f"成员=`{chat.get('member_count', 0)}` "
+                                f"最近观察=`{time.strftime('%m-%d %H:%M', time.localtime(chat.get('last_seen', 0)))}`"
+                            )
 
             status_text = [
                 "**系统状态**",

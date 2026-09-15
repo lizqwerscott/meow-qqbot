@@ -45,7 +45,6 @@ from core.managers.context_store import MemoryContextStore, SQLiteContextStore
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager
 from core.managers.identity_manager import IdentityManager
-from core.managers.nickname_manager import NicknameManager
 from core.managers.permission_manager import PermissionManager
 from core.managers.template_manager import TemplateManager
 from core.managers.workspace_manager import WorkspaceManager
@@ -566,7 +565,7 @@ class ServiceGraph:
 
         self.bot_id = self.cfg.bot_id
 
-        # ── Permission + Workspace + Nickname ──
+        # ── Permission + Workspace ──
         self.permission_manager = PermissionManager("config/allowlist.toml")
         self.admin_ids = self.permission_manager.get_role_ids("admin")
         if self.background_task_runner:
@@ -576,7 +575,6 @@ class ServiceGraph:
         self.workspace_manager = WorkspaceManager(
             root=workspace_config.get("root", "workspaces"),
         )
-        self.nickname_manager = NicknameManager(bot_id=self.bot_id)
 
         # ── Skills ──
         self.skill_managers = SkillManagers(
@@ -707,7 +705,6 @@ class ServiceGraph:
             ),
             prompt=PromptContext(
                 template_manager=self.template_manager,
-                nickname_manager=self.nickname_manager,
                 emoji_manager=self.emoji_manager,
                 skill_managers=self.skill_managers,
                 learning_orchestrator=self.learning_orchestrator,
@@ -848,7 +845,6 @@ class ServiceGraph:
         # ── 构造 ToolDeps 并注册工具 ──
         self.tool_deps = ToolDeps(
             emoji_manager=self.emoji_manager,
-            nickname_manager=self.nickname_manager,
             identity_manager=self.identity_manager,
             skill_managers=self.skill_managers,
             hindsight=self.hindsight_memory,
@@ -978,7 +974,6 @@ class ServiceGraph:
             router=router,
             admin_id=self.admin_ids,
             permission_manager=self.permission_manager,
-            nickname_manager=self.nickname_manager,
             emoji_manager=self.emoji_manager,
             multimodal_service=self.multimodal_service,
             media_service=self.media_service,
@@ -987,6 +982,13 @@ class ServiceGraph:
             identity_manager=self.identity_manager,
             runtime_shutdown_callback=self._stop_after_runtime_channel_failure,
         )
+
+    def _get_user_display_name(self, user_id: str) -> str:
+        if self.identity_manager is not None:
+            get_name = getattr(self.identity_manager, "get_channel_name", None)
+            if callable(get_name):
+                return get_name(user_id, channel="qq", account_id="default")
+        return str(user_id or "")
 
     async def _stop_after_runtime_channel_failure(self) -> None:
         if self._shutdown_event.is_set():
@@ -1337,6 +1339,7 @@ class ServiceGraph:
             delivery_controller=self.agent_engine._get_delivery_controller(),
             approval_manager=self.approval_manager,
             channel_info_provider=self.bot_engine.channel_info_provider,
+            identity_manager=self.identity_manager,
             media_service=self.media_service,
             delivery_target_catalog=self.delivery_target_catalog,
         )
@@ -1359,7 +1362,7 @@ class ServiceGraph:
             self.webui_gateway = WebUiConversationGateway(
                 operator_id=str(webui_config.get("operator_id", "admin")),
                 route_callback=self.bot_engine.router.route,
-                get_user_nickname=self.nickname_manager.get,
+                get_user_nickname=self._get_user_display_name,
                 event_log=self.agent_engine.event_log,
                 media_service=self.media_service,
                 model_registry=self.model_registry,
@@ -1373,7 +1376,6 @@ class ServiceGraph:
             webui_app = create_app(
                 managers={
                     "emoji_manager": self.emoji_manager,
-                    "nickname_manager": self.nickname_manager,
                     "identity_manager": self.identity_manager,
                     "channel_info_provider": self.bot_engine.channel_info_provider,
                     "context_manager": self.context_manager,

@@ -36,6 +36,13 @@ class ChannelUserRef:
         return "\n".join(parts)
 
 
+@dataclass(frozen=True, slots=True)
+class _RosterSnapshot:
+    refs: tuple[ChannelUserRef, ...]
+    refreshed_at: float
+    turns_since_refresh: int = 0
+
+
 class IdentityManager:
     """Deep identity module with a small observe/resolve/search interface."""
 
@@ -46,6 +53,7 @@ class IdentityManager:
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA busy_timeout = 5000")
+        self._roster_snapshots: dict[tuple[str, str, str, str], _RosterSnapshot] = {}
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS channel_identities (
                 channel TEXT NOT NULL,
@@ -304,6 +312,29 @@ class IdentityManager:
             scope=self._chat_key(target),
         )
 
+    def get_channel_name(
+        self,
+        actor_id: str,
+        *,
+        channel: str = "qq",
+        account_id: str = "default",
+    ) -> str:
+        """Return the best channel-level display name for internal formatting."""
+        row = self._conn.execute(
+            """
+            SELECT identity_ref, current_name, username
+            FROM channel_identities
+            WHERE channel = ? AND account_id = ? AND actor_id = ?
+            """,
+            (channel, account_id, actor_id),
+        ).fetchone()
+        if row is None:
+            return str(actor_id or "")
+        aliases = self._aliases(
+            row["identity_ref"], "channel", f"{channel}:{account_id}"
+        )
+        return str(aliases[0] or row["current_name"] or row["username"] or actor_id)
+
     def ensure_legacy_ref(
         self, target: DeliveryTarget, actor_id: str
     ) -> ChannelUserRef | None:
@@ -442,12 +473,68 @@ class IdentityManager:
         forced_actor_ids: Iterable[str] = (),
         limit: int = 30,
     ) -> list[ChannelUserRef]:
+        roster = self.project_roster(target, activity, limit=limit)
+        roster_refs = {ref.identity_ref for ref in roster}
+        forced_refs = self.project_forced(target, forced_actor_ids)
+        return roster + [
+            ref for ref in forced_refs if ref.identity_ref not in roster_refs
+        ]
+
+    def project_roster(
+        self,
+        target: DeliveryTarget,
+        activity: dict[str, float],
+        *,
+        limit: int = 30,
+        refresh: bool = False,
+    ) -> list[ChannelUserRef]:
+        """Return a temporarily frozen, activity-ranked identity roster."""
+        limit = max(1, min(limit, 100))
+        key = target.catalog_key
+        now = time.monotonic()
+        snapshot = self._roster_snapshots.get(key)
+        if (
+            snapshot is not None
+            and not refresh
+            and now - snapshot.refreshed_at < 300.0
+            and snapshot.turns_since_refresh < 10
+        ):
+            self._roster_snapshots[key] = _RosterSnapshot(
+                refs=snapshot.refs,
+                refreshed_at=snapshot.refreshed_at,
+                turns_since_refresh=snapshot.turns_since_refresh + 1,
+            )
+            return list(snapshot.refs[:limit])
+
+        refs = self._rank_roster_candidates(target, activity, max(limit, 30))
+        self._roster_snapshots[key] = _RosterSnapshot(
+            refs=tuple(refs), refreshed_at=now
+        )
+        return refs[:limit]
+
+    def project_forced(
+        self,
+        target: DeliveryTarget,
+        forced_actor_ids: Iterable[str],
+    ) -> list[ChannelUserRef]:
+        """Return current-turn identities observed in this exact chat."""
         forced = list(
             dict.fromkeys(actor_id for actor_id in forced_actor_ids if actor_id)
         )
-        candidates = set(activity) | set(forced)
-        if not candidates:
-            return []
+        refs = []
+        for actor_id in forced:
+            ref = self.get_ref(target, actor_id)
+            if ref is not None and self.resolve_identity(target, ref.identity_ref):
+                refs.append(ref)
+        return refs
+
+    def _rank_roster_candidates(
+        self,
+        target: DeliveryTarget,
+        activity: dict[str, float],
+        limit: int,
+    ) -> list[ChannelUserRef]:
+        candidates = set(activity)
         rows = {}
         for actor_id in candidates:
             ref = self.get_ref(target, actor_id)
@@ -474,7 +561,6 @@ class IdentityManager:
                     ref = self.get_ref(target, actor_id)
                     if ref is not None:
                         rows[actor_id] = ref
-        forced_rows = [rows[actor_id] for actor_id in forced if actor_id in rows]
         ranked = sorted(
             rows.values(),
             key=lambda ref: (
@@ -486,25 +572,7 @@ class IdentityManager:
                 ref.identity_ref,
             ),
         )
-        if len(forced_rows) > limit:
-            forced_refs = {ref.identity_ref for ref in forced_rows}
-            return [ref for ref in ranked if ref.identity_ref in forced_refs]
-        selected = ranked[:limit]
-        selected_refs = {ref.identity_ref for ref in selected}
-        selected.extend(
-            ref for ref in forced_rows if ref.identity_ref not in selected_refs
-        )
-        return sorted(
-            selected,
-            key=lambda ref: (
-                -self._activity_score(
-                    target,
-                    self.actor_for(target, ref.identity_ref),
-                    activity,
-                ),
-                ref.identity_ref,
-            ),
-        )
+        return ranked[:limit]
 
     def actor_for(self, target: DeliveryTarget, identity_ref: str) -> str:
         row = self._conn.execute(
@@ -663,9 +731,14 @@ class IdentityManager:
         manual: bool = True,
     ) -> ChannelUserRef:
         """Set a channel-level alias without fabricating chat membership."""
-        target = DeliveryTarget(channel, account_id, "direct", "")
+        target = DeliveryTarget(channel, account_id, "direct", actor_id)
         now = time.time()
-        identity = self._ensure_identity(channel, account_id, actor_id, alias, "", now)
+        identity = self._ensure_identity(channel, account_id, actor_id, "", "", now)
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM aliases WHERE identity_ref = ? AND scope = 'channel' AND scope_key = ? AND is_manual = 1",
+                (identity.identity_ref, f"{channel}:{account_id}"),
+            )
         self._record_alias(
             identity,
             "channel",
@@ -675,6 +748,98 @@ class IdentityManager:
             now,
         )
         return identity
+
+    def remove_automatic_channel_aliases(
+        self,
+        actor_id: str,
+        *,
+        channel: str = "qq",
+        account_id: str = "default",
+    ) -> None:
+        row = self._conn.execute(
+            "SELECT identity_ref FROM channel_identities WHERE channel = ? AND account_id = ? AND actor_id = ?",
+            (channel, account_id, actor_id),
+        ).fetchone()
+        if row is None:
+            return
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM aliases WHERE identity_ref = ? AND scope = 'channel' AND scope_key = ? AND is_manual = 0",
+                (row["identity_ref"], f"{channel}:{account_id}"),
+            )
+
+    def promote_channel_alias(
+        self,
+        actor_id: str,
+        alias: str | None = None,
+        *,
+        channel: str = "qq",
+        account_id: str = "default",
+    ) -> bool:
+        row = self._conn.execute(
+            "SELECT identity_ref FROM channel_identities WHERE channel = ? AND account_id = ? AND actor_id = ?",
+            (channel, account_id, actor_id),
+        ).fetchone()
+        if row is None:
+            return False
+        scope_key = f"{channel}:{account_id}"
+        if alias is None:
+            selected = self._conn.execute(
+                "SELECT alias FROM aliases WHERE identity_ref = ? AND scope = 'channel' AND scope_key = ? AND is_manual = 0 ORDER BY last_seen DESC LIMIT 1",
+                (row["identity_ref"], scope_key),
+            ).fetchone()
+            alias = str(selected["alias"]) if selected else ""
+        if not alias:
+            return False
+        self.set_channel_alias(
+            actor_id,
+            alias,
+            channel=channel,
+            account_id=account_id,
+            manual=True,
+        )
+        self.remove_automatic_channel_aliases(
+            actor_id, channel=channel, account_id=account_id
+        )
+        return True
+
+    def list_channel_aliases(
+        self,
+        *,
+        channel: str = "qq",
+        account_id: str = "default",
+        limit: int = 500,
+    ) -> dict[str, dict[str, object]]:
+        """Return legacy-shaped manual/automatic views backed by SQLite aliases."""
+        rows = self._conn.execute(
+            """
+            SELECT ci.actor_id, a.alias, a.is_manual, a.last_seen
+            FROM channel_identities ci
+            JOIN aliases a ON a.identity_ref = ci.identity_ref
+            WHERE ci.channel = ? AND ci.account_id = ?
+              AND a.scope = 'channel' AND a.scope_key = ?
+            ORDER BY a.is_manual DESC, a.last_seen DESC, ci.actor_id
+            LIMIT ?
+            """,
+            (channel, account_id, f"{channel}:{account_id}", max(1, min(limit, 2000))),
+        ).fetchall()
+        manual: dict[str, str] = {}
+        automatic: dict[str, dict[str, object]] = {}
+        for row in rows:
+            actor_id = str(row["actor_id"])
+            alias = str(row["alias"])
+            if row["is_manual"]:
+                manual.setdefault(actor_id, alias)
+            else:
+                entry = automatic.setdefault(
+                    actor_id,
+                    {"aliases": [], "updated_at": float(row["last_seen"])},
+                )
+                entry["aliases"].append(alias)
+                entry["updated_at"] = max(
+                    float(entry["updated_at"]), float(row["last_seen"])
+                )
+        return {"manual": manual, "auto": automatic}
 
     def remove_channel_alias(
         self,
