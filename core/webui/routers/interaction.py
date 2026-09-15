@@ -7,6 +7,7 @@ import json
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
+from core.session_identity import parse_chat_session_key
 from core.webui.csrf import csrf_token
 from core.webui.routers.sessions import (
     _attach_resource_views,
@@ -35,6 +36,37 @@ def _bad_request(exc: ValueError) -> HTTPException:
 
 def _not_found(exc: KeyError) -> HTTPException:
     return HTTPException(status_code=404, detail=f"session not found: {exc.args[0]}")
+
+
+def _history_identity(request: Request, chat_id: str, sender_id: str) -> dict[str, str]:
+    """Return the current safe identity projection for a historical user event."""
+    if not sender_id:
+        return {}
+    identity_manager = request.app.state.managers.get("identity_manager")
+    if identity_manager is None:
+        return {}
+    try:
+        target = parse_chat_session_key(chat_id)
+    except (TypeError, ValueError):
+        resolver = request.app.state.managers.get("session_identity_resolver")
+        if resolver is None:
+            return {}
+        try:
+            target = resolver.resolve_legacy(chat_id).target
+        except (TypeError, ValueError):
+            return {}
+    if target is None:
+        return {}
+    get_ref = getattr(identity_manager, "get_ref", None)
+    if not callable(get_ref):
+        return {}
+    ref = get_ref(target, sender_id)
+    if ref is None:
+        return {}
+    return {
+        "identity_ref": ref.identity_ref,
+        "sender_display_name": ref.chat_name or ref.current_name or ref.identity_ref,
+    }
 
 
 async def _turn_dtos(page, *, session_id: str, request: Request) -> list[dict]:
@@ -72,6 +104,11 @@ async def _turn_dtos(page, *, session_id: str, request: Request) -> list[dict]:
         for event, message in zip(events, card["events"]):
             timestamps.append(event.timestamp)
             sender_id = str(message.get("sender_id") or event.sender_id or "")
+            identity = (
+                _history_identity(request, page.chat_id, sender_id)
+                if event.role == "user"
+                else {}
+            )
             content = str(message.get("content") or "").strip()
             reasoning = str(message.get("reasoning_content") or "").strip()
             if reasoning:
@@ -80,6 +117,7 @@ async def _turn_dtos(page, *, session_id: str, request: Request) -> list[dict]:
                         "type": "reasoning",
                         "role": "assistant",
                         "sender_id": sender_id,
+                        **identity,
                         "text": reasoning,
                     }
                 )
@@ -90,6 +128,7 @@ async def _turn_dtos(page, *, session_id: str, request: Request) -> list[dict]:
                         "text": content,
                         "role": event.role,
                         "sender_id": sender_id,
+                        **identity,
                     }
                 )
             for resource in message.get("resources") or ():
@@ -101,6 +140,7 @@ async def _turn_dtos(page, *, session_id: str, request: Request) -> list[dict]:
                         "type": resource_view["resource_type"] or "file",
                         "role": event.role,
                         "sender_id": sender_id,
+                        **identity,
                         "resource": resource_view,
                     }
                 )
@@ -115,6 +155,7 @@ async def _turn_dtos(page, *, session_id: str, request: Request) -> list[dict]:
                         "type": "tool",
                         "role": event.role,
                         "sender_id": sender_id,
+                        **identity,
                         "tool_calls": tool_calls,
                         "tool_call_id": (
                             first_call.get("id", "")
@@ -140,6 +181,7 @@ async def _turn_dtos(page, *, session_id: str, request: Request) -> list[dict]:
                         "type": "tool_result",
                         "role": event.role,
                         "sender_id": sender_id,
+                        **identity,
                         "tool_call_id": event.tool_call_id,
                         "tool_name": event.tool_name
                         or tool_names.get(event.tool_call_id, ""),

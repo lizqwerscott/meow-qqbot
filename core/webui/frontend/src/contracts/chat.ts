@@ -40,6 +40,8 @@ export type ContentBlock = {
   type: string;
   role?: string;
   sender_id?: string;
+  identity_ref?: string;
+  sender_display_name?: string;
   text?: string;
   resource?: Record<string, unknown>;
   tool_calls?: unknown[];

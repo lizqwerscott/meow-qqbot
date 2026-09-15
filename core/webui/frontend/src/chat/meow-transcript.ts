@@ -323,7 +323,12 @@ export class MeowTranscript extends LitElement {
   }
 
   private messageLabel(block: ContentBlock): string {
-    if (block.role === "user") return block.sender_id ? `用户 · ${block.sender_id}` : "用户";
+    if (block.role === "user") {
+      const identity = [block.sender_display_name, block.identity_ref]
+        .filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index)
+        .join(" · ");
+      return identity ? `用户 · ${identity}` : block.sender_id ? `用户 · ${block.sender_id}` : "用户";
+    }
     if (block.role === "tool") return block.tool_name ? `工具 · ${block.tool_name}` : "工具";
     if (block.role === "system") return "系统";
     return "助手";

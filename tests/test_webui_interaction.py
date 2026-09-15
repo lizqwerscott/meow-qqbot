@@ -16,6 +16,7 @@ from core.engine.conversation_event_log import (
     TurnStatus,
 )
 from core.engine.tool_events import ToolLifecycleEvent
+from core.managers.identity_manager import IdentityManager
 from core.media.store import MediaStore
 from core.session_identity import (
     ApprovalPrompt,
@@ -173,6 +174,49 @@ async def test_webui_can_browse_external_channel_sessions_read_only(tmp_path):
         gateway.get_session("qq-private-42")
     history_session = await gateway.resolve_history_session("qq-private-42")
     assert history_session.session_key == "qq-private-42"
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_workbench_history_projects_current_identity_for_canonical_chat(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    target = DeliveryTarget("qq", "default", "group", "group-42")
+    identity_manager = IdentityManager(tmp_path / "identities.sqlite3")
+    identity = identity_manager.observe(target, "actor-7", "小明")
+    chat_id = "agent:main:qq:default:group:group-42"
+    await event_log.append_user_message(
+        chat_id=chat_id,
+        turn_id="turn-1",
+        message_id="message-1",
+        content="来自旧历史",
+        sender_id="actor-7",
+        session_kind="group",
+    )
+    gateway = WebUiConversationGateway(
+        operator_id="admin",
+        route_callback=lambda **_kwargs: None,
+        get_user_nickname=lambda _user_id: "admin",
+        event_log=event_log,
+        store_path=str(tmp_path / "webui.sqlite3"),
+    )
+    app = create_app(
+        {
+            "conversation_event_log": event_log,
+            "identity_manager": identity_manager,
+            "webui_gateway": gateway,
+        },
+        {},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(f"/api/sessions/{chat_id}/turns")
+
+    assert response.status_code == 200
+    block = response.json()["items"][0]["blocks"][0]
+    assert block["sender_id"] == "actor-7"
+    assert block["identity_ref"] == identity.identity_ref
+    assert block["sender_display_name"] == "小明"
+    identity_manager.close()
     await event_log.close()
 
 
@@ -890,9 +934,7 @@ async def test_webui_session_list_uses_stable_cursor_pages(tmp_path):
     assert third.has_more is False
     all_sessions = await gateway.list_sessions(limit=100)
     assert {
-        session.session_id
-        for page in (first, second, third)
-        for session in page.items
+        session.session_id for page in (first, second, third) for session in page.items
     } == {session.session_id for session in all_sessions.items}
 
     with pytest.raises(ValueError, match="invalid session cursor"):

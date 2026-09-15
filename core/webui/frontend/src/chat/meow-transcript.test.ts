@@ -283,4 +283,30 @@ describe("meow-transcript", () => {
     expect(transcript.shadowRoot?.querySelector(".reasoning-card")).not.toBeNull();
     expect(transcript.shadowRoot?.querySelector(".reasoning-card")?.hasAttribute("open")).toBe(false);
   });
+
+  it("prefers the current identity projection over a platform sender ID", async () => {
+    const transcript = document.createElement("meow-transcript") as HTMLElement & {
+      turns: Turn[];
+      loading: boolean;
+    };
+    transcript.turns = [{
+      ...turns[0],
+      blocks: [{
+        type: "text",
+        role: "user",
+        sender_id: "actor-7",
+        sender_display_name: "小明",
+        identity_ref: "member_12345678",
+        text: "你好",
+      }],
+    }];
+    transcript.loading = false;
+    document.body.append(transcript);
+    await (transcript as unknown as { updateComplete: Promise<unknown> }).updateComplete;
+
+    const label = transcript.shadowRoot?.querySelector(".user .message-label")?.textContent;
+    expect(label).toContain("小明");
+    expect(label).toContain("member_12345678");
+    expect(label).not.toContain("actor-7");
+  });
 });
