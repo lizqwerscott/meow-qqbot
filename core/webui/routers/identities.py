@@ -23,25 +23,35 @@ async def identity_list(request: Request, ref: str = Query("")):
     suggestions = []
     if manager is None:
         rows = []
+        direct_peers = []
         persons = []
     else:
         members = manager.list_members()
+        direct_peers = manager.list_direct_peers()
         persons = manager.list_persons()
         chats = manager.list_chats()
         suggestions = manager.list_suggestions()
         if highlight_ref:
-            highlight_person_ref = next(
+            matched = next(
                 (
-                    str(member.get("person_ref") or "")
-                    for member in members
-                    if member.get("identity_ref") == highlight_ref
+                    row
+                    for row in [*members, *direct_peers]
+                    if row.get("identity_ref") == highlight_ref
                 ),
-                "",
+                None,
+            )
+            highlight_person_ref = (
+                str(matched.get("person_ref") or "") if matched else ""
             )
             rows = [
                 member
                 for member in members
                 if member.get("identity_ref") == highlight_ref
+            ]
+            direct_peers = [
+                peer
+                for peer in direct_peers
+                if peer.get("identity_ref") == highlight_ref
             ]
         else:
             rows = members
@@ -51,6 +61,7 @@ async def identity_list(request: Request, ref: str = Query("")):
         {
             "request": request,
             "members": rows,
+            "direct_peers": direct_peers,
             "persons": persons,
             "chats": chats,
             "suggestions": suggestions,

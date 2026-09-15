@@ -690,6 +690,55 @@ class IdentityManager:
             )
         return result
 
+    def list_direct_peers(self, *, limit: int = 500) -> list[dict[str, object]]:
+        rows = self._conn.execute(
+            """
+            SELECT cm.channel, cm.account_id, cm.chat_id, cm.actor_id, cm.last_seen,
+                   cm.message_count, cm.mention_count, cm.reply_count,
+                   ci.identity_ref, ci.current_name, ci.username,
+                   il.person_ref, p.display_name
+            FROM chat_memberships cm
+            JOIN channel_identities ci
+              ON ci.channel = cm.channel AND ci.account_id = cm.account_id
+             AND ci.actor_id = cm.actor_id
+            LEFT JOIN identity_links il ON il.identity_ref = ci.identity_ref
+            LEFT JOIN persons p ON p.person_ref = il.person_ref
+            WHERE cm.chat_type = 'direct'
+            ORDER BY cm.last_seen DESC, cm.message_count DESC
+            LIMIT ?
+            """,
+            (max(1, min(limit, 2000)),),
+        ).fetchall()
+        result = []
+        for row in rows:
+            target = DeliveryTarget(
+                channel=str(row["channel"]),
+                account_id=str(row["account_id"]),
+                chat_type="direct",
+                target_id=str(row["chat_id"]),
+            )
+            ref = self.get_ref(target, str(row["actor_id"]))
+            result.append(
+                {
+                    "identity_ref": row["identity_ref"],
+                    "chat_id": row["chat_id"],
+                    "person_ref": row["person_ref"] or "",
+                    "person_name": row["display_name"] or "",
+                    "current_chat_name": ref.chat_name if ref else "",
+                    "historical_names": list(ref.historical_names) if ref else [],
+                    "current_name": row["current_name"] or row["username"] or "",
+                    "chat_fingerprint": self.chat_fingerprint(
+                        row["channel"], row["account_id"], row["chat_id"]
+                    ),
+                    "channel": row["channel"],
+                    "message_count": int(row["message_count"]),
+                    "mention_count": int(row["mention_count"]),
+                    "reply_count": int(row["reply_count"]),
+                    "last_seen": float(row["last_seen"]),
+                }
+            )
+        return result
+
     def list_chats(self, *, limit: int = 500) -> list[dict[str, object]]:
         rows = self._conn.execute(
             """

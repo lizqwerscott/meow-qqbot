@@ -167,6 +167,52 @@ def test_chat_type_is_part_of_membership_and_alias_scope(tmp_path):
     assert len(manager._conn.execute("SELECT * FROM chat_memberships").fetchall()) == 2
 
 
+def test_list_direct_peers_only_returns_direct_observations(tmp_path):
+    manager = IdentityManager(tmp_path / "identity.sqlite3")
+    group = DeliveryTarget("qq", "default", "group", "g1")
+    direct = DeliveryTarget("qq", "default", "direct", "peer-1")
+
+    group_ref = manager.observe(group, "actor-1", "群名")
+    direct_ref = manager.observe(direct, "peer-1", "私聊名")
+    manager.observe(direct, "peer-2", "另一个对象")
+
+    peers = manager.list_direct_peers()
+    assert {row["identity_ref"] for row in peers} == {
+        direct_ref.identity_ref,
+        manager.get_ref(direct, "peer-2").identity_ref,
+    }
+    assert all(row["chat_fingerprint"] for row in peers)
+    assert all(row["channel"] == "qq" for row in peers)
+
+    # 群成员与已知群列表不得混入私聊观察
+    assert {row["identity_ref"] for row in manager.list_members()} == {
+        group_ref.identity_ref
+    }
+    assert {row["chat_id"] for row in manager.list_chats()} == {"g1"}
+
+
+def test_direct_peer_fields_match_store_and_link_person_applies(tmp_path):
+    manager = IdentityManager(tmp_path / "identity.sqlite3")
+    direct = DeliveryTarget("qq", "default", "direct", "peer-1")
+    ref = manager.observe(direct, "peer-1", "私聊名")
+
+    row = manager.list_direct_peers()[0]
+    assert row["identity_ref"] == ref.identity_ref
+    assert row["chat_id"] == "peer-1"
+    assert row["current_name"] == "私聊名"
+    assert row["current_chat_name"] == "私聊名"
+    assert "私聊名" in row["historical_names"]
+    assert row["message_count"] == 1
+    assert row["person_ref"] == ""
+
+    person = manager.create_person("某人")
+    manager.link_person(ref.identity_ref, person, "webui-admin")
+
+    linked = manager.list_direct_peers()[0]
+    assert linked["person_ref"] == person
+    assert linked["person_name"] == "某人"
+
+
 def test_observe_legacy_history_backfills_members_and_names(tmp_path):
     manager = IdentityManager(tmp_path / "identity.sqlite3")
     target = DeliveryTarget("qq", "default", "group", "g1")
