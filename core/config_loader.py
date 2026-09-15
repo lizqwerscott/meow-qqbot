@@ -69,7 +69,7 @@ class ConfigLoader:
         except FileNotFoundError as exc:
             raise ConfigError(
                 f"配置文件不存在: {path}\n"
-                "请复制 config.toml 并填写 QQ bot 凭证与 API key 后重试"
+                "请创建 config/config.toml 并填写 QQ bot 凭证；模型配置可放在 config/models.toml"
             ) from exc
 
         # 独立的模型配置文件默认与主配置同目录（config/models.toml 或 tmp_path 下同款）

@@ -151,6 +151,7 @@ class ServiceGraph:
         self._shutdown_event = asyncio.Event()
         self._shutdown_lock = asyncio.Lock()
         self._shutdown_complete = False
+        self.exit_code = 0
         self.group_target_verifier = (
             group_target_verifier or ObservedGroupTargetVerifier()
         )
@@ -994,6 +995,7 @@ class ServiceGraph:
         if self._shutdown_event.is_set():
             return
         _log.error("运行时渠道账号健康检查连续失败，停止服务")
+        self.exit_code = 1
         await self.stop()
 
     async def wait_until_stopped(self) -> None:

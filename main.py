@@ -30,7 +30,7 @@ def setup_logging() -> logging.Logger:
     return logging.getLogger(__name__)
 
 
-async def main() -> None:
+async def main() -> int:
     log = setup_logging()
 
     services = None
@@ -53,17 +53,18 @@ async def main() -> None:
     except ConfigError as exc:
         await _cleanup_after_startup_failure()
         log.critical(str(exc))
-        return
+        return 1
     except Exception:
         await _cleanup_after_startup_failure()
         log.critical("启动失败", exc_info=True)
-        return
+        return 1
 
     try:
         await services.wait_until_stopped()
+        return int(getattr(services, "exit_code", 0))
     finally:
         await services.stop()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))

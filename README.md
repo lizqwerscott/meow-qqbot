@@ -15,7 +15,10 @@
 ```
 meow-qqbot/
 ├── main.py              # 主程序入口
-├── config.toml          # 配置文件
+├── config/               # 运行配置（不纳入版本控制）
+│   ├── config.toml       # QQ 凭据与功能配置
+│   ├── models.toml       # 模型 provider 与分组配置
+│   └── allowlist.toml    # 权限与命令白名单
 ├── pyproject.toml       # 项目依赖配置
 ├── core/
 │   ├── __init__.py
@@ -38,38 +41,22 @@ pip install -e .
 
 ## 配置
 
-1. 复制配置文件模板：
-```bash
-cp config.toml.example config.toml
+运行配置位于被 Git 忽略的 `config/`，请通过测试环境的密钥管理系统创建，不能提交
+QQ `appid`、`secret` 或模型 API Key。至少准备：
+
+```toml
+# config/config.toml
+appid = "测试 QQ Bot AppID"
+secret = "测试 QQ Bot Secret"
+character_card = "characters/default.md"
 ```
 
-2. 编辑 `config.toml` 文件：
-```yaml
-appid: "你的QQ机器人AppID"
-secret: "你的QQ机器人Secret"
+模型 provider 与分组配置放在 `config/models.toml`，权限规则放在
+`config/allowlist.toml`。`character_card` 指向的角色卡也是运行资产，部署时必须
+一并提供；缺失时服务会记录警告并以空角色卡继续运行。
 
-# OpenAI 配置
-openai:
-  api_key: "你的OpenAI API Key"  # 必填
-  base_url: "https://api.openai.com/v1"  # 可替换为其他兼容接口
-  model: "gpt-3.5-turbo"  # 模型名称
-  temperature: 0.7  # 温度参数
-  max_tokens: 1000  # 最大生成token数
-  timeout: 30  # 请求超时时间
-  max_retries: 3  # 最大重试次数
-
-# AI 系统提示
-ai_system_prompt: |
-  你是一个友好的QQ机器人助手，请用中文回答用户的问题。
-  保持回答简洁、有帮助，避免冗长。
-```
-
-3. 设置环境变量（可选）：
-```bash
-export OPENAI_API_KEY="你的OpenAI API Key"
-export OPENAI_BASE_URL="https://api.openai.com/v1"
-export OPENAI_MODEL="gpt-3.5-turbo"
-```
+测试服务器请使用独立 QQ Bot 凭据，并确保 `data/` 可写。首次启动会自动创建
+身份和渠道缓存 SQLite 数据库；新测试环境无需复制生产身份库。
 
 ### S2-Pro 语音合成
 
@@ -101,7 +88,7 @@ min_tokens_before_end = 0
 ## 运行
 
 ```bash
-python main.py
+uv run python main.py
 ```
 
 ## 使用说明

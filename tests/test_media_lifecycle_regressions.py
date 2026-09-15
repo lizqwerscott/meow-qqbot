@@ -99,9 +99,58 @@ async def test_bot_engine_stop_closes_runtime_resources(monkeypatch):
         main_module, "setup_logging", lambda: main_module.logging.getLogger("test")
     )
 
-    await main_module.main()
+    assert await main_module.main() == 1
 
     assert events == ["build", "start", "stop"]
+
+
+@pytest.mark.asyncio
+async def test_main_returns_runtime_service_exit_code(monkeypatch):
+    import main as main_module
+
+    events = []
+
+    class FailedRuntimeGraph:
+        exit_code = 1
+
+        def __init__(self, cfg):
+            events.append("build")
+
+        async def build(self):
+            return self
+
+        async def start(self):
+            events.append("start")
+
+        async def wait_until_stopped(self):
+            events.append("wait")
+
+        async def stop(self):
+            events.append("stop")
+
+    monkeypatch.setattr(main_module, "ServiceGraph", FailedRuntimeGraph)
+    monkeypatch.setattr(main_module, "ConfigLoader", lambda: object())
+    monkeypatch.setattr(
+        main_module, "setup_logging", lambda: main_module.logging.getLogger("test")
+    )
+
+    assert await main_module.main() == 1
+    assert events == ["build", "start", "wait", "stop"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_channel_failure_marks_service_unsuccessful():
+    graph = ServiceGraph.__new__(ServiceGraph)
+    graph._shutdown_event = asyncio.Event()
+    graph._shutdown_lock = asyncio.Lock()
+    graph._shutdown_complete = False
+    graph.exit_code = 0
+    graph._stop_impl = AsyncMock()
+
+    await graph._stop_after_runtime_channel_failure()
+
+    assert graph.exit_code == 1
+    graph._stop_impl.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

@@ -24,3 +24,9 @@ def test_task_prompt_uses_adaptive_reply_format():
     assert "任务规则优先" in prompt
     assert "不要给短结果套标题" in prompt
     assert "按基础 markdown 输出" not in prompt
+
+
+def test_missing_character_card_logs_warning(tmp_path, caplog):
+    TemplateManager(character_card=str(tmp_path / "missing.md"))
+
+    assert "角色卡文件不存在" in caplog.text

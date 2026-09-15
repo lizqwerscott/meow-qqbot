@@ -27,6 +27,8 @@ class TemplateManager:
                     self.character_card = f.read().strip()
             except Exception as e:
                 _log.error(f"读取角色卡文件失败: {e}")
+        elif card_path:
+            _log.warning("角色卡文件不存在，将使用空角色卡: %s", card_path)
 
     def render_prompt_template(self, template_path: str, context: dict) -> str:
         """
