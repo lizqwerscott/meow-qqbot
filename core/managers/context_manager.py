@@ -4,7 +4,6 @@ import time
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
-from core.engine.history_projection import merge_timeline_visible_events
 from core.managers.chat_context import ChatContext
 from core.managers.context_store import ContextStore
 
@@ -20,7 +19,6 @@ class ChatContextManager:
     def __init__(
         self,
         store: ContextStore,
-        compactor: Any = None,
         max_history_per_chat: int = 10000,
         cleanup_interval: int = 3600,
         max_tool_results: int = 5,
@@ -29,7 +27,6 @@ class ChatContextManager:
         hard_clear: int = 180000,
     ):
         self._store = store
-        self._compactor = compactor
         self.max_history_per_chat = max_history_per_chat
         self.cleanup_interval = cleanup_interval
         self.max_tool_results = max_tool_results
@@ -117,8 +114,7 @@ class ChatContextManager:
                 max_events=bounded_limit,
             )
             return not any(
-                event.get("role") == "user"
-                and event.get("message_id") == message_id
+                event.get("role") == "user" and event.get("message_id") == message_id
                 for event in history
             )
         lock = await self._get_chat_lock(chat_id)
@@ -500,46 +496,6 @@ class ChatContextManager:
         async with lock:
             context = await self._get_or_restore_context_locked(chat_id)
             return await func(context)
-
-    @property
-    def compaction_threshold_tokens(self) -> int:
-        return (
-            self._compactor.compact_threshold_tokens
-            if self._compactor is not None
-            else 0
-        )
-
-    async def compact_history_if_needed(
-        self, chat_id: str, force: bool = False
-    ) -> tuple[bool, Optional[Dict], int]:
-        if self._event_log is not None or self._compactor is None:
-            if self._event_log is not None and self._prompt_projection is not None:
-                snapshot = await self._prompt_projection.snapshot_for_prompt(chat_id)
-                return False, None, len(snapshot.events)
-            if self._event_log is not None:
-                history = await self._event_log.history(chat_id, max_events=100)
-            else:
-                history = await self.get_chat_history_async(chat_id)
-            return False, None, len(history)
-        lock = await self._get_chat_lock(chat_id)
-        async with lock:
-            context = await self._get_or_restore_context_locked(chat_id)
-            history = context.get_history()
-            if self._timeline is not None:
-                try:
-                    events = await self._timeline.snapshot(chat_id)
-                    merged = merge_timeline_visible_events(history, events)
-                    if len(merged) != len(history):
-                        context.set_messages(merged)
-                        history = merged
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    _log.warning("压缩读取 timeline 失败 [%s..]: %s", chat_id[:12], exc)
-            result = await self._compactor.compact(history, force=force)
-            if result.compacted:
-                context.set_messages(result.messages)
-            return result.compacted, result.usage, len(result.messages)
 
     # ── 上下文生命周期 ──
 

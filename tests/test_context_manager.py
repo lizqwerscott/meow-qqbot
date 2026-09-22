@@ -1,14 +1,13 @@
 import asyncio
+import importlib
 import threading
 from collections import OrderedDict
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from core.engine.conversation_event_log import ConversationEventLog
 from core.engine.prompt_history_projection import PromptHistoryProjection
-from core.managers.context_compactor import CompactionResult
 from core.managers.context_manager import ChatContextManager, _scan_legacy_store_ids
 from core.managers.context_store import MemoryContextStore
 
@@ -16,26 +15,6 @@ from core.managers.context_store import MemoryContextStore
 @pytest.fixture
 def store():
     return MemoryContextStore()
-
-
-class FakeCompactor:
-    compact_threshold_tokens = 100
-    keep_recent_tokens = 10
-
-    def __init__(self, result=None):
-        self.result = result
-        self.calls = []
-
-    async def compact(self, messages, *, force=False):
-        self.calls.append((list(messages), force))
-        if self.result is not None:
-            return self.result
-        return CompactionResult(False, list(messages), None)
-
-
-@pytest.fixture
-def compactor():
-    return FakeCompactor()
 
 
 def test_scan_legacy_store_ids_includes_archived_sessions():
@@ -51,9 +30,7 @@ def test_scan_legacy_store_ids_includes_archived_sessions():
 
 def test_token_cache_prune_removes_matching_timestamp():
     manager = ChatContextManager(store=MemoryContextStore())
-    manager._token_cache = OrderedDict(
-        [("old", 1), ("new", 2), ("newest", 3)]
-    )
+    manager._token_cache = OrderedDict([("old", 1), ("new", 2), ("newest", 3)])
     manager._token_cache_time = {
         "old": 10.0,
         "new": 20.0,
@@ -68,8 +45,15 @@ def test_token_cache_prune_removes_matching_timestamp():
 
 
 @pytest.fixture
-def mgr(store, compactor):
-    return ChatContextManager(store=store, compactor=compactor)
+def mgr(store):
+    return ChatContextManager(store=store)
+
+
+def test_legacy_message_list_compaction_api_is_retired():
+    assert not hasattr(ChatContextManager, "compact_history_if_needed")
+    assert not hasattr(ChatContextManager, "compaction_threshold_tokens")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("core.managers.context_compactor")
 
 
 @pytest.mark.asyncio
@@ -120,12 +104,18 @@ async def test_event_log_user_dedup_uses_identity_lookup_without_snapshot(tmp_pa
         side_effect=AssertionError("dedup must not materialize the ledger")
     )
 
-    assert await manager.add_user_message_async(
-        "ledger-chat", "已有消息", message_id="message-1"
-    ) is False
-    assert await manager.add_user_message_async(
-        "ledger-chat", "新消息", message_id="message-2"
-    ) is True
+    assert (
+        await manager.add_user_message_async(
+            "ledger-chat", "已有消息", message_id="message-1"
+        )
+        is False
+    )
+    assert (
+        await manager.add_user_message_async(
+            "ledger-chat", "新消息", message_id="message-2"
+        )
+        is True
+    )
     await event_log.close()
 
 
@@ -257,7 +247,7 @@ async def test_history_access_loads_from_store(mgr, store):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_first_access_restores_once(compactor):
+async def test_concurrent_first_access_restores_once():
     class BlockingStore(MemoryContextStore):
         def __init__(self):
             super().__init__()
@@ -272,7 +262,7 @@ async def test_concurrent_first_access_restores_once(compactor):
             return None
 
     store = BlockingStore()
-    mgr = ChatContextManager(store=store, compactor=compactor)
+    mgr = ChatContextManager(store=store)
     first = asyncio.create_task(mgr.get_chat_history_async("chat_001"))
     await store.started.wait()
     second = asyncio.create_task(mgr.get_chat_history_async("chat_001"))
@@ -284,7 +274,7 @@ async def test_concurrent_first_access_restores_once(compactor):
 
 
 @pytest.mark.asyncio
-async def test_first_access_different_chats_restores_in_parallel(compactor):
+async def test_first_access_different_chats_restores_in_parallel():
     class ParallelStore(MemoryContextStore):
         def __init__(self):
             super().__init__()
@@ -299,7 +289,7 @@ async def test_first_access_different_chats_restores_in_parallel(compactor):
             return None
 
     store = ParallelStore()
-    mgr = ChatContextManager(store=store, compactor=compactor)
+    mgr = ChatContextManager(store=store)
     await asyncio.wait_for(
         asyncio.gather(
             mgr.get_chat_history_async("chat_001"),
@@ -446,86 +436,6 @@ async def test_remove_last_user_message_empty_chat(mgr):
     assert result is False
 
 
-# ── compact_history_if_needed ──
-
-
-@pytest.mark.asyncio
-async def test_compact_history_if_needed_noop(mgr):
-    compacted, usage, count = await mgr.compact_history_if_needed("chat_001")
-    assert compacted is False
-    assert usage is None
-    assert count == 0
-
-
-@pytest.mark.asyncio
-async def test_ledger_compaction_noop_uses_bounded_projection():
-    calls = []
-
-    class EventLog:
-        async def history(self, chat_id, **kwargs):
-            raise AssertionError("legacy compaction must not read ledger bodies")
-
-    class Projection:
-        async def snapshot_for_prompt(self, chat_id):
-            calls.append(chat_id)
-            return SimpleNamespace(events=(1, 2))
-
-    manager = ChatContextManager(store=MemoryContextStore())
-    manager.set_event_log(EventLog())
-    manager.set_prompt_projection(Projection())
-
-    result = await manager.compact_history_if_needed("chat", force=True)
-
-    assert result == (False, None, 2)
-    assert calls == ["chat"]
-
-
-@pytest.mark.asyncio
-async def test_compact_history_if_needed_forwards_force_and_applies_result(
-    mgr, compactor
-):
-    from core.managers.chat_message import ChatMessage
-
-    await mgr.add_user_message_async("chat_001", "old")
-    original = ChatMessage(role="user", content="old", timestamp=1)
-    replacement = ChatMessage(role="assistant", content="summary", timestamp=1)
-    compactor.result = CompactionResult(True, [replacement], {"total_tokens": 3})
-
-    compacted, usage, count = await mgr.compact_history_if_needed(
-        "chat_001", force=True
-    )
-
-    assert compacted is True
-    assert usage == {"total_tokens": 3}
-    assert count == 1
-    assert (await mgr.get_chat_history_async("chat_001"))[0]["content"] == "summary"
-    assert compactor.calls[0][1] is True
-    assert compactor.calls[0][0][0].content == original.content
-
-
-@pytest.mark.asyncio
-async def test_compaction_materializes_timeline_only_visible_events(mgr, compactor):
-    mgr.set_timeline(
-        SimpleNamespace(
-            snapshot=AsyncMock(
-                return_value=(
-                    SimpleNamespace(
-                        event_id="delivery:d1",
-                        role="assistant",
-                        message_id="",
-                        content="accepted answer",
-                        timestamp=1,
-                    ),
-                )
-            )
-        )
-    )
-
-    await mgr.compact_history_if_needed("chat_001", force=True)
-
-    assert [message.content for message in compactor.calls[0][0]] == ["accepted answer"]
-
-
 @pytest.mark.asyncio
 async def test_clear_history_also_clears_timeline(mgr):
     class Timeline:
@@ -543,63 +453,6 @@ async def test_clear_history_also_clears_timeline(mgr):
 
 
 @pytest.mark.asyncio
-async def test_compaction_same_chat_is_serialized(mgr, compactor):
-    started = asyncio.Event()
-    release = asyncio.Event()
-    active = 0
-    maximum_active = 0
-
-    async def compact(messages, *, force=False):
-        nonlocal active, maximum_active
-        active += 1
-        maximum_active = max(maximum_active, active)
-        started.set()
-        await release.wait()
-        active -= 1
-        return CompactionResult(False, list(messages), None)
-
-    compactor.compact = compact
-    first = asyncio.create_task(mgr.compact_history_if_needed("chat_001"))
-    await started.wait()
-    second = asyncio.create_task(mgr.compact_history_if_needed("chat_001"))
-    await asyncio.sleep(0)
-    assert maximum_active == 1
-    release.set()
-    await asyncio.gather(first, second)
-    assert maximum_active == 1
-
-
-@pytest.mark.asyncio
-async def test_compaction_different_chats_can_run_in_parallel(mgr, compactor):
-    started = []
-    release = asyncio.Event()
-
-    async def compact(messages, *, force=False):
-        started.append(len(started))
-        if len(started) == 2:
-            release.set()
-        await release.wait()
-        return CompactionResult(False, list(messages), None)
-
-    compactor.compact = compact
-    tasks = [
-        asyncio.create_task(mgr.compact_history_if_needed("chat_001")),
-        asyncio.create_task(mgr.compact_history_if_needed("chat_002")),
-    ]
-    await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
-    assert len(started) == 2
-
-    await mgr.add_user_message_async("chat_001", "keep")
-    before = await mgr.get_chat_history_async("chat_001")
-
-    compacted, usage, _ = await mgr.compact_history_if_needed("chat_001")
-
-    assert compacted is False
-    assert usage is None
-    assert await mgr.get_chat_history_async("chat_001") == before
-
-
-@pytest.mark.asyncio
 async def test_cleanup_inactive_contexts(mgr):
     store = mgr.store
     store.flush("chat_001", [{"role": "user", "content": "old", "timestamp": 0}])
@@ -610,7 +463,7 @@ async def test_cleanup_inactive_contexts(mgr):
 
 
 @pytest.mark.asyncio
-async def test_cleanup_does_not_release_file_lock_for_retained_context(compactor):
+async def test_cleanup_does_not_release_file_lock_for_retained_context():
     class TrackingStore(MemoryContextStore):
         def __init__(self):
             super().__init__()
@@ -620,7 +473,7 @@ async def test_cleanup_does_not_release_file_lock_for_retained_context(compactor
             self.released.append(chat_id)
 
     store = TrackingStore()
-    mgr = ChatContextManager(store=store, compactor=compactor)
+    mgr = ChatContextManager(store=store)
     await mgr.add_user_message_async("chat_001", "active")
 
     removed = await mgr.cleanup_inactive_contexts_async(max_inactivity=3600)
@@ -630,7 +483,7 @@ async def test_cleanup_does_not_release_file_lock_for_retained_context(compactor
 
 
 @pytest.mark.asyncio
-async def test_remove_context_waits_for_pending_save(compactor):
+async def test_remove_context_waits_for_pending_save():
     class BlockingStore(MemoryContextStore):
         def __init__(self):
             super().__init__()
@@ -643,7 +496,7 @@ async def test_remove_context_waits_for_pending_save(compactor):
             super().flush(chat_id, messages)
 
     store = BlockingStore()
-    mgr = ChatContextManager(store=store, compactor=compactor)
+    mgr = ChatContextManager(store=store)
     await mgr.add_user_message_async("chat_001", "pending")
     await asyncio.to_thread(store.started.wait, 1)
 

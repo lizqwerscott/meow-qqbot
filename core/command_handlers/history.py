@@ -126,7 +126,7 @@ class HistoryCommand:
             f"消息数: {count} (用户 {role_counts.get('user', 0)}, 助手 {role_counts.get('assistant', 0)}, 工具 {role_counts.get('tool', 0)})",
             f"最近活动: {last_time}",
             f"最近消息: {last_preview}",
-            f"最大历史: {self.context_manager.max_history_per_chat} | 压缩阈值: {self.context_manager.compaction_threshold_tokens} tokens",
+            f"最大历史: {self.context_manager.max_history_per_chat}",
         ]
         return make_reply(input_message, "\n".join(parts))
 

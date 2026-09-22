@@ -8,19 +8,9 @@ from core.message import InputMessage
 
 
 @pytest.mark.asyncio
-async def test_history_command_does_not_use_legacy_context_compactor():
-    calls = []
-
+async def test_history_command_reports_bounded_projection_without_model_context():
     class ContextManager:
-        compaction_threshold_tokens = 100
-
-        async def get_chat_history_async(self, chat_id):
-            assert chat_id == "chat_001"
-            return [{"role": "user", "content": "one"}] * 2
-
-        async def compact_history_if_needed(self, chat_id, force=False):
-            calls.append((chat_id, force))
-            return True, None, 1
+        pass
 
     command = HistoryCommand(ContextManager())
     input_message = InputMessage(
@@ -33,7 +23,6 @@ async def test_history_command_does_not_use_legacy_context_compactor():
 
     replies = await command._compact(input_message, "")
 
-    assert calls == []
     assert "bounded Prompt projection" in replies[0]["content"]
 
 
