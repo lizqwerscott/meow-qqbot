@@ -164,7 +164,7 @@ async def test_tool_loop_propagates_turn_kind_to_protocol_events(monkeypatch, tm
 
 
 @pytest.mark.asyncio
-async def test_tool_loop_emits_redacted_lifecycle_events(monkeypatch):
+async def test_tool_loop_emits_lifecycle_metadata_for_live_tool_cards(monkeypatch):
     class FakeAI:
         model = "test"
 
@@ -245,5 +245,11 @@ async def test_tool_loop_emits_redacted_lifecycle_events(monkeypatch):
     assert events[0].session_id == "chat"
     assert events[0].turn_id == "turn-1"
     assert events[0].tool_call_id == "call-1"
+    # 生命周期 meta 只带直播卡片需要的字段；脱敏与截断由投递通道自己负责。
     assert events[0].metadata == {}
-    assert all("secret" not in str(event.metadata) for event in events)
+    assert events[1].metadata == {"arguments": {"path": "/secret/file"}}
+    assert events[2].metadata == {
+        "arguments": {"path": "/secret/file"},
+        "result": "secret result",
+        "resources": (),
+    }

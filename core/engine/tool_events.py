@@ -9,7 +9,11 @@ from typing import Any, Awaitable, Callable
 
 @dataclass(frozen=True, slots=True)
 class ToolLifecycleEvent:
-    """A redacted execution lifecycle update for one model tool call."""
+    """One model tool call's execution lifecycle update.
+
+    ``metadata`` carries the payload a channel needs for live tool cards
+    (arguments, result, resources); each channel owns redaction and truncation.
+    """
 
     event_type: str
     session_id: str
