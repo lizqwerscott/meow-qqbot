@@ -152,6 +152,10 @@ class _TurnRequest:
     ] = None
     capabilities: Optional[TurnCapabilities] = None
     turn_id: str = ""
+    # False：本次 run 只往 event-log turn 追加事件，终态交给拥有 scheduler turn
+    # 的调用方（consumer）写入。planner wait 重规划、Chat→Agent handoff 都会用
+    # 同一个 turn id 再跑一次，单次 run 提前终结会让后续 run 无法追加事件。
+    terminalize_event_log: bool = True
     intent: Optional[InboundIntent] = None
     model_context_commit_callback: Optional[
         Callable[[ModelContextScope], Awaitable[None]]
@@ -2835,6 +2839,9 @@ class AgentEngine:
                             f"scheduler turn disappeared: {scheduler_turn_id}"
                         )
                     if current_turn.phase is TurnPhase.CANCELLED:
+                        await self._record_event_log_terminal(
+                            chat_id, current_turn.turn_id, "aborted"
+                        )
                         await self._close_model_context_scope(pending)
                         await self._get_scheduler().drop_turn(current_turn.turn_id)
                     else:
@@ -3364,6 +3371,8 @@ class AgentEngine:
                 raise
 
         async def _execute_with_terminal() -> _TurnResult:
+            if not request.terminalize_event_log:
+                return await _execute_with_rollback()
             try:
                 result = await _execute_with_rollback()
             except asyncio.CancelledError:
@@ -3600,6 +3609,7 @@ class AgentEngine:
                         turn_kind=TurnKind.AI,
                         planner_control_callback=_handle_planner_control,
                         track_tool_delivery=True,
+                        terminalize_event_log=False,
                     )
                 )
                 if (
@@ -4039,6 +4049,7 @@ class AgentEngine:
                     tool_event_callback=tool_event_callback,
                     planner_control_callback=_handle_planner_control,
                     turn_id=scheduler_turn_id or input_message.id,
+                    terminalize_event_log=False,
                     model_context_commit_callback=(
                         lambda scope: self._materialize_model_context(
                             scope,

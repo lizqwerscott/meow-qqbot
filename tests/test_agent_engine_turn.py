@@ -2013,6 +2013,164 @@ async def test_run_turn_accepts_tool_loop_usage_elapsed_ms():
     assert received == [(scope, {"prompt_tokens": 1}, service, "test")]
 
 
+class AssistantEventToolLoop:
+    """复现真实 ToolLoop 的协议落库：每轮向 event-log turn 追加一个 assistant 事件。"""
+
+    def __init__(self, round_index):
+        self.round_index = round_index
+        self.calls = []
+
+    async def run(self, **kwargs):
+        self.calls.append(kwargs)
+        event_log = kwargs.get("event_log")
+        if event_log is not None:
+            from core.engine.conversation_event_log import (
+                ConversationEvent,
+                EventKind,
+            )
+
+            await event_log.append_event(
+                ConversationEvent(
+                    chat_id=kwargs["chat_id"],
+                    turn_id=kwargs["turn_id"],
+                    event_id=f"assistant:{self.round_index}",
+                    role="assistant",
+                    kind=EventKind.ASSISTANT_TOOL_CALL,
+                    content=f"round-{self.round_index}",
+                )
+            )
+        return False, False
+
+
+async def _shared_turn_state(event_log, turn_id):
+    snapshot = await event_log.snapshot_turns("chat", include_internal=True)
+    return next(turn for turn in snapshot.turns if turn.turn_id == turn_id)
+
+
+@pytest.mark.asyncio
+async def test_run_turn_continuation_keeps_shared_event_log_turn_open(tmp_path):
+    from core.engine.conversation_event_log import ConversationEventLog
+
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    engine = make_engine(AssistantEventToolLoop(0))
+    engine.event_log = event_log
+
+    async def build_prompt():
+        return [], []
+
+    async def reply_callback(**kwargs):
+        pass
+
+    for round_index in (0, 1):
+        engine.tool_loop = AssistantEventToolLoop(round_index)
+        await engine._run_turn(
+            _TurnRequest(
+                chat_id="chat",
+                sender_id="user",
+                is_group=False,
+                reply_to="turn-shared",
+                route_text="hello",
+                prompt_factory=build_prompt,
+                reply_callback=reply_callback,
+                turn_id="turn-shared",
+                terminalize_event_log=False,
+            )
+        )
+
+    turn = await _shared_turn_state(event_log, "turn-shared")
+
+    assert turn.is_terminal is False
+    assert turn.event_count == 2
+
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_run_turn_default_still_terminalizes_its_event_log_turn(tmp_path):
+    from core.engine.conversation_event_log import ConversationEventLog, TurnStatus
+
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    engine = make_engine(AssistantEventToolLoop(0))
+    engine.event_log = event_log
+
+    async def build_prompt():
+        return [], []
+
+    async def reply_callback(**kwargs):
+        pass
+
+    await engine._run_turn(
+        _TurnRequest(
+            chat_id="chat",
+            sender_id="user",
+            is_group=False,
+            reply_to="turn-sole",
+            route_text="hello",
+            prompt_factory=build_prompt,
+            reply_callback=reply_callback,
+            turn_id="turn-sole",
+        )
+    )
+
+    turn = await _shared_turn_state(event_log, "turn-sole")
+
+    assert turn.is_terminal is True
+    assert turn.status is TurnStatus.COMPLETED
+
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_process_message_replan_reuses_same_open_event_log_turn(tmp_path):
+    from core.engine.conversation_event_log import (
+        ConversationEventLog,
+        EventKind,
+    )
+    from core.engine.prompt_history_projection import PromptHistoryProjection
+
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    engine = make_engine(AssistantEventToolLoop(0))
+    engine.event_log = event_log
+    engine.prompt_history_projection = PromptHistoryProjection(
+        event_log, metadata_path=str(tmp_path / "projection.sqlite3")
+    )
+
+    async def build(**kwargs):
+        return [], []
+
+    engine.prompt_builder = SimpleNamespace(build=build)
+
+    async def reply_callback(**kwargs):
+        pass
+
+    pending = PendingInbound(
+        InputMessage("message", "user", "chat", "hello", False),
+        "hello",
+        InboundIntent.PRIVATE_CONVERSATION,
+        AdmissionOrigin.USER_MESSAGE,
+    )
+
+    for round_index in (0, 1):
+        engine.tool_loop = AssistantEventToolLoop(round_index)
+        await engine._process_message(
+            pending,
+            reply_callback,
+            lambda sender_id: "name",
+            scheduler_turn_id="message",
+        )
+
+    events = await event_log.snapshot_events("chat", include_internal=True)
+    turn = await _shared_turn_state(event_log, "message")
+
+    assert (
+        sum(event.kind is EventKind.ASSISTANT_TOOL_CALL for event in events.events) == 2
+    )
+    assert turn.is_terminal is False
+
+    await engine.prompt_history_projection.close()
+    await event_log.close()
+
+
 @pytest.mark.asyncio
 async def test_model_context_scope_fails_closed_for_direct_tasks_without_lifecycle_binding():
     engine = make_engine(FakeToolLoop())
