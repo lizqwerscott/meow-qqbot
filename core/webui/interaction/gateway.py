@@ -28,6 +28,27 @@ from .events import EventHub
 from .models import SubmissionReceipt, WebUiSession, WebUiSessionPage
 from .store import WebUiSessionStore
 
+_TOOL_ARGUMENT_KEY_LIMIT = 20
+_TOOL_ARGUMENT_VALUE_CHARS = 500
+_TOOL_SECRET_ARGUMENT_KEY = re.compile(
+    r"token|secret|password|passwd|api[-_]?key|authorization|credential",
+    re.IGNORECASE,
+)
+
+
+def _safe_tool_arguments(arguments: dict) -> dict:
+    """Bound and redact model tool arguments before they reach the live view."""
+    safe: dict = {}
+    for key, value in list(arguments.items())[:_TOOL_ARGUMENT_KEY_LIMIT]:
+        name = str(key)
+        if _TOOL_SECRET_ARGUMENT_KEY.search(name):
+            safe[name] = "[redacted]"
+        elif isinstance(value, str) and len(value) > _TOOL_ARGUMENT_VALUE_CHARS:
+            safe[name] = f"{value[:_TOOL_ARGUMENT_VALUE_CHARS]}…"
+        else:
+            safe[name] = value
+    return safe
+
 
 class WebUiConversationGateway:
     """Create isolated WebUI sessions and submit them through one route seam."""
@@ -568,7 +589,7 @@ class WebUiConversationGateway:
                     safe_metadata[key] = value
             arguments = event.metadata.get("arguments")
             if isinstance(arguments, dict):
-                safe_metadata["arguments"] = arguments
+                safe_metadata["arguments"] = _safe_tool_arguments(arguments)
             result = event.metadata.get("result")
             if isinstance(result, str):
                 safe_metadata["result"] = result[:4000]

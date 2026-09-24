@@ -400,6 +400,46 @@ async def test_webui_gateway_projects_tool_arguments_and_result_for_live_cards(
 
 
 @pytest.mark.asyncio
+async def test_webui_gateway_bounds_and_redacts_tool_arguments(tmp_path):
+    async def route(*, input_message, tool_event_callback, **_kwargs):
+        await tool_event_callback(
+            ToolLifecycleEvent(
+                event_type="tool.updated",
+                session_id=input_message.chat_id,
+                turn_id=input_message.id,
+                tool_call_id="call-exec",
+                tool_name="exec",
+                status="running",
+                metadata={
+                    "arguments": {
+                        "command": "x" * 900,
+                        "api_key": "sk-live-value",
+                        "path": "/tmp/file",
+                    }
+                },
+            )
+        )
+
+    gateway = WebUiConversationGateway(
+        operator_id="admin",
+        route_callback=route,
+        get_user_nickname=lambda _user_id: "admin",
+        store_path=str(tmp_path / "webui.sqlite3"),
+    )
+    session = await gateway.create_session()
+    await gateway.submit(session.session_id, content="run", request_id="tool-bounds")
+    await asyncio.sleep(0.05)
+
+    events = list(gateway.hub._events[session.session_id])
+    updated = next(event for event in events if event.event_type == "tool.updated")
+    arguments = updated.payload["arguments"]
+
+    assert arguments["path"] == "/tmp/file"
+    assert arguments["api_key"] == "[redacted]"
+    assert arguments["command"] == "x" * 500 + "…"
+
+
+@pytest.mark.asyncio
 async def test_channel_delivery_router_unifies_message_and_approval_delivery():
     sent = []
     approvals = []
