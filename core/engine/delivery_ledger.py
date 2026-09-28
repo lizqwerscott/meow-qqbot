@@ -408,6 +408,7 @@ class DeliveryController:
         timeline=None,
         event_log: Optional[ConversationEventLog] = None,
         audit_delivery: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
+        model_provider: Optional[Callable[[], str]] = None,
     ):
         self.ledger = ledger
         self.timeline = timeline
@@ -415,6 +416,16 @@ class DeliveryController:
         self.retry_base_seconds = max(1.0, retry_base_seconds)
         self.max_attempts = max(1, max_attempts)
         self._audit_delivery = audit_delivery
+        # Optional model hint so ledger rows get provider-aware token counts.
+        self._model_provider = model_provider
+
+    def _model(self) -> str:
+        if self._model_provider is None:
+            return ""
+        try:
+            return str(self._model_provider() or "")
+        except Exception:  # pragma: no cover - defensive
+            return ""
 
     async def _audit(self, record: DeliveryRecord, status: str) -> None:
         if self._audit_delivery is not None:
@@ -825,6 +836,7 @@ class DeliveryController:
                     message_id=record.reply_anchor_id,
                     timestamp=record.updated_at,
                     resources=resources,
+                    model=self._model(),
                 )
             except EventLogInvariantError as exc:
                 try:
@@ -836,6 +848,7 @@ class DeliveryController:
                         message_id=record.reply_anchor_id,
                         delivery_kind=delivery_kind,
                         timestamp=record.updated_at,
+                        model=self._model(),
                     )
                 except Exception:
                     _log.warning(
@@ -900,7 +913,8 @@ class DeliveryController:
                         sort_keys=True,
                     ),
                     timestamp=record.updated_at,
-                )
+                ),
+                model=self._model(),
             )
         except Exception:
             _log.warning(

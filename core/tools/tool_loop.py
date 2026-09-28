@@ -257,6 +257,7 @@ class ToolLoop:
                         tool_name=tool_name,
                     ),
                     turn_kind=turn_kind,
+                    model=current_model_name or self.ai_service.model,
                 )
             if protocol_history is not None and event_log is None:
                 await protocol_history.append_tool_result(
@@ -658,6 +659,7 @@ class ToolLoop:
                             reasoning_content=reasoning or "",
                         ),
                         turn_kind=turn_kind,
+                        model=current_model_name or self.ai_service.model,
                     )
                 if protocol_history is not None and event_log is None:
                     await protocol_history.append_assistant(

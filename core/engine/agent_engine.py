@@ -17,7 +17,7 @@ import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
-from typing import Any, Awaitable, Callable, List, Literal, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Set
 from uuid import uuid4
 
 from core.engine.admission_effect_policy import effect_types_for
@@ -115,6 +115,26 @@ class AdmittedMessage:
     message_id: str
     prompt_message: dict
     additional_prompt_messages: tuple[dict, ...] = ()
+
+
+def _build_cost_metadata(request: "_TurnRequest", scope: Any) -> Dict[str, Any]:
+    """Attribution metadata for cost tracking and the usage ledger.
+
+    ``turn_id``/``turn_kind`` let the ledger split consumption by source
+    (``turn:reply`` / ``turn:ambient``); see ``core/engine/token_usage_log.py``.
+    """
+    metadata: Dict[str, Any] = {
+        "turn_id": request.turn_id,
+        "turn_kind": str(request.turn_kind or ""),
+        "turn_intent": str(
+            request.intent or request.steering_intent or InboundIntent.DIRECT_TASK
+        ),
+    }
+    if scope is not None:
+        metadata["scope_generation"] = scope.generation
+        metadata["scope_kind"] = str(scope.kind)
+        metadata["tool_protocol"] = True
+    return metadata
 
 
 @dataclass(frozen=True)
@@ -1260,6 +1280,7 @@ class AgentEngine:
                     is not None
                     else None
                 ),
+                model_provider=self._active_model_name,
             )
             self.delivery_controller = controller
         return controller
@@ -3054,26 +3075,7 @@ class AgentEngine:
                 delivery_state_callback=(
                     _tool_delivery_callback if request.track_tool_delivery else None
                 ),
-                cost_metadata=(
-                    {
-                        "scope_generation": model_context_scope.generation,
-                        "scope_kind": str(model_context_scope.kind),
-                        "tool_protocol": True,
-                        "turn_intent": str(
-                            request.intent
-                            or request.steering_intent
-                            or InboundIntent.DIRECT_TASK
-                        ),
-                    }
-                    if model_context_scope is not None
-                    else {
-                        "turn_intent": str(
-                            request.intent
-                            or request.steering_intent
-                            or InboundIntent.DIRECT_TASK
-                        )
-                    }
-                ),
+                cost_metadata=_build_cost_metadata(request, model_context_scope),
                 protocol_settled_callback=(
                     (lambda: request.model_context_commit_callback(model_context_scope))
                     if request.model_context_commit_callback

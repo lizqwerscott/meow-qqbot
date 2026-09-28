@@ -186,3 +186,35 @@ async def test_event_log_counts_deepseek_with_bare_model_id(tmp_path):
     assert snapshot.events[0].token_count == deepseek_token_counter(_MIXED)
     assert snapshot.events[0].token_count != len(_MIXED) // 4
     await log.close()
+
+
+@pytest.mark.asyncio
+async def test_delivery_controller_forwards_model_to_event_log():
+    from core.engine.delivery_ledger import DeliveryController, DeliveryLedger
+
+    captured: list[dict] = []
+
+    class FakeEventLog:
+        async def append_accepted_delivery(self, **kwargs):
+            captured.append(kwargs)
+
+    controller = DeliveryController(
+        DeliveryLedger(":memory:"),
+        event_log=FakeEventLog(),
+        model_provider=lambda: "deepseek-v4-flash",
+    )
+    record = SimpleNamespace(
+        chat_id="c",
+        turn_id="t",
+        logical_delivery_id="d",
+        key="d",
+        reply_anchor_id="m",
+        updated_at=1.0,
+    )
+
+    await controller._append_accepted_timeline(
+        record, content="hi", delivery_kind="response"
+    )
+
+    assert captured
+    assert captured[0]["model"] == "deepseek-v4-flash"
