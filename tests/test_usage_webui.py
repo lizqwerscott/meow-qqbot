@@ -31,6 +31,10 @@ async def test_usage_page_renders_summary_and_breakdowns():
     assert "deepseek-v4-flash" in response.text
     assert SOURCE_TURN_REPLY in response.text
     assert "0.001234" in response.text
+    # charts: vendored Chart.js + canvases + inline data
+    assert "/static/vendor/chart.umd.min.js" in response.text
+    assert 'id="trend-chart"' in response.text
+    assert 'id="source-chart"' in response.text
     log.close()
 
 

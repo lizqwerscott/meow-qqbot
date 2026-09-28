@@ -1,4 +1,5 @@
 import logging
+import time
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
@@ -59,6 +60,21 @@ async def status_page(request: Request):
     channel_info_provider = managers.get("channel_info_provider")
     cache_status = getattr(channel_info_provider, "cache_status", None)
     stats["channel_info_cache"] = cache_status() if callable(cache_status) else []
+
+    # AI consumption brief from the durable ledger (跨重启累计).
+    token_usage_log = managers.get("token_usage_log")
+    if token_usage_log is not None:
+        try:
+            stats["usage"] = token_usage_log.summary()
+            today_start = time.mktime(
+                time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d")
+            )
+            stats["usage_today"] = token_usage_log.summary(since=today_start)
+        except Exception as exc:
+            _log.warning("读取用量账本失败: %s", exc)
+            stats["usage"] = None
+    else:
+        stats["usage"] = None
 
     return templates.TemplateResponse(
         request,

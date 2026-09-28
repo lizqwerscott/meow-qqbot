@@ -22,39 +22,50 @@
         <div class="stat-value">{{ stats.queue_total }}</div>
         <div class="stat-label">排队消息</div>
     </div>
+    {% if stats.usage %}
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.usage.record_count }}</div>
+        <div class="stat-label">AI 调用（累计）</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.usage.prompt_tokens }}</div>
+        <div class="stat-label">输入 Tokens（累计）</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.usage.completion_tokens }}</div>
+        <div class="stat-label">输出 Tokens（累计）</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">¥{{ "%.4f"|format(stats.usage.cost or 0) }}</div>
+        <div class="stat-label">累计成本</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">¥{{ "%.4f"|format(stats.usage_today.cost or 0) }}</div>
+        <div class="stat-label">今日成本</div>
+    </div>
+    {% else %}
     <div class="stat-card">
         <div class="stat-value">{{ stats.cost.turn_count }}</div>
-        <div class="stat-label">AI 调用次数</div>
+        <div class="stat-label">AI 调用（本次运行）</div>
     </div>
     <div class="stat-card">
         <div class="stat-value">{{ stats.cost.prompt_tokens }}</div>
-        <div class="stat-label">Prompt Tokens</div>
+        <div class="stat-label">Prompt Tokens（本次运行）</div>
     </div>
     <div class="stat-card">
         <div class="stat-value">{{ stats.cost.completion_tokens }}</div>
-        <div class="stat-label">Completion Tokens</div>
+        <div class="stat-label">Completion Tokens（本次运行）</div>
     </div>
     <div class="stat-card">
-        <div class="stat-value">{{ stats.cost.cache_hit_rate }}%</div>
-        <div class="stat-label">缓存命中率</div>
+        <div class="stat-value">¥{{ "%.4f"|format(stats.cost.total_cost or 0) }}</div>
+        <div class="stat-label">总消耗（本次运行）</div>
     </div>
-    <div class="stat-card">
-        <div class="stat-value">{{ stats.cost.cache_hit_tokens }}</div>
-        <div class="stat-label">缓存命中 Tokens</div>
-    </div>
-    <div class="stat-card">
-        <div class="stat-value">{{ stats.cost.cache_miss_tokens }}</div>
-        <div class="stat-label">缓存未命中 Tokens</div>
-    </div>
-    <div class="stat-card">
-        <div class="stat-value">{{ stats.cost.cache_observation_count }}</div>
-        <div class="stat-label">缓存观测次数（缺失 {{ stats.cost.cache_usage_missing_count }}）</div>
-    </div>
-    <div class="stat-card">
-        <div class="stat-value">${{ stats.cost.total_cost }}</div>
-        <div class="stat-label">总消耗</div>
-    </div>
+    {% endif %}
 </div>
+
+<p style="margin-top:10px">
+    <a class="btn btn-sm" href="/usage">💰 查看 token 用量明细与图表 →</a>
+</p>
 
 {% if stats.model_context %}
 <div class="card" style="margin-top:20px">

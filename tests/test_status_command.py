@@ -66,3 +66,40 @@ async def test_status_displays_ledger_integrity_summary(monkeypatch):
     assert "identity 冲突: `1`" in content
     assert "total=5" in content
     assert "invalid=1" in content
+
+
+def test_status_usage_lines_come_from_ledger():
+    from core.engine.token_usage_log import TokenUsageLog
+
+    log = TokenUsageLog(":memory:")
+    log.record(model="m", prompt_tokens=10, completion_tokens=2, cost=0.5)
+    command = StatusCommand.__new__(StatusCommand)
+    command.token_usage_log = log
+    command.agent_engine = SimpleNamespace()
+
+    content = "\n".join(command._usage_lines())
+
+    assert "持久账本" in content
+    assert "0.5000" in content
+    log.close()
+
+
+def test_status_usage_lines_fall_back_to_memory_without_ledger():
+    stats = SimpleNamespace(
+        turn_count=3,
+        prompt_tokens=100,
+        completion_tokens=20,
+        cache_hit_tokens=0,
+        cache_miss_tokens=0,
+        cost=0.25,
+    )
+    command = StatusCommand.__new__(StatusCommand)
+    command.token_usage_log = None
+    command.agent_engine = SimpleNamespace(
+        cost_tracker=SimpleNamespace(get_global_stats=lambda: stats)
+    )
+
+    content = "\n".join(command._usage_lines())
+
+    assert "内存统计" in content
+    assert "0.2500" in content

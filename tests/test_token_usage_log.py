@@ -103,6 +103,42 @@ def test_unsupported_breakdown_dimension_raises():
     log.close()
 
 
+def test_chat_filter_scopes_summary_and_breakdown():
+    log = TokenUsageLog(":memory:")
+    log.record(chat_id="chat-A", model="m", source=SOURCE_TURN_REPLY, cost=0.5)
+    log.record(chat_id="chat-B", model="m", source=SOURCE_TURN_REPLY, cost=0.25)
+
+    scoped = log.summary(chat_id="chat-A")
+    assert scoped["record_count"] == 1
+    assert scoped["cost"] == pytest.approx(0.5)
+    assert log.count(chat_id="chat-B") == 1
+    assert [row["key"] for row in log.breakdown("chat")] == ["chat-A", "chat-B"]
+
+    by_source = log.breakdown("source", chat_id="chat-B")
+    assert len(by_source) == 1
+    assert by_source[0]["key"] == SOURCE_TURN_REPLY
+    assert by_source[0]["cost"] == pytest.approx(0.25)
+    log.close()
+
+
+def test_timeseries_is_chronological_and_bucketed():
+    log = TokenUsageLog(":memory:")
+    now = time.time()
+    log.record(model="m", prompt_tokens=10, cost=0.1, recorded_at=now)
+    log.record(model="m", prompt_tokens=20, cost=0.2, recorded_at=now + 86400)
+
+    daily = log.timeseries("day")
+    assert len(daily) == 2
+    assert daily[0]["key"] < daily[1]["key"]  # ascending time order
+    assert daily[0]["prompt_tokens"] == 10
+
+    assert log.timeseries("hour")[0]["prompt_tokens"] == 10
+
+    with pytest.raises(ValueError):
+        log.timeseries("minute")
+    log.close()
+
+
 def test_invalid_schema_version_rejected(tmp_path):
     path = tmp_path / "usage.sqlite3"
     log = TokenUsageLog(str(path))

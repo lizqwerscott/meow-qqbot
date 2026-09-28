@@ -1,5 +1,7 @@
+import json
 import logging
 import time
+from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
@@ -10,6 +12,16 @@ router = APIRouter(tags=["usage"])
 
 _DIMENSIONS = ("day", "model", "source", "provider", "chat")
 _PAGE_SIZE = 50
+
+
+def _script_json(value: Any) -> str:
+    """JSON safe to inline inside a <script> tag (escapes tag delimiters)."""
+    return (
+        json.dumps(value, ensure_ascii=False)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
 
 
 def _parse_day(value: str | None) -> float | None:
@@ -77,6 +89,13 @@ async def usage_page(request: Request):
         records = log.recent(
             limit=_PAGE_SIZE, offset=(page - 1) * _PAGE_SIZE, since=since, until=until
         )
+        charts = {
+            "day": log.timeseries("day", since=since, until=until),
+            "hour": log.timeseries("hour", since=since, until=until, limit=72),
+            "source": breakdowns["source"],
+            "model": breakdowns["model"][:10],
+            "provider": breakdowns["provider"],
+        }
     except Exception as exc:
         _log.warning("读取 token 用量账本失败: %s", exc)
         context["available"] = False
@@ -95,6 +114,7 @@ async def usage_page(request: Request):
             "records": records,
             "total_records": total_records,
             "total_pages": max(1, (total_records + _PAGE_SIZE - 1) // _PAGE_SIZE),
+            "charts_json": _script_json(charts),
         }
     )
     return templates.TemplateResponse(request, "usage/index.html", context)

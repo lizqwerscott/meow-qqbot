@@ -1273,6 +1273,7 @@ class ServiceGraph:
             event_log=self.agent_engine.event_log,
             archive_index=getattr(self.archive_manager, "_archive_index", None),
             model_context_transcript=self.agent_engine.model_context,
+            token_usage_log=self.token_usage_log,
             prompt_history_projection=self.agent_engine.prompt_history_projection,
             turn_summary_store=self.agent_engine.turn_summary_store,
             prompt_context_reports=self.agent_engine.prompt_context_reports,

@@ -53,6 +53,33 @@
 </div>
 <p style="color:var(--text-secondary);font-size:13px">范围：{{ summary_earliest }} → {{ summary_latest }}</p>
 
+<div class="card">
+    <h2 style="display:flex;justify-content:space-between;align-items:center">
+        <span>📈 用量趋势</span>
+        <select id="trend-bucket">
+            <option value="day">按日</option>
+            <option value="hour">按小时</option>
+        </select>
+    </h2>
+    <div style="height:320px"><canvas id="trend-chart"></canvas></div>
+</div>
+
+<div class="stats-grid" style="align-items:stretch">
+    <div class="card" style="grid-column:span 1">
+        <h2>🍩 来源占比（按成本）</h2>
+        <div style="height:300px"><canvas id="source-chart"></canvas></div>
+    </div>
+    <div class="card" style="grid-column:span 1">
+        <h2>📊 模型对比（tokens）</h2>
+        <div style="height:300px"><canvas id="model-chart"></canvas></div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>🏷️ provider 对比（tokens）</h2>
+    <div style="height:300px"><canvas id="provider-chart"></canvas></div>
+</div>
+
 {% for dimension, title in [("day", "按日期"), ("model", "按模型"), ("source", "按来源"), ("provider", "按 provider"), ("chat", "按会话")] %}
 <div class="card">
     <h2>{{ title }}</h2>
@@ -114,5 +141,85 @@
     <p style="color:var(--text-secondary);font-size:13px">无记录。</p>
     {% endif %}
 </div>
+
+<script src="/static/vendor/chart.umd.min.js"></script>
+<script>
+(function () {
+    const DATA = {{ charts_json|safe }};
+    if (!window.Chart || !DATA) return;
+    const AXIS = { color: '#9ca3af' };
+    const GRID = { color: 'rgba(156,163,175,0.2)' };
+
+    let trendChart = null;
+    function renderTrend(bucket) {
+        const rows = DATA[bucket] || [];
+        const datasets = [
+            {label: '输入 tokens', data: rows.map(r => r.prompt_tokens), borderColor: '#4f9cf9', backgroundColor: 'transparent', tension: 0.25, pointRadius: 2},
+            {label: '输出 tokens', data: rows.map(r => r.completion_tokens), borderColor: '#22c55e', backgroundColor: 'transparent', tension: 0.25, pointRadius: 2},
+            {label: '成本 ¥', data: rows.map(r => r.cost), borderColor: '#f59e0b', backgroundColor: 'transparent', tension: 0.25, pointRadius: 2, yAxisID: 'y1'},
+        ];
+        const labels = rows.map(r => r.key);
+        if (trendChart) {
+            trendChart.data.labels = labels;
+            trendChart.data.datasets = datasets;
+            trendChart.update();
+            return;
+        }
+        trendChart = new Chart(document.getElementById('trend-chart'), {
+            type: 'line',
+            data: {labels: labels, datasets: datasets},
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                interaction: {mode: 'index', intersect: false},
+                plugins: {legend: {labels: AXIS}},
+                scales: {
+                    x: {ticks: AXIS, grid: GRID},
+                    y: {beginAtZero: true, title: {display: true, text: 'tokens', color: '#9ca3af'}, ticks: AXIS, grid: GRID},
+                    y1: {beginAtZero: true, position: 'right', title: {display: true, text: '¥', color: '#9ca3af'}, ticks: AXIS, grid: {drawOnChartArea: false}},
+                },
+            },
+        });
+    }
+    renderTrend('day');
+    const bucketSelect = document.getElementById('trend-bucket');
+    if (bucketSelect) bucketSelect.addEventListener('change', e => renderTrend(e.target.value));
+
+    const sourceRows = DATA.source || [];
+    if (sourceRows.length) {
+        new Chart(document.getElementById('source-chart'), {
+            type: 'doughnut',
+            data: {
+                labels: sourceRows.map(r => r.key),
+                datasets: [{data: sourceRows.map(r => r.cost), backgroundColor: ['#4f9cf9', '#22c55e', '#f59e0b', '#ef4444', '#a855f7', '#14b8a6', '#eab308', '#64748b']}],
+            },
+            options: {responsive: true, maintainAspectRatio: false, plugins: {legend: {position: 'right', labels: AXIS}}},
+        });
+    }
+
+    function renderTokensBar(canvasId, rows) {
+        if (!rows || !rows.length) return;
+        new Chart(document.getElementById(canvasId), {
+            type: 'bar',
+            data: {
+                labels: rows.map(r => r.key),
+                datasets: [
+                    {label: '输入 tokens', data: rows.map(r => r.prompt_tokens), backgroundColor: '#4f9cf9'},
+                    {label: '输出 tokens', data: rows.map(r => r.completion_tokens), backgroundColor: '#22c55e'},
+                ],
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: {legend: {position: 'bottom', labels: AXIS}},
+                scales: {
+                    x: {ticks: Object.assign({autoSkip: false, maxRotation: 45}, AXIS), grid: GRID},
+                    y: {beginAtZero: true, ticks: AXIS, grid: GRID},
+                },
+            },
+        });
+    }
+    renderTokensBar('model-chart', DATA.model || []);
+    renderTokensBar('provider-chart', DATA.provider || []);
+})();
+</script>
 {% endif %}
 {% endblock %}

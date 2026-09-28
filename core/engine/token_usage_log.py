@@ -224,8 +224,13 @@ class TokenUsageLog:
 
     # ── 查询（只读） ──
 
-    def _time_clause(
-        self, since: Optional[float], until: Optional[float]
+    def _where(
+        self,
+        since: Optional[float] = None,
+        until: Optional[float] = None,
+        chat_id: Optional[str] = None,
+        source: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> tuple[str, list[Any]]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -235,13 +240,26 @@ class TokenUsageLog:
         if until is not None:
             clauses.append("recorded_at <= ?")
             params.append(float(until))
+        if chat_id:
+            clauses.append("chat_id = ?")
+            params.append(str(chat_id))
+        if source:
+            clauses.append("source = ?")
+            params.append(str(source))
+        if model:
+            clauses.append("model = ?")
+            params.append(str(model))
         return (" AND ".join(clauses), params)
 
     def summary(
-        self, *, since: Optional[float] = None, until: Optional[float] = None
+        self,
+        *,
+        since: Optional[float] = None,
+        until: Optional[float] = None,
+        chat_id: Optional[str] = None,
     ) -> dict[str, Any]:
         conn = self._ensure_open()
-        where, params = self._time_clause(since, until)
+        where, params = self._where(since=since, until=until, chat_id=chat_id)
         clause = f" WHERE {where}" if where else ""
         row = conn.execute(
             f"""
@@ -278,6 +296,7 @@ class TokenUsageLog:
         *,
         since: Optional[float] = None,
         until: Optional[float] = None,
+        chat_id: Optional[str] = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         if dimension == "day":
@@ -287,7 +306,7 @@ class TokenUsageLog:
             if not expression:
                 raise ValueError(f"unsupported breakdown dimension: {dimension}")
         conn = self._ensure_open()
-        where, params = self._time_clause(since, until)
+        where, params = self._where(since=since, until=until, chat_id=chat_id)
         clause = f" WHERE {where}" if where else ""
         rows = conn.execute(
             f"""
@@ -314,6 +333,52 @@ class TokenUsageLog:
             for row in rows
         ]
 
+    def timeseries(
+        self,
+        bucket: str = "day",
+        *,
+        since: Optional[float] = None,
+        until: Optional[float] = None,
+        chat_id: Optional[str] = None,
+        limit: int = 365,
+    ) -> list[dict[str, Any]]:
+        """Chronological token/cost buckets (``bucket`` is ``day`` or ``hour``)."""
+        if bucket == "hour":
+            expression = (
+                "strftime('%Y-%m-%d %H:00', recorded_at, 'unixepoch', 'localtime')"
+            )
+        elif bucket == "day":
+            expression = "strftime('%Y-%m-%d', recorded_at, 'unixepoch', 'localtime')"
+        else:
+            raise ValueError(f"unsupported timeseries bucket: {bucket}")
+        conn = self._ensure_open()
+        where, params = self._where(since=since, until=until, chat_id=chat_id)
+        clause = f" WHERE {where}" if where else ""
+        rows = conn.execute(
+            f"""
+            SELECT {expression} AS key,
+                   COUNT(*) AS record_count,
+                   COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                   COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                   COALESCE(SUM(cost), 0) AS cost
+              FROM token_usage_records{clause}
+             GROUP BY key
+             ORDER BY key DESC
+             LIMIT ?
+            """,
+            [*params, max(1, int(limit))],
+        ).fetchall()
+        return [
+            {
+                "key": str(row["key"]),
+                "record_count": int(row["record_count"]),
+                "prompt_tokens": int(row["prompt_tokens"]),
+                "completion_tokens": int(row["completion_tokens"]),
+                "cost": float(row["cost"]),
+            }
+            for row in reversed(rows)
+        ]
+
     def count(
         self,
         *,
@@ -321,17 +386,13 @@ class TokenUsageLog:
         until: Optional[float] = None,
         source: Optional[str] = None,
         model: Optional[str] = None,
+        chat_id: Optional[str] = None,
     ) -> int:
         conn = self._ensure_open()
-        where, params = self._time_clause(since, until)
-        clauses = [where] if where else []
-        if source:
-            clauses.append("source = ?")
-            params.append(str(source))
-        if model:
-            clauses.append("model = ?")
-            params.append(str(model))
-        clause = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        where, params = self._where(
+            since=since, until=until, chat_id=chat_id, source=source, model=model
+        )
+        clause = f" WHERE {where}" if where else ""
         row = conn.execute(
             f"SELECT COUNT(*) AS n FROM token_usage_records{clause}", params
         ).fetchone()
@@ -346,17 +407,13 @@ class TokenUsageLog:
         until: Optional[float] = None,
         source: Optional[str] = None,
         model: Optional[str] = None,
+        chat_id: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         conn = self._ensure_open()
-        where, params = self._time_clause(since, until)
-        clauses = [where] if where else []
-        if source:
-            clauses.append("source = ?")
-            params.append(str(source))
-        if model:
-            clauses.append("model = ?")
-            params.append(str(model))
-        clause = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        where, params = self._where(
+            since=since, until=until, chat_id=chat_id, source=source, model=model
+        )
+        clause = f" WHERE {where}" if where else ""
         rows = conn.execute(
             f"""
             SELECT * FROM token_usage_records{clause}

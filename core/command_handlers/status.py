@@ -39,11 +39,48 @@ class StatusCommand:
         approval_manager=None,
         channel_info_provider=None,
         identity_manager=None,
+        token_usage_log=None,
     ):
         self.agent_engine = agent_engine
         self.approval_manager = approval_manager  # 2.4：审批白名单状态行
         self.channel_info_provider = channel_info_provider
         self.identity_manager = identity_manager
+        self.token_usage_log = token_usage_log
+
+    def _usage_lines(self) -> List[str]:
+        """Brief AI consumption from the durable ledger (falls back to memory)."""
+        log = self.token_usage_log
+        if log is None:
+            cost_tracker = getattr(self.agent_engine, "cost_tracker", None)
+            stats = cost_tracker.get_global_stats() if cost_tracker else None
+            if stats is None or stats.turn_count == 0:
+                return []
+            return [
+                "",
+                "**AI 消耗**（内存统计，账本未启用；重启清零）",
+                f"- API 调用: `{stats.turn_count}` 次",
+                f"- 输入 `{stats.prompt_tokens:,}` / 输出 `{stats.completion_tokens:,}` tokens",
+                f"- 总费用: **¥{stats.cost:.4f}**",
+            ]
+        try:
+            total = log.summary()
+            today_since = time.mktime(
+                time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d")
+            )
+            today = log.summary(since=today_since)
+        except Exception as exc:
+            _log.warning("读取用量账本失败: %s", exc)
+            return []
+        if int(total.get("record_count", 0)) == 0:
+            return ["", "**AI 消耗**（持久账本）", "- 暂无记录"]
+        return [
+            "",
+            "**AI 消耗**（持久账本，跨重启累计）",
+            f"- 累计: 调用 `{total['record_count']}` 次，输入 `{total['prompt_tokens']:,}`"
+            f" / 输出 `{total['completion_tokens']:,}` tokens，费用 **¥{total['cost']:.4f}**",
+            f"- 今日: 调用 `{today['record_count']}` 次，费用 **¥{today['cost']:.4f}**",
+            "- 明细/图表: WebUI `/usage`；本会话历史: `猫猫消耗`",
+        ]
 
     @staticmethod
     def _plugin_count() -> int:
@@ -129,18 +166,7 @@ class StatusCommand:
                 )
             skill_count = len(sm.list_skill_names()) if sm and sm.has_skills else 0
 
-            cost = stats.get("cost", {})
-            cost_lines = []
-            if cost.get("turn_count", 0) > 0:
-                cost_lines = [
-                    "",
-                    "**AI 消耗**",
-                    f"- API 调用: `{cost['turn_count']}` 次",
-                    f"- 输入 tokens: `{cost.get('prompt_tokens', 0):,}` (命中 `{cost.get('cache_hit_rate', 0)}%`，hit `{cost.get('cache_hit_tokens', 0):,}` / miss `{cost.get('cache_miss_tokens', 0):,}`)",
-                    f"- 缓存观测: `{cost.get('cache_observation_count', 0)}` 次（provider 未提供字段 `{cost.get('cache_usage_missing_count', 0)}` 次）",
-                    f"- 输出 tokens: `{cost.get('completion_tokens', 0):,}`",
-                    f"- 总费用: **¥{cost.get('total_cost', 0):.4f}**",
-                ]
+            cost_lines = self._usage_lines()
 
             channel_info_lines = []
             cache_status = getattr(self.channel_info_provider, "cache_status", None)
