@@ -3,7 +3,7 @@
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 _log = logging.getLogger(__name__)
 
@@ -44,14 +44,50 @@ class SessionCostStats:
         return self.cache_hit_tokens / total
 
 
+def _usage_source(metadata: Dict) -> str:
+    """Map call metadata to a ledger source label (see ``token_usage_log``)."""
+    from core.engine.token_usage_log import (
+        SOURCE_AUX_COMPACTION,
+        SOURCE_TURN_AMBIENT,
+        SOURCE_TURN_PASSIVE,
+        SOURCE_TURN_REPLY,
+        SOURCE_TURN_STEER,
+        SOURCE_UNKNOWN,
+    )
+
+    if str(metadata.get("usage_kind") or "") == "model_context_compaction":
+        return SOURCE_AUX_COMPACTION
+    turn_kind = str(metadata.get("turn_kind") or "").lower()
+    admission = str(metadata.get("admission_source") or "").lower()
+    if turn_kind == "ambient":
+        return SOURCE_TURN_AMBIENT
+    if admission == "steer":
+        return SOURCE_TURN_STEER
+    if admission == "passive":
+        return SOURCE_TURN_PASSIVE
+    if turn_kind or admission:
+        return SOURCE_TURN_REPLY
+    return SOURCE_UNKNOWN
+
+
 class CostTracker:
-    def __init__(self, pricing: Optional[Dict] = None):
+    def __init__(
+        self,
+        pricing: Optional[Dict] = None,
+        usage_log: Optional[Any] = None,
+    ):
         self._pricing = DEFAULT_PRICING.copy()
         if pricing:
             self._pricing.update(pricing)
         self._session_stats: Dict[str, SessionCostStats] = {}
         self._global_stats = SessionCostStats()
         self._cache_observations = deque(maxlen=1000)
+        # Optional durable ledger (core.engine.token_usage_log.TokenUsageLog).
+        # Typed loosely to avoid importing core.engine from core.managers.
+        self._usage_log = usage_log
+
+    def set_usage_log(self, usage_log: Any) -> None:
+        self._usage_log = usage_log
 
     def record_turn(
         self,
@@ -74,11 +110,18 @@ class CostTracker:
         completion = usage.get("completion_tokens", 0) or 0
 
         price = self._pricing.get(model, self._pricing.get("deepseek-v4-flash", {}))
-        cost = (
-            miss * price.get("input_per_million", 1.0) / 1_000_000
-            + hit * price.get("cache_hit_per_million", 0.02) / 1_000_000
-            + completion * price.get("output_per_million", 2.0) / 1_000_000
-        )
+        input_price = price.get("input_per_million", 1.0) / 1_000_000
+        output_price = price.get("output_per_million", 2.0) / 1_000_000
+        if cache_keys_present:
+            cost = (
+                miss * input_price
+                + hit * price.get("cache_hit_per_million", 0.02) / 1_000_000
+                + completion * output_price
+            )
+        else:
+            # Provider reported prompt_tokens without the cache split: bill the
+            # whole prompt at the input price instead of dropping it.
+            cost = prompt * input_price + completion * output_price
 
         if chat_id not in self._session_stats:
             self._session_stats[chat_id] = SessionCostStats()
@@ -118,6 +161,58 @@ class CostTracker:
         )
         if is_cache_observation:
             self._cache_observations.append(observation)
+
+        if self._usage_log is not None:
+            self._record_usage(
+                chat_id,
+                model,
+                observation,
+                cost,
+                prompt,
+                completion,
+                hit,
+                miss,
+                cache_keys_present,
+            )
+
+    def _record_usage(
+        self,
+        chat_id: str,
+        model: str,
+        observation: Dict,
+        cost: float,
+        prompt: int,
+        completion: int,
+        hit: int,
+        miss: int,
+        cache_usage_present: bool,
+    ) -> None:
+        try:
+            self._usage_log.record(
+                chat_id=chat_id,
+                turn_id=str(observation.get("turn_id") or ""),
+                model=model,
+                provider=str(observation.get("provider") or ""),
+                source=_usage_source(observation),
+                turn_kind=str(observation.get("turn_kind") or ""),
+                intent=str(
+                    observation.get("turn_intent") or observation.get("intent") or ""
+                ),
+                scope_generation=int(observation.get("scope_generation") or 0),
+                prompt_tokens=prompt,
+                completion_tokens=completion,
+                cache_hit_tokens=hit,
+                cache_miss_tokens=miss,
+                usage_present=bool(observation.get("usage_present", True)),
+                cache_usage_present=cache_usage_present,
+                estimated_prompt_tokens=int(
+                    observation.get("estimated_prompt_tokens") or 0
+                ),
+                cost=cost,
+                elapsed_ms=float(observation.get("elapsed_ms") or 0.0),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            _log.warning("写入 token 用量账本失败: %s", exc)
 
     def cache_observations(self) -> list[dict]:
         return list(self._cache_observations)

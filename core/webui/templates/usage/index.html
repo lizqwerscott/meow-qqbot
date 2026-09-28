@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}Token 用量 - 猫猫管理{% endblock %}
+{% set nav_active = "usage" %}
+
+{% block content %}
+<h2 style="margin-bottom:12px">💰 Token 用量</h2>
+
+{% if not available %}
+<div class="card">
+    <p>用量账本不可用（未启用或读取失败）。请在 <code>[cost_tracking]</code> 确认 <code>ledger_enabled = true</code>。</p>
+</div>
+{% else %}
+<p style="color:var(--text-secondary);font-size:13px">
+    记录永久保留（<code>data/token_usage.sqlite3</code>）。真实用量来自 provider <code>usage</code>；<code>cost</code> 按写入时定价快照计算，历史不受后续调价影响。
+</p>
+
+<form method="get" action="/usage" style="margin:12px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <label>起始 <input type="date" name="since" value="{{ since }}"></label>
+    <label>结束 <input type="date" name="until" value="{{ until }}"></label>
+    <button type="submit" class="btn btn-sm">筛选</button>
+    <a href="/usage" class="btn btn-sm">重置</a>
+</form>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-value">{{ summary.record_count }}</div>
+        <div class="stat-label">调用记录</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ summary.prompt_tokens }}</div>
+        <div class="stat-label">Prompt Tokens</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ summary.completion_tokens }}</div>
+        <div class="stat-label">Completion Tokens</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ summary.cache_hit_tokens }}</div>
+        <div class="stat-label">缓存命中 Tokens</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ summary.cache_miss_tokens }}</div>
+        <div class="stat-label">缓存未命中 Tokens</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ "%.6f"|format(summary.cost or 0) }}</div>
+        <div class="stat-label">累计成本</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ summary.usage_present_count }}/{{ summary.record_count }}</div>
+        <div class="stat-label">有 usage 回报</div>
+    </div>
+</div>
+<p style="color:var(--text-secondary);font-size:13px">范围：{{ summary_earliest }} → {{ summary_latest }}</p>
+
+{% for dimension, title in [("day", "按日期"), ("model", "按模型"), ("source", "按来源"), ("provider", "按 provider"), ("chat", "按会话")] %}
+<div class="card">
+    <h2>{{ title }}</h2>
+    {% if breakdowns.get(dimension) %}
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>{{ title }}</th><th>记录</th><th>Prompt</th><th>Completion</th><th>成本</th></tr></thead>
+            <tbody>
+            {% for row in breakdowns.get(dimension, []) %}
+            <tr>
+                <td><code>{{ row.key }}</code></td>
+                <td>{{ row.record_count }}</td>
+                <td>{{ row.prompt_tokens }}</td>
+                <td>{{ row.completion_tokens }}</td>
+                <td>{{ "%.6f"|format(row.cost) }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p style="color:var(--text-secondary);font-size:13px">无数据。</p>
+    {% endif %}
+</div>
+{% endfor %}
+
+<div class="card">
+    <h2>最近记录（{{ total_records }} 条，第 {{ page }}/{{ total_pages }} 页）</h2>
+    {% if records %}
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>时间</th><th>来源</th><th>模型</th><th>provider</th><th>turn_kind</th><th>Prompt</th><th>Completion</th><th>缓存命中/未命中</th><th>成本</th></tr></thead>
+            <tbody>
+            {% for record in records %}
+            <tr>
+                <td>{{ record.recorded_at_str }}</td>
+                <td><code>{{ record.source }}</code></td>
+                <td>{{ record.model }}</td>
+                <td>{{ record.provider }}</td>
+                <td>{{ record.turn_kind }}</td>
+                <td>{{ record.prompt_tokens }}</td>
+                <td>{{ record.completion_tokens }}</td>
+                <td>{{ record.cache_hit_tokens }}/{{ record.cache_miss_tokens }}</td>
+                <td>{{ record.cost_str }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+        {% if page > 1 %}
+        <a class="btn btn-sm" href="/usage?since={{ since }}&until={{ until }}&page={{ page - 1 }}">上一页</a>
+        {% endif %}
+        {% if page < total_pages %}
+        <a class="btn btn-sm" href="/usage?since={{ since }}&until={{ until }}&page={{ page + 1 }}">下一页</a>
+        {% endif %}
+    </div>
+    {% else %}
+    <p style="color:var(--text-secondary);font-size:13px">无记录。</p>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}

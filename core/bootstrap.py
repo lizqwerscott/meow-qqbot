@@ -36,6 +36,7 @@ from core.engine.engagement_config import normalize_engagement_config
 from core.engine.hindsight_memory import HindsightMemory
 from core.engine.router import Router
 from core.engine.system_events import SystemEventQueue
+from core.engine.token_usage_log import TokenUsageLog
 from core.engine.turn_summary import TurnSummaryStore
 from core.engine.wake_dispatcher import WakeDispatcher
 from core.learners.orchestrator import LearningOrchestrator
@@ -425,10 +426,18 @@ class ServiceGraph:
 
         # ── CostTracker ──
         cost_tracking_config = self.cfg.cost_tracking
+        self.token_usage_log = None
+        if cost_tracking_config.get("ledger_enabled", True):
+            self.token_usage_log = TokenUsageLog(
+                str(cost_tracking_config.get("ledger_path", "data/token_usage.sqlite3"))
+            )
         self.cost_tracker = (
-            CostTracker(pricing=cost_tracking_config.get("pricing"))
+            CostTracker(
+                pricing=cost_tracking_config.get("pricing"),
+                usage_log=self.token_usage_log,
+            )
             if cost_tracking_config.get("enabled", True)
-            else CostTracker()
+            else CostTracker(usage_log=self.token_usage_log)
         )
 
         # ── Hindsight 记忆 ──
@@ -1322,6 +1331,7 @@ class ServiceGraph:
                     "model_context_transcript": self.agent_engine.model_context,
                     "protocol_history": self.agent_engine.protocol_history,
                     "cost_tracker": self.cost_tracker,
+                    "token_usage_log": self.token_usage_log,
                     "agent_engine": self.agent_engine,
                     "approval_manager": self.approval_manager,
                     "learning_orchestrator": self.learning_orchestrator,
@@ -1600,6 +1610,13 @@ class ServiceGraph:
         runtime_settings = getattr(self, "runtime_settings", None)
         if runtime_settings is not None:
             await self._safe_cleanup("runtime_settings", runtime_settings.close)
+
+        token_usage_log = getattr(self, "token_usage_log", None)
+        self.token_usage_log = None
+        if token_usage_log is not None:
+            await self._safe_cleanup(
+                "token_usage_log", lambda: asyncio.to_thread(token_usage_log.close)
+            )
 
         delivery_target_catalog = getattr(self, "delivery_target_catalog", None)
         self.delivery_target_catalog = None

@@ -79,6 +79,7 @@ from core.webui.routers import (
     settings,
     status,
     tasks,
+    usage,
 )
 
 _log = logging.getLogger(__name__)
@@ -184,6 +185,7 @@ def create_app(managers: Dict[str, Any], webui_config: Dict[str, Any]) -> FastAP
 
     # Register routers
     app.include_router(status.router)
+    app.include_router(usage.router)
     app.include_router(channels.router)
     app.include_router(interaction.router)
     app.include_router(emojis.router)
