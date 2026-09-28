@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from core.command_handlers.cost import CostCommand
+from core.engine.token_usage_log import SOURCE_TURN_REPLY, TokenUsageLog
 from core.message import InputMessage
 from core.session_identity import (
     DeliveryTarget,
@@ -48,3 +49,104 @@ async def test_cost_lookup_resolves_legacy_session_alias(tmp_path):
 
     assert "→ `agent:main:qq:default:group:123`" in replies[0]["content"]
     registry.close()
+
+
+@pytest.mark.asyncio
+async def test_cost_command_defaults_to_current_chat_history():
+    log = TokenUsageLog(":memory:")
+    log.record(
+        chat_id="chat-1",
+        model="deepseek-v4-flash",
+        source=SOURCE_TURN_REPLY,
+        prompt_tokens=1000,
+        completion_tokens=200,
+        cost=0.75,
+    )
+    log.record(
+        chat_id="chat-2",
+        model="deepseek-v4-flash",
+        source=SOURCE_TURN_REPLY,
+        prompt_tokens=5000,
+        completion_tokens=900,
+        cost=3.5,
+    )
+    command = CostCommand(SimpleNamespace(cost_tracker=None), token_usage_log=log)
+
+    reply = await command.execute(InputMessage("m1", "admin", "chat-1", "", False), "")
+    content = reply[0]["content"]
+
+    assert "本会话 token 消耗（全部历史）" in content
+    assert "0.7500" in content
+    assert "3.5000" not in content  # the other chat is not included
+    log.close()
+
+
+@pytest.mark.asyncio
+async def test_cost_command_global_mode_lists_top_chats():
+    log = TokenUsageLog(":memory:")
+    log.record(chat_id="chat-1", model="m", source=SOURCE_TURN_REPLY, cost=0.75)
+    log.record(chat_id="chat-2", model="m", source=SOURCE_TURN_REPLY, cost=3.5)
+    command = CostCommand(SimpleNamespace(cost_tracker=None), token_usage_log=log)
+
+    reply = await command.execute(
+        InputMessage("m1", "admin", "chat-1", "", False), "全局"
+    )
+    content = reply[0]["content"]
+
+    assert "AI 消耗总览（全部历史）" in content
+    assert "各会话 Top" in content
+    assert "chat-1" in content and "chat-2" in content
+    log.close()
+
+
+@pytest.mark.asyncio
+async def test_cost_command_resolves_legacy_alias_against_ledger(tmp_path):
+    registry = SessionIdentityRegistry(tmp_path / "identity.sqlite3")
+    registry.register_chat(
+        DeliveryTarget("qq", "default", "group", "123"),
+        legacy_key="123",
+        state="verified",
+        hindsight_document_id="session-123",
+    )
+    resolver = SessionIdentityResolver(registry, canonical_enabled=True)
+    log = TokenUsageLog(":memory:")
+    log.record(
+        chat_id="agent:main:qq:default:group:123",
+        model="m",
+        source=SOURCE_TURN_REPLY,
+        cost=0.5,
+    )
+    command = CostCommand(
+        SimpleNamespace(cost_tracker=None, session_identity_resolver=resolver),
+        token_usage_log=log,
+    )
+
+    reply = await command.execute(InputMessage("m1", "admin", "123", "", True), "123")
+    content = reply[0]["content"]
+
+    assert "agent:main:qq:default:group:123" in content
+    assert "0.5000" in content
+    registry.close()
+    log.close()
+
+
+@pytest.mark.asyncio
+async def test_cost_command_day_window_uses_suffix():
+    log = TokenUsageLog(":memory:")
+    log.record(
+        chat_id="chat-1",
+        model="m",
+        source=SOURCE_TURN_REPLY,
+        prompt_tokens=100,
+        cost=0.4,
+    )
+    command = CostCommand(SimpleNamespace(cost_tracker=None), token_usage_log=log)
+
+    reply = await command.execute(
+        InputMessage("m1", "admin", "chat-1", "", False), "7d"
+    )
+    content = reply[0]["content"]
+
+    assert "最近 7 天" in content
+    assert "0.4000" in content
+    log.close()
