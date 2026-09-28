@@ -14,9 +14,10 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 from zoneinfo import ZoneInfo
 
+from core.ai.tokenizers import default_token_counter
 from core.managers.chat_message import normalize_legacy_content, strip_content_prefix
 
 
@@ -324,6 +325,19 @@ class ConversationEventLog:
         self._conn: Optional[sqlite3.Connection] = None
         self._lock = asyncio.Lock()
         self._legacy_repair_locks: dict[str, asyncio.Lock] = {}
+        self._token_counter: Optional[Callable[[str, str], int]] = None
+
+    def set_token_counter(self, token_counter: Callable[[str, str], int]) -> None:
+        """Inject a ``(text, model) -> int`` estimator for budget token counts."""
+        self._token_counter = token_counter
+
+    def _count_tokens(self, text: str, model: str) -> int:
+        if self._token_counter is not None:
+            try:
+                return self._token_counter(text, model)
+            except Exception as exc:  # pragma: no cover - defensive
+                _log.warning("token 估算失败，回落 len//4: %s", exc)
+        return default_token_counter(text)
 
     async def _ensure_open(self) -> sqlite3.Connection:
         if self._conn is not None:
@@ -646,8 +660,13 @@ class ConversationEventLog:
         event: ConversationEvent,
         *,
         turn_kind: TurnKind | str = TurnKind.UNKNOWN,
+        model: str = "",
     ) -> ConversationEvent:
-        """Append an immutable event, returning the existing event idempotently."""
+        """Append an immutable event, returning the existing event idempotently.
+
+        ``model`` is only a hint for provider-aware token counting; it is not
+        stored on the event.
+        """
         try:
             turn_kind = TurnKind(turn_kind)
         except ValueError as exc:
@@ -658,7 +677,7 @@ class ConversationEventLog:
             event,
             timestamp=float(event.timestamp or time.time()),
             source_date=source_date,
-            token_count=(event.token_count or max(0, len(event.content) // 4)),
+            token_count=(event.token_count or self._count_tokens(event.content, model)),
         )
         async with self._lock:
             conn.execute("BEGIN IMMEDIATE")
@@ -899,6 +918,7 @@ class ConversationEventLog:
         session_kind: str = "chat",
         turn_kind: TurnKind | str = TurnKind.UNKNOWN,
         resources: Sequence[dict[str, Any]] = (),
+        model: str = "",
     ) -> ConversationEvent:
         return await self.append_event(
             ConversationEvent(
@@ -922,6 +942,7 @@ class ConversationEventLog:
                 ),
             ),
             turn_kind=turn_kind,
+            model=model,
         )
 
     async def append_accepted_delivery(
@@ -935,6 +956,7 @@ class ConversationEventLog:
         timestamp: float = 0.0,
         session_kind: str = "chat",
         resources: Sequence[dict[str, Any]] = (),
+        model: str = "",
     ) -> ConversationEvent:
         return await self.append_event(
             ConversationEvent(
@@ -955,7 +977,8 @@ class ConversationEventLog:
                     }
                     for resource in resources
                 ),
-            )
+            ),
+            model=model,
         )
 
     async def append_late_delivery_event(
@@ -969,6 +992,7 @@ class ConversationEventLog:
         delivery_kind: str = "response",
         timestamp: float = 0.0,
         session_kind: str = "late_orphan",
+        model: str = "",
     ) -> ConversationEvent:
         """Record an accepted delivery that missed its terminal turn boundary."""
         if not original_turn_id or not delivery_id:
@@ -998,7 +1022,8 @@ class ConversationEventLog:
                 content=payload,
                 timestamp=timestamp,
                 session_kind=session_kind,
-            )
+            ),
+            model=model,
         )
         await self.append_turn_terminal(
             chat_id=chat_id,

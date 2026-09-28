@@ -12,9 +12,10 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Collection, Optional, Sequence
+from typing import Any, Callable, Collection, Optional, Sequence
 
 from core.ai.fallback_runner import FallbackRunner
+from core.ai.tokenizers import default_token_counter
 from core.engine.conversation_event_log import (
     ConversationEvent,
     ConversationEventLog,
@@ -116,6 +117,7 @@ class TurnSummaryStore:
         semantic_group: str = "summary",
         model_registry: Any = None,
         semantic_max_tokens: int = 500,
+        token_counter: Optional[Callable[[str, str], int]] = None,
     ) -> None:
         if max_prompt_tokens < 1 or max_prompt_summaries < 1 or max_summary_batches < 1:
             raise ValueError("summary prompt limits must be positive")
@@ -134,6 +136,25 @@ class TurnSummaryStore:
         self._conn: Optional[sqlite3.Connection] = None
         self._lock = asyncio.Lock()
         self._semantic_tasks: set[asyncio.Task] = set()
+        self._token_counter: Optional[Callable[[str, str], int]] = token_counter
+
+    def set_token_counter(self, token_counter: Callable[[str, str], int]) -> None:
+        """Inject a ``(text, model) -> int`` estimator for budget token counts."""
+        self._token_counter = token_counter
+
+    def _count_tokens(self, text: str, model: str = "") -> int:
+        if self._token_counter is not None:
+            try:
+                return self._token_counter(text, model)
+            except Exception:  # pragma: no cover - defensive
+                pass
+        registry = self._model_registry
+        if registry is not None and model:
+            try:
+                return registry.count_tokens(model, text)
+            except Exception:  # pragma: no cover - defensive
+                pass
+        return default_token_counter(text)
 
     async def _ensure_open(self) -> sqlite3.Connection:
         if self._conn is not None:
@@ -359,9 +380,7 @@ class TurnSummaryStore:
             events_snapshot = (
                 await self._event_log.snapshot_events(chat_id, include_internal=True)
             ).events
-        events = tuple(
-            event for event in events_snapshot if event.turn_id == turn_id
-        )
+        events = tuple(event for event in events_snapshot if event.turn_id == turn_id)
         if not events:
             return None
         turns = await self._event_log.snapshot_turns(chat_id, include_internal=True)
@@ -630,7 +649,7 @@ class TurnSummaryStore:
                 skipped += len(group)
                 continue
             for summary in group:
-                cost = max(1, len(summary.text) // 4)
+                cost = max(1, self._count_tokens(summary.text, summary.semantic_model))
                 if len(selected) >= count_limit or used + cost > token_limit:
                     skipped += 1
                     rollup_candidates.append(summary)
@@ -653,7 +672,7 @@ class TurnSummaryStore:
                 )
                 if len(rollup_text) > max_chars:
                     rollup_text = rollup_text[:max_chars].rstrip() + "…"
-                rollup_tokens = max(1, len(rollup_text) // 4)
+                rollup_tokens = max(1, self._count_tokens(rollup_text))
                 used += rollup_tokens
         return SummarySelection(
             tuple(selected),

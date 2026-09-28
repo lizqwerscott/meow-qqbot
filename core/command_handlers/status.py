@@ -77,20 +77,14 @@ class StatusCommand:
                 engagement_status = await get_engagement_status()
             engagement_metrics = engagement_status.get("engagement", {})
             delivery_counts = engagement_status.get("delivery", {})
-            history_migration = {}
-            get_history_migration_status = getattr(
-                self.agent_engine, "get_history_migration_status", None
+            history_integrity = {}
+            get_ledger_integrity = getattr(
+                self.agent_engine, "get_ledger_integrity_async", None
             )
-            if get_history_migration_status is not None:
-                history_migration = await get_history_migration_status(
+            if get_ledger_integrity is not None:
+                history_integrity = await get_ledger_integrity(
                     session_key_for_message(input_message, self.agent_engine)
                 )
-            history_migration_summary = {}
-            get_history_migration_summary = getattr(
-                self.agent_engine, "get_history_migration_summary", None
-            )
-            if get_history_migration_summary is not None:
-                history_migration_summary = await get_history_migration_summary()
             model_context = stats.get("model_context", {})
             prompt_projection = stats.get("prompt_projection", {})
             prompt_reports = stats.get("prompt_reports", {})
@@ -116,14 +110,8 @@ class StatusCommand:
             ]
             history_lines = [
                 "",
-                "**历史迁移**",
-                f"- 可见消息: `legacy={history_migration.get('legacy_visible_count', 0)}` `timeline={history_migration.get('timeline_visible_count', 0)}`",
-                f"- 缺口: `{history_migration.get('missing_legacy_visible_count', 0)}`，legacy protocol: `{history_migration.get('legacy_protocol_count', 0)}`",
-                f"- 可移除 legacy read: `{'yes' if history_migration.get('ready_for_legacy_read_removal') else 'no'}`",
-                f"- 旧历史迁移水位: `{'complete' if history_migration.get('legacy_migration_complete', True) else 'pending'}`",
-                f"- 全局会话: `{history_migration_summary.get('session_count', 0)}`，可退出 fallback: `{history_migration_summary.get('sessions_ready_for_legacy_read_removal', 0)}`",
-                f"- 全局缺口会话: `{history_migration_summary.get('sessions_with_missing_legacy_visible', 0)}`，协议残留会话: `{history_migration_summary.get('sessions_with_legacy_protocol', 0)}`",
-                f"- identity 冲突: `chat={history_migration.get('legacy_conflict_count', 0)}` `global={history_migration_summary.get('legacy_conflict_count', 0)}`",
+                "**账本完整性**",
+                f"- identity 冲突: `{history_integrity.get('legacy_conflict_count', 0)}`",
             ]
             projection_lines = []
             if prompt_projection or prompt_reports or archive_stats:
@@ -134,7 +122,7 @@ class StatusCommand:
                     f"- Prompt reports: `total={prompt_reports.get('report_count', 0)}` `fallback={prompt_reports.get('fallback_count', 0)}` `degraded={prompt_reports.get('degraded_count', 0)}` `historical_excluded={prompt_reports.get('historical_exclusion_count', 0)}`",
                     f"- Archive: `batches={archive_stats.get('batch_count', 0)}` `pending={archive_stats.get('pending_count', 0)}` `events={archive_stats.get('event_count', 0)}` `export_failed={archive_stats.get('export_failed_count', 0)}`",
                 ]
-            event_integrity = history_migration.get("event_integrity", {})
+            event_integrity = history_integrity.get("event_integrity", {})
             if event_integrity:
                 history_lines.append(
                     f"- 账本 turn: `total={event_integrity.get('turn_count', 0)}` `invalid={event_integrity.get('invalid_turn_count', 0)}` `incomplete={event_integrity.get('incomplete_turn_count', 0)}` `open={event_integrity.get('open_turn_count', 0)}` `waiting_tool={event_integrity.get('waiting_tool_turn_count', 0)}`"

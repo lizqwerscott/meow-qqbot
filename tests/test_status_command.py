@@ -7,7 +7,7 @@ from core.message import InputMessage
 
 
 @pytest.mark.asyncio
-async def test_status_displays_global_history_migration_summary(monkeypatch):
+async def test_status_displays_ledger_integrity_summary(monkeypatch):
     import core.command_handlers.status as status_module
 
     monkeypatch.setattr(
@@ -45,15 +45,16 @@ async def test_status_displays_global_history_migration_summary(monkeypatch):
         async def get_engagement_status(self):
             return {}
 
-        async def get_history_migration_status(self, chat_id):
-            return {}
-
-        async def get_history_migration_summary(self):
+        async def get_ledger_integrity_async(self, chat_id):
             return {
-                "session_count": 4,
-                "sessions_ready_for_legacy_read_removal": 2,
-                "sessions_with_missing_legacy_visible": 1,
-                "sessions_with_legacy_protocol": 1,
+                "legacy_conflict_count": 1,
+                "event_integrity": {
+                    "turn_count": 5,
+                    "invalid_turn_count": 1,
+                    "incomplete_turn_count": 0,
+                    "open_turn_count": 0,
+                    "waiting_tool_turn_count": 0,
+                },
             }
 
     replies = await StatusCommand(Engine()).execute(
@@ -61,6 +62,7 @@ async def test_status_displays_global_history_migration_summary(monkeypatch):
     )
 
     content = replies[0]["content"]
-    assert "全局会话: `4`" in content
-    assert "可退出 fallback: `2`" in content
-    assert "全局缺口会话: `1`，协议残留会话: `1`" in content
+    assert "账本完整性" in content
+    assert "identity 冲突: `1`" in content
+    assert "total=5" in content
+    assert "invalid=1" in content

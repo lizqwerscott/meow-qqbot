@@ -10,6 +10,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, Sequence
 
+from core.ai.tokenizers import default_token_counter
 from core.managers.session_manager import InboundIntent
 
 
@@ -221,6 +222,7 @@ class ModelContextTranscript:
         compaction_keep_recent_tokens: int = 4096,
         compaction_snip_max_chars: int = 1200,
         compaction_max_summary_tokens: int = 500,
+        token_counter: Optional[Callable[[str, str], int]] = None,
     ):
         self._path = path
         self._max_events = max(1, int(max_events))
@@ -238,6 +240,44 @@ class ModelContextTranscript:
         self._lock = asyncio.Lock()
         self._schema_status = "uninitialized"
         self._repair_report: dict[str, int | str] = {}
+        self._token_counter: Optional[Callable[[str, str], int]] = token_counter
+        self._scope_models: dict[tuple[str, ...], str] = {}
+
+    def set_token_counter(self, token_counter: Callable[[str, str], int]) -> None:
+        """Inject a ``(text, model) -> int`` estimator for budget token counts."""
+        self._token_counter = token_counter
+
+    def _count_tokens(self, text: str, model: str = "") -> int:
+        if self._token_counter is not None:
+            try:
+                return self._token_counter(text, model)
+            except Exception:  # pragma: no cover - defensive
+                pass
+        return default_token_counter(text)
+
+    def _model_for(self, scope: ModelContextScope) -> str:
+        key = self._scope_values(scope)
+        cached = self._scope_models.get(key)
+        if cached:
+            return cached
+        conn = self._conn
+        if conn is None:
+            return ""
+        try:
+            row = conn.execute(
+                "SELECT model FROM model_context_usage "
+                "WHERE chat_id = ? AND principal_id = ? AND task_correlation_id = ? "
+                "AND kind = ? AND model != '' ORDER BY recorded_at DESC LIMIT 1",
+                key,
+            ).fetchone()
+        except sqlite3.Error:  # pragma: no cover - defensive
+            return ""
+        if row is None:
+            return ""
+        model = str(row["model"] or "")
+        if model:
+            self._scope_models[key] = model
+        return model
 
     async def _ensure_open(self) -> sqlite3.Connection:
         if self._conn is not None:
@@ -910,6 +950,8 @@ class ModelContextTranscript:
     ) -> ModelContextUsage:
         """Persist one provider observation for the scope generation."""
         current = await self.current_scope(scope)
+        if model:
+            self._scope_models[self._scope_values(current)] = model
         usage = usage or {}
         prompt_tokens = max(0, int(usage.get("prompt_tokens", 0) or 0))
         cache_hit_tokens = max(0, int(usage.get("prompt_cache_hit_tokens", 0) or 0))
@@ -1083,9 +1125,8 @@ class ModelContextTranscript:
             rows = conn.execute(query, params).fetchall()
         return current, tuple(self._row_event(row) for row in rows)
 
-    @classmethod
-    def _snapshot_tokens(cls, events: Sequence[ModelContextEvent]) -> int:
-        return sum(cls._estimate_wire_tokens(event) for event in events)
+    def _snapshot_tokens(self, events: Sequence[ModelContextEvent]) -> int:
+        return sum(self._estimate_wire_tokens(event) for event in events)
 
     @staticmethod
     def _group_events_by_turn(
@@ -1592,7 +1633,11 @@ class ModelContextTranscript:
                 summary_elapsed_ms = 0.0
             summary = (summary or "").strip()
             source_tokens = self._snapshot_tokens(source_events)
-            if not summary or self._estimate_text_tokens(summary) >= source_tokens:
+            if (
+                not summary
+                or self._estimate_text_tokens(summary, self._model_for(local_scope))
+                >= source_tokens
+            ):
                 await self.fail_compaction(
                     operation_id, "summary is empty or not smaller"
                 )
@@ -1655,9 +1700,8 @@ class ModelContextTranscript:
                 "summary failed",
             )
 
-    @staticmethod
-    def _estimate_text_tokens(text: str) -> int:
-        return max(1, len(text) // 4)
+    def _estimate_text_tokens(self, text: str, model: str = "") -> int:
+        return max(1, self._count_tokens(text, model))
 
     @staticmethod
     def _insert_event_locked(
@@ -1693,12 +1737,11 @@ class ModelContextTranscript:
             values,
         )
 
-    @staticmethod
-    def _estimate_wire_tokens(event: ModelContextEvent) -> int:
+    def _estimate_wire_tokens(self, event: ModelContextEvent) -> int:
         wire = json.dumps(
             event.to_wire(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
-        return max(1, len(wire) // 4)
+        return max(1, self._count_tokens(wire, self._model_for(event.scope)))
 
     def _prune_locked(
         self,

@@ -13,6 +13,7 @@ from core.engine.agent_engine import (
     _TurnRequest,
     _TurnResult,
 )
+from core.engine.chat_type_index import ChatTypeIndex
 from core.engine.conversation_event_log import EventLogInvariantError
 from core.engine.conversation_scheduler import ConversationScheduler
 from core.engine.delivery_ledger import (
@@ -37,6 +38,7 @@ from core.managers.session_manager import (
     SessionTaskManager,
 )
 from core.message import InputMessage
+from core.session_identity import DeliveryTargetCatalog
 from core.tasks.task_state_store import TaskStateStore
 from core.tools._types import ToolResult
 from core.tools.tool_loop import ToolLoop
@@ -207,9 +209,6 @@ async def test_admission_retries_ledger_after_legacy_projection_was_written(tmp_
         def __init__(self):
             self.recorded = False
 
-        async def record_chat_type(self, chat_id, is_group):
-            return None
-
         async def add_user_message_async(self, *args, **kwargs):
             if self.recorded:
                 return False
@@ -316,33 +315,6 @@ async def test_legacy_prompt_snapshot_is_bounded_at_storage(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_legacy_timeline_repair_skips_legacy_read_when_ledger_exists(tmp_path):
-    from core.engine.conversation_event_log import ConversationEventLog
-
-    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
-    await event_log.append_user_message(
-        chat_id="chat", turn_id="turn", message_id="message", content="ledger"
-    )
-
-    class LegacyContext:
-        async def get_chat_history_async(self, chat_id):
-            raise AssertionError("legacy history must not be read")
-
-    class Timeline:
-        async def repair_from_legacy_history(self, chat_id, history):
-            raise AssertionError("legacy repair must not run")
-
-    engine = make_engine(FakeToolLoop())
-    engine._get_event_log = lambda: event_log
-    engine.timeline = Timeline()
-    engine.context_manager = LegacyContext()
-
-    await engine._repair_timeline_from_legacy_history("chat")
-
-    await event_log.close()
-
-
-@pytest.mark.asyncio
 async def test_admission_duplicate_check_prefers_timeline_projection():
     engine = make_engine(FakeToolLoop())
     engine.timeline = SimpleNamespace(
@@ -356,192 +328,6 @@ async def test_admission_duplicate_check_prefers_timeline_projection():
     engine.context_manager = LegacyContextManager()
 
     assert await engine._is_message_admitted("chat", "message-1") is True
-
-
-@pytest.mark.asyncio
-async def test_history_migration_summary_scans_legacy_and_timeline_session_union(
-    tmp_path,
-):
-    from core.engine.conversation_timeline import ConversationTimeline
-
-    timeline = ConversationTimeline(str(tmp_path / "timeline.sqlite3"))
-    await timeline.append_user_message(
-        chat_id="shared",
-        message_id="m1",
-        content="hello",
-        sender_id="user",
-        timestamp=1,
-    )
-    await timeline.append_user_message(
-        chat_id="timeline-only",
-        message_id="m2",
-        content="new",
-        sender_id="user",
-        timestamp=2,
-    )
-
-    class ContextManager:
-        async def get_all_chat_ids_async(self):
-            return ["shared", "legacy-only"]
-
-        async def get_all_disk_chat_ids_async(self):
-            return ["disk-only"]
-
-        async def get_chat_history_async(self, chat_id):
-            if chat_id == "shared":
-                return [{"role": "user", "raw_content": "hello"}]
-            if chat_id == "legacy-only":
-                return [
-                    {"role": "user", "raw_content": "old"},
-                    {"role": "tool", "content": "result", "tool_call_id": "call"},
-                ]
-            return []
-
-    engine = make_engine(FakeToolLoop())
-    engine.context_manager = ContextManager()
-    engine.timeline = timeline
-
-    summary = await engine.get_history_migration_summary()
-
-    assert summary == {
-        "session_count": 4,
-        "sessions_with_missing_legacy_visible": 1,
-        "sessions_with_legacy_protocol": 1,
-        "sessions_ready_for_legacy_read_removal": 3,
-        "sessions_with_scan_errors": 0,
-        "ready_for_legacy_read_removal": False,
-    }
-    assert "hello" not in str(summary)
-    await timeline.close()
-
-
-@pytest.mark.asyncio
-async def test_history_migration_status_uses_ledger_without_legacy_reads(tmp_path):
-    from core.engine.conversation_event_log import ConversationEventLog
-
-    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
-    await event_log.append_user_message(
-        chat_id="ledger-chat",
-        turn_id="turn-1",
-        message_id="message-1",
-        content="hello",
-    )
-
-    class LegacyContextManager:
-        async def get_chat_history_async(self, chat_id):
-            raise AssertionError("ledger migration status must not read legacy history")
-
-        async def get_all_chat_ids_async(self):
-            raise AssertionError(
-                "ledger migration summary must not scan legacy sessions"
-            )
-
-        async def get_all_disk_chat_ids_async(self):
-            raise AssertionError(
-                "ledger migration summary must not scan legacy sessions"
-            )
-
-    engine = make_engine(FakeToolLoop())
-    engine.context_manager = LegacyContextManager()
-    engine.event_log = event_log
-
-    status = await engine.get_history_migration_status("ledger-chat")
-    summary = await engine.get_history_migration_summary()
-
-    assert status["legacy_read"] is False
-    assert status["missing_legacy_visible_count"] == 0
-    assert status["legacy_migration_complete"] is False
-    assert summary["session_count"] == 1
-    assert summary["legacy_read"] is False
-    assert summary["legacy_migration_complete"] is False
-    await event_log.close()
-
-
-@pytest.mark.asyncio
-async def test_history_migration_status_uses_per_chat_checkpoint(tmp_path):
-    from core.engine.conversation_event_log import ConversationEventLog
-
-    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
-    await event_log.append_user_message(
-        chat_id="migrated-chat",
-        turn_id="turn-1",
-        message_id="message-1",
-        content="hello",
-    )
-    await event_log.mark_legacy_chat_migration_complete("migrated-chat")
-
-    engine = make_engine(FakeToolLoop())
-    engine.context_manager = object()
-    engine.event_log = event_log
-
-    status = await engine.get_history_migration_status("migrated-chat")
-    summary = await engine.get_history_migration_summary()
-
-    assert status["legacy_chat_migration_complete"] is True
-    assert status["ready_for_legacy_read_removal"] is True
-    assert status["legacy_migration_complete"] is False
-    assert summary["sessions_ready_for_legacy_read_removal"] == 1
-    assert summary["ready_for_legacy_read_removal"] is False
-    await event_log.close()
-
-
-@pytest.mark.asyncio
-async def test_history_migration_summary_includes_legacy_only_chats(tmp_path):
-    from core.engine.conversation_event_log import ConversationEventLog
-
-    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
-    await event_log.append_user_message(
-        chat_id="ledger-chat",
-        turn_id="turn-1",
-        message_id="message-1",
-        content="hello",
-    )
-
-    class LegacyContext:
-        async def get_legacy_chat_ids_async(self):
-            return ["ledger-chat", "legacy-only"]
-
-    engine = make_engine(FakeToolLoop())
-    engine.context_manager = LegacyContext()
-    engine.event_log = event_log
-
-    summary = await engine.get_history_migration_summary()
-
-    assert summary["session_count"] == 2
-    assert summary["sessions_with_missing_legacy_visible"] == 1
-    assert summary["sessions_ready_for_legacy_read_removal"] == 0
-    assert summary["ready_for_legacy_read_removal"] is False
-    await event_log.close()
-
-
-@pytest.mark.asyncio
-async def test_history_migration_summary_does_not_block_on_new_ledger_only_chat(
-    tmp_path,
-):
-    from core.engine.conversation_event_log import ConversationEventLog
-
-    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
-    await event_log.append_user_message(
-        chat_id="new-chat",
-        turn_id="turn-1",
-        message_id="message-1",
-        content="new",
-    )
-
-    class LegacyContext:
-        async def get_legacy_chat_ids_async(self):
-            return []
-
-    engine = make_engine(FakeToolLoop())
-    engine.context_manager = LegacyContext()
-    engine.event_log = event_log
-
-    summary = await engine.get_history_migration_summary()
-
-    assert summary["session_count"] == 1
-    assert summary["sessions_ready_for_legacy_read_removal"] == 1
-    assert summary["ready_for_legacy_read_removal"] is False
-    await event_log.close()
 
 
 @pytest.mark.asyncio
@@ -641,16 +427,12 @@ class FakeContextManager:
     def __init__(self):
         self.rollbacks = []
         self.user_messages = []
-        self.recorded_chat_types = []
 
     async def remove_last_user_message_if_async(self, chat_id, message_id):
         self.rollbacks.append((chat_id, message_id))
 
     async def add_user_message_async(self, chat_id, content, message_id, **kwargs):
         self.user_messages.append((chat_id, content, message_id, kwargs))
-
-    async def record_chat_type(self, chat_id, is_group):
-        self.recorded_chat_types.append((chat_id, is_group))
 
     def get_chat_type(self, chat_id):
         return False
@@ -707,6 +489,7 @@ def make_engine(tool_loop, *, rule_router=None, model_registry=None):
     engine = AgentEngine.__new__(AgentEngine)
     engine._bot_id = "bot"
     engine.context_manager = FakeContextManager()
+    engine.chat_type_index = ChatTypeIndex()
     engine.session_manager = SessionTaskManager()
     engine.tool_loop = tool_loop
     engine.rule_router = rule_router
@@ -2490,6 +2273,7 @@ async def test_run_turn_serializes_same_session_but_not_other_sessions():
 async def test_process_message_preserves_prompt_stream_and_system_event_adapters():
     tool_loop = FakeToolLoop()
     engine = make_engine(tool_loop)
+    engine.chat_type_index = ChatTypeIndex(DeliveryTargetCatalog(":memory:"))
     prompt_calls = []
     system_events = []
     engine._system_events = SimpleNamespace(
@@ -2518,7 +2302,7 @@ async def test_process_message_preserves_prompt_stream_and_system_event_adapters
         lambda sender_id: "name",
     )
 
-    assert engine.context_manager.recorded_chat_types == [("chat", True)]
+    assert engine.chat_type_index.get("chat") is True
     assert prompt_calls[0]["user_nickname"] == "name"
     assert delivered[0]["message_id"] == "id"
     assert tool_loop.calls[0]["get_user_nickname"]("user") == "name"

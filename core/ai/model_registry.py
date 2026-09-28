@@ -7,7 +7,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from openai.types.chat import ChatCompletionMessageParam
 
@@ -15,6 +15,7 @@ from core.ai.cooldown import ModelCooldownManager
 from core.ai.fallback_runner import FallbackRunner
 from core.ai.protocol import LLMService
 from core.ai.provider_factory import get_provider_factory
+from core.ai.tokenizers import default_token_counter
 
 _log = logging.getLogger(__name__)
 
@@ -130,6 +131,27 @@ class ModelRegistry:
 
     def get(self, name: str) -> Optional[LLMService]:
         return self._services.get(name)
+
+    def count_tokens(self, model_name: str, text: str) -> int:
+        """Estimate tokens for a model via its provider, else the heuristic."""
+        service = self._services.get(model_name)
+        counter = getattr(service, "count_tokens", None)
+        if callable(counter):
+            try:
+                return counter(text)
+            except Exception as exc:  # pragma: no cover - defensive
+                _log.warning("provider count_tokens 失败 [%s]: %s", model_name, exc)
+        return default_token_counter(text)
+
+    def token_counter(self) -> Callable[[str, str], int]:
+        """Return a ``(text, model) -> int`` resolver for store injection."""
+
+        def _resolve(text: str, model: str = "") -> int:
+            if model:
+                return self.count_tokens(model, text)
+            return default_token_counter(text)
+
+        return _resolve
 
     def get_group(self, group_name: str) -> List[str]:
         """获取组的模型链。"""

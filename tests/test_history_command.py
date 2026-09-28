@@ -197,7 +197,7 @@ async def test_legacy_history_compatibility_reader_is_bounded():
     calls = []
 
     class ContextManager:
-        async def get_legacy_chat_history_async(self, chat_id, max_messages=None):
+        async def get_chat_history_async(self, chat_id, max_messages=None):
             calls.append((chat_id, max_messages))
             return [{"role": "user", "content": str(index)} for index in range(200)]
 
@@ -213,7 +213,7 @@ async def test_legacy_history_compatibility_reader_supports_limit_parameter():
     calls = []
 
     class ContextManager:
-        async def get_legacy_chat_history_async(self, chat_id, limit=None):
+        async def get_chat_history_async(self, chat_id, limit=None):
             calls.append((chat_id, limit))
             return [{"role": "user", "content": str(index)} for index in range(200)]
 
@@ -229,7 +229,7 @@ async def test_legacy_history_compatibility_reader_supports_positional_only_limi
     calls = []
 
     class ContextManager:
-        async def get_legacy_chat_history_async(self, chat_id, max_messages, /):
+        async def get_chat_history_async(self, chat_id, max_messages, /):
             calls.append((chat_id, max_messages))
             return [{"role": "user", "content": str(index)} for index in range(200)]
 

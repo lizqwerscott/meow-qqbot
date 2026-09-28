@@ -55,6 +55,8 @@ class DeliveryTargetCatalog:
             );
             CREATE INDEX IF NOT EXISTS idx_delivery_targets_status
                 ON delivery_targets(status);
+            CREATE INDEX IF NOT EXISTS idx_delivery_targets_target
+                ON delivery_targets(target_id);
             """)
         self._conn.commit()
 
@@ -92,6 +94,21 @@ class DeliveryTargetCatalog:
             target.catalog_key,
         ).fetchone()
         return self._row_to_known(row) if row is not None else None
+
+    def get_chat_type(self, target_id: str) -> str | None:
+        """Return ``group``/``direct`` for a raw target id, fail-safe on ambiguity."""
+        if not target_id:
+            return None
+        rows = self._conn.execute(
+            """
+            SELECT DISTINCT chat_type FROM delivery_targets WHERE target_id = ?
+            """,
+            (target_id,),
+        ).fetchall()
+        kinds = {str(row["chat_type"]) for row in rows}
+        if len(kinds) != 1:
+            return None
+        return next(iter(kinds))
 
     def list_visible(
         self,

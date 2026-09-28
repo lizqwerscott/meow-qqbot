@@ -266,6 +266,7 @@ class ToolLoop:
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
                     content=content,
+                    model=current_model_name or self.ai_service.model,
                 )
 
         async def turn_is_active() -> bool:
@@ -666,6 +667,7 @@ class ToolLoop:
                         content=response_text or "",
                         tool_calls=tool_calls_data or (),
                         reasoning_content=reasoning or "",
+                        model=current_model_name or self.ai_service.model,
                     )
                 protocol_started = True
                 await persist_legacy_assistant(

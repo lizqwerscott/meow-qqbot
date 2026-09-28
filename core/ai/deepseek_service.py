@@ -35,6 +35,7 @@ from core.ai.protocol import (
     is_context_overflow_error,
     log_llm_error,
 )
+from core.ai.tokenizers import count_tokens_for
 
 _log = logging.getLogger(__name__)
 
@@ -293,6 +294,10 @@ class DeepSeekResponsesService:
 
     async def close(self):
         await self.client.close()
+
+    def count_tokens(self, text: str) -> int:
+        """Best-effort estimate for budgeting, resolved by model family."""
+        return count_tokens_for(self.model, text)
 
     async def __aenter__(self):
         return self

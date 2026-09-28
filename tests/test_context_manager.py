@@ -1,52 +1,10 @@
-import asyncio
 import importlib
-import threading
-from collections import OrderedDict
-from unittest.mock import AsyncMock
 
 import pytest
 
 from core.engine.conversation_event_log import ConversationEventLog
 from core.engine.prompt_history_projection import PromptHistoryProjection
-from core.managers.context_manager import ChatContextManager, _scan_legacy_store_ids
-from core.managers.context_store import MemoryContextStore
-
-
-@pytest.fixture
-def store():
-    return MemoryContextStore()
-
-
-def test_scan_legacy_store_ids_includes_archived_sessions():
-    class LegacyStore(MemoryContextStore):
-        def get_all_disk_ids(self):
-            return []
-
-        def get_archived_summary(self):
-            return {"archived-chat": 2}
-
-    assert _scan_legacy_store_ids(LegacyStore()) == {"archived-chat"}
-
-
-def test_token_cache_prune_removes_matching_timestamp():
-    manager = ChatContextManager(store=MemoryContextStore())
-    manager._token_cache = OrderedDict([("old", 1), ("new", 2), ("newest", 3)])
-    manager._token_cache_time = {
-        "old": 10.0,
-        "new": 20.0,
-        "newest": 30.0,
-    }
-    manager._token_cache_max_size = 2
-
-    manager._prune_token_cache()
-
-    assert list(manager._token_cache) == ["new", "newest"]
-    assert manager._token_cache_time == {"new": 20.0, "newest": 30.0}
-
-
-@pytest.fixture
-def mgr(store):
-    return ChatContextManager(store=store)
+from core.managers.context_manager import ChatContextManager
 
 
 def test_legacy_message_list_compaction_api_is_retired():
@@ -56,25 +14,15 @@ def test_legacy_message_list_compaction_api_is_retired():
         importlib.import_module("core.managers.context_compactor")
 
 
-@pytest.mark.asyncio
-async def test_first_history_access_creates_new(mgr):
-    assert await mgr.get_chat_history_async("chat_001") == []
-    assert await mgr.get_all_chat_ids_async() == ["chat_001"]
+def test_legacy_active_store_modules_are_gone():
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("core.managers.chat_context")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("core.managers.context_store")
 
 
 @pytest.mark.asyncio
-async def test_first_history_access_reuses_existing(mgr):
-    await mgr.get_chat_history_async("chat_001")
-    await mgr.get_chat_history_async("chat_001")
-    assert await mgr.get_context_count_async() == 1
-
-
-@pytest.mark.asyncio
-async def test_event_log_session_enumeration_does_not_scan_legacy_store(tmp_path):
-    class LegacyStore(MemoryContextStore):
-        def get_all_disk_ids(self):
-            raise AssertionError("event-log mode must not scan legacy sessions")
-
+async def test_event_log_session_enumeration_is_ledger_only(tmp_path):
     event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
     await event_log.append_user_message(
         chat_id="ledger-chat",
@@ -82,26 +30,24 @@ async def test_event_log_session_enumeration_does_not_scan_legacy_store(tmp_path
         message_id="message-1",
         content="账本会话",
     )
-    manager = ChatContextManager(store=LegacyStore())
+    manager = ChatContextManager()
     manager.set_event_log(event_log)
 
     assert await manager.get_all_disk_chat_ids_async() == ["ledger-chat"]
+    assert await manager.get_all_chat_ids_async() == ["ledger-chat"]
     await event_log.close()
 
 
 @pytest.mark.asyncio
 async def test_event_log_user_dedup_uses_identity_lookup_without_snapshot(tmp_path):
     event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
-    manager = ChatContextManager(store=MemoryContextStore())
+    manager = ChatContextManager()
     manager.set_event_log(event_log)
     await event_log.append_user_message(
         chat_id="ledger-chat",
         turn_id="turn-1",
         message_id="message-1",
         content="已有消息",
-    )
-    event_log.snapshot_events = AsyncMock(
-        side_effect=AssertionError("dedup must not materialize the ledger")
     )
 
     assert (
@@ -125,7 +71,7 @@ async def test_recent_user_contents_uses_bounded_prompt_projection(tmp_path):
     projection = PromptHistoryProjection(
         event_log, metadata_path=str(tmp_path / "projection.sqlite3")
     )
-    manager = ChatContextManager(store=MemoryContextStore())
+    manager = ChatContextManager()
     manager.set_event_log(event_log)
     manager.set_prompt_projection(projection)
     await event_log.append_user_message(
@@ -157,16 +103,16 @@ async def test_recent_user_contents_uses_bounded_prompt_projection(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_event_log_session_clear_purges_legacy_store(tmp_path):
+async def test_session_clear_resets_ledger(tmp_path):
     event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
-    store = MemoryContextStore()
-    store.flush("chat", [{"role": "user", "content": "legacy"}])
-    manager = ChatContextManager(store=store)
+    manager = ChatContextManager()
     manager.set_event_log(event_log)
+    await event_log.append_user_message(
+        chat_id="chat", turn_id="turn-1", message_id="m1", content="hello"
+    )
 
     await manager.clear_chat_history_async("chat")
 
-    assert store.load("chat") is None
     assert await event_log.history("chat") == []
     await event_log.close()
 
@@ -177,7 +123,7 @@ async def test_recent_user_contents_bounds_ledger_read(tmp_path):
     await event_log.append_user_message(
         chat_id="chat", turn_id="turn-1", message_id="message-1", content="hello"
     )
-    manager = ChatContextManager(store=MemoryContextStore())
+    manager = ChatContextManager()
     manager.set_event_log(event_log)
 
     assert await manager.get_recent_user_contents_async("chat", count=2) == ["hello"]
@@ -193,7 +139,7 @@ async def test_recent_user_contents_uses_bounded_event_window():
             calls.append((chat_id, kwargs))
             return [{"role": "user", "content": "hello"}]
 
-    manager = ChatContextManager(store=MemoryContextStore())
+    manager = ChatContextManager()
     manager.set_event_log(EventLog())
 
     assert await manager.get_recent_user_contents_async("chat", count=3) == ["hello"]
@@ -209,7 +155,7 @@ async def test_event_log_history_defaults_to_bounded_window():
             calls.append((chat_id, kwargs))
             return [{"role": "user", "content": "hello"}]
 
-    manager = ChatContextManager(store=MemoryContextStore())
+    manager = ChatContextManager()
     manager.set_event_log(EventLog())
 
     assert await manager.get_chat_history_async("chat") == [
@@ -219,18 +165,8 @@ async def test_event_log_history_defaults_to_bounded_window():
 
 
 @pytest.mark.asyncio
-async def test_event_log_mode_does_not_read_legacy_archives():
-    class LegacyStore(MemoryContextStore):
-        def get_archived_summary(self):
-            raise AssertionError("ledger mode must not read legacy archive summary")
-
-        def list_archives(self, chat_id):
-            raise AssertionError("ledger mode must not list legacy archives")
-
-        def read_archive(self, file_path, max_messages=200):
-            raise AssertionError("ledger mode must not read legacy archive bodies")
-
-    manager = ChatContextManager(store=LegacyStore())
+async def test_legacy_archive_readers_always_empty():
+    manager = ChatContextManager()
     manager.set_event_log(object())
 
     assert await manager.get_archived_sessions_summary_async() == {}
@@ -239,205 +175,23 @@ async def test_event_log_mode_does_not_read_legacy_archives():
 
 
 @pytest.mark.asyncio
-async def test_history_access_loads_from_store(mgr, store):
-    store.flush("chat_001", [{"role": "user", "content": "hello", "timestamp": 100.0}])
-    history = await mgr.get_chat_history_async("chat_001")
-    assert len(history) == 1
-    assert history[0]["raw_content"] == "hello"
-
-
-@pytest.mark.asyncio
-async def test_concurrent_first_access_restores_once():
-    class BlockingStore(MemoryContextStore):
-        def __init__(self):
-            super().__init__()
-            self.load_calls = 0
-            self.started = asyncio.Event()
-            self.release = asyncio.Event()
-
-        async def load_async(self, chat_id):
-            self.load_calls += 1
-            self.started.set()
-            await self.release.wait()
-            return None
-
-    store = BlockingStore()
-    mgr = ChatContextManager(store=store)
-    first = asyncio.create_task(mgr.get_chat_history_async("chat_001"))
-    await store.started.wait()
-    second = asyncio.create_task(mgr.get_chat_history_async("chat_001"))
-    await asyncio.sleep(0)
-    assert store.load_calls == 1
-    store.release.set()
-    first_history, second_history = await asyncio.gather(first, second)
-    assert first_history == second_history == []
-
-
-@pytest.mark.asyncio
-async def test_first_access_different_chats_restores_in_parallel():
-    class ParallelStore(MemoryContextStore):
-        def __init__(self):
-            super().__init__()
-            self.started = set()
-            self.release = asyncio.Event()
-
-        async def load_async(self, chat_id):
-            self.started.add(chat_id)
-            if len(self.started) == 2:
-                self.release.set()
-            await self.release.wait()
-            return None
-
-    store = ParallelStore()
-    mgr = ChatContextManager(store=store)
-    await asyncio.wait_for(
-        asyncio.gather(
-            mgr.get_chat_history_async("chat_001"),
-            mgr.get_chat_history_async("chat_002"),
-        ),
-        timeout=1,
+async def test_remove_message_if_is_noop_in_ledger_mode(tmp_path):
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    manager = ChatContextManager()
+    manager.set_event_log(event_log)
+    await event_log.append_user_message(
+        chat_id="chat", turn_id="turn-1", message_id="m1", content="hello"
     )
-    assert store.started == {"chat_001", "chat_002"}
+
+    assert await manager.remove_last_user_message_if_async("chat", "m1") is False
+    assert len(await manager.get_chat_history_async("chat")) == 1
+    await event_log.close()
 
 
 @pytest.mark.asyncio
-async def test_add_user_message_async(mgr):
-    await mgr.add_user_message_async(
-        "chat_001", "hello", message_id="msg_001", sender_id="user_001"
-    )
-    history = await mgr.get_chat_history_async("chat_001")
-    assert len(history) == 1
-    assert history[0]["role"] == "user"
-    assert history[0]["raw_content"] == "hello"
+async def test_clear_history_resets_ledger_without_touching_timeline(tmp_path):
+    """Ledger clear must not drive the preserved Timeline/ProtocolHistory."""
 
-
-@pytest.mark.asyncio
-async def test_add_assistant_message_async(mgr):
-    await mgr.add_assistant_message_async("chat_001", "hi there", message_id="msg_002")
-    history = await mgr.get_chat_history_async("chat_001")
-    assert history[0]["role"] == "assistant"
-
-
-@pytest.mark.asyncio
-async def test_add_tool_result_async(mgr):
-    await mgr.add_tool_result_async(
-        "chat_001", "search", '{"result": "ok"}', "call_001"
-    )
-    history = await mgr.get_chat_history_async("chat_001")
-    assert history[0]["role"] == "tool"
-
-
-def test_set_messages_persists_without_event_loop():
-    from core.managers.chat_context import ChatContext
-    from core.managers.chat_message import ChatMessage
-
-    store = MemoryContextStore()
-    ctx = ChatContext("chat_001", store)
-    ctx.set_messages([ChatMessage(role="assistant", content="summary", timestamp=1)])
-
-    assert store.load("chat_001")[0]["content"] == "summary"
-
-
-@pytest.mark.asyncio
-async def test_set_messages_respects_max_history_and_restores():
-    from core.managers.chat_context import ChatContext
-    from core.managers.chat_message import ChatMessage
-
-    store = MemoryContextStore()
-    ctx = ChatContext("chat_001", store, max_history=2)
-    messages = [
-        ChatMessage(role="user", content="one", timestamp=1),
-        ChatMessage(role="user", content="two", timestamp=2),
-        ChatMessage(role="assistant", content="three", timestamp=3),
-    ]
-
-    ctx.set_messages(messages)
-    await ctx._save_task
-    restored = ChatContext("chat_001", store, max_history=2)
-    assert restored.restore_from_store() is True
-    assert [item.content for item in restored.get_history()] == ["two", "three"]
-
-
-@pytest.mark.asyncio
-async def test_set_messages_reschedules_after_pending_save():
-    from core.managers.chat_context import ChatContext
-    from core.managers.chat_message import ChatMessage
-
-    class BlockingStore(MemoryContextStore):
-        def __init__(self):
-            super().__init__()
-            self.started = threading.Event()
-            self.release = threading.Event()
-            self.flush_count = 0
-
-        def flush(self, chat_id, messages):
-            self.flush_count += 1
-            if self.flush_count == 1:
-                self.started.set()
-                self.release.wait(timeout=1)
-            super().flush(chat_id, messages)
-
-    store = BlockingStore()
-    ctx = ChatContext("chat_001", store)
-    ctx.add_message("user", "before")
-    await asyncio.to_thread(store.started.wait, 1)
-    ctx.set_messages([ChatMessage(role="assistant", content="after", timestamp=2)])
-    store.release.set()
-    await ctx._save_task
-    await asyncio.sleep(0)
-    if ctx._save_pending or store.flush_count == 1:
-        await ctx._save_task
-
-    assert store.flush_count == 2
-    assert store.load("chat_001")[0]["content"] == "after"
-
-
-@pytest.mark.asyncio
-async def test_set_messages_persists_replacement():
-    from core.managers.chat_context import ChatContext
-    from core.managers.chat_message import ChatMessage
-
-    store = MemoryContextStore()
-    ctx = ChatContext("chat_001", store)
-    replacement = ChatMessage(role="assistant", content="summary", timestamp=1)
-
-    ctx.set_messages([replacement])
-    await ctx._save_task
-
-    assert store.load("chat_001")[0]["content"] == "summary"
-
-
-@pytest.mark.asyncio
-async def test_remove_last_user_message_match(mgr):
-    await mgr.add_user_message_async("chat_001", "hello", message_id="msg_001")
-    result = await mgr.remove_last_user_message_if_async("chat_001", "msg_001")
-    assert result is True
-    assert await mgr.get_chat_history_async("chat_001") == []
-
-
-@pytest.mark.asyncio
-async def test_remove_last_user_message_no_match(mgr):
-    await mgr.add_user_message_async("chat_001", "hello", message_id="msg_001")
-    result = await mgr.remove_last_user_message_if_async("chat_001", "wrong_id")
-    assert result is False
-    assert len(await mgr.get_chat_history_async("chat_001")) == 1
-
-
-@pytest.mark.asyncio
-async def test_remove_last_user_message_wrong_role(mgr):
-    await mgr.add_assistant_message_async("chat_001", "hello", message_id="msg_001")
-    result = await mgr.remove_last_user_message_if_async("chat_001", "msg_001")
-    assert result is False
-
-
-@pytest.mark.asyncio
-async def test_remove_last_user_message_empty_chat(mgr):
-    result = await mgr.remove_last_user_message_if_async("unknown", "msg_001")
-    assert result is False
-
-
-@pytest.mark.asyncio
-async def test_clear_history_also_clears_timeline(mgr):
     class Timeline:
         def __init__(self):
             self.cleared = []
@@ -445,75 +199,40 @@ async def test_clear_history_also_clears_timeline(mgr):
         async def clear_chat(self, chat_id):
             self.cleared.append(chat_id)
 
+    event_log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    await event_log.append_user_message(
+        chat_id="chat", turn_id="turn-1", message_id="m1", content="hello"
+    )
     timeline = Timeline()
-    mgr.set_timeline(timeline)
-    await mgr.clear_chat_history_async("chat_001")
+    manager = ChatContextManager()
+    manager.set_event_log(event_log)
+    manager.set_timeline(timeline)
 
-    assert timeline.cleared == ["chat_001"]
+    await manager.clear_chat_history_async("chat")
 
-
-@pytest.mark.asyncio
-async def test_cleanup_inactive_contexts(mgr):
-    store = mgr.store
-    store.flush("chat_001", [{"role": "user", "content": "old", "timestamp": 0}])
-    await mgr.get_chat_history_async("chat_001")
-    removed = await mgr.cleanup_inactive_contexts_async(max_inactivity=0)
-    assert "chat_001" in removed
-    assert "chat_001" not in await mgr.get_all_chat_ids_async()
+    assert await event_log.history("chat") == []
+    assert timeline.cleared == []
+    await event_log.close()
 
 
 @pytest.mark.asyncio
-async def test_cleanup_does_not_release_file_lock_for_retained_context():
-    class TrackingStore(MemoryContextStore):
-        def __init__(self):
-            super().__init__()
-            self.released = []
-
-        def release_file_lock(self, chat_id):
-            self.released.append(chat_id)
-
-    store = TrackingStore()
-    mgr = ChatContextManager(store=store)
-    await mgr.add_user_message_async("chat_001", "active")
-
-    removed = await mgr.cleanup_inactive_contexts_async(max_inactivity=3600)
-
-    assert removed == []
-    assert store.released == []
-
-
-@pytest.mark.asyncio
-async def test_remove_context_waits_for_pending_save():
-    class BlockingStore(MemoryContextStore):
-        def __init__(self):
-            super().__init__()
-            self.started = threading.Event()
-            self.release = threading.Event()
-
-        def flush(self, chat_id, messages):
-            self.started.set()
-            self.release.wait(timeout=1)
-            super().flush(chat_id, messages)
-
-    store = BlockingStore()
-    mgr = ChatContextManager(store=store)
-    await mgr.add_user_message_async("chat_001", "pending")
-    await asyncio.to_thread(store.started.wait, 1)
-
-    removal = asyncio.create_task(mgr.remove_context_async("chat_001"))
-    await asyncio.sleep(0)
-    assert not removal.done()
-
-    store.release.set()
-    await asyncio.wait_for(removal, timeout=1)
-    assert await mgr.get_all_chat_ids_async() == []
-    assert store.load("chat_001")[0]["raw_content"] == "pending"
+async def test_cleanup_inactive_contexts_is_noop_in_ledger_mode():
+    manager = ChatContextManager()
+    assert await manager.cleanup_inactive_contexts_async(max_inactivity=0) == []
 
 
 # ── 聊天类型 ──
 
 
 @pytest.mark.asyncio
-async def test_record_and_get_chat_type(mgr):
-    await mgr.record_chat_type("chat_001", True)
-    assert mgr.get_chat_type("chat_001") is True
+async def test_get_chat_type_uses_index():
+    from core.engine.chat_type_index import ChatTypeIndex
+    from core.session_identity import DeliveryTarget, DeliveryTargetCatalog
+
+    catalog = DeliveryTargetCatalog(":memory:")
+    index = ChatTypeIndex(catalog)
+    manager = ChatContextManager()
+    manager.set_chat_type_index(index)
+    index.observe(DeliveryTarget("qq", "default", "group", "chat_001"))
+    assert manager.get_chat_type("chat_001") is True
+    assert manager.get_chat_type("chat_unknown") is None

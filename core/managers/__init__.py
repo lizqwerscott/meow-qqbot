@@ -1,6 +1,5 @@
 """管理器模块 — 各类 Manager 统一归入此子包"""
 
-from core.managers.chat_context import ChatContext
 from core.managers.command_manager import (
     Command,
     CommandManager,
@@ -8,11 +7,6 @@ from core.managers.command_manager import (
     PermissionLevel,
 )
 from core.managers.context_manager import ChatContextManager
-from core.managers.context_store import (
-    ContextStore,
-    JSONLContextStore,
-    MemoryContextStore,
-)
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager, is_custom_emoji
 from core.managers.identity_manager import ChannelUserRef, IdentityManager
@@ -24,11 +18,7 @@ __all__ = [
     "CommandManager",
     "CommandRegistry",
     "PermissionLevel",
-    "ChatContext",
     "ChatContextManager",
-    "ContextStore",
-    "JSONLContextStore",
-    "MemoryContextStore",
     "CostTracker",
     "EmojiManager",
     "is_custom_emoji",

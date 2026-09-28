@@ -11,7 +11,9 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
+
+from core.ai.tokenizers import default_token_counter
 
 
 class ProtocolInvariantError(RuntimeError):
@@ -75,10 +77,20 @@ class ProtocolEvent:
 class TurnProtocolHistory:
     """Durable, turn-isolated protocol event store."""
 
-    def __init__(self, path: str = "data/turn_protocol_history.sqlite3"):
+    def __init__(
+        self,
+        path: str = "data/turn_protocol_history.sqlite3",
+        *,
+        token_counter: Optional[Callable[[str, str], int]] = None,
+    ):
         self._path = path
         self._conn: Optional[sqlite3.Connection] = None
         self._lock = asyncio.Lock()
+        self._token_counter: Optional[Callable[[str, str], int]] = token_counter
+
+    def set_token_counter(self, token_counter: Callable[[str, str], int]) -> None:
+        """Inject a ``(text, model) -> int`` estimator for budget token counts."""
+        self._token_counter = token_counter
 
     async def _ensure_open(self) -> sqlite3.Connection:
         if self._conn is not None:
@@ -207,15 +219,20 @@ class TurnProtocolHistory:
             ),
         )
 
-    @staticmethod
-    def _estimate_tokens(
-        content: str, tool_calls: str = "", reasoning_content: str = ""
+    def _count_tokens(
+        self,
+        content: str,
+        tool_calls: str = "",
+        reasoning_content: str = "",
+        model: str = "",
     ) -> int:
-        return max(
-            0,
-            (len(content or "") + len(tool_calls or "") + len(reasoning_content or ""))
-            // 4,
-        )
+        text = f"{content or ''}{tool_calls or ''}{reasoning_content or ''}"
+        if self._token_counter is not None:
+            try:
+                return self._token_counter(text, model)
+            except Exception:  # pragma: no cover - defensive
+                pass
+        return default_token_counter(text)
 
     async def append_assistant(
         self,
@@ -227,6 +244,7 @@ class TurnProtocolHistory:
         reasoning_content: str = "",
         timestamp: float | None = None,
         chat_id: str = "",
+        model: str = "",
     ) -> ProtocolEvent:
         calls = tuple(dict(call) for call in tool_calls)
         return await self._append(
@@ -238,6 +256,7 @@ class TurnProtocolHistory:
             tool_calls=calls,
             reasoning_content=reasoning_content,
             timestamp=timestamp,
+            model=model,
         )
 
     async def append_tool_result(
@@ -250,6 +269,7 @@ class TurnProtocolHistory:
         content: str,
         timestamp: float | None = None,
         chat_id: str = "",
+        model: str = "",
     ) -> ProtocolEvent:
         if not tool_call_id:
             raise ProtocolInvariantError("tool result requires tool_call_id")
@@ -299,6 +319,7 @@ class TurnProtocolHistory:
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 timestamp=timestamp,
+                model=model,
             )
 
     async def _append(
@@ -314,6 +335,7 @@ class TurnProtocolHistory:
         tool_call_id: str = "",
         tool_name: str = "",
         timestamp: float | None = None,
+        model: str = "",
     ) -> ProtocolEvent:
         conn = await self._ensure_open()
         async with self._lock:
@@ -329,6 +351,7 @@ class TurnProtocolHistory:
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 timestamp=timestamp,
+                model=model,
             )
 
     async def _append_locked(
@@ -345,6 +368,7 @@ class TurnProtocolHistory:
         tool_call_id: str = "",
         tool_name: str = "",
         timestamp: float | None = None,
+        model: str = "",
     ) -> ProtocolEvent:
         if not turn_id or not event_id:
             raise ValueError("turn_id and event_id are required")
@@ -363,10 +387,11 @@ class TurnProtocolHistory:
             (chat_id, turn_id),
         ).fetchone()[0]
         now = time.time() if timestamp is None else timestamp
-        token_count = self._estimate_tokens(
+        token_count = self._count_tokens(
             content,
             json.dumps(list(tool_calls), ensure_ascii=False, sort_keys=True),
             reasoning_content,
+            model,
         )
         conn.execute(
             """

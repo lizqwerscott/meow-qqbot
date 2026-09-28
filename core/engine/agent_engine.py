@@ -27,6 +27,7 @@ from core.engine.batch_media_context import (
     BatchMediaContextBuilder,
     BatchMediaLimits,
 )
+from core.engine.chat_type_index import ChatTypeIndex
 from core.engine.context import EngineContext
 from core.engine.conversation_event_log import (
     ConversationEventLog,
@@ -250,6 +251,9 @@ class AgentEngine:
         self.delivery_target_catalog = getattr(
             ctx.mgmt, "delivery_target_catalog", None
         )
+        self.chat_type_index = ChatTypeIndex(
+            self.delivery_target_catalog, self.session_identity_resolver
+        )
 
         # ── 子模块 ──
         self.session_manager = SessionTaskManager()
@@ -375,6 +379,12 @@ class AgentEngine:
                 _compaction_value("max_summary_tokens", 500)
             ),
         )
+        counter_factory = getattr(self.model_registry, "token_counter", None)
+        if callable(counter_factory):
+            token_counter = counter_factory()
+            self.event_log.set_token_counter(token_counter)
+            self.model_context.set_token_counter(token_counter)
+            self.turn_summary_store.set_token_counter(token_counter)
         self.prompt_builder = PromptBuilder(ctx)
         self.prompt_builder.timeline = self.timeline
         self.prompt_builder.event_log = self.event_log
@@ -876,6 +886,7 @@ class AgentEngine:
                     if getattr(resource, "media_uri", "")
                     or getattr(resource, "resource_type", "") == "emoji"
                 ),
+                model=self._active_model_name(),
             )
             return
         try:
@@ -897,274 +908,55 @@ class AgentEngine:
                 exc,
             )
 
-    async def _repair_timeline_from_legacy_history(self, chat_id: str) -> None:
-        get_history = getattr(
-            self.context_manager, "get_legacy_chat_history_async", None
-        )
-        if getattr(self, "event_log", None) is not None:
-            return
-        if get_history is None:
-            get_history = getattr(self.context_manager, "get_chat_history_async", None)
-        if get_history is None:
-            return
-        timeline = self._get_timeline()
-        repair = getattr(timeline, "repair_from_legacy_history", None)
-        if repair is None:
-            return
-        try:
-            event_log = self._get_event_log()
-            if await event_log.latest_event_seq(chat_id):
-                return
-            history = await get_history(chat_id)
-            migrated = await repair(chat_id, history)
-            event_log_repair = getattr(event_log, "repair_from_legacy_history", None)
-            if event_log_repair is not None:
-                await event_log_repair(chat_id, history)
-            if migrated:
-                _log.info(
-                    "已从旧 ChatContext 回填 timeline [%s..]: %d 条",
-                    chat_id[:12],
-                    migrated,
-                )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _log.warning("旧历史回填 timeline 失败 [%s..]: %s", chat_id[:12], exc)
-
-    async def migrate_legacy_history_async(self, chat_id: str) -> int:
-        """Import one legacy active history into the authoritative event log once."""
-        get_history = getattr(
-            self.context_manager, "get_legacy_chat_history_async", None
-        )
-        if get_history is None:
-            return 0
-        history = await get_history(chat_id)
-        if not history:
-            return 0
-        identity_manager = getattr(self, "_identity_manager", None)
-        get_chat_type = getattr(self.context_manager, "get_chat_type", None)
-        is_group = get_chat_type(chat_id) if callable(get_chat_type) else None
-        if identity_manager is not None and is_group is not None:
-            target = self.resolve_delivery_target(chat_id, is_group=bool(is_group))
-            observe_history = getattr(identity_manager, "observe_legacy_history", None)
-            if target is not None and callable(observe_history):
-                observe_history(target, history)
-        event_log = self._get_event_log()
-        repair = getattr(event_log, "repair_from_legacy_history", None)
-        if repair is None:
-            return 0
-        return await repair(chat_id, history, source_id="legacy-active")
-
-    async def get_history_migration_status(self, chat_id: str) -> dict:
-        """Return non-content readiness for retiring legacy prompt history."""
+    async def get_ledger_integrity_async(self, chat_id: str) -> dict:
+        """Return non-content ledger integrity and identity-conflict counts."""
         event_log = getattr(self, "event_log", None)
-        if event_log is not None:
-            summary = await event_log.session_summary(chat_id)
-            migration_check = getattr(event_log, "legacy_migration_is_complete", None)
-            global_migration_complete = (
-                bool(await migration_check()) if callable(migration_check) else True
-            )
-            chat_migration_check = getattr(
-                event_log, "legacy_chat_migration_is_complete", None
-            )
-            migration_complete = (
-                bool(await chat_migration_check(chat_id))
-                if callable(chat_migration_check)
-                else global_migration_complete
-            )
-            conflict_reader = getattr(event_log, "legacy_conflict_event_ids", None)
-            conflict_count = 0
-            if callable(conflict_reader):
-                try:
-                    conflict_count = len(await conflict_reader(chat_id, max_ids=100))
-                except (asyncio.CancelledError,):
-                    raise
-                except Exception as exc:
-                    _log.warning(
-                        "读取 legacy identity 冲突失败 [%s..]: %s",
-                        chat_id[:12],
-                        exc,
-                    )
-            report = {
-                "chat_id": chat_id,
-                "legacy_visible_count": int(summary.get("message_count", 0)),
-                "timeline_visible_count": int(summary.get("message_count", 0)),
-                "missing_legacy_visible_count": 0,
-                "extra_timeline_visible_count": 0,
-                "legacy_protocol_count": 0,
-                "ready_for_legacy_read_removal": migration_complete,
-                "legacy_read": False,
-                "legacy_migration_complete": global_migration_complete,
-                "legacy_chat_migration_complete": migration_complete,
-                "legacy_conflict_count": conflict_count,
-            }
-            try:
-                report["event_integrity"] = await event_log.integrity_summary(chat_id)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                _log.warning("读取账本完整性状态失败 [%s..]: %s", chat_id[:12], exc)
-                report["event_integrity"] = {"error": "unavailable"}
+        report: dict = {}
+        if event_log is None:
             return report
-        get_legacy = getattr(
-            self.context_manager, "get_legacy_chat_history_async", None
-        )
-        legacy = await (get_legacy or self.context_manager.get_chat_history_async)(
-            chat_id
-        )
-        report = (
-            await self._get_timeline().migration_report(chat_id, legacy)
-        ).to_dict()
-        return report
-
-    async def get_history_migration_summary(self) -> dict:
-        """Scan all known sessions and return content-free migration readiness."""
-        event_log = getattr(self, "event_log", None)
-        if event_log is not None:
-            chat_ids = set(await event_log.chat_ids())
-            migration_check = getattr(event_log, "legacy_migration_is_complete", None)
-            global_migration_complete = (
-                bool(await migration_check()) if callable(migration_check) else True
-            )
-            legacy_scan_error = False
-            legacy_chat_ids: set[str] | None = None
-            if not global_migration_complete:
-                legacy_ids_reader = getattr(
-                    self.context_manager, "get_legacy_chat_ids_async", None
-                )
-                if callable(legacy_ids_reader):
-                    try:
-                        legacy_chat_ids = {
-                            str(chat_id) for chat_id in await legacy_ids_reader()
-                        }
-                        chat_ids.update(legacy_chat_ids)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        legacy_scan_error = True
-                        _log.warning(
-                            "枚举 legacy 迁移会话失败，摘要保持未完成: %s", exc
-                        )
-            chat_migration_check = getattr(
-                event_log, "legacy_chat_migration_is_complete", None
-            )
-            reports = []
-            ready_count = 0
-            missing_legacy_count = 0
-            for chat_id in sorted(chat_ids):
-                summary = await event_log.session_summary(chat_id)
-                needs_legacy_migration = not global_migration_complete and (
-                    legacy_scan_error
-                    or legacy_chat_ids is None
-                    or chat_id in legacy_chat_ids
-                )
-                chat_complete = (
-                    bool(await chat_migration_check(chat_id))
-                    if needs_legacy_migration and callable(chat_migration_check)
-                    else not needs_legacy_migration
-                )
-                ready_count += int(chat_complete)
-                if needs_legacy_migration and not summary.get(
-                    "event_count", summary.get("message_count", 0)
-                ):
-                    missing_legacy_count += int(not chat_complete)
-                conflict_count = 0
-                conflict_reader = getattr(event_log, "legacy_conflict_event_ids", None)
-                if callable(conflict_reader):
-                    try:
-                        conflict_count = len(
-                            await conflict_reader(chat_id, max_ids=100)
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        _log.warning(
-                            "读取 legacy identity 冲突失败 [%s..]: %s",
-                            chat_id[:12],
-                            exc,
-                        )
-                reports.append(
-                    {
-                        "legacy_visible_count": int(summary.get("message_count", 0)),
-                        "timeline_visible_count": int(summary.get("message_count", 0)),
-                        "missing_legacy_visible_count": 0,
-                        "extra_timeline_visible_count": 0,
-                        "legacy_protocol_count": 0,
-                        "ready_for_legacy_read_removal": chat_complete,
-                        "legacy_conflict_count": conflict_count,
-                    }
-                )
-            migration_complete = global_migration_complete and (
-                not legacy_scan_error and ready_count == len(reports)
-            )
-            return {
-                "session_count": len(reports),
-                "sessions_with_missing_legacy_visible": missing_legacy_count,
-                "sessions_with_legacy_protocol": 0,
-                "legacy_conflict_count": sum(
-                    int(report.get("legacy_conflict_count", 0)) for report in reports
-                ),
-                "sessions_ready_for_legacy_read_removal": ready_count,
-                "sessions_with_scan_errors": int(legacy_scan_error),
-                "ready_for_legacy_read_removal": migration_complete,
-                "legacy_read": False,
-                "legacy_migration_complete": global_migration_complete,
-            }
-        chat_ids: set[str] = set()
-        for method_name in (
-            "get_all_chat_ids_async",
-            "get_all_disk_chat_ids_async",
-        ):
-            method = getattr(self.context_manager, method_name, None)
-            if method is None:
-                continue
+        conflict_count = 0
+        conflict_reader = getattr(event_log, "legacy_conflict_event_ids", None)
+        if callable(conflict_reader):
             try:
-                chat_ids.update(str(chat_id) for chat_id in await method())
+                conflict_count = len(await conflict_reader(chat_id, max_ids=100))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                _log.warning("枚举历史迁移会话失败 [%s]: %s", method_name, exc)
-
-        timeline = self._get_timeline()
+                _log.warning("读取 identity 冲突失败 [%s..]: %s", chat_id[:12], exc)
+        report["legacy_conflict_count"] = conflict_count
         try:
-            chat_ids.update(str(chat_id) for chat_id in await timeline.chat_ids())
+            report["event_integrity"] = await event_log.integrity_summary(chat_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            _log.warning("枚举 timeline 会话失败: %s", exc)
-
-        reports = []
-        scan_errors = 0
-        for chat_id in sorted(chat_ids):
-            try:
-                get_legacy = getattr(
-                    self.context_manager, "get_legacy_chat_history_async", None
-                )
-                legacy = await (
-                    get_legacy or self.context_manager.get_chat_history_async
-                )(chat_id)
-                reports.append(await timeline.migration_report(chat_id, legacy))
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                scan_errors += 1
-                _log.warning("扫描历史迁移状态失败 [%s..]: %s", chat_id[:12], exc)
-
-        return timeline.migration_summary(reports, scan_errors=scan_errors).to_dict()
+            _log.warning("读取账本完整性状态失败 [%s..]: %s", chat_id[:12], exc)
+            report["event_integrity"] = {"error": "unavailable"}
+        return report
 
     def _get_protocol_history(self) -> TurnProtocolHistory:
         history = getattr(self, "protocol_history", None)
         if history is None:
-            history = TurnProtocolHistory()
+            counter_factory = getattr(self.model_registry, "token_counter", None)
+            history = TurnProtocolHistory(
+                token_counter=(counter_factory() if callable(counter_factory) else None)
+            )
             self.protocol_history = history
         return history
 
     def _get_model_context(self) -> ModelContextTranscript:
         transcript = getattr(self, "model_context", None)
         if transcript is None:
-            transcript = ModelContextTranscript()
+            counter_factory = getattr(self.model_registry, "token_counter", None)
+            transcript = ModelContextTranscript(
+                token_counter=(counter_factory() if callable(counter_factory) else None)
+            )
             self.model_context = transcript
         return transcript
+
+    def _active_model_name(self) -> str:
+        """Best-effort active model name for provider-aware token counting."""
+        service = getattr(self, "ai_service", None)
+        return str(getattr(service, "model", "") or "")
 
     async def _model_context_scope(
         self,
@@ -2046,7 +1838,7 @@ class AgentEngine:
                     fallback=get_user_nickname(message.sender_id),
                     known_ref=message.identity_ref,
                 )
-                await self.context_manager.record_chat_type(chat_id, message.is_group)
+                self.chat_type_index.observe(getattr(message, "delivery_target", None))
                 committed = (
                     await self.context_manager.add_user_message_async(
                         chat_id,

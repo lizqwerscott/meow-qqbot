@@ -383,6 +383,15 @@ class LLMService(Protocol):
 
     async def close(self) -> None: ...
 
+    def count_tokens(self, text: str) -> int:
+        """Best-effort token estimate for budgeting when ``usage`` is absent.
+
+        Real accounting must use the provider ``usage`` payload; this is only a
+        fallback for pre-call/historical budgets.  Providers may override it for
+        their model family (e.g. DeepSeek via ``deepseek_tokenizer``).
+        """
+        ...
+
 
 def ensure_messages_consistent(messages: list[dict[str, Any]]) -> None:
     """清理 messages 中孤立的 tool_calls 并修复 tool 响应顺序。

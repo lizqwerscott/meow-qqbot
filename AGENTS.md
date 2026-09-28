@@ -69,7 +69,8 @@ uv run black <file>   # format code
 - **Prompt structure**: Static prompt (role + character card + skill intro + memory desc + tool coop + emoji guide) rendered once from Jinja2 templates (`prompts/`). Dynamic block (skill entries + memory context + learning context + time + emoji tags + users list + workspace info) appended as a separate system message each turn.
 - **Multi-model routing** (optional): `RuleRouter` scores messages on 16 dimensions (code, complexity, reasoning, etc.) and assigns SIMPLE / MEDIUM / COMPLEX / REASONING tiers. Each tier has a fallback chain of models from `[models]` config. Routing disabled by default (`[routing].enabled = false`).
 - **Keyword flush**: Certain keywords (`"我喜欢"`, `"记住"`, etc.) trigger an immediate Hindsight `flush` for the current session.
-- **Archive**: 自动归档由跨天消息触发，按 `archive.timezone` 的来源日期生成不可变 batch；timeline 事件通过 `ArchiveLedger` 去重，未完成操作由 manifest 在启动时恢复。`猫猫归档 执行日切` 执行日切，`猫猫归档 快照` 只读保存 active history；`archive_hour` 和 `replay_count` 仅作弃用兼容配置。
+- **Token 估算**: 预算/水位用的 token 估算走 provider 能力 `LLMService.count_tokens`（DeepSeek 系用 `deepseek_tokenizer`，其余默认 `len//4`），经 `ModelRegistry.count_tokens` / `token_counter()` 解析后注入 `ConversationEventLog` / `TurnProtocolHistory` / `ModelContextTranscript` / `TurnSummaryStore`。真实计费与缓存统计以 provider `usage` 为准（`CostTracker`），估算仅用于 provider 未回报时的预算；seam 集中在 `core/ai/tokenizers.py`。
+- **Archive**: 归档由 `ConversationEventLog` 的完整 terminal turn 驱动，按 `archive.timezone` 的来源日期写入不可变 `ArchiveIndex` batch（token/turn/字节/最大年龄 retention），再提交 prompt visibility、摘要投影与模型上下文轮换；未完成的 operation 由 archive manifest 在启动时按阶段补齐。旧 JSONL 归档管线、`ChatContext` active 存储与 `ArchiveLedger` 已于 2026-09-26 退役（历史导入改用 `scripts/import_legacy_history.py`）。`猫猫归档 执行日切` 执行日切，`猫猫归档 快照` 只读保存 active history。
 
 ## Bot Commands
 

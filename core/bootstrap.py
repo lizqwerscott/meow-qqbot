@@ -6,7 +6,7 @@
 import asyncio
 import json
 import logging
-import time
+import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -38,10 +38,8 @@ from core.engine.system_events import SystemEventQueue
 from core.engine.turn_summary import TurnSummaryStore
 from core.engine.wake_dispatcher import WakeDispatcher
 from core.learners.orchestrator import LearningOrchestrator
-from core.managers.archive_ledger import ArchiveLedger
 from core.managers.archive_manager import ArchiveManager
 from core.managers.context_manager import ChatContextManager
-from core.managers.context_store import MemoryContextStore, SQLiteContextStore
 from core.managers.cost_tracker import CostTracker
 from core.managers.emoji_manager import EmojiManager
 from core.managers.identity_manager import IdentityManager
@@ -64,6 +62,7 @@ from core.runtime_settings import (
 )
 from core.session_identity import (
     ChannelRegistry,
+    DeliveryTarget,
     DeliveryTargetCatalog,
     SessionIdentityRegistry,
     SessionIdentityResolver,
@@ -95,6 +94,62 @@ _GATEWAY_FETCH_MAX_ATTEMPTS = 3
 _GATEWAY_FETCH_RETRY_DELAYS = (1, 2)
 _CHANNEL_HEALTH_MAX_ATTEMPTS = 3
 _CHANNEL_HEALTH_RETRY_DELAYS = (1, 2)
+
+
+def _backfill_chat_types(
+    catalog: DeliveryTargetCatalog | None,
+    legacy_db_path: Path,
+    chat_types_path: Path,
+) -> int:
+    """Seed group/private hints from the retired active store into the catalog.
+
+    The legacy ``conversation_context.sqlite3`` ``context_chat_types`` table and
+    ``data/sessions/meta/chat_types.json`` are read-only inputs; entries already
+    present in the catalog are left untouched.  Idempotent.
+    """
+    if catalog is None:
+        return 0
+    hints: dict[str, bool] = {}
+    if legacy_db_path.exists():
+        try:
+            conn = sqlite3.connect(f"file:{legacy_db_path}?mode=ro", uri=True)
+            try:
+                rows = conn.execute(
+                    "SELECT chat_id, is_group FROM context_chat_types"
+                ).fetchall()
+            finally:
+                conn.close()
+            for chat_id, is_group in rows:
+                hints[str(chat_id)] = bool(is_group)
+        except Exception as exc:
+            _log.warning("读取旧会话类型失败: %s", exc)
+    if chat_types_path.exists():
+        try:
+            data = json.loads(chat_types_path.read_text(encoding="utf-8"))
+            for chat_id, is_group in dict(data).items():
+                hints.setdefault(str(chat_id), bool(is_group))
+        except Exception as exc:
+            _log.warning("读取旧会话类型 JSON 失败: %s", exc)
+    seeded = 0
+    for chat_id, is_group in hints.items():
+        if not chat_id or catalog.get_chat_type(chat_id) is not None:
+            continue
+        try:
+            catalog.observe(
+                DeliveryTarget(
+                    "qq",
+                    "default",
+                    "group" if is_group else "direct",
+                    chat_id,
+                ),
+                source="legacy_backfill",
+            )
+            seeded += 1
+        except Exception as exc:
+            _log.warning("回填会话类型失败 [%s..]: %s", chat_id[:12], exc)
+    if seeded:
+        _log.info("会话类型回填完成: %d 条", seeded)
+    return seeded
 
 
 def _is_retryable_gateway_error(exc: BaseException) -> bool:
@@ -162,113 +217,10 @@ class ServiceGraph:
         await self._build_services()
         self._build_bot_engine()
         self._wire_callbacks()
-        await self._migrate_legacy_history()
         await self._deliver_pending_task_recovery()
         self._setup_extras()
         await self.agent_engine.start()
         return self
-
-    async def _migrate_legacy_history(self) -> None:
-        """Import legacy active/archive records before exposing new read paths."""
-        resolver = getattr(self, "session_identity_resolver", None)
-        if resolver is not None and getattr(resolver, "canonical_enabled", False):
-            _log.info(
-                "canonical session identity 已启用，跳过运行期 legacy history 扫描"
-            )
-            return
-        event_log = getattr(getattr(self, "agent_engine", None), "event_log", None)
-        migration_check = getattr(event_log, "legacy_migration_is_complete", None)
-        if callable(migration_check) and await migration_check():
-            _log.info("旧历史迁移已完成，跳过旧存储扫描")
-            return
-        get_ids = getattr(self.context_manager, "get_legacy_chat_ids_async", None)
-        if get_ids is None:
-            return
-        try:
-            chat_ids = await get_ids()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _log.warning("旧历史会话扫描失败，保留迁移水位: %s", exc)
-            return
-        if chat_ids:
-            _log.info("开始迁移旧历史: %d 个会话", len(chat_ids))
-        started = time.monotonic()
-        failed = False
-        chat_migration_check = getattr(
-            event_log, "legacy_chat_migration_is_complete", None
-        )
-        mark_chat_complete = getattr(
-            event_log, "mark_legacy_chat_migration_complete", None
-        )
-        for index, chat_id in enumerate(chat_ids, start=1):
-            if callable(chat_migration_check):
-                try:
-                    if await chat_migration_check(chat_id):
-                        _log.info("旧历史会话已迁移，跳过: [%s..]", chat_id[:12])
-                        continue
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    failed = True
-                    _log.warning("读取会话迁移水位失败 [%s..]: %s", chat_id[:12], exc)
-                    continue
-            _log.info(
-                "迁移旧历史会话: %d/%d [%s..]", index, len(chat_ids), chat_id[:12]
-            )
-            chat_failed = False
-            try:
-                await self.agent_engine.migrate_legacy_history_async(chat_id)
-                conflict_reader = getattr(event_log, "legacy_conflict_event_ids", None)
-                if callable(conflict_reader):
-                    conflict_ids = await conflict_reader(chat_id)
-                    if conflict_ids:
-                        failed = True
-                        chat_failed = True
-                        _log.warning(
-                            "旧历史迁移发现 identity collision [%s..]: %d 条，"
-                            "保留 chat checkpoint 待人工核对",
-                            chat_id[:12],
-                            len(conflict_ids),
-                        )
-                result = {}
-                if self.archive_manager is not None:
-                    result = await self.archive_manager.import_legacy_archives_async(
-                        chat_id
-                    )
-                    if (
-                        result.get("error_count", 0)
-                        or result.get("status") == "degraded"
-                    ):
-                        failed = True
-                        chat_failed = True
-                if result.get("imported_event_count") or result.get(
-                    "imported_batch_count"
-                ):
-                    _log.info(
-                        "旧历史迁移完成 [%s..]: events=%d batches=%d",
-                        chat_id[:12],
-                        result.get("imported_event_count", 0),
-                        result.get("imported_batch_count", 0),
-                    )
-                if not chat_failed and callable(mark_chat_complete):
-                    await mark_chat_complete(chat_id)
-                if index == 1 or index % 25 == 0 or index == len(chat_ids):
-                    _log.info(
-                        "旧历史迁移进度: %d/%d 个会话, elapsed=%.1fs",
-                        index,
-                        len(chat_ids),
-                        time.monotonic() - started,
-                    )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                failed = True
-                _log.warning("旧历史迁移失败 [%s..]: %s", chat_id[:12], exc)
-        mark_complete = getattr(event_log, "mark_legacy_migration_complete", None)
-        if not failed and callable(mark_complete):
-            await mark_complete()
-            _log.info("旧历史迁移已完成并记录水位: %d 个会话", len(chat_ids))
 
     # ── 阶段 1: 构造所有服务 ───────────────────────────────────────
 
@@ -431,46 +383,20 @@ class ServiceGraph:
         # ── 上下文管理 ──
         ctx_mgmt = self.cfg.context_management
         _merge_ws = ctx_mgmt.get("merge_window_seconds", 15)
-        _cache_cfg = ctx_mgmt.get("cache", {})
-        _cache_dir = (
-            (_cache_cfg.get("dir") or "data/sessions/")
-            if _cache_cfg.get("enabled", True)
-            else None
-        )
-        _store = (
-            SQLiteContextStore(
-                db_path=str(Path(_cache_dir).parent / "conversation_context.sqlite3"),
-                archive_dir=_cache_dir,
-            )
-            if _cache_dir
-            else MemoryContextStore()
-        )
         self.context_manager = ChatContextManager(
-            store=_store,
             max_history_per_chat=ctx_mgmt.get("max_history", 10000),
-            max_tool_results=ctx_mgmt.get("max_tool_results", 5),
-            keep_last_assistants=ctx_mgmt.get("keep_last_assistants", 3),
-            soft_trim=ctx_mgmt.get("soft_trim", 20000),
-            hard_clear=ctx_mgmt.get("hard_clear", 180000),
         )
 
         # ── ArchiveManager ──
         archive_config = self.cfg.archive
         self.archive_manager = None
         if archive_config.get("enabled", True):
-            if "archive_hour" in archive_config or "replay_count" in archive_config:
-                _log.warning(
-                    "archive.archive_hour 和 archive.replay_count 已弃用，"
-                    "归档现在由跨天消息触发并使用 replay_gap_seconds"
-                )
             archive_memory_dir = archive_config.get(
                 "memory_dir", "data/archives/memory/"
             )
             self.archive_manager = ArchiveManager(
                 context_manager=self.context_manager,
                 memory_dir=archive_memory_dir,
-                archive_hour=archive_config.get("archive_hour", 4),
-                replay_count=archive_config.get("replay_count"),
                 replay_gap_seconds=archive_config.get("replay_gap_seconds", 600),
                 summary_count=archive_config.get("summary_count", 15),
                 summary_days=archive_config.get("summary_days", 2),
@@ -484,9 +410,6 @@ class ServiceGraph:
                     "hot_max_age_seconds", 7 * 86400
                 ),
                 hot_low_water_ratio=archive_config.get("hot_low_water_ratio", 0.75),
-                archive_ledger=ArchiveLedger(
-                    str(Path(archive_memory_dir).parent / "archive_ledger.sqlite3")
-                ),
             )
             _log.info(
                 "归档系统已启用 (跨天消息触发, 摘要 %d 条, 回放连续段间隔 %d 秒)",
@@ -780,10 +703,10 @@ class ServiceGraph:
         self.context_manager.set_prompt_projection(
             self.agent_engine.prompt_history_projection
         )
+        self.context_manager.set_chat_type_index(self.agent_engine.chat_type_index)
         self.context_manager.set_timeline(self.agent_engine.timeline)
         self.context_manager.set_protocol_history(self.agent_engine.protocol_history)
         if self.archive_manager is not None:
-            self.archive_manager.set_timeline(self.agent_engine.timeline)
             self.archive_manager.set_event_log(
                 self.agent_engine.event_log,
                 self.agent_engine.prompt_history_projection,
@@ -818,6 +741,7 @@ class ServiceGraph:
                 semantic_group=str(summary_config.get("model_group", "summary")),
                 model_registry=self.model_registry,
                 semantic_max_tokens=int(summary_config.get("max_tokens", 500)),
+                token_counter=self.model_registry.token_counter(),
             )
             self.archive_manager.set_summary_store(self.agent_engine.turn_summary_store)
             self.archive_manager.set_model_context_transcript(
@@ -1429,16 +1353,28 @@ class ServiceGraph:
 
     async def start(self):
         """启动所有后台服务。"""
-        if isinstance(self.context_manager.store, SQLiteContextStore):
-            migration = await asyncio.to_thread(
-                self.context_manager.store.migrate_legacy
-            )
-            if migration["sessions"] or migration["removed_duplicates"]:
-                _log.info(
-                    "SQLite 会话迁移完成: sessions=%d duplicates=%d",
-                    migration["sessions"],
-                    migration["removed_duplicates"],
-                )
+        cache_cfg = (self.cfg.context_management or {}).get("cache", {})
+        cache_dir = (
+            Path(cache_cfg.get("dir") or "data/sessions/")
+            if cache_cfg.get("enabled", True)
+            else None
+        )
+        legacy_db = (
+            cache_dir.parent / "conversation_context.sqlite3"
+            if cache_dir
+            else Path("data/conversation_context.sqlite3")
+        )
+        chat_types_json = (
+            cache_dir / "meta" / "chat_types.json"
+            if cache_dir
+            else Path("data/sessions/meta/chat_types.json")
+        )
+        await asyncio.to_thread(
+            _backfill_chat_types,
+            self.delivery_target_catalog,
+            legacy_db,
+            chat_types_json,
+        )
         await self.check_hindsight_health()
         await self.media_service.open()
         await self._check_channel_info_health_with_retry()
