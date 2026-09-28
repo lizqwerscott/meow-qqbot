@@ -140,3 +140,49 @@ async def test_turn_summary_uses_injected_counter(tmp_path):
     assert store._count_tokens("anything", "deepseek-v4-flash") == 123
     await store.close()
     await log.close()
+
+
+def test_registry_resolves_bare_model_id_to_provider_counter():
+    # Production shape: registry key is "provider/name" while the service's
+    # ``model`` (and therefore AgentEngine._active_model_name) is the bare id.
+    registry = ModelRegistry({}, {})
+    registry._services["deepseek/primary"] = SimpleNamespace(
+        model="deepseek-v4-flash", count_tokens=deepseek_token_counter
+    )
+
+    assert registry.count_tokens("deepseek-v4-flash", _MIXED) == (
+        deepseek_token_counter(_MIXED)
+    )
+    assert registry.count_tokens("deepseek/primary", _MIXED) == (
+        deepseek_token_counter(_MIXED)
+    )
+
+
+def test_registry_falls_back_to_family_dispatch_without_service():
+    registry = ModelRegistry({}, {})
+
+    assert registry.count_tokens("deepseek-v4-flash", _MIXED) != len(_MIXED) // 4
+    assert registry.count_tokens("gpt-4o", "abcdefgh") == 2
+
+
+@pytest.mark.asyncio
+async def test_event_log_counts_deepseek_with_bare_model_id(tmp_path):
+    registry = ModelRegistry({}, {})
+    registry._services["deepseek/primary"] = SimpleNamespace(
+        model="deepseek-v4-flash", count_tokens=deepseek_token_counter
+    )
+    log = ConversationEventLog(str(tmp_path / "events.sqlite3"))
+    log.set_token_counter(registry.token_counter())
+
+    await log.append_user_message(
+        chat_id="c",
+        turn_id="t",
+        message_id="m",
+        content=_MIXED,
+        model="deepseek-v4-flash",
+    )
+
+    snapshot = await log.snapshot_events("c", include_internal=True)
+    assert snapshot.events[0].token_count == deepseek_token_counter(_MIXED)
+    assert snapshot.events[0].token_count != len(_MIXED) // 4
+    await log.close()

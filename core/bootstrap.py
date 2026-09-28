@@ -14,6 +14,7 @@ import httpx
 
 from core.ai.model_registry import ModelRegistry
 from core.ai.multimodal import MultimodalService
+from core.ai.tokenizers import TOKEN_COUNTERS
 from core.ai.tts_service import TtsService
 from core.command_handlers import register_all_commands
 from core.config_loader import ConfigLoader
@@ -271,6 +272,11 @@ class ServiceGraph:
                 providers_config,
                 groups_config,
                 cooldown_config=self.cfg.cooldown,
+            )
+            TOKEN_COUNTERS.verify_available(
+                model_cfg.get("model", "")
+                for provider in providers_config.values()
+                for model_cfg in provider.get("models", [])
             )
             n_models = sum(len(p.get("models", [])) for p in providers_config.values())
             _log.info(

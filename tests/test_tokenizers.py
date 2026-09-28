@@ -1,8 +1,12 @@
 from types import SimpleNamespace
 
+import pytest
+
+from core.ai import tokenizers
 from core.ai.model_registry import ModelRegistry
 from core.ai.tokenizers import (
     TOKEN_COUNTERS,
+    TokenCounterRegistry,
     deepseek_token_counter,
     default_token_counter,
 )
@@ -69,3 +73,37 @@ def test_model_registry_token_counter_adapter():
 
     assert resolver("anything", "p/deep") == 9
     assert resolver("abcdefgh", "") == 2
+
+
+def test_verify_available_passes_for_installed_tokenizer():
+    # deepseek-tokenizer is a hard dependency, so this must not raise.
+    TOKEN_COUNTERS.verify_available(["deepseek-v4-flash", "gpt-4o"])
+
+
+def test_verify_available_raises_for_missing_needed_tokenizer():
+    registry = TokenCounterRegistry()
+
+    def _boom() -> None:
+        raise ImportError("no module named 'deepseek_tokenizer'")
+
+    registry.register(lambda m: "deepseek" in m, deepseek_token_counter, verify=_boom)
+
+    with pytest.raises(RuntimeError, match="tokenizer"):
+        registry.verify_available(["deepseek-v4-flash"])
+    # A model whose family declares no verify hook never blocks startup.
+    registry.verify_available(["gpt-4o"])
+
+
+def test_deepseek_fallback_warns_only_once(monkeypatch, caplog):
+    def _boom(_text):
+        raise RuntimeError("no tokenizer")
+
+    monkeypatch.setattr(tokenizers, "_deepseek_count", _boom)
+    monkeypatch.setattr(tokenizers, "_warned_missing_tokenizer", False)
+
+    with caplog.at_level("WARNING", logger="core.ai.tokenizers"):
+        deepseek_token_counter("one")
+        deepseek_token_counter("two")
+
+    warnings = [r for r in caplog.records if "deepseek tokenizer" in r.message]
+    assert len(warnings) == 1

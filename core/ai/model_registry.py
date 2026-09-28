@@ -15,7 +15,7 @@ from core.ai.cooldown import ModelCooldownManager
 from core.ai.fallback_runner import FallbackRunner
 from core.ai.protocol import LLMService
 from core.ai.provider_factory import get_provider_factory
-from core.ai.tokenizers import default_token_counter
+from core.ai.tokenizers import count_tokens_for
 
 _log = logging.getLogger(__name__)
 
@@ -132,24 +132,35 @@ class ModelRegistry:
     def get(self, name: str) -> Optional[LLMService]:
         return self._services.get(name)
 
-    def count_tokens(self, model_name: str, text: str) -> int:
-        """Estimate tokens for a model via its provider, else the heuristic."""
+    def _service_for(self, model_name: str) -> Optional[LLMService]:
+        """Resolve a service by qualified key, bare registry name, or model id."""
+        if not model_name:
+            return None
         service = self._services.get(model_name)
+        if service is not None:
+            return service
+        suffix = f"/{model_name}"
+        for key, candidate in self._services.items():
+            if key.endswith(suffix) or getattr(candidate, "model", "") == model_name:
+                return candidate
+        return None
+
+    def count_tokens(self, model_name: str, text: str) -> int:
+        """Estimate tokens for a model via its provider, else family dispatch."""
+        service = self._service_for(model_name)
         counter = getattr(service, "count_tokens", None)
         if callable(counter):
             try:
                 return counter(text)
             except Exception as exc:  # pragma: no cover - defensive
                 _log.warning("provider count_tokens 失败 [%s]: %s", model_name, exc)
-        return default_token_counter(text)
+        return count_tokens_for(model_name, text)
 
     def token_counter(self) -> Callable[[str, str], int]:
         """Return a ``(text, model) -> int`` resolver for store injection."""
 
         def _resolve(text: str, model: str = "") -> int:
-            if model:
-                return self.count_tokens(model, text)
-            return default_token_counter(text)
+            return self.count_tokens(model, text)
 
         return _resolve
 
