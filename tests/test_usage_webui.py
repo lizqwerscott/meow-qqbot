@@ -35,6 +35,7 @@ async def test_usage_page_renders_summary_and_breakdowns():
     assert "/static/vendor/chart.umd.min.js" in response.text
     assert 'id="trend-chart"' in response.text
     assert 'id="source-chart"' in response.text
+    assert 'id="session-chart"' in response.text
     log.close()
 
 

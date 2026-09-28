@@ -57,15 +57,23 @@ def _usage_source(metadata: Dict) -> str:
 
     if str(metadata.get("usage_kind") or "") == "model_context_compaction":
         return SOURCE_AUX_COMPACTION
+    explicit = str(metadata.get("source") or "")
+    if explicit:
+        return explicit
     turn_kind = str(metadata.get("turn_kind") or "").lower()
-    admission = str(metadata.get("admission_source") or "").lower()
     if turn_kind == "ambient":
         return SOURCE_TURN_AMBIENT
+    turn_intent = str(
+        metadata.get("turn_intent") or metadata.get("intent") or ""
+    ).lower()
+    if turn_intent == "group_ambient":
+        return SOURCE_TURN_AMBIENT
+    admission = str(metadata.get("admission_source") or "").lower()
     if admission == "steer":
         return SOURCE_TURN_STEER
     if admission == "passive":
         return SOURCE_TURN_PASSIVE
-    if turn_kind or admission:
+    if turn_kind or turn_intent or admission:
         return SOURCE_TURN_REPLY
     return SOURCE_UNKNOWN
 

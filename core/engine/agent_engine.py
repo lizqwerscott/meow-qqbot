@@ -68,6 +68,11 @@ from core.engine.protocol_projection import ProtocolProjection
 from core.engine.reply_necessity import ReplyNecessityGate, ReplyNecessityInput
 from core.engine.routing_audit import RoutingAuditStore
 from core.engine.routing_metrics import RoutingMetrics
+from core.engine.token_usage_log import (
+    SOURCE_TURN_AMBIENT,
+    SOURCE_TURN_REPLY,
+    SOURCE_TURN_STEER,
+)
 from core.engine.tool_events import ToolEventCallback
 from core.engine.turn_capabilities import TurnCapabilities
 from core.engine.turn_planner import (
@@ -120,15 +125,26 @@ class AdmittedMessage:
 def _build_cost_metadata(request: "_TurnRequest", scope: Any) -> Dict[str, Any]:
     """Attribution metadata for cost tracking and the usage ledger.
 
-    ``turn_id``/``turn_kind`` let the ledger split consumption by source
-    (``turn:reply`` / ``turn:ambient``); see ``core/engine/token_usage_log.py``.
+    ``source`` lets the ledger split consumption by origin
+    (``turn:reply`` / ``turn:ambient`` / ``turn:steer``); see
+    ``core/engine/token_usage_log.py``.
     """
+    intent = request.intent or request.steering_intent
+    if request.steering_enabled:
+        source = SOURCE_TURN_STEER
+    elif intent is InboundIntent.GROUP_AMBIENT or str(request.turn_kind or "") == str(
+        TurnKind.AMBIENT
+    ):
+        source = SOURCE_TURN_AMBIENT
+    else:
+        source = SOURCE_TURN_REPLY
     metadata: Dict[str, Any] = {
         "turn_id": request.turn_id,
-        "turn_kind": str(request.turn_kind or ""),
-        "turn_intent": str(
-            request.intent or request.steering_intent or InboundIntent.DIRECT_TASK
+        "turn_kind": str(
+            request.turn_kind or ("ambient" if source == SOURCE_TURN_AMBIENT else "ai")
         ),
+        "turn_intent": str(intent or InboundIntent.DIRECT_TASK),
+        "source": source,
     }
     if scope is not None:
         metadata["scope_generation"] = scope.generation

@@ -80,6 +80,11 @@
     <div style="height:300px"><canvas id="provider-chart"></canvas></div>
 </div>
 
+<div class="card">
+    <h2>💬 会话对比（Top 10，按成本）</h2>
+    <div style="height:320px"><canvas id="session-chart"></canvas></div>
+</div>
+
 {% for dimension, title in [("day", "按日期"), ("model", "按模型"), ("source", "按来源"), ("provider", "按 provider"), ("chat", "按会话")] %}
 <div class="card">
     <h2>{{ title }}</h2>
@@ -219,6 +224,30 @@
     }
     renderTokensBar('model-chart', DATA.model || []);
     renderTokensBar('provider-chart', DATA.provider || []);
+
+    const chatRows = DATA.chat || [];
+    if (chatRows.length) {
+        const shortLabel = k => (k.length > 22 ? k.slice(0, 20) + '…' : k);
+        new Chart(document.getElementById('session-chart'), {
+            type: 'bar',
+            data: {
+                labels: chatRows.map(r => shortLabel(r.key)),
+                datasets: [{label: '费用 ¥', data: chatRows.map(r => r.cost), backgroundColor: '#a855f7'}],
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true, maintainAspectRatio: false,
+                plugins: {
+                    legend: {display: false},
+                    tooltip: {callbacks: {title: items => chatRows[items[0].dataIndex].key}},
+                },
+                scales: {
+                    x: {beginAtZero: true, ticks: AXIS, grid: GRID},
+                    y: {ticks: AXIS, grid: GRID},
+                },
+            },
+        });
+    }
 })();
 </script>
 {% endif %}

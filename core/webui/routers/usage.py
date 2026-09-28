@@ -95,6 +95,7 @@ async def usage_page(request: Request):
             "source": breakdowns["source"],
             "model": breakdowns["model"][:10],
             "provider": breakdowns["provider"],
+            "chat": breakdowns["chat"][:10],
         }
     except Exception as exc:
         _log.warning("读取 token 用量账本失败: %s", exc)

@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from core.engine.token_usage_log import (
@@ -62,6 +64,72 @@ def test_source_mapping_for_ambient_and_compaction(tmp_path):
         SOURCE_AUX_COMPACTION,
     }
     log.close()
+
+
+def test_usage_source_honours_explicit_source(tmp_path):
+    log = TokenUsageLog(str(tmp_path / "usage.sqlite3"))
+    tracker = CostTracker(usage_log=log)
+
+    tracker.record_turn(
+        "c", "m", {"prompt_tokens": 1}, metadata={"source": "turn:ambient"}
+    )
+
+    assert log.recent()[0]["source"] == SOURCE_TURN_AMBIENT
+    log.close()
+
+
+def test_usage_source_falls_back_to_turn_intent(tmp_path):
+    log = TokenUsageLog(str(tmp_path / "usage.sqlite3"))
+    tracker = CostTracker(usage_log=log)
+
+    tracker.record_turn(
+        "c", "m", {"prompt_tokens": 1}, metadata={"turn_intent": "group_ambient"}
+    )
+    tracker.record_turn(
+        "c", "m", {"prompt_tokens": 1}, metadata={"turn_intent": "private_conversation"}
+    )
+
+    assert [row["source"] for row in log.recent()] == [
+        SOURCE_TURN_REPLY,
+        SOURCE_TURN_AMBIENT,
+    ]
+    log.close()
+
+
+def test_build_cost_metadata_derives_source():
+    from core.engine.agent_engine import _build_cost_metadata
+    from core.engine.token_usage_log import (
+        SOURCE_TURN_AMBIENT,
+        SOURCE_TURN_REPLY,
+        SOURCE_TURN_STEER,
+    )
+    from core.managers.session_manager import InboundIntent
+
+    def request(**overrides):
+        base = dict(
+            turn_id="t",
+            turn_kind=None,
+            intent=None,
+            steering_intent=None,
+            steering_enabled=False,
+        )
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    reply = _build_cost_metadata(
+        request(intent=InboundIntent.PRIVATE_CONVERSATION), None
+    )
+    assert reply["source"] == SOURCE_TURN_REPLY
+    assert reply["turn_kind"] == "ai"
+
+    ambient = _build_cost_metadata(request(intent=InboundIntent.GROUP_AMBIENT), None)
+    assert ambient["source"] == SOURCE_TURN_AMBIENT
+    assert ambient["turn_kind"] == "ambient"
+
+    steer = _build_cost_metadata(
+        request(intent=InboundIntent.DIRECT_TASK, steering_enabled=True), None
+    )
+    assert steer["source"] == SOURCE_TURN_STEER
 
 
 def test_cost_bills_prompt_when_cache_split_absent():
